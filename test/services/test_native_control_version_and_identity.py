@@ -34,6 +34,7 @@ from cli_agent_orchestrator.services import provider_contracts
 #: Exactly what the provider prints and the binding stores.
 CLAUDE_BANNER = "2.1.220 (Claude Code)"
 CLAUDE_BARE = "2.1.220"
+KIMI_BANNER = "kimi 0.29.0"
 KIMI_BARE = "0.29.0"
 NATIVE_SESSION = "3e9989ee-6465-4f80-8eee-6837f225bf37"
 PROVIDER_PROCESS = "4242@Jul 25 20:00:00 2026"
@@ -91,6 +92,51 @@ class TestThePinIsNotWidened:
             for key in table:
                 assert key == provider_contracts.normalized_version(key), key
                 assert " " not in key and "(" not in key, key
+
+
+class TestBothAdaptersAnswerTheSameQuestionTheSameWay:
+    """One consumer asks both plans whether this build's composer is proven.
+
+    The control path refuses to type at a composer whose behaviour was
+    never read, and it decides that from ``composer_evidence`` on the
+    plan.  A field only one adapter published would read as "unproven
+    build" for the other one permanently -- refusing every healthy
+    generation that provider has, which is a rule about proof class
+    turned against a provider it was never about.  Kimi is the provider
+    that failure would have hit, so it is the reason this is asserted
+    across both rather than on whichever adapter happened to be read
+    first.
+    """
+
+    @pytest.mark.parametrize(
+        "adapter, banner",
+        [(claude, CLAUDE_BANNER), (kimi, KIMI_BANNER)],
+        ids=["claude", "kimi"],
+    )
+    def test_a_pinned_build_publishes_its_composer_evidence(self, adapter, banner):
+        plan = adapter.plan_composer_keystrokes("/compact", provider_version=banner)
+
+        assert plan["composer_evidence"] is not None
+        assert plan["soft_newline_keystroke"] is not None
+
+    @pytest.mark.parametrize("adapter", [claude, kimi], ids=["claude", "kimi"])
+    def test_an_unpinned_build_publishes_no_evidence(self, adapter):
+        """The gate must stay falsifiable, or it refuses nothing."""
+        plan = adapter.plan_composer_keystrokes("/compact", provider_version="9.9.9")
+
+        assert plan["composer_evidence"] is None
+        assert plan["soft_newline_keystroke"] is None
+
+    @pytest.mark.parametrize("adapter", [claude, kimi], ids=["claude", "kimi"])
+    def test_the_evidence_is_journaled_with_the_plan(self, adapter):
+        """A keystroke recorded without its evidence is a claim, not a proof."""
+        banner = CLAUDE_BANNER if adapter is claude else KIMI_BANNER
+        plan = adapter.plan_composer_keystrokes("/compact", provider_version=banner)
+
+        journalable = adapter._journalable_plan(plan)
+
+        assert journalable["composer_evidence"] == plan["composer_evidence"]
+        assert "lines" not in journalable
 
 
 class TestTheControlIdentityTellsTheTruth:
@@ -285,35 +331,52 @@ class TestALegacyManagedRowNeverProjectsNative:
         assert cis.screen_expected_identity({}, resolved) is not None
 
 
-class TestTheNativeRouteMustUseTheNativeAdapter:
-    """KNOWN GAP -- currently failing, deliberately committed as failing.
+class TestTheNativeRouteUsesTheNativeAdapter:
+    """A managed native generation must not be typed at by the raw primitive.
 
     The projection and the allowlist together let a managed native
-    generation past the gate. The delivery path underneath still calls the
-    generic ``send_literal_line`` primitive unconditionally, so a managed
-    native ``/compact`` would be typed as a raw literal line rather than
-    through the provider's proven composer plan -- no soft-newline
-    keystroke, no submit settle, no provider normalization.
+    generation past the gate.  Before the dispatch existed, the delivery
+    path underneath still called ``send_literal_line`` unconditionally --
+    so a managed native ``/compact`` would have been typed as a raw
+    literal line with no proven newline keystroke, no paste-burst reset
+    and no submit settle, and the Enter would have been swallowed with no
+    error and no turn.
 
-    That makes the projection strictly unsafe to deploy on its own: before
-    it, a managed native pane was refused; after it, the pane is reachable
-    by the wrong primitive. The two halves must land together.
-
-    This test states the requirement rather than the current behaviour, so
-    it fails until the fork-internal dispatch exists.
+    That made the projection strictly unsafe to deploy alone: before it a
+    managed native pane was refused, after it the pane was reachable by
+    the wrong primitive.  The behaviour is proven end-to-end against a
+    real bound generation in
+    ``test_native_control_identity_projection.py``; what is pinned here is
+    the structural requirement that the two halves stay together, since a
+    later edit could quietly restore the raw write and still pass every
+    outcome-shaped assertion.
     """
 
-    def test_the_delivery_path_dispatches_to_a_provider_adapter(self):
+    def test_the_adapters_expose_the_dispatch_entry_point(self):
+        """Both adapters must offer the store-free plan executor.
+
+        The control path journals in its own record, so it needs the
+        keystroke sequence without the adapter's operation store. An
+        adapter that only exposed the journaling entry points would force
+        a second at-most-once record for one control.
+        """
+        for adapter in (claude, kimi):
+            assert callable(adapter.execute_composer_plan)
+            assert issubclass(adapter.ComposerWriteInterrupted, adapter.NativeControlError)
+
+    def test_the_delivery_path_reaches_a_provider_adapter(self):
+        """Named in the preflight, which is where the plan is built."""
         import inspect
 
-        source = inspect.getsource(cis._deliver_under_lease)
-
-        assert (
-            "claude_native_control" in source
-            or "kimi_native_control" in source
-            or "plan_composer_keystrokes" in source
-        ), (
-            "the native delivery path still writes through the generic literal "
-            "primitive; a managed native generation must reach its provider's "
-            "proven composer plan"
+        source = inspect.getsource(cis._native_composer_preflight) + inspect.getsource(
+            cis._send_through_native_adapter
         )
+
+        assert "plan_composer_keystrokes" in source
+        assert "execute_composer_plan" in source
+
+    def test_the_raw_primitive_is_not_the_native_route(self):
+        """The generic write stays for unmanaged panes and only for them."""
+        import inspect
+
+        assert "send_literal_line" not in inspect.getsource(cis._native_composer_preflight)
