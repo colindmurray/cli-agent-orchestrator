@@ -350,6 +350,11 @@ def observed_model_mismatch_detail(requested: str, observed: Optional[str]) -> s
     if not model_matches:
         return f"requested model {wanted_model!r}, observed model {seen_model!r}"
     if wanted_context is not None and wanted_context != seen_context:
+        if seen_context is None:
+            return (
+                f"requested context window {wanted_context!r}, "
+                "but the provider reported no context window"
+            )
         return (
             f"requested context window {wanted_context!r}, "
             f"observed context window {seen_context!r}"

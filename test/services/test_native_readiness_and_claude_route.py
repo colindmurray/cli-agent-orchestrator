@@ -107,6 +107,10 @@ class TestTheObservedModelIsCheckedAgainstTheRequest:
             cl.observed_model_mismatch_detail("claude-opus-5[1m]", "claude-opus-5[200k]")
             == "requested context window '[1m]', observed context window '[200k]'"
         )
+        assert (
+            cl.observed_model_mismatch_detail("claude-opus-5[1m]", "claude-opus-5")
+            == "requested context window '[1m]', but the provider reported no context window"
+        )
 
     def test_a_missing_observation_is_not_a_match(self):
         """Fail closed: nothing observed is not evidence of agreement."""
@@ -252,6 +256,10 @@ class TestBindRefusesAWrongFamilyBeforeAdmission:
     def test_the_requested_family_binds(self):
         row = _Row(model=SONNET)
         v2._validate_readiness_for_bind(row, _receipt(row, model=OBSERVED_SONNET))
+
+    def test_the_explicit_1m_route_crosses_the_real_bind_gate(self):
+        row = _Row(model="claude-opus-5[1m]")
+        v2._validate_readiness_for_bind(row, _receipt(row, model=OBSERVED_OPUS_1M))
 
     def test_an_unobservable_effort_claim_is_refused_at_bind(self):
         """A receipt naming an effort Claude cannot expose pre-turn."""
