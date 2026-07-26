@@ -625,11 +625,11 @@ class TerminalGenerationMismatchError(ValueError):
 class DestructiveEndpointRequiredError(TerminalGenerationMismatchError):
     """A v2 terminal row was targeted by a legacy destructive path.
 
-    Every v2 destructive action — including an ordinary terminal DELETE —
-    is lawful only as the effect of the conditional destructive endpoint
-    (exact heartbeat, identity/fence, dual-exit, and containment
-    decisions). A legacy caller carries no endpoint-issued intent, so the
-    teardown refuses with zero mutation. Mapped to HTTP 409 like every
+    A caller may retire one exact generation by supplying its generation
+    and session, or use the stronger conditional destructive endpoint when
+    heartbeat, fencing, dual-exit, and containment proofs are required.  A
+    bare legacy caller carries neither identity nor endpoint-issued intent,
+    so teardown refuses with zero mutation. Mapped to HTTP 409 like every
     other conditional-identity refusal."""
 
 

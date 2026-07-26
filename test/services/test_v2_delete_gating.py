@@ -108,6 +108,29 @@ def test_exact_generation_delete_retires_v2_row(v2_metadata, spies):
     assert deregister.calls != [], "exact retirement drains registry entries"
 
 
+@pytest.mark.parametrize(
+    ("generation", "session"),
+    [
+        (str(uuid.uuid4()), "managed-session"),
+        (None, "wrong-session"),
+    ],
+)
+def test_wrong_v2_identity_refuses_with_zero_mutation(v2_metadata, spies, generation, session):
+    terminal_id, expected_generation, _ = v2_metadata
+    backend, db_delete, deregister = spies
+
+    with pytest.raises(terminals.TerminalGenerationMismatchError):
+        terminals.delete_terminal(
+            terminal_id,
+            expected_generation=generation or expected_generation,
+            expected_session=session,
+        )
+
+    assert backend.calls == [], f"window/history mutation leaked: {backend.calls}"
+    assert db_delete.calls == [], "the v2 row must survive"
+    assert deregister.calls == [], "registry entries must survive"
+
+
 def test_endpoint_effect_still_tears_down_lawfully(v2_metadata, spies):
     terminal_id, generation, _ = v2_metadata
     backend, db_delete, deregister = spies

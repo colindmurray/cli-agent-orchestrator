@@ -276,6 +276,35 @@ def test_bare_delete_of_v2_row_is_refused(client, isolated_memory_db):
     assert database.get_terminal_metadata_v2("a1b2c3d4") is not None
 
 
+def test_exact_v2_identity_reaches_the_terminal_delete_route(client, monkeypatch):
+    """The API preserves both identity fields needed for exact retirement."""
+    calls = []
+
+    def _delete(terminal_id, **kwargs):
+        calls.append((terminal_id, kwargs))
+        return True
+
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.api.main.terminal_service.delete_terminal",
+        _delete,
+    )
+    response = client.delete(
+        "/terminals/a1b2c3d4",
+        params={
+            "expected_generation": "gen-1",
+            "expected_session": "cao-test",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True}
+    assert len(calls) == 1
+    terminal_id, kwargs = calls[0]
+    assert terminal_id == "a1b2c3d4"
+    assert kwargs["expected_generation"] == "gen-1"
+    assert kwargs["expected_session"] == "cao-test"
+
+
 def _admitted_v2_reservation(tmp_path, monkeypatch):
     """A live admitted v2 reservation + its delivery journal + CAO home."""
     import json
