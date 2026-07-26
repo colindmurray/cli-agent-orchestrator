@@ -276,33 +276,47 @@ def test_bare_delete_of_v2_row_is_refused(client, isolated_memory_db):
     assert database.get_terminal_metadata_v2("a1b2c3d4") is not None
 
 
-def test_exact_v2_identity_reaches_the_terminal_delete_route(client, monkeypatch):
-    """The API preserves both identity fields needed for exact retirement."""
-    calls = []
+def test_exact_v2_identity_retires_through_the_http_route(
+    client, isolated_memory_db, monkeypatch, tmp_path
+):
+    """The production HTTP seam completes identity-bound v2 retirement."""
+    from unittest.mock import MagicMock
 
-    def _delete(terminal_id, **kwargs):
-        calls.append((terminal_id, kwargs))
-        return True
+    from cli_agent_orchestrator.clients import database
+    from cli_agent_orchestrator.services import terminal_service as terminals
 
-    monkeypatch.setattr(
-        "cli_agent_orchestrator.api.main.terminal_service.delete_terminal",
-        _delete,
+    generation = str(uuid.uuid4())
+    window = terminals.managed_window_name("a1b2c3d4", generation)
+    database.create_terminal_v2(
+        "a1b2c3d4",
+        "cao-test",
+        window,
+        "codex",
+        generation=generation,
     )
+    backend = MagicMock()
+    backend.get_history.return_value = ""
+    backend.get_pane_working_directory.return_value = str(tmp_path)
+    backend.window_exists.return_value = False
+    monkeypatch.setattr(terminals, "get_backend", lambda: backend)
+    monkeypatch.setattr(terminals, "get_herdr_inbox_service", lambda: None)
+    monkeypatch.setattr(terminals, "fifo_manager", MagicMock())
+    monkeypatch.setattr(terminals, "status_monitor", MagicMock())
+    monkeypatch.setattr(terminals, "provider_manager", MagicMock())
+    monkeypatch.setattr(terminals, "TERMINAL_LOG_DIR", tmp_path)
+    monkeypatch.setattr(terminals, "dispatch_plugin_event", lambda *args, **kwargs: None)
+    deregister = MagicMock()
+    monkeypatch.setattr(terminals, "_deregister_v2_terminal_resources", deregister)
+
     response = client.delete(
-        "/terminals/a1b2c3d4",
-        params={
-            "expected_generation": "gen-1",
-            "expected_session": "cao-test",
-        },
+        f"/terminals/a1b2c3d4?expected_generation={generation}&expected_session=cao-test"
     )
 
     assert response.status_code == 200
-    assert response.json() == {"success": True}
-    assert len(calls) == 1
-    terminal_id, kwargs = calls[0]
-    assert terminal_id == "a1b2c3d4"
-    assert kwargs["expected_generation"] == "gen-1"
-    assert kwargs["expected_session"] == "cao-test"
+    assert response.json()["success"] is True
+    backend.kill_window.assert_called_once_with("cao-test", window)
+    assert database.get_terminal_metadata_v2("a1b2c3d4") is None
+    deregister.assert_called_once()
 
 
 def _admitted_v2_reservation(tmp_path, monkeypatch):
