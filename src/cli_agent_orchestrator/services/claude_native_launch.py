@@ -329,11 +329,9 @@ def observed_model_matches(requested: str, observed: Optional[str]) -> bool:
         return False
     wanted_model, wanted_context = _model_and_context(requested)
     seen_model, seen_context = _model_and_context(observed)
-    if wanted_model in MODEL_ALIASES:
-        model_matches = _family_of(seen_model) == wanted_model
-    else:
-        model_matches = seen_model == wanted_model
-    return model_matches and (wanted_context is None or wanted_context == seen_context)
+    return _models_match(wanted_model, seen_model) and (
+        wanted_context is None or wanted_context == seen_context
+    )
 
 
 def observed_model_mismatch_detail(requested: str, observed: Optional[str]) -> str:
@@ -342,12 +340,7 @@ def observed_model_mismatch_detail(requested: str, observed: Optional[str]) -> s
         return "the provider did not report a model"
     wanted_model, wanted_context = _model_and_context(requested)
     seen_model, seen_context = _model_and_context(observed)
-    model_matches = (
-        _family_of(seen_model) == wanted_model
-        if wanted_model in MODEL_ALIASES
-        else seen_model == wanted_model
-    )
-    if not model_matches:
+    if not _models_match(wanted_model, seen_model):
         return f"requested model {wanted_model!r}, observed model {seen_model!r}"
     if wanted_context is not None and wanted_context != seen_context:
         if seen_context is None:
@@ -367,6 +360,12 @@ def _model_and_context(value: str) -> tuple[str, Optional[str]]:
     match = _CONTEXT_SUFFIX.search(normalized)
     context = match.group(0).strip() if match else None
     return normalize_observed_model(normalized).lower(), context
+
+
+def _models_match(wanted_model: str, seen_model: str) -> bool:
+    if wanted_model in MODEL_ALIASES:
+        return _family_of(seen_model) == wanted_model
+    return seen_model == wanted_model
 
 
 def build_launch_argv_with_model(
