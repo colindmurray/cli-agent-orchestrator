@@ -26,7 +26,10 @@ class _Spy:
     def __getattr__(self, name):
         def _method(*args, **kwargs):
             self.calls.append((name, args, kwargs))
-            return self._returns.get(name)
+            result = self._returns.get(name)
+            if isinstance(result, BaseException):
+                raise result
+            return result
 
         return _method
 
@@ -106,6 +109,23 @@ def test_exact_generation_delete_retires_v2_row(v2_metadata, spies):
     ) in backend.calls
     assert db_delete.calls != [], "exact retirement deletes the v2 row"
     assert deregister.calls != [], "exact retirement drains registry entries"
+
+
+def test_exact_retirement_accepts_an_already_absent_window(v2_metadata, spies):
+    terminal_id, generation, _ = v2_metadata
+    backend, db_delete, deregister = spies
+    backend._returns["kill_window"] = RuntimeError("No objects found")
+    backend._returns["window_exists"] = False
+
+    deleted = terminals.delete_terminal(
+        terminal_id,
+        expected_generation=generation,
+        expected_session="managed-session",
+    )
+
+    assert deleted is True
+    assert db_delete.calls != [], "the exact dead generation's row is retired"
+    assert deregister.calls != [], "the exact dead generation's registry entries are drained"
 
 
 @pytest.mark.parametrize(
