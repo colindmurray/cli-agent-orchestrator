@@ -2642,6 +2642,24 @@ def delete_terminal(
     reused terminal id.  The stronger destructive endpoint may also call this
     function after performing its additional heartbeat/fence checks."""
     try:
+
+        def _ensure_exact_window_absent(session_name: str, window_name: str) -> None:
+            """Remove one generation-bound window, accepting an earlier exit."""
+            backend = get_backend()
+            try:
+                backend.kill_window(session_name, window_name)
+            except Exception:
+                # A provider may exit before collection.  tmux then reports
+                # "no objects found", which is already the requested
+                # postcondition.  Any surviving exact window keeps the error
+                # fatal.
+                if backend.window_exists(session_name, window_name):
+                    raise
+            if backend.window_exists(session_name, window_name):
+                raise RuntimeError(
+                    f"managed terminal window survived cleanup: {session_name}:{window_name}"
+                )
+
         # P1-1 (final conformance §20.2f): expected_session without the exact
         # generation NEVER degrades to ID-only destruction — a session name is
         # not an incarnation identity.
@@ -2697,12 +2715,7 @@ def delete_terminal(
                 # can finish a crash that occurred before the terminal row was
                 # persisted or after another cleanup removed it. A different
                 # generation has a different window identity.
-                get_backend().kill_window(expected_session, expected_window)
-                if get_backend().window_exists(expected_session, expected_window):
-                    raise RuntimeError(
-                        f"managed terminal window survived cleanup: "
-                        f"{expected_session}:{expected_window}"
-                    )
+                _ensure_exact_window_absent(expected_session, expected_window)
 
         def _recheck_teardown_claim() -> None:
             """Generation-owned teardown claim (P1-1, final conformance
@@ -2803,12 +2816,10 @@ def delete_terminal(
                 except Exception as e:
                     logger.warning(f"Failed to kill tmux window for {terminal_id}: {e}")
             else:
-                get_backend().kill_window(metadata["tmux_session"], metadata["tmux_window"])
-                if get_backend().window_exists(metadata["tmux_session"], metadata["tmux_window"]):
-                    raise RuntimeError(
-                        f"managed terminal window survived cleanup: "
-                        f"{metadata['tmux_session']}:{metadata['tmux_window']}"
-                    )
+                _ensure_exact_window_absent(
+                    metadata["tmux_session"],
+                    metadata["tmux_window"],
+                )
 
         # Cleanup provider state and database record
         _recheck_teardown_claim()

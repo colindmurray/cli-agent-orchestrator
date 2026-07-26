@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import libtmux
+from libtmux.exc import ObjectDoesNotExist
 
 from cli_agent_orchestrator.constants import TMUX_HISTORY_LINES
 from cli_agent_orchestrator.services.control_input_contract import (
@@ -836,10 +837,18 @@ class TmuxClient:
 
     def window_exists(self, session_name: str, window_name: str) -> bool:
         """Check the exact tmux window without swallowing lookup failures."""
-        session = self.server.sessions.get(session_name=session_name)
+        try:
+            session = self.server.sessions.get(session_name=session_name)
+        except ObjectDoesNotExist:
+            return False
         if not session:
             return False
-        return session.windows.get(window_name=window_name) is not None
+        try:
+            return session.windows.get(window_name=window_name) is not None
+        except ObjectDoesNotExist:
+            # libtmux uses this exception for the ordinary zero-match case.
+            # It is absence, not an unreadable tmux server.
+            return False
 
     def window_identity(self, session_name: str, window_name: str) -> Optional[Dict[str, str]]:
         """Server-owned immutable tmux identity of a window: its tmux-assigned
