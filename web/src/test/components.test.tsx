@@ -16,6 +16,11 @@ describe('StatusBadge', () => {
     expect(screen.getByText('Processing')).toBeInTheDocument()
   })
 
+  it('renders a lifecycle-live managed native terminal honestly', () => {
+    render(<StatusBadge status="not_fifo_monitored" />)
+    expect(screen.getByText('Managed Live')).toBeInTheDocument()
+  })
+
   it('renders completed status', () => {
     render(<StatusBadge status="completed" />)
     expect(screen.getByText('Completed')).toBeInTheDocument()

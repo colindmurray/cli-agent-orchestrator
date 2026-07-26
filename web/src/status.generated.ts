@@ -27,6 +27,12 @@ export const STATUS_CONFIG: Record<string, StatusStyle> = {
     textClass: "text-cao-info",
     pulse: true,
   },
+  NOT_FIFO_MONITORED: {
+    label: "Managed Live",
+    dotClass: "bg-cao-success",
+    bgClass: "bg-cao-success/10",
+    textClass: "text-cao-success",
+  },
   COMPLETED: {
     label: "Completed",
     dotClass: "bg-cao-accent",

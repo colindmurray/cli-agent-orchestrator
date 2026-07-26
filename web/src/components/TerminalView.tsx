@@ -18,11 +18,23 @@ const TERMINAL_FONT_SIZE = 14
 // yet, so a touch delta can still be turned into whole wheel notches.
 const DEFAULT_LINE_HEIGHT = Math.round(TERMINAL_FONT_SIZE * 1.2)
 
+function isWheelMouseReport(data: string): boolean {
+  const sgr = /^\x1b\[<([0-9]{1,3});[0-9]{1,4};[0-9]{1,4}[Mm]$/.exec(data)
+  if (sgr) return (Number(sgr[1]) & 64) === 64
+
+  if (data.startsWith('\x1b[M') && data.length === 6) {
+    const encodedButton = data.charCodeAt(3)
+    return encodedButton >= 96 && encodedButton <= 159
+  }
+  return false
+}
+
 export function TerminalView({ terminalId, provider, agentProfile, onClose }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const managedRef = useRef<boolean | null>(null)
   const [managed, setManaged] = useState(false)
   const [generation, setGeneration] = useState<string | undefined>()
+  const [executionMode, setExecutionMode] = useState<string | undefined>()
   const [message, setMessage] = useState('')
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('')
@@ -36,6 +48,7 @@ export function TerminalView({ terminalId, provider, agentProfile, onClose }: Te
         managedRef.current = result.managed
         setManaged(result.managed)
         setGeneration(result.generation)
+        setExecutionMode(result.execution_mode)
       })
       .catch(() => {
         // Unknown control identity is not proof this is an ordinary TUI.
@@ -44,6 +57,7 @@ export function TerminalView({ terminalId, provider, agentProfile, onClose }: Te
         managedRef.current = null
         setManaged(false)
         setGeneration(undefined)
+        setExecutionMode(undefined)
         setControlStatus('terminal control identity unavailable')
       })
   }, [terminalId])
@@ -91,6 +105,55 @@ export function TerminalView({ terminalId, provider, agentProfile, onClose }: Te
       } catch {
         setControlStatus(
           `${body.action}: response unavailable; operation ${operationId} retained for reconciliation`,
+        )
+      }
+    } finally {
+      setControlBusy(false)
+    }
+  }
+
+  const runNativeControl = async (text: string, label: string) => {
+    const controlId = crypto.randomUUID()
+    setControlBusy(true)
+    setControlStatus(`${label}: submitting… (${controlId})`)
+    try {
+      const identity = await api.getControlIdentity(terminalId)
+      const expectedIdentity = Object.fromEntries(
+        [
+          'terminal_id',
+          'terminal_incarnation',
+          'terminal_generation',
+          'pane_birth_id',
+          'provider_process_id',
+          'provider',
+          'native_session_id',
+          'execution_mode',
+          'session_name',
+        ].map(key => [key, identity[key] ?? null]),
+      )
+      const response = await api.sendControlInput(terminalId, {
+        control_id: controlId,
+        text,
+        enter: true,
+        expected_identity: expectedIdentity,
+      })
+      const outcome = String(response.outcome || 'unknown')
+      const reason = response.reason_code || response.detail
+      setControlStatus(
+        `${label}: ${outcome} (${controlId})${reason ? ` — ${String(reason)}` : ''}`,
+      )
+      if (label === 'send' && outcome === 'success') setMessage('')
+    } catch {
+      try {
+        const response = await api.queryControlInput(controlId)
+        const outcome = String(response.outcome || 'unknown')
+        const reason = response.reason_code || response.detail
+        setControlStatus(
+          `${label}: ${outcome} (${controlId})${reason ? ` — ${String(reason)}` : ''}`,
+        )
+      } catch {
+        setControlStatus(
+          `${label}: response unavailable; control ${controlId} retained for reconciliation`,
         )
       }
     } finally {
@@ -214,6 +277,20 @@ export function TerminalView({ terminalId, provider, agentProfile, onClose }: Te
     el.addEventListener('touchend', endTouch, { passive: true })
     el.addEventListener('touchcancel', endTouch, { passive: true })
 
+    // In tmux mouse mode xterm converts a wheel event into a terminal mouse
+    // report and emits it through onData. Managed panes intentionally block
+    // keyboard and paste data, but blocking this report also disables
+    // scrolling. Open a synchronous, wheel-only gate and validate the emitted
+    // bytes below before forwarding them to the same pane.
+    let wheelEventActive = false
+    const onWheel = () => {
+      wheelEventActive = true
+      queueMicrotask(() => {
+        wheelEventActive = false
+      })
+    }
+    el.addEventListener('wheel', onWheel, { capture: true, passive: true })
+
     // Connect WebSocket
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${protocol}//${location.host}/terminals/${terminalId}/ws`)
@@ -262,6 +339,13 @@ export function TerminalView({ terminalId, provider, agentProfile, onClose }: Te
       // is unresolved so an early paste cannot leak into the wrong transport.
       if (managedRef.current === false && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'input', data }))
+      } else if (
+        managedRef.current === true &&
+        wheelEventActive &&
+        isWheelMouseReport(data) &&
+        ws.readyState === WebSocket.OPEN
+      ) {
+        ws.send(JSON.stringify({ type: 'input', data }))
       }
     })
 
@@ -293,10 +377,13 @@ export function TerminalView({ terminalId, provider, agentProfile, onClose }: Te
       el.removeEventListener('touchmove', onTouchMove)
       el.removeEventListener('touchend', endTouch)
       el.removeEventListener('touchcancel', endTouch)
+      el.removeEventListener('wheel', onWheel, true)
       ws.close()
       term.dispose()
     }
   }, [terminalId])
+
+  const nativeManaged = managed && executionMode === 'native_tui'
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col" style={{ background: '#0d1117' }}>
@@ -307,7 +394,13 @@ export function TerminalView({ terminalId, provider, agentProfile, onClose }: Te
           <span className="text-sm font-mono text-gray-300">{terminalId}</span>
           {provider && <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded">{provider}</span>}
           {agentProfile && <span className="text-xs text-emerald-400 bg-emerald-900/30 px-2 py-0.5 rounded">{agentProfile}</span>}
-          {managed && <span className="text-xs text-cyan-300 bg-cyan-900/30 px-2 py-0.5 rounded">Managed ACP · read-only transcript</span>}
+          {managed && (
+            <span className="text-xs text-cyan-300 bg-cyan-900/30 px-2 py-0.5 rounded">
+              {nativeManaged
+                ? 'Managed native TUI · identity-bound controls'
+                : 'Managed ACP · read-only transcript'}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[10px] text-gray-600">Click X to close</span>
@@ -320,7 +413,45 @@ export function TerminalView({ terminalId, provider, agentProfile, onClose }: Te
           </button>
         </div>
       </div>
-      {managed && (
+      {nativeManaged && (
+        <div className="shrink-0 border-b border-gray-700/50 bg-gray-950 px-4 py-2 space-y-2">
+          <div className="flex gap-2">
+            <input
+              value={message}
+              onChange={event => setMessage(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Enter' && message.trim() && !controlBusy) {
+                  void runNativeControl(message.trim(), 'send')
+                }
+              }}
+              placeholder="Send literal text to the native composer…"
+              className="min-w-0 flex-1 rounded border border-gray-700 bg-gray-900 px-3 py-1.5 text-sm text-gray-200 focus:border-emerald-500 focus:outline-none"
+            />
+            <button
+              disabled={controlBusy || !message.trim()}
+              onClick={() => void runNativeControl(message.trim(), 'send')}
+              className="rounded bg-emerald-700 px-3 py-1.5 text-xs text-white disabled:opacity-40"
+            >
+              Send
+            </button>
+            <button
+              disabled={controlBusy}
+              onClick={() => void runNativeControl('/compact', 'compact')}
+              className="rounded bg-indigo-700 px-3 py-1.5 text-xs text-white disabled:opacity-40"
+            >
+              Compact
+            </button>
+          </div>
+          <div className="flex items-center gap-2 text-[11px] text-gray-500">
+            <span>
+              Cancel, route, effort, and resume controls are unavailable for
+              native TUI sessions.
+            </span>
+            <span className="min-w-0 truncate">{controlStatus}</span>
+          </div>
+        </div>
+      )}
+      {managed && !nativeManaged && (
         <div className="shrink-0 border-b border-gray-700/50 bg-gray-950 px-4 py-2 space-y-2">
           <div className="flex gap-2">
             <input

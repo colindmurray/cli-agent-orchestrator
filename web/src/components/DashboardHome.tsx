@@ -8,7 +8,7 @@ import { InboxPanel } from './InboxPanel'
 import { StatusBadge, STATUS_CONFIG } from './StatusBadge'
 import { OutputViewer } from './OutputViewer'
 
-const STATUS_ORDER = ['PROCESSING', 'IDLE', 'WAITING_USER_ANSWER', 'ERROR', 'COMPLETED', 'UNKNOWN']
+const STATUS_ORDER = ['PROCESSING', 'NOT_FIFO_MONITORED', 'IDLE', 'WAITING_USER_ANSWER', 'ERROR', 'COMPLETED', 'UNKNOWN']
 
 function fmtRel(dateStr: string | null | undefined): string | null {
   if (!dateStr) return null
@@ -40,6 +40,7 @@ STATUS_META['UNKNOWN'] = { label: 'Unknown', dot: 'bg-gray-500', text: 'text-gra
 
 const STATUS_ACTIVE_BG: Record<string, string> = {
   PROCESSING: 'bg-blue-900/40 border-blue-500/50 text-blue-300',
+  NOT_FIFO_MONITORED: 'bg-emerald-900/40 border-emerald-500/50 text-emerald-300',
   IDLE: 'bg-emerald-900/40 border-emerald-500/50 text-emerald-300',
   WAITING_USER_ANSWER: 'bg-amber-900/40 border-amber-500/50 text-amber-300',
   ERROR: 'bg-red-900/40 border-red-500/50 text-red-300',

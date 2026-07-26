@@ -3,6 +3,7 @@
   "statuses": {
     "idle": { "label": "Idle", "semanticRole": "success", "pulse": false },
     "processing": { "label": "Processing", "semanticRole": "info", "pulse": true },
+    "not_fifo_monitored": { "label": "Managed Live", "semanticRole": "success", "pulse": false },
     "completed": { "label": "Completed", "semanticRole": "accent", "pulse": false },
     "waiting_user_answer": { "label": "Awaiting Input", "semanticRole": "warning", "pulse": false },
     "error": { "label": "Error", "semanticRole": "danger", "pulse": false },

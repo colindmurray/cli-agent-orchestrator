@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, cleanup } from '@testing-library/react'
+import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { TerminalView } from '../components/TerminalView'
 
 // xterm renders nothing meaningful under jsdom, so replace it with a minimal
@@ -14,10 +14,14 @@ const { wheelEvents, termRegistry, FakeTerminal } = vi.hoisted(() => {
     rows = 24
     cols = 80
     element: HTMLDivElement
+    dataHandler: ((data: string) => void) | null = null
 
     constructor(_opts: unknown) {
       this.element = document.createElement('div')
-      this.element.addEventListener('wheel', (e) => wheelEvents.push(e as WheelEvent))
+      this.element.addEventListener('wheel', (e) => {
+        wheelEvents.push(e as WheelEvent)
+        this.dataHandler?.('\x1b[<64;1;1M')
+      })
       termRegistry.current = this
     }
 
@@ -25,7 +29,12 @@ const { wheelEvents, termRegistry, FakeTerminal } = vi.hoisted(() => {
     open(parent: HTMLElement) {
       parent.appendChild(this.element)
     }
-    onData() {}
+    onData(handler: (data: string) => void) {
+      this.dataHandler = handler
+    }
+    emitData(data: string) {
+      this.dataHandler?.(data)
+    }
     onSelectionChange() {}
     attachCustomKeyEventHandler() {}
     getSelection() {
@@ -50,13 +59,19 @@ vi.mock('@xterm/addon-fit', () => ({
 // TerminalView opens a WebSocket and observes resizes; jsdom has neither.
 class FakeWebSocket {
   static OPEN = 1
+  static instances: FakeWebSocket[] = []
   readyState = FakeWebSocket.OPEN
   binaryType = ''
+  sent: string[] = []
   onopen: (() => void) | null = null
   onmessage: (() => void) | null = null
   onclose: (() => void) | null = null
-  constructor(public url: string) {}
-  send() {}
+  constructor(public url: string) {
+    FakeWebSocket.instances.push(this)
+  }
+  send(data: string) {
+    this.sent.push(data)
+  }
   close() {}
 }
 
@@ -92,12 +107,21 @@ describe('TerminalView touch scrolling', () => {
   beforeEach(() => {
     wheelEvents.length = 0
     termRegistry.current = null
+    FakeWebSocket.instances.length = 0
     ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWebSocket
     ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = FakeResizeObserver
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ managed: false }),
+      }),
+    )
   })
 
   afterEach(() => {
     cleanup()
+    vi.unstubAllGlobals()
   })
 
   it('emits exactly one line-mode notch per row of travel', () => {
@@ -193,5 +217,128 @@ describe('TerminalView touch scrolling', () => {
     el.dispatchEvent(touch('touchmove', [100]))
 
     expect(wheelEvents.length).toBe(0)
+  })
+
+  it('forwards only wheel-originated mouse reports for a managed TUI', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          managed: true,
+          generation: 'generation-1',
+          execution_mode: 'native_tui',
+        }),
+      }),
+    )
+    render(<TerminalView terminalId="t-native" onClose={() => {}} />)
+
+    await screen.findByText('Managed native TUI · identity-bound controls')
+    const socket = FakeWebSocket.instances[0]
+    const terminal = termRegistry.current
+    if (!socket || !terminal) throw new Error('terminal did not mount')
+
+    terminal.emitData('ordinary keyboard input')
+    expect(socket.sent).toHaveLength(0)
+
+    terminal.element.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: 1,
+        deltaMode: WheelEvent.DOM_DELTA_LINE,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'input', data: '\x1b[<64;1;1M' }),
+    ])
+
+    await Promise.resolve()
+    terminal.emitData('\x1b[<64;1;1M')
+    expect(socket.sent).toHaveLength(1)
+  })
+
+  it('routes native Send and Compact through identity-bound control input', async () => {
+    const requests: Array<{ url: string; body?: Record<string, unknown> }> = []
+    let controlNumber = 0
+    vi.stubGlobal('crypto', {
+      randomUUID: () => `control-${++controlNumber}`,
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input)
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+        requests.push({ url, body })
+        let response: Record<string, unknown>
+        if (url.endsWith('/managed-control')) {
+          response = {
+            managed: true,
+            generation: 'generation-1',
+            execution_mode: 'native_tui',
+          }
+        } else if (url.endsWith('/control-identity')) {
+          response = {
+            terminal_id: 't-native',
+            terminal_incarnation: 'incarnation-1',
+            terminal_generation: 'generation-1',
+            pane_birth_id: '%7',
+            provider_process_id: '42@start',
+            provider: 'kimi_cli',
+            native_session_id: 'session-1',
+            execution_mode: 'native_tui',
+            session_name: 'cao-test',
+            pane: { pane_id: '%7' },
+          }
+        } else {
+          response = {
+            control_id: body?.control_id,
+            outcome: 'success',
+          }
+        }
+        return {
+          ok: true,
+          json: async () => response,
+        } as Response
+      }),
+    )
+
+    render(<TerminalView terminalId="t-native" onClose={() => {}} />)
+
+    expect(
+      await screen.findByText('Managed native TUI · identity-bound controls'),
+    ).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Cancel turn' })).toBeNull()
+
+    fireEvent.change(
+      screen.getByPlaceholderText('Send literal text to the native composer…'),
+      { target: { value: 'continue the review' } },
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => {
+      const control = requests.find(request => request.url.endsWith('/control-input'))
+      expect(control?.body?.text).toBe('continue the review')
+      expect(control?.body?.enter).toBe(true)
+      expect(control?.body?.expected_identity).toEqual({
+        terminal_id: 't-native',
+        terminal_incarnation: 'incarnation-1',
+        terminal_generation: 'generation-1',
+        pane_birth_id: '%7',
+        provider_process_id: '42@start',
+        provider: 'kimi_cli',
+        native_session_id: 'session-1',
+        execution_mode: 'native_tui',
+        session_name: 'cao-test',
+      })
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Compact' }))
+    await waitFor(() => {
+      const controls = requests.filter(request => request.url.endsWith('/control-input'))
+      expect(controls).toHaveLength(2)
+      expect(controls[1].body?.text).toBe('/compact')
+      expect(controls[1].body?.enter).toBe(true)
+    })
   })
 })
