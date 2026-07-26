@@ -1584,8 +1584,9 @@ def _send_through_native_adapter(
 
     record = journal.mark_delivered(
         control_id,
+        # Both numbers read off the transport, as on the ambiguous exits.
         chunks_sent=transport.chunks_sent,
-        enter_attempted=enter,
+        enter_attempted=transport.enter_attempted,
         evidence_digest=digest,
     )
     return ControlInputResult(
