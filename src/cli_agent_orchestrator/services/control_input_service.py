@@ -272,6 +272,24 @@ def _tmux_client() -> Any:
     return tmux_client
 
 
+def _managed_execution_mode(managed: Optional[Dict[str, Any]]) -> str:
+    """The control mode of a resolved terminal, default-deny on the unknown.
+
+    An unmanaged pane is a native TUI: there is no bridge in front of it.
+    A managed generation reports the mode its reservation durably records.
+    A managed row whose mode this side cannot resolve is reported as ACP,
+    which is the refusing branch -- an unresolved mode must never route to
+    the composer path, because typing into a pane on an unproven mode is
+    exactly the misroute the refusal exists to prevent.
+    """
+    if managed is None:
+        return EXECUTION_MODE_NATIVE_TUI
+    mode = managed.get("execution_mode")
+    if mode == EXECUTION_MODE_NATIVE_TUI:
+        return EXECUTION_MODE_NATIVE_TUI
+    return EXECUTION_MODE_ACP
+
+
 def resolve_control_identity(terminal_id: str) -> Optional[ResolvedControlIdentity]:
     """This server's own view of ``terminal_id``, or None if unknown.
 
@@ -320,16 +338,25 @@ def resolve_control_identity(terminal_id: str) -> Optional[ResolvedControlIdenti
         terminal_incarnation=None,
         terminal_generation=generation,
         provider=metadata.get("provider"),
-        # A native TUI pane has no provider-native session id this server
-        # observes; the managed surface has one, and managed panes are
-        # refused by this path rather than typed into.
-        native_session_id=None,
-        execution_mode=EXECUTION_MODE_ACP if managed is not None else EXECUTION_MODE_NATIVE_TUI,
+        # An unmanaged pane is a plain native TUI with no managed record
+        # behind it. A managed generation reports what its own reservation
+        # durably says -- the mode it was launched in, and the native
+        # session and provider process its readiness proof published.
+        #
+        # These used to be hardcoded: every managed reservation projected
+        # ACP with both identities null, so a managed native pane was
+        # refused by the generic path and unreachable by control input at
+        # all, even once it was admitted. The mode is the reservation's
+        # own, never inferred from argv or protocol vintage, because the
+        # ACP bridge is also a v2 argv-launched terminal.
+        native_session_id=managed.get("native_session_id") if managed else None,
+        execution_mode=_managed_execution_mode(managed),
         session_name=metadata.get("tmux_session"),
-        # Unprovable here: pane_pid is the pane's root process, the
-        # provider is a descendant of it, and a guess would be worse
-        # than an absence.
-        provider_process_id=None,
+        # For an unmanaged pane this stays unprovable: pane_pid is the
+        # pane's root process, the provider is a descendant of it, and a
+        # guess would be worse than an absence. A managed generation does
+        # not have to guess -- its readiness proof recorded the process.
+        provider_process_id=managed.get("provider_process_id") if managed else None,
         pane_id=pane_id,
         window_id=window_id,
         pane_pid=pane_pid,
@@ -419,7 +446,17 @@ def screen_expected_identity(
             f"{declared_terminal!r}",
         )
 
-    if resolved.execution_mode == EXECUTION_MODE_ACP:
+    # A positive allowlist, not "is it ACP". Only a mode this side has
+    # resolved to a real native TUI may be typed into; everything else --
+    # ACP, a legacy row whose durable mode is NULL, a value from a newer
+    # writer this build does not know -- takes the refusing branch.
+    #
+    # A deny-list here would refuse only the literal spelling and let every
+    # other value fall through to the composer, which is the one outcome
+    # this gate exists to prevent: a managed bridge pane typed into as
+    # though it were a native composer. The unknown case is exactly where
+    # that costs the most, because nothing about it is legible.
+    if resolved.execution_mode != EXECUTION_MODE_NATIVE_TUI:
         return (
             REASON_MANAGED_ACP_PANE,
             "this terminal is driven through the managed provider bridge; its pane runs "

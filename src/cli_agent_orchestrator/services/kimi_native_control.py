@@ -42,7 +42,7 @@ from typing import Any, Optional, Protocol, cast
 
 from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.services import execution_mode as em
-from cli_agent_orchestrator.services import native_attachment
+from cli_agent_orchestrator.services import native_attachment, provider_contracts
 from cli_agent_orchestrator.services.canonical_json import canonical_sha256
 
 #: The only provider this adapter speaks for.  Named rather than
@@ -338,7 +338,22 @@ def plan_composer_keystrokes(
                 f"keystrokes for the breaks between them"
             )
 
-    pin = _PROVEN_COMPOSER_NEWLINE.get((provider_version or "").strip())
+    # Normalized through the one normalizer the version pin already uses.
+    # The durable binding records the provider's banner verbatim --
+    # "2.1.220 (Claude Code)" -- because that is what the provider printed,
+    # while this table is keyed by the bare build. A raw strip therefore
+    # missed on an installed, pinned, proven build and refused it as
+    # unproven, with zero task bytes, even though check_pinned_version had
+    # already accepted the same string at bind time by normalizing it.
+    #
+    # Normalizing the lookup INPUT is not loosening the pin. The keys stay
+    # bare exact builds, so an unproven version still misses. Adding the
+    # banner form as a second key would have turned a table of proven
+    # builds into a table of spellings, and the next banner variant would
+    # be unproven again.
+    pin = _PROVEN_COMPOSER_NEWLINE.get(
+        provider_contracts.normalized_version(provider_version or "")
+    )
     undeliverable = None
     if len(lines) > 1 and pin is None:
         # Recorded on the plan rather than raised. The payload is well
