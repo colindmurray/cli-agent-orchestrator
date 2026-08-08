@@ -146,6 +146,7 @@ from cli_agent_orchestrator.services import (
     secret_gate,
     session_env,
     session_service,
+    supervisor_create_channel,
     terminal_projection,
     terminal_service,
     wake_receipts,
@@ -740,7 +741,24 @@ async def lifespan(app: FastAPI):
         herdr_inbox_task = asyncio.create_task(svc.start())
         logger.info("Herdr inbox service started")
 
+    # The supervisor-creation channel: default-off, because this build's
+    # contract is that no flags open no listener beyond the TCP port, and
+    # because G10 is unproven so nothing may use the channel yet. When it is
+    # asked for, a bind failure is a startup failure by design — a truncated
+    # path or a second live owner must not degrade to "no channel", which a
+    # client would read as an ordinary refusal.
+    app.state.supervisor_create_channel = None
+    if supervisor_create_channel.channel_enabled():
+        channel = supervisor_create_channel.SupervisorCreateChannel()
+        await channel.start()
+        app.state.supervisor_create_channel = channel
+
     yield
+
+    if getattr(app.state, "supervisor_create_channel", None) is not None:
+        await app.state.supervisor_create_channel.aclose()
+        app.state.supervisor_create_channel = None
+        logger.info("supervisor-create channel stopped")
 
     # Stop herdr inbox service on shutdown
     if herdr_inbox_task is not None:
