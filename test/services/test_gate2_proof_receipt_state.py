@@ -16,7 +16,10 @@ import stat
 
 import pytest
 
+from cli_agent_orchestrator.services import gate2_proof_receipt as codec
 from cli_agent_orchestrator.services import gate2_proof_receipt_state as rs
+
+from ._gate2_fixtures import minimal_receipt
 
 
 def _write(path, payload: object, mode: int = 0o600) -> None:
@@ -59,26 +62,39 @@ def test_paths_follow_the_state_root(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_valid_state_records_both_proofs(tmp_path):
+def test_valid_state_records_both_proofs(monkeypatch, tmp_path):
+    """A state and the receipt it points at, which is the only valid pairing now."""
+    import cli_agent_orchestrator.constants as constants
+
+    monkeypatch.setattr(constants, "CAO_HOME_DIR", tmp_path)
+    _, sha = codec.emit_receipt(tmp_path / codec.RECEIPT_BASENAME, minimal_receipt())
     path = tmp_path / rs.RECEIPT_STATE_BASENAME
-    _write(path, _valid())
+    _write(path, _valid(sha))
     got = rs.load_receipt_state(path)
     assert got is not None
     assert got.records_both_proofs is True
-    assert got.receipt_sha256 == "a" * 64
+    assert got.receipt_sha256 == sha
     assert got.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_proof_order_does_not_matter(tmp_path):
+def test_proof_order_does_not_matter(monkeypatch, tmp_path):
     """Both named is the requirement; their order is not a wire contract."""
+    import cli_agent_orchestrator.constants as constants
+
+    monkeypatch.setattr(constants, "CAO_HOME_DIR", tmp_path)
+    _, sha = codec.emit_receipt(tmp_path / codec.RECEIPT_BASENAME, minimal_receipt())
     path = tmp_path / rs.RECEIPT_STATE_BASENAME
-    _write(path, {**_valid(), "proofs_recorded": list(reversed(rs.REQUIRED_PROOFS))})
+    _write(path, {**_valid(sha), "proofs_recorded": list(reversed(rs.REQUIRED_PROOFS))})
     assert rs.load_receipt_state(path).records_both_proofs is True
 
 
-def test_write_helper_round_trips(tmp_path):
+def test_write_helper_round_trips(monkeypatch, tmp_path):
+    import cli_agent_orchestrator.constants as constants
+
+    monkeypatch.setattr(constants, "CAO_HOME_DIR", tmp_path)
+    _, sha = codec.emit_receipt(tmp_path / codec.RECEIPT_BASENAME, minimal_receipt())
     path = tmp_path / rs.RECEIPT_STATE_BASENAME
-    written = rs.write_receipt_state_for_proof_run(path, "b" * 64)
+    written = rs.write_receipt_state_for_proof_run(path, sha)
     assert stat.S_IMODE(path.lstat().st_mode) == 0o600
     loaded = rs.load_receipt_state(path)
     assert loaded.sha256 == written.sha256
@@ -138,32 +154,6 @@ def test_a_non_canonical_digest_is_refused(tmp_path, digest):
     with pytest.raises(rs.ReceiptStateError) as excinfo:
         rs.load_receipt_state(path)
     assert "64" in str(excinfo.value) or "hex" in str(excinfo.value)
-
-
-def test_digest_matching_the_canonical_receipt_is_accepted(monkeypatch, tmp_path):
-    import cli_agent_orchestrator.constants as constants
-
-    monkeypatch.setattr(constants, "CAO_HOME_DIR", tmp_path)
-    receipt = tmp_path / rs.CANONICAL_RECEIPT_BASENAME
-    receipt.write_bytes(b'{"gate": 2}')
-    digest = hashlib.sha256(receipt.read_bytes()).hexdigest()
-    _write(tmp_path / rs.RECEIPT_STATE_BASENAME, _valid(digest))
-
-    got = rs.load_receipt_state()
-    assert got is not None and got.receipt_sha256 == digest
-
-
-def test_digest_mismatching_the_canonical_receipt_refuses(monkeypatch, tmp_path):
-    """A pointer naming the wrong evidence is worse than no pointer."""
-    import cli_agent_orchestrator.constants as constants
-
-    monkeypatch.setattr(constants, "CAO_HOME_DIR", tmp_path)
-    (tmp_path / rs.CANONICAL_RECEIPT_BASENAME).write_bytes(b'{"gate": 2}')
-    _write(tmp_path / rs.RECEIPT_STATE_BASENAME, _valid("c" * 64))
-
-    with pytest.raises(rs.ReceiptStateError) as excinfo:
-        rs.load_receipt_state()
-    assert "hashes to" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------

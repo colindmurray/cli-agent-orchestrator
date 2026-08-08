@@ -180,22 +180,46 @@ def load_receipt_state(path: Optional[Path] = None) -> Optional[Gate2ReceiptStat
 
 
 def _verify_against_canonical_receipt(state_path: Path, declared_digest: str) -> None:
-    """Compare the declared digest to the canonical receipt when it is present.
+    """Verify the canonical receipt **unconditionally**. No verify-if-present.
 
-    The canonical receipt is a campaign-side artifact and is not guaranteed to
-    sit in the server's state root. When it is there, a mismatch **refuses
-    server start** — a pointer that names the wrong evidence is worse than no
-    pointer. When it is not, the structural checks above stand and the binding
-    is recorded unverified; see the report's observation on this, because a
-    pointer whose target cannot be reached is checkable in form only.
+    Once the receipt is load-bearing, "check it when it happens to be reachable"
+    is not a check: it makes the strength of the binding depend on whether a file
+    was copied. So with a receipt state present, the canonical receipt must be
+    present, readable, of the right schema, and hash to the declared digest —
+    anything else **refuses server start**.
+
+    The earlier best-effort branch is withdrawn deliberately. Its residual was
+    that a forged receipt state bearing any well-formed digest was accepted on a
+    deployment where the receipt had never been placed; now that state cannot
+    start a server at all.
     """
+    from cli_agent_orchestrator.services import gate2_proof_receipt
+
     receipt = canonical_receipt_path()
     try:
         raw = receipt.read_bytes()
-    except (FileNotFoundError, NotADirectoryError):
-        return
+    except FileNotFoundError:
+        raise ReceiptStateError(
+            f"{state_path} is present, so the canonical gate-2 receipt must be at "
+            f"{receipt}; it is absent. A receipt state without its receipt names "
+            "evidence this deployment does not hold."
+        ) from None
     except OSError as exc:
         raise ReceiptStateError(f"{receipt} cannot be read: {exc}") from exc
+
+    # Wrong-schema is its own refusal: a partial's digest could otherwise be
+    # declared here, and a partial must never serve as a receipt-state referent.
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+        schema = parsed.get("schema") if isinstance(parsed, dict) else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        schema = None
+    if schema != gate2_proof_receipt.RECEIPT_SCHEMA:
+        raise ReceiptStateError(
+            f"{receipt} declares schema {schema!r}; only "
+            f"{gate2_proof_receipt.RECEIPT_SCHEMA!r} may be a receipt-state referent. "
+            "A partial can never attest."
+        )
 
     actual = hashlib.sha256(raw).hexdigest()
     if actual != declared_digest:

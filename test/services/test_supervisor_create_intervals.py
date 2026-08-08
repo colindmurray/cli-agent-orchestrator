@@ -20,6 +20,8 @@ from cli_agent_orchestrator.services import supervisor_create_channel as channel
 from cli_agent_orchestrator.services.actor_broker import PeerCredentials
 from cli_agent_orchestrator.services.gate2_proof_designation import Gate2ProofDesignation
 
+from ._gate2_fixtures import install_recorded_gate2_state
+
 ORDINARY = "cao-ordinary"
 PROOF_PROJECT = "cao-gate2-scratch"
 CREDS = PeerCredentials(pid=4242, uid=501)
@@ -283,7 +285,7 @@ def test_designation_after_recorded_receipt_refuses_server_start(state_root, tmp
     from cli_agent_orchestrator.services import gate2_proof_designation as gd
 
     gd.write_designation_for_proof_run(state_root / gd.DESIGNATION_BASENAME, PROOF_PROJECT)
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
 
     with pytest.raises(channel.SupervisorCreateChannelError) as excinfo:
         channel.load_designation_at_start()
@@ -301,7 +303,7 @@ def test_designation_alone_starts_cleanly(state_root):
 
 
 def test_receipt_state_alone_starts_cleanly(state_root):
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
     channel.load_designation_at_start()
     assert channel._designation() is None
     assert channel._gate2_receipt_recorded() is True
@@ -386,7 +388,7 @@ def test_interval_selection_reads_only_start_state(monkeypatch, state_root):
     channel.load_designation_at_start()
     assert channel._gate2_receipt_recorded() is False
 
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
     # No re-read happens without another start.
     assert channel._gate2_receipt_recorded() is False
 
@@ -466,7 +468,7 @@ async def test_binding_installed_after_start_does_not_end_the_bypass(
     In interval ii, installing a binding mid-run must not flip the very next
     request onto the full pipeline. The binding set is frozen at start.
     """
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
     channel.load_designation_at_start()
     _install_create(monkeypatch)
 
@@ -487,7 +489,7 @@ async def test_binding_removed_after_start_does_not_reinstate_the_bypass(
     isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
 ):
     """Removal is as inert as installation: the snapshot is frozen either way."""
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
     project_dir = tmp_path / "conductor-ordinary"
     project_dir.mkdir()
     psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
@@ -506,7 +508,7 @@ async def test_binding_content_changed_after_start_is_not_re_read(
     isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
 ):
     """The bound path used by a later request is the one read at start."""
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
     fresh_dir = tmp_path / "fresh"  # no project.json -> ABSENT
     fresh_dir.mkdir()
     used_dir = tmp_path / "used"  # has project.json -> PRESENT
@@ -535,7 +537,7 @@ async def test_binding_content_changed_after_start_is_not_re_read(
 async def test_binding_replaced_with_an_invalid_file_after_start_is_not_re_read(
     isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
 ):
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
     project_dir = tmp_path / "conductor-ordinary"
     project_dir.mkdir()
     psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
@@ -553,7 +555,7 @@ async def test_restart_takes_up_the_new_binding(
     isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
 ):
     """A restart is the operator-visible boundary at which the interval moves."""
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
     channel.load_designation_at_start()
     _install_create(monkeypatch)
 
@@ -609,7 +611,7 @@ async def test_invalid_binding_ends_the_bypass_then_refuses_on_unknown(
     """Recorded-but-invalid must not be silently treated as absent."""
     import os
 
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
     psb.bindings_dir().mkdir(parents=True, exist_ok=True)
     descriptor = os.open(psb.binding_path(ORDINARY), os.O_CREAT | os.O_WRONLY, 0o600)
     try:
@@ -666,7 +668,7 @@ async def test_bypass_selection_and_observation_share_one_snapshot(
     object the witness observation is given — plus behaviourally, by mutating the
     file between the two and seeing neither move.
     """
-    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    install_recorded_gate2_state(state_root)
     project_dir = tmp_path / "conductor-ordinary"
     project_dir.mkdir()
     psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
