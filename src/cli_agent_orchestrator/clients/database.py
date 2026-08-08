@@ -665,6 +665,81 @@ class ManagedLaunchV2TerminalModel(Base):
     last_active = Column(DateTime, default=datetime.now)
 
 
+class ProjectSupervisorAuthorityModel(Base):
+    """The one current supervisor authority row per project.
+
+    There is exactly one row per project and it is **CAS-updated in place**,
+    never deleted and never duplicated: the alternative — inserting a second
+    row per epoch — cannot coexist with ``project`` being the primary key, and
+    every authorization compares against *the* current row.  Superseded epochs
+    are appended to :class:`ProjectSupervisorAuthorityHistoryModel`.
+
+    ``supervisor_terminal_id`` and ``supervisor_generation`` are **derived from
+    the kernel-verified channel connection and the terminal this server
+    created** — never claimed by a caller.  There is deliberately no
+    credential, hash, or token column: authority is proven per-connection by
+    the kernel, so there is no bearer secret to store, present, or leak.
+    """
+
+    __tablename__ = "project_supervisor_authority"
+
+    project = Column(Text, primary_key=True)
+    project_incarnation = Column(Integer, nullable=False)
+    supervisor_terminal_id = Column(Text, nullable=False)
+    supervisor_generation = Column(Text, nullable=False)
+    authority_epoch = Column(Integer, nullable=False)
+    channel_socket_path = Column(Text, nullable=True)
+    state = Column(Text, nullable=False)  # live | revoked
+    established_at = Column(Text, nullable=True)
+    rotated_at = Column(Text, nullable=True)
+    revoked_at = Column(Text, nullable=True)
+    # What the existing-run witness observed when this row was established or
+    # rotated, and on what basis: the trit, where the fork looked, and the
+    # observed ``project.json`` digest or its positively observed absence.
+    # ``(1, 1)`` is the most consequential value this protocol mints, so the
+    # basis is recorded beside the result rather than only in a log line.
+    witness_provenance_json = Column(Text, nullable=True)
+
+
+class ProjectSupervisorAuthorityHistoryModel(Base):
+    """Insert-only record of every superseded authority epoch.
+
+    One contributing source among several to the recovery high-water — not a
+    privileged maximum.  Losing it lowers nothing, because the allocation table
+    carries the same pairs.
+    """
+
+    __tablename__ = "project_supervisor_authority_history"
+
+    project = Column(Text, primary_key=True)
+    authority_epoch = Column(Integer, primary_key=True)
+    project_incarnation = Column(Integer, nullable=False)
+    supervisor_terminal_id = Column(Text, nullable=False)
+    supervisor_generation = Column(Text, nullable=False)
+    state_at_close = Column(Text, nullable=False)  # rotated | revoked
+    opened_at = Column(Text, nullable=True)
+    closed_at = Column(Text, nullable=True)
+
+
+class RouteObservationAuthorityEpochAllocationModel(Base):
+    """Insert-only high-water: every epoch that was ever *allocated*.
+
+    Committed in phase A, **before** the epoch is used and separately from the
+    phase-C current-row CAS.  That split is the whole point: under one
+    transaction a losing CAS would roll the allocation back and the next
+    creator could reissue that epoch.  Because phase A commits on its own, a
+    failed or lost phase C leaves the epoch permanently consumed and never
+    reissued — a gap in the sequence is expected and harmless; reuse is not.
+    """
+
+    __tablename__ = "route_observation_authority_epoch_allocation"
+
+    project = Column(Text, primary_key=True)
+    authority_epoch = Column(Integer, primary_key=True)
+    project_incarnation = Column(Integer, nullable=False)
+    allocated_at = Column(Text, nullable=True)
+
+
 class NativeSessionAttachmentModel(Base):
     """Exclusive, crash-safe ownership of one provider-native session.
 
@@ -923,11 +998,21 @@ def _migrate_tracker_kind_column() -> None:
                 raise RuntimeError("tracker_issues table is malformed: missing expected columns")
             if "kind" in cols:
                 # Ensure index exists even if column already present
-                conn.execute(sa_text("CREATE INDEX IF NOT EXISTS ix_tracker_issues_project_kind_status ON tracker_issues(project_id, kind, status)"))
+                conn.execute(
+                    sa_text(
+                        "CREATE INDEX IF NOT EXISTS ix_tracker_issues_project_kind_status ON tracker_issues(project_id, kind, status)"
+                    )
+                )
                 return
             # Column missing — add it with default within same transaction
-            conn.execute(sa_text("ALTER TABLE tracker_issues ADD COLUMN kind TEXT NOT NULL DEFAULT 'issue'"))
-            conn.execute(sa_text("CREATE INDEX IF NOT EXISTS ix_tracker_issues_project_kind_status ON tracker_issues(project_id, kind, status)"))
+            conn.execute(
+                sa_text("ALTER TABLE tracker_issues ADD COLUMN kind TEXT NOT NULL DEFAULT 'issue'")
+            )
+            conn.execute(
+                sa_text(
+                    "CREATE INDEX IF NOT EXISTS ix_tracker_issues_project_kind_status ON tracker_issues(project_id, kind, status)"
+                )
+            )
     except Exception as exc:
         # Fail-closed: upgraded ORM cannot query without column
         raise RuntimeError(f"tracker kind migration failed: {exc}") from exc
