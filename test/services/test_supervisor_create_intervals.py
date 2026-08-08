@@ -29,9 +29,11 @@ CREDS = PeerCredentials(pid=4242, uid=501)
 def _clean_start_state():
     channel._set_designation_for_test(None)
     channel._set_receipt_state_for_test(None)
+    channel._set_bindings_for_test(None)
     yield
     channel._set_designation_for_test(None)
     channel._set_receipt_state_for_test(None)
+    channel._set_bindings_for_test(None)
 
 
 @pytest.fixture
@@ -67,28 +69,43 @@ def _recorded_state() -> rs.Gate2ReceiptState:
 
 def _install_create(monkeypatch, *, terminal_id="phase-b", session=ORDINARY):
     created: dict = {}
+    calls = {"n": 0}
 
     async def fake_create(args):
         created["args"] = dict(args)
+        calls["n"] += 1
+        # Unique per call so a test may exercise the verb twice (e.g. across a
+        # restart) without colliding on the terminal generation index.
+        this_id = terminal_id if calls["n"] == 1 else f"{terminal_id}-{calls['n']}"
         with database.SessionLocal() as db:
             db.add(
                 database.TerminalModel(
-                    id=terminal_id,
+                    id=this_id,
                     tmux_session=session,
                     tmux_window="supervisor",
                     provider="codex",
-                    generation=f"gen-{terminal_id}",
+                    generation=f"gen-{this_id}",
                 )
             )
             db.commit()
         return {
-            "id": terminal_id,
-            "generation": f"gen-{terminal_id}",
+            "id": this_id,
+            "generation": f"gen-{this_id}",
             "tmux_session": session,
         }
 
     monkeypatch.setattr(channel, "_create_terminal_from_set_a", fake_create)
     return created
+
+
+def _restart_binding_snapshot() -> None:
+    """Adopt the bindings currently on disk as this process's start-state.
+
+    Stands in for a server restart. Bindings are read once at start, so a test
+    that wants a binding in effect must install it *before* the snapshot is
+    taken, exactly as an operator must restart for one to take effect.
+    """
+    channel._set_bindings_for_test(psb.load_bindings_at_start())
 
 
 async def _run(project: str) -> channel.ChannelOutcome:
@@ -174,6 +191,7 @@ async def test_interval_three_runs_the_pipeline_and_mints_on_observed_absent(
     project_dir = tmp_path / "conductor-ordinary"
     project_dir.mkdir()  # readable, and demonstrably lacking project.json
     psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
+    _restart_binding_snapshot()
     _install_create(monkeypatch)
 
     outcome = await _run(ORDINARY)
@@ -194,6 +212,7 @@ async def test_interval_three_unknown_witness_still_refuses(
     psb.write_binding_for_project(
         psb.binding_path(ORDINARY), ORDINARY, str(tmp_path / "does-not-exist")
     )
+    _restart_binding_snapshot()
     created = _install_create(monkeypatch)
 
     outcome = await _run(ORDINARY)
@@ -214,6 +233,7 @@ async def test_interval_three_present_witness_refuses(
     project_dir.mkdir()
     (project_dir / psb.PROJECT_JSON_BASENAME).write_bytes(b'{"project_incarnation": 7}')
     psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
+    _restart_binding_snapshot()
     _install_create(monkeypatch)
 
     outcome = await _run(ORDINARY)
@@ -388,6 +408,7 @@ async def test_authority_row_records_the_witness_basis(
     project_dir = tmp_path / "conductor-ordinary"
     project_dir.mkdir()
     psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
+    _restart_binding_snapshot()
     _install_create(monkeypatch)
 
     await _run(ORDINARY)
@@ -429,3 +450,255 @@ async def test_proof_project_provenance_names_the_designation(
     assert provenance["witness"] == "absent"
     assert provenance["witness_detail"] == "designated-proof-project"
     assert provenance["witness_source_path"] == "/tmp/d.json"
+
+
+# --------------------------------------------------------------------------
+# R-1 regression: bindings are start-state, frozen for the process lifetime.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_binding_installed_after_start_does_not_end_the_bypass(
+    isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
+):
+    """R-1: interval selection must not move without a restart.
+
+    In interval ii, installing a binding mid-run must not flip the very next
+    request onto the full pipeline. The binding set is frozen at start.
+    """
+    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    channel.load_designation_at_start()
+    _install_create(monkeypatch)
+
+    project_dir = tmp_path / "conductor-ordinary"
+    project_dir.mkdir()
+    psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
+
+    outcome = await _run(ORDINARY)
+
+    assert outcome.detail == channel.DETAIL_WITNESS_BINDING_UNAVAILABLE
+    assert outcome.authority_granted is False
+    with database.SessionLocal() as db:
+        assert db.query(database.ProjectSupervisorAuthorityModel).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_binding_removed_after_start_does_not_reinstate_the_bypass(
+    isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
+):
+    """Removal is as inert as installation: the snapshot is frozen either way."""
+    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    project_dir = tmp_path / "conductor-ordinary"
+    project_dir.mkdir()
+    psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
+    channel.load_designation_at_start()
+    _install_create(monkeypatch)
+
+    psb.binding_path(ORDINARY).unlink()
+
+    outcome = await _run(ORDINARY)
+    assert outcome.authority_granted is True, "the start-time binding still governs"
+    assert outcome.detail is None
+
+
+@pytest.mark.asyncio
+async def test_binding_content_changed_after_start_is_not_re_read(
+    isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
+):
+    """The bound path used by a later request is the one read at start."""
+    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    fresh_dir = tmp_path / "fresh"  # no project.json -> ABSENT
+    fresh_dir.mkdir()
+    used_dir = tmp_path / "used"  # has project.json -> PRESENT
+    used_dir.mkdir()
+    (used_dir / psb.PROJECT_JSON_BASENAME).write_bytes(b'{"project_incarnation": 7}')
+
+    psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(fresh_dir))
+    channel.load_designation_at_start()
+    _install_create(monkeypatch)
+
+    # Repoint the binding at a directory that would observe PRESENT.
+    psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(used_dir))
+
+    outcome = await _run(ORDINARY)
+    assert outcome.authority_granted is True, "still observing the start-bound path"
+    with database.SessionLocal() as db:
+        provenance = json.loads(
+            db.query(database.ProjectSupervisorAuthorityModel).one().witness_provenance_json
+        )
+    assert provenance["witness"] == "absent"
+    assert str(fresh_dir) in provenance["witness_source_path"]
+    assert str(used_dir) not in provenance["witness_source_path"]
+
+
+@pytest.mark.asyncio
+async def test_binding_replaced_with_an_invalid_file_after_start_is_not_re_read(
+    isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
+):
+    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    project_dir = tmp_path / "conductor-ordinary"
+    project_dir.mkdir()
+    psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
+    channel.load_designation_at_start()
+    _install_create(monkeypatch)
+
+    psb.binding_path(ORDINARY).write_bytes(b"corrupted after start")
+
+    outcome = await _run(ORDINARY)
+    assert outcome.authority_granted is True
+
+
+@pytest.mark.asyncio
+async def test_restart_takes_up_the_new_binding(
+    isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
+):
+    """A restart is the operator-visible boundary at which the interval moves."""
+    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    channel.load_designation_at_start()
+    _install_create(monkeypatch)
+
+    first = await _run(ORDINARY)
+    assert first.detail == channel.DETAIL_WITNESS_BINDING_UNAVAILABLE
+
+    # The bypass-era terminal was created and retained, and the bootstrap
+    # precondition counts any recorded row in the session — so an operator
+    # clearing it is part of the real restart path here. (That recorded rows are
+    # not lifecycle-filtered is a separate queued P4; this round does not touch
+    # it, so the test models the operator remedy rather than assuming a fix.)
+    with database.SessionLocal() as db:
+        db.query(database.TerminalModel).delete()
+        db.commit()
+
+    project_dir = tmp_path / "conductor-ordinary"
+    project_dir.mkdir()
+    psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
+    channel.load_designation_at_start()  # the restart
+
+    second = await _run(ORDINARY)
+    assert second.authority_granted is True
+
+
+def test_invalid_binding_at_start_is_recorded_and_does_not_refuse_start(state_root):
+    """Per-project blast radius, at the start-time load.
+
+    Recorded ends the bypass; invalid then observes UNKNOWN. Invalid must never
+    read as absent, and must never take the server down.
+    """
+    import os
+
+    psb.bindings_dir().mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(psb.binding_path(ORDINARY), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(descriptor, b"{ not json")
+    finally:
+        os.close(descriptor)
+
+    channel.load_designation_at_start()  # must not raise
+
+    snapshot = channel._bindings()
+    assert snapshot.recorded(ORDINARY) is True, "recorded, so the bypass ends"
+    entry = snapshot.entry(ORDINARY)
+    assert entry.valid is False
+    assert psb.observe_witness_from_snapshot(ORDINARY, snapshot).witness == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_invalid_binding_ends_the_bypass_then_refuses_on_unknown(
+    isolated_memory_db, state_root, monkeypatch, operator_peer
+):
+    """Recorded-but-invalid must not be silently treated as absent."""
+    import os
+
+    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    psb.bindings_dir().mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(psb.binding_path(ORDINARY), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(descriptor, b"{ not json")
+    finally:
+        os.close(descriptor)
+    channel.load_designation_at_start()
+    created = _install_create(monkeypatch)
+
+    outcome = await _run(ORDINARY)
+
+    assert outcome.detail != channel.DETAIL_WITNESS_BINDING_UNAVAILABLE, "bypass ended"
+    assert outcome.reason_code == authority.REASON_RECOVERY_HIGH_WATER_UNAVAILABLE
+    assert outcome.detail == "existing-run-unknown"
+    assert outcome.terminal_created is False
+    assert created == {}
+
+
+def test_one_invalid_binding_does_not_disturb_another_project_at_start(state_root, tmp_path):
+    import os
+
+    good_dir = tmp_path / "good"
+    good_dir.mkdir()
+    psb.write_binding_for_project(psb.binding_path("good-proj"), "good-proj", str(good_dir))
+    psb.bindings_dir().mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(psb.binding_path("bad-proj"), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(descriptor, b"nope")
+    finally:
+        os.close(descriptor)
+
+    channel.load_designation_at_start()
+    snapshot = channel._bindings()
+
+    assert snapshot.entry("good-proj").valid is True
+    assert snapshot.entry("bad-proj").valid is False
+    assert psb.observe_witness_from_snapshot("good-proj", snapshot).witness == "absent"
+    assert psb.observe_witness_from_snapshot("bad-proj", snapshot).witness == "unknown"
+
+
+def test_absent_binding_stays_in_the_bypass_and_is_not_recorded(state_root):
+    channel.load_designation_at_start()
+    assert channel._bindings().recorded(ORDINARY) is False
+    assert channel._bindings().entry(ORDINARY) is None
+
+
+@pytest.mark.asyncio
+async def test_bypass_selection_and_observation_share_one_snapshot(
+    isolated_memory_db, state_root, tmp_path, monkeypatch, operator_peer
+):
+    """Race-free: one object answers both questions, so they cannot disagree.
+
+    Asserted by identity — the snapshot the interval check consults is the same
+    object the witness observation is given — plus behaviourally, by mutating the
+    file between the two and seeing neither move.
+    """
+    rs.write_receipt_state_for_proof_run(state_root / rs.RECEIPT_STATE_BASENAME, "a" * 64)
+    project_dir = tmp_path / "conductor-ordinary"
+    project_dir.mkdir()
+    psb.write_binding_for_project(psb.binding_path(ORDINARY), ORDINARY, str(project_dir))
+    channel.load_designation_at_start()
+
+    snapshot = channel._bindings()
+    seen: list = []
+
+    real_observe = psb.observe_witness_from_snapshot
+
+    def spy(project, given):
+        seen.append(given)
+        # Mutate the file between interval selection and observation: under the
+        # old live-read model this is where one decision spanned two contents.
+        psb.binding_path(ORDINARY).write_bytes(b"changed mid-decision")
+        return real_observe(project, given)
+
+    monkeypatch.setattr(psb, "observe_witness_from_snapshot", spy)
+    _install_create(monkeypatch)
+
+    outcome = await _run(ORDINARY)
+
+    assert len(seen) == 1
+    assert seen[0] is snapshot, "the same frozen snapshot, not a fresh read"
+    assert outcome.authority_granted is True
+
+
+def test_channel_never_calls_the_live_binding_readers(monkeypatch, state_root):
+    """Structural guard: the request path must not reach a live filesystem read."""
+    import inspect
+
+    source = inspect.getsource(channel)
+    assert "project_state_binding.binding_recorded(" not in source
+    assert "project_state_binding.observe_witness(" not in source
+    assert "project_state_binding.observe_witness_from_snapshot(" in source

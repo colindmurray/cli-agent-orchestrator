@@ -186,9 +186,17 @@ _MAX_ANCESTRY_HOPS = 64
 _DESIGNATION_AT_START = None
 
 #: The gate-2 receipt state as it stood at server start. Together with the
-#: designation these are the whole of what the server reads to decide which
-#: interval it is in — durable state, never a request.
+#: designation and the binding snapshot these are the whole of what the server
+#: reads to decide which interval it is in — durable state, never a request.
 _RECEIPT_STATE_AT_START = None
+
+#: Every project-state binding as it stood at server start, frozen for this
+#: process's lifetime. Both questions a decision asks — is a binding recorded for
+#: this project, and where does it point — are answered from this one object, so
+#: they can never disagree. Reading them live meant a single decision could span
+#: two binding contents, which is exactly the "flipped mid-decision" the
+#: start-only rule exists to exclude.
+_BINDINGS_AT_START = None
 
 
 def load_designation_at_start() -> None:
@@ -201,15 +209,19 @@ def load_designation_at_start() -> None:
     singular, and an operator who wrote one believes something about this
     deployment that starting quietly would falsify.
     """
-    global _DESIGNATION_AT_START, _RECEIPT_STATE_AT_START
+    global _DESIGNATION_AT_START, _RECEIPT_STATE_AT_START, _BINDINGS_AT_START
 
     from cli_agent_orchestrator.services import (
         gate2_proof_designation,
         gate2_proof_receipt_state,
+        project_state_binding,
     )
 
     designation = gate2_proof_designation.load_designation()
     receipt_state = gate2_proof_receipt_state.load_receipt_state()
+    # Read and parsed here, beside the other two, before any request can run.
+    # Unlike them this never raises: a bad binding degrades its own project only.
+    bindings = project_state_binding.load_bindings_at_start()
 
     # The honor window: a designation is honored only while the deployment's
     # gate-2 receipt is unrecorded. Once both proofs are recorded the proof run
@@ -226,6 +238,7 @@ def load_designation_at_start() -> None:
 
     _DESIGNATION_AT_START = designation
     _RECEIPT_STATE_AT_START = receipt_state
+    _BINDINGS_AT_START = bindings
 
 
 def _set_designation_for_test(designation) -> None:
@@ -240,6 +253,26 @@ def _set_receipt_state_for_test(receipt_state) -> None:
     global _RECEIPT_STATE_AT_START
 
     _RECEIPT_STATE_AT_START = receipt_state
+
+
+def _set_bindings_for_test(bindings) -> None:
+    """Test seam for the start-only read. Not reachable from any request path."""
+    global _BINDINGS_AT_START
+
+    _BINDINGS_AT_START = bindings
+
+
+def _bindings():
+    """The frozen start-time binding snapshot.
+
+    An empty snapshot before any start, so a decision can never fall back to a
+    live filesystem read.
+    """
+    from cli_agent_orchestrator.services import project_state_binding
+
+    if _BINDINGS_AT_START is None:
+        return project_state_binding.EMPTY_SNAPSHOT
+    return _BINDINGS_AT_START
 
 
 class SupervisorCreateChannelError(RuntimeError):
@@ -770,15 +803,13 @@ def _bypass_detail(project: str) -> Optional[str]:
     project has empty ``SOURCES`` and an ``UNKNOWN`` witness, so phase A would
     refuse and create no terminal.
     """
-    from cli_agent_orchestrator.services import project_state_binding
-
     if _designation() is not None and bool(project) and _designation().project == project:
         return None
 
     if not _gate2_receipt_recorded():
         return DETAIL_G10_UNPROVEN
 
-    if not project_state_binding.binding_recorded(project):
+    if not _bindings().recorded(project):
         return DETAIL_WITNESS_BINDING_UNAVAILABLE
 
     return None
@@ -827,7 +858,9 @@ def _observe_witness(project: str):
             project_json_observed_absent=True,
             detail="designated-proof-project",
         )
-    return project_state_binding.observe_witness(project)
+    # The binding itself is never re-read; the bound directory is observed now,
+    # because that is the observation.
+    return project_state_binding.observe_witness_from_snapshot(project, _bindings())
 
 
 def _witness_trit(observation):

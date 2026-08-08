@@ -82,6 +82,128 @@ class WitnessObservation:
         }
 
 
+@dataclass(frozen=True)
+class BindingEntry:
+    """One project's binding as it stood at server start.
+
+    ``valid`` distinguishes *recorded and parseable* from *recorded and not*.
+    Both are recorded — which is what ends the bypass for that project — but only
+    a valid entry carries a directory to observe. An invalid one observes
+    ``UNKNOWN`` at decision time, so a bad file never reads as an absent one.
+    """
+
+    project: str
+    valid: bool
+    project_state_dir: Optional[str] = None
+    invalid_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class BindingSnapshot:
+    """Every binding this server read at start, frozen for its lifetime.
+
+    One object answers both questions a decision asks — *is a binding recorded
+    for this project* (bypass condition 2) and *where does it point* (the witness
+    observation) — so the two can never disagree. Reading them from two live
+    filesystem calls is what let a single decision span two binding contents.
+
+    Adding, removing, replacing, or editing a binding file after start changes
+    nothing until the next start. That is deliberate: an operator-visible restart
+    is the boundary at which a deployment's interval may move.
+    """
+
+    entries: dict
+
+    def recorded(self, project: str) -> bool:
+        """Whether a binding artifact existed for this project at start.
+
+        Existence, not validity. A malformed binding is recorded — the gate-6
+        mechanism has landed for that project — and then observes ``UNKNOWN``.
+        Treating invalid as absent would silently reinstate the bypass.
+        """
+        return bool(project) and project in self.entries
+
+    def entry(self, project: str) -> Optional[BindingEntry]:
+        return self.entries.get(project) if project else None
+
+
+EMPTY_SNAPSHOT = BindingSnapshot(entries={})
+
+
+def load_bindings_at_start() -> BindingSnapshot:
+    """Read and parse every binding once, at server start.
+
+    **Never raises.** A malformed, unreadable, wrong-mode, symlinked,
+    schema-invalid, or project-mismatched binding is cached as an invalid entry
+    for *that project only* and degrades to ``UNKNOWN`` at decision time. It must
+    not refuse server start: bindings are per-project, and one bad file must not
+    take every other project's bring-up down with it. That asymmetry against the
+    designation and receipt state — both of which do refuse start — is the point,
+    not an oversight.
+    """
+    entries: dict = {}
+    directory = bindings_dir()
+
+    try:
+        names = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        return EMPTY_SNAPSHOT
+    except OSError:
+        logger.warning("project-state bindings directory %s cannot be listed", directory)
+        return EMPTY_SNAPSHOT
+
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        project = name[: -len(".json")]
+        path = directory / name
+        parsed = _load_binding(path)
+        if parsed is None:
+            entries[project] = BindingEntry(
+                project=project, valid=False, invalid_reason="binding-malformed"
+            )
+            continue
+        entries[project] = BindingEntry(
+            project=project, valid=True, project_state_dir=parsed["project_state_dir"]
+        )
+
+    if entries:
+        logger.info(
+            "project-state bindings loaded at start: %d recorded (%d valid)",
+            len(entries),
+            sum(1 for entry in entries.values() if entry.valid),
+        )
+    return BindingSnapshot(entries=entries)
+
+
+def observe_witness_from_snapshot(project: str, snapshot: BindingSnapshot):
+    """Derive the trit using the start-cached binding, observing live.
+
+    The binding itself is never re-read here — that is the frozen part. What *is*
+    read now is the bound directory and its ``project.json``, because that is the
+    observation, and observing it at decision time is what keeps the trit
+    evidence-derived rather than remembered.
+    """
+    entry = snapshot.entry(project)
+    if entry is None:
+        return WitnessObservation(
+            witness="unknown",
+            source_path=None,
+            project_json_sha256=None,
+            project_json_observed_absent=False,
+            detail="binding-absent",
+        )
+    if not entry.valid:
+        return WitnessObservation(
+            witness="unknown",
+            source_path=None,
+            project_json_sha256=None,
+            project_json_observed_absent=False,
+            detail=entry.invalid_reason or "binding-malformed",
+        )
+    return _observe_bound_directory(Path(str(entry.project_state_dir)))
+
+
 def bindings_dir() -> Path:
     from cli_agent_orchestrator.constants import CAO_HOME_DIR
 
@@ -137,13 +259,20 @@ def observe_witness(project: str) -> WitnessObservation:
             detail="binding-absent" if not path.exists() else "binding-malformed",
         )
 
-    state_dir = Path(parsed["project_state_dir"])
+    return _observe_bound_directory(Path(parsed["project_state_dir"]))
 
+
+def _observe_bound_directory(state_dir: Path) -> WitnessObservation:
+    """Observe the bound project-state directory and its ``project.json``.
+
+    The only positive proof of a fresh project is a readable, existing directory
+    that demonstrably lacks ``project.json``. A missing path, an unreadable one,
+    or a non-directory proves nothing about whether a prior run existed, so each
+    is ``UNKNOWN``.
+    """
     try:
         info = state_dir.lstat()
     except OSError:
-        # A bound path that does not exist or cannot be inspected proves
-        # nothing about whether a prior run existed.
         return WitnessObservation(
             witness="unknown",
             source_path=str(state_dir),
@@ -174,8 +303,6 @@ def observe_witness(project: str) -> WitnessObservation:
     try:
         raw = project_json.read_bytes()
     except FileNotFoundError:
-        # A readable directory demonstrably lacking project.json. This is the
-        # only positive proof of a fresh project, and it is what admits (1, 1).
         return WitnessObservation(
             witness="absent",
             source_path=str(project_json),
