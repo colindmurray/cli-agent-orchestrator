@@ -30,17 +30,23 @@ states, never two (:class:`PeerOrigin`), and an unreadable chain is
 ``UNPROVEN`` → ``authority-lineage-unproven``. Collapsing ``UNPROVEN`` into
 ``OPERATOR`` would hand the channel to exactly the process it exists to refuse.
 
-**What this module deliberately does not contain.** The authority record, epoch
-allocation, history, the recovery high-water calculation, and the phase-A/phase-C
-bind are absent. They sit behind G10, whose two deployment proofs are not
-recorded (:func:`g10_proofs_recorded`), and the design forbids building behind a
-fail-closed refusal. With G10 unproven no authority decision is taken and no
-epoch is allocated: phase A0 verifies the peer, phase B creates the terminal,
-and the authority side effect refuses ``authority-bootstrap-unavailable`` with
-detail ``g10-unproven``. That refusal is **not** a bring-up failure — it is the
-one outcome where the verb succeeds and returns a terminal while carrying no
-authority, and treating it as a failure would break every bring-up on every
-deployment until G10 closes.
+**Which projects reach the authority pipeline.** Building this channel, the
+predicate, and the A0/A/B/C pipeline is gate 2's *own* subject — a gate whose
+subject may not be built is a gate that can never close — while everything a
+*later* gate proves stays out. But gate 2 closes only on evidence that the
+pipeline produced, so the pipeline has to run somewhere before the gate is
+closed. It runs for exactly one project: the disposable one named by the
+operator-written designation of
+:mod:`cli_agent_orchestrator.services.gate2_proof_designation`. Every other
+project keeps the ordinary bypass, in which no decision is taken and no epoch is
+allocated — phase B creates the terminal and the authority side effect refuses
+``authority-bootstrap-unavailable`` with detail ``g10-unproven``.
+
+That bypass refusal is **not** a bring-up failure. It is the one outcome where
+the verb succeeds and returns a terminal while carrying no authority, and
+treating it as a failure would break every bring-up on every deployment until
+gate 2 closes. Every *other* refusal either precedes creation or tears the
+created terminal down.
 """
 
 from __future__ import annotations
@@ -129,6 +135,28 @@ REASON_SET_B_PRESENT = "operation-admission-unproven"
 DETAIL_G10_UNPROVEN = "g10-unproven"
 DETAIL_BOOTSTRAP_PRECONDITION = "bootstrap-precondition"
 
+#: `authority-lineage-unproven` carries the cause, so an operator can tell a
+#: broken host from a refused peer. These are detail strings, not reason codes:
+#: the closed vocabulary permits added detail fields and forbids added codes.
+DETAIL_ANCESTRY_UNREADABLE = "ancestry-unreadable"
+DETAIL_ANCESTRY_CYCLIC = "ancestry-cyclic"
+DETAIL_ANCESTRY_BUDGET_EXHAUSTED = "ancestry-budget-exhausted"
+DETAIL_PEER_NOT_LIVE = "peer-not-live"
+DETAIL_MANAGED_SET_UNENUMERABLE = "managed-set-unenumerable"
+DETAIL_KERNEL_CREDENTIALS_UNAVAILABLE = "kernel-credentials-unavailable"
+
+#: Every `UNPROVEN` cause, for the completeness assertion in the suite.
+LINEAGE_UNPROVEN_DETAILS = frozenset(
+    {
+        DETAIL_ANCESTRY_UNREADABLE,
+        DETAIL_ANCESTRY_CYCLIC,
+        DETAIL_ANCESTRY_BUDGET_EXHAUSTED,
+        DETAIL_PEER_NOT_LIVE,
+        DETAIL_MANAGED_SET_UNENUMERABLE,
+        DETAIL_KERNEL_CREDENTIALS_UNAVAILABLE,
+    }
+)
+
 #: The fork's existing safe bound for an ``AF_UNIX`` pathname. A longer path
 #: fails closed at startup rather than binding a silently truncated name.
 AF_UNIX_SAFE_PATH_BYTES = 100
@@ -136,6 +164,35 @@ AF_UNIX_SAFE_PATH_BYTES = 100
 #: Hop budget for an ancestry walk. Exhausting it without reaching init is not
 #: a proof of anything, so it answers ``UNPROVEN``.
 _MAX_ANCESTRY_HOPS = 64
+
+
+#: The gate-2 proof designation as it stood **at server start**, and the only
+#: value any decision consults. Read once so it cannot be flipped mid-run to
+#: change a decision already in flight, and ``None`` — no designation, the
+#: pipeline runs nowhere — is both the default and the safe state.
+_DESIGNATION_AT_START = None
+
+
+def load_designation_at_start() -> None:
+    """Read the designation once, at server start. Fails closed on a bad one.
+
+    Absence is ordinary and leaves the pipeline running nowhere. A malformed,
+    ambiguous, or multi-project designation raises, because an operator who
+    wrote one believes a proof run is scoped, and continuing as if it were
+    absent would silently falsify that belief.
+    """
+    global _DESIGNATION_AT_START
+
+    from cli_agent_orchestrator.services import gate2_proof_designation
+
+    _DESIGNATION_AT_START = gate2_proof_designation.load_designation()
+
+
+def _set_designation_for_test(designation) -> None:
+    """Test seam for the start-only read. Not reachable from any request path."""
+    global _DESIGNATION_AT_START
+
+    _DESIGNATION_AT_START = designation
 
 
 class SupervisorCreateChannelError(RuntimeError):
@@ -267,11 +324,20 @@ def managed_pid_set() -> ManagedPidSet:
 
         with SessionLocal() as db:
             for (pid,) in db.query(TerminalModel.pane_pid).all():
-                if pid:
-                    pids.add(int(pid))
+                if pid is None:
+                    # A recorded terminal whose own pane pid is missing leaves
+                    # the set incomplete. This refuses even though the tmux
+                    # server pid below would in practice still catch anything
+                    # inside a pane — deliberate extra conservatism, not a hole
+                    # being plugged. It costs availability until the row is
+                    # repaired and buys independence from the catch-all's
+                    # continued correctness.
+                    return ManagedPidSet(pids=frozenset(), enumerable=False)
+                pids.add(int(pid))
             for (pid,) in db.query(ManagedLaunchV2TerminalModel.v2_pane_pid).all():
-                if pid:
-                    pids.add(int(pid))
+                if pid is None:
+                    return ManagedPidSet(pids=frozenset(), enumerable=False)
+                pids.add(int(pid))
     except Exception:
         # A store that cannot be read proves nothing about origin.
         logger.exception("supervisor-create: managed pid enumeration failed")
@@ -312,35 +378,51 @@ def _tmux_server_pid() -> Optional[int]:
         return None
 
 
-def classify_peer_origin(peer_pid: int, managed: ManagedPidSet) -> PeerOrigin:
-    """Walk the peer's live ancestry and answer which of the three states holds.
+def classify_peer_origin(peer_pid: int, managed: ManagedPidSet) -> Tuple[PeerOrigin, Optional[str]]:
+    """Classify the peer's origin, returning ``(origin, cause_detail)``.
 
     Re-walked live rather than cached: kernel peer credentials are connect-time
-    fixed on both platforms, so a pid alone cannot tell a live peer from an
-    exited one whose pid has since been recycled. The walk is the detector.
+    fixed on both platforms, so re-reading them returns the original pid even
+    after the peer exits. The walk is the detector, not the pid.
+
+    ``MANAGED`` is decidable on a **partial** walk — a positive hit
+    short-circuits and never needs the chain completed. ``OPERATOR`` requires
+    the opposite: an **exhaustive** walk to init meeting no managed pid, with
+    the managed set proven enumerable. Everything else is ``UNPROVEN``, and the
+    cause is returned so an operator can tell a broken host from a refused peer.
     """
     if not managed.enumerable:
-        return PeerOrigin.UNPROVEN
+        return PeerOrigin.UNPROVEN, DETAIL_MANAGED_SET_UNENUMERABLE
     if peer_pid <= 0:
-        return PeerOrigin.UNPROVEN
+        return PeerOrigin.UNPROVEN, DETAIL_PEER_NOT_LIVE
 
     seen: set[int] = set()
     current = peer_pid
+    first_hop = True
     for _ in range(_MAX_ANCESTRY_HOPS):
         if current in managed.pids:
-            return PeerOrigin.MANAGED
+            return PeerOrigin.MANAGED, None
         if current <= 1:
-            # Reached init without meeting a managed pid: proven outside.
-            return PeerOrigin.OPERATOR
+            # Walked exhaustively to init without meeting a managed pid. This is
+            # the only admitting answer.
+            return PeerOrigin.OPERATOR, None
         if current in seen:
-            return PeerOrigin.UNPROVEN
+            return PeerOrigin.UNPROVEN, DETAIL_ANCESTRY_CYCLIC
         seen.add(current)
         parent = _parent_pid(current)
         if parent is None:
-            # A chain that stops answering cannot prove absence of ancestry.
-            return PeerOrigin.UNPROVEN
+            # A chain that stops answering cannot prove the absence of managed
+            # ancestry. On the very first hop this is overwhelmingly a peer that
+            # has already exited; deeper in, a host that stopped answering.
+            return (
+                PeerOrigin.UNPROVEN,
+                DETAIL_PEER_NOT_LIVE if first_hop else DETAIL_ANCESTRY_UNREADABLE,
+            )
         current = parent
-    return PeerOrigin.UNPROVEN
+        first_hop = False
+    # The budget ran out before reaching init, so the walk was never exhaustive
+    # and proves nothing.
+    return PeerOrigin.UNPROVEN, DETAIL_ANCESTRY_BUDGET_EXHAUSTED
 
 
 def _parent_pid(pid: int) -> Optional[int]:
@@ -415,16 +497,21 @@ def evaluate_phase_a0(
     """Phase A0: verify the peer before anything is created or allocated.
 
     Returns the refusal, or ``None`` when the peer is proven operator-origin and
-    the call may proceed. Nothing is written on either refusal.
+    the call may proceed. Nothing is created, allocated, or written on either
+    refusal — A0 runs with no transaction held and before phase A exists.
     """
     if credentials is None:
-        return ChannelOutcome(ok=False, reason_code=REASON_LINEAGE_UNPROVEN)
+        return ChannelOutcome(
+            ok=False,
+            reason_code=REASON_LINEAGE_UNPROVEN,
+            detail=DETAIL_KERNEL_CREDENTIALS_UNAVAILABLE,
+        )
 
-    origin = classify_peer_origin(credentials.pid, managed)
+    origin, cause = classify_peer_origin(credentials.pid, managed)
     if origin is PeerOrigin.MANAGED:
         return ChannelOutcome(ok=False, reason_code=REASON_DISCRIMINATOR_ABSENT)
     if origin is PeerOrigin.UNPROVEN:
-        return ChannelOutcome(ok=False, reason_code=REASON_LINEAGE_UNPROVEN)
+        return ChannelOutcome(ok=False, reason_code=REASON_LINEAGE_UNPROVEN, detail=cause)
     return None
 
 
@@ -506,16 +593,22 @@ async def handle_supervisor_terminal_create(
     unproven there is no authority decision to take after creation, so the
     terminal is created, retained, and reported as carrying no authority.
     """
+    from cli_agent_orchestrator.services import supervisor_authority as authority
+
     refusal = evaluate_phase_a0(credentials, managed)
     if refusal is not None:
         return refusal
 
-    terminal = await _create_terminal_from_set_a(args)
+    project = _project_for(args)
+    pipeline = _pipeline_admitted(project)
 
-    if not g10_proofs_recorded():
-        # The sole create-without-authority outcome. ``ok`` is True because the
-        # command did what it was asked to do; authority simply does not exist
-        # on this deployment yet.
+    if not pipeline:
+        # Ordinary operation on a deployment whose gate-2 receipt records no
+        # proofs: no decision, no allocation, no phase-C bind. The terminal is
+        # still created with full launch fidelity and retained — this is the one
+        # outcome where the command succeeds while carrying no authority, and
+        # treating it as a failure would break bring-up everywhere.
+        terminal = await _create_terminal_from_set_a(args)
         return ChannelOutcome(
             ok=True,
             reason_code=REASON_BOOTSTRAP_UNAVAILABLE,
@@ -525,15 +618,151 @@ async def handle_supervisor_terminal_create(
             terminal_created=True,
         )
 
-    # Unreachable while G10 is unproven. Phases A and C — the epoch allocation,
-    # the recovery high-water, the history append, and the single-row CAS — are
-    # deliberately absent rather than stubbed: the design forbids building
-    # behind a fail-closed refusal, and a stub here would be indistinguishable
-    # from an implementation that had been reviewed.
-    raise SupervisorCreateChannelError(
-        "authority establishment is not implemented: G10 is unproven and the "
-        "phase-A/phase-C bind is out of scope until it closes"
+    # ---- phase A: decide and commit the allocation, before anything is created
+    decision = authority.decide(
+        authority.SupervisorTuple(
+            project=project, supervisor_terminal_id="", supervisor_generation=""
+        ),
+        witness=_existing_run_witness(project),
     )
+    if decision.decision is authority.Decision.REFUSE:
+        # A decision-table refusal is reached in phase A, before phase B, so it
+        # allocates nothing and creates nothing. Leaving a stray
+        # non-authoritative supervisor terminal behind here would be wrong.
+        return ChannelOutcome(ok=False, reason_code=decision.reason_code, detail=decision.detail)
+
+    if decision.decision is not authority.Decision.NOOP:
+        # A non-refusing, non-noop decision always carries both values; the
+        # asserts state that rather than leaving it to the reader.
+        assert decision.project_incarnation is not None
+        assert decision.authority_epoch is not None
+        authority.phase_a_allocate(project, decision.project_incarnation, decision.authority_epoch)
+
+    # ---- phase B: create the terminal; no transaction and no lock held here
+    terminal = await _create_terminal_from_set_a(args)
+    terminal_id = str(terminal.get("id") or "")
+    generation = str(terminal.get("generation") or "")
+    tmux_session = str(terminal.get("tmux_session") or "")
+
+    # ---- phase C: re-verify on the same still-open connection, then bind
+    recheck = evaluate_phase_a0(credentials, managed_pid_set())
+    if recheck is not None:
+        # A peer that exited, whose pid was recycled into the managed set, or
+        # whose chain stopped answering during the 15-30 s settle wait. The
+        # phase-B terminal is torn down and the phase-A epoch stays consumed.
+        await _teardown(terminal_id)
+        return ChannelOutcome(
+            ok=False,
+            reason_code=recheck.reason_code,
+            detail=recheck.detail,
+            terminal_created=True,
+        )
+
+    if decision.decision is authority.Decision.BOOTSTRAP and tmux_session:
+        if authority.session_has_other_live_managed_terminal(tmux_session, terminal_id):
+            # Excluding phase B's own terminal is what keeps this from
+            # self-refusing every genuine bootstrap.
+            await _teardown(terminal_id)
+            return ChannelOutcome(
+                ok=False,
+                reason_code=REASON_BOOTSTRAP_UNAVAILABLE,
+                detail=DETAIL_BOOTSTRAP_PRECONDITION,
+                terminal_created=True,
+            )
+
+    bound, conflict = authority.phase_c_bind(
+        authority.SupervisorTuple(
+            project=project,
+            supervisor_terminal_id=terminal_id,
+            supervisor_generation=generation,
+        ),
+        decision,
+        channel_socket_path=str(socket_path()),
+    )
+    if not bound:
+        await _teardown(terminal_id)
+        return ChannelOutcome(ok=False, reason_code=conflict, terminal_created=True)
+
+    return ChannelOutcome(
+        ok=True,
+        authority_granted=True,
+        terminal=terminal,
+        terminal_created=True,
+    )
+
+
+def _project_for(args: Dict[str, Any]) -> str:
+    """The project key this creation belongs to.
+
+    Derived from the session name, which is a Set A launch parameter: it says
+    *where to run*, and using it as the project key grants the caller no say in
+    who the authority is. The authority decision reads only server-derived state
+    for that key.
+    """
+    return str(args.get("session_name") or "")
+
+
+def _pipeline_admitted(project: str) -> bool:
+    """Whether the pre-closure pipeline may run for this project.
+
+    Two ways in, and only two: the deployment's gate-2 receipt records both
+    proofs, or this exact project is the one named by the operator-written
+    designation. Absence of a designation means the pipeline runs nowhere.
+    """
+    if g10_proofs_recorded():
+        return True
+    designation = _designation()
+    return designation is not None and bool(project) and designation.project == project
+
+
+def _designation():
+    """The designation loaded at server start, or ``None``.
+
+    Read from the module-level cache rather than the filesystem, so it cannot be
+    flipped mid-run to affect a decision in flight.
+    """
+    return _DESIGNATION_AT_START
+
+
+def _existing_run_witness(project: str):
+    """Whether a prior run of this project is known to survive.
+
+    A designated proof project is disposable by construction — created for the
+    run and destroyed with it — so its prior-run state is positively absent.
+    For any other project this server cannot see ``project.json``, so the honest
+    answer is ``UNKNOWN``, which fails closed rather than minting ``(1, 1)``.
+    """
+    from cli_agent_orchestrator.services import supervisor_authority as authority
+
+    designation = _designation()
+    if designation is not None and designation.project == project:
+        return authority.ExistingRunWitness.ABSENT
+    return authority.ExistingRunWitness.UNKNOWN
+
+
+async def _teardown(terminal_id: str) -> None:
+    """Remove a phase-B terminal after a phase-C abort.
+
+    Best-effort by necessity — the abort has already happened and the epoch is
+    already consumed — but a failure is logged rather than swallowed, because a
+    surviving non-authoritative supervisor terminal is exactly what the
+    create/no-create contract forbids.
+    """
+    if not terminal_id:
+        return
+    try:
+        import asyncio
+
+        from cli_agent_orchestrator.services import terminal_service
+
+        # Synchronous, and it tears down tmux — kept off the event loop.
+        await asyncio.to_thread(terminal_service.delete_terminal, terminal_id)
+    except Exception:
+        logger.exception(
+            "supervisor-create: phase-C teardown of %s failed; a non-authoritative "
+            "supervisor terminal may survive and must be removed by an operator",
+            terminal_id,
+        )
 
 
 async def _create_terminal_from_set_a(args: Dict[str, Any]) -> Dict[str, Any]:

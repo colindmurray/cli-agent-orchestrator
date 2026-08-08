@@ -60,7 +60,9 @@ def test_unreadable_ancestry_is_unproven_not_operator(monkeypatch):
     would mean "admit".
     """
     monkeypatch.setattr(channel, "_parent_pid", lambda pid: None)
-    assert channel.classify_peer_origin(4242, _managed(99)) is channel.PeerOrigin.UNPROVEN
+    origin, cause = channel.classify_peer_origin(4242, _managed(99))
+    assert origin is channel.PeerOrigin.UNPROVEN
+    assert cause in channel.LINEAGE_UNPROVEN_DETAILS
 
 
 def test_dead_peer_is_unproven(monkeypatch):
@@ -70,50 +72,58 @@ def test_dead_peer_is_unproven(monkeypatch):
         "_parent_pid",
         lambda pid: None,
     )
-    origin = channel.classify_peer_origin(999_999, _managed(1234))
+    origin, cause = channel.classify_peer_origin(999_999, _managed(1234))
     assert origin is channel.PeerOrigin.UNPROVEN
+    assert cause == channel.DETAIL_PEER_NOT_LIVE
 
 
 def test_non_enumerable_managed_set_is_unproven():
     """A store that cannot be read proves nothing about origin."""
-    assert (
-        channel.classify_peer_origin(1234, _managed(enumerable=False))
-        is channel.PeerOrigin.UNPROVEN
-    )
+    origin, cause = channel.classify_peer_origin(1234, _managed(enumerable=False))
+    assert origin is channel.PeerOrigin.UNPROVEN
+    assert cause == channel.DETAIL_MANAGED_SET_UNENUMERABLE
 
 
 def test_managed_ancestor_anywhere_in_chain_is_managed(monkeypatch):
     """Depth does not launder origin: a worker's grandchild is still managed."""
     chain = {500: 400, 400: 300, 300: 200, 200: 1}
     monkeypatch.setattr(channel, "_parent_pid", lambda pid: chain.get(pid))
-    assert channel.classify_peer_origin(500, _managed(300)) is channel.PeerOrigin.MANAGED
+    assert channel.classify_peer_origin(500, _managed(300))[0] is channel.PeerOrigin.MANAGED
 
 
 def test_peer_that_is_itself_a_managed_pane_is_managed(monkeypatch):
     monkeypatch.setattr(channel, "_parent_pid", lambda pid: 1)
-    assert channel.classify_peer_origin(777, _managed(777)) is channel.PeerOrigin.MANAGED
+    assert channel.classify_peer_origin(777, _managed(777))[0] is channel.PeerOrigin.MANAGED
 
 
 def test_chain_reaching_init_without_managed_pid_is_operator(monkeypatch):
     chain = {800: 700, 700: 1}
     monkeypatch.setattr(channel, "_parent_pid", lambda pid: chain.get(pid))
-    assert channel.classify_peer_origin(800, _managed(300, 400)) is channel.PeerOrigin.OPERATOR
+    origin, cause = channel.classify_peer_origin(800, _managed(300, 400))
+    assert origin is channel.PeerOrigin.OPERATOR
+    assert cause is None
 
 
 def test_ancestry_cycle_is_unproven(monkeypatch):
     chain = {10: 11, 11: 10}
     monkeypatch.setattr(channel, "_parent_pid", lambda pid: chain.get(pid))
-    assert channel.classify_peer_origin(10, _managed(999)) is channel.PeerOrigin.UNPROVEN
+    origin, cause = channel.classify_peer_origin(10, _managed(999))
+    assert origin is channel.PeerOrigin.UNPROVEN
+    assert cause == channel.DETAIL_ANCESTRY_CYCLIC
 
 
 def test_hop_budget_exhaustion_is_unproven(monkeypatch):
     """A chain longer than the budget was never walked to init, so it proves nothing."""
     monkeypatch.setattr(channel, "_parent_pid", lambda pid: pid + 1)
-    assert channel.classify_peer_origin(2, _managed(10**9)) is channel.PeerOrigin.UNPROVEN
+    origin, cause = channel.classify_peer_origin(2, _managed(10**9))
+    assert origin is channel.PeerOrigin.UNPROVEN
+    assert cause == channel.DETAIL_ANCESTRY_BUDGET_EXHAUSTED
 
 
 def test_nonpositive_peer_pid_is_unproven():
-    assert channel.classify_peer_origin(0, _managed(1)) is channel.PeerOrigin.UNPROVEN
+    origin, cause = channel.classify_peer_origin(0, _managed(1))
+    assert origin is channel.PeerOrigin.UNPROVEN
+    assert cause == channel.DETAIL_PEER_NOT_LIVE
 
 
 # --------------------------------------------------------------------------
@@ -122,7 +132,9 @@ def test_nonpositive_peer_pid_is_unproven():
 
 
 def test_phase_a0_refuses_managed_origin_with_discriminator_absent(monkeypatch):
-    monkeypatch.setattr(channel, "classify_peer_origin", lambda pid, m: channel.PeerOrigin.MANAGED)
+    monkeypatch.setattr(
+        channel, "classify_peer_origin", lambda pid, m: (channel.PeerOrigin.MANAGED, None)
+    )
     outcome = channel.evaluate_phase_a0(PeerCredentials(pid=5, uid=501), _managed(5))
     assert outcome is not None
     assert outcome.ok is False
@@ -132,7 +144,11 @@ def test_phase_a0_refuses_managed_origin_with_discriminator_absent(monkeypatch):
 
 
 def test_phase_a0_refuses_unproven_with_lineage_unproven(monkeypatch):
-    monkeypatch.setattr(channel, "classify_peer_origin", lambda pid, m: channel.PeerOrigin.UNPROVEN)
+    monkeypatch.setattr(
+        channel,
+        "classify_peer_origin",
+        lambda pid, m: (channel.PeerOrigin.UNPROVEN, channel.DETAIL_ANCESTRY_UNREADABLE),
+    )
     outcome = channel.evaluate_phase_a0(PeerCredentials(pid=5, uid=501), _managed(5))
     assert outcome is not None
     assert outcome.reason_code == channel.REASON_LINEAGE_UNPROVEN
@@ -147,7 +163,9 @@ def test_phase_a0_refuses_absent_credentials():
 
 
 def test_phase_a0_admits_proven_operator(monkeypatch):
-    monkeypatch.setattr(channel, "classify_peer_origin", lambda pid, m: channel.PeerOrigin.OPERATOR)
+    monkeypatch.setattr(
+        channel, "classify_peer_origin", lambda pid, m: (channel.PeerOrigin.OPERATOR, None)
+    )
     assert channel.evaluate_phase_a0(PeerCredentials(pid=5, uid=501), _managed(9)) is None
 
 
@@ -238,7 +256,9 @@ async def test_g10_unproven_creates_the_terminal_and_refuses_only_authority(monk
     An implementation that reported this as a failure would break every
     ``conduct up`` until gate 2 closes.
     """
-    monkeypatch.setattr(channel, "classify_peer_origin", lambda pid, m: channel.PeerOrigin.OPERATOR)
+    monkeypatch.setattr(
+        channel, "classify_peer_origin", lambda pid, m: (channel.PeerOrigin.OPERATOR, None)
+    )
 
     async def fake_create(args):
         return {"id": "term1234", "agent_profile": args["agent_profile"]}
@@ -262,7 +282,9 @@ async def test_g10_unproven_creates_the_terminal_and_refuses_only_authority(monk
 @pytest.mark.asyncio
 async def test_managed_peer_creates_no_terminal(monkeypatch):
     """The reproduced hole: a worker in situ gets nothing, whatever it sends."""
-    monkeypatch.setattr(channel, "classify_peer_origin", lambda pid, m: channel.PeerOrigin.MANAGED)
+    monkeypatch.setattr(
+        channel, "classify_peer_origin", lambda pid, m: (channel.PeerOrigin.MANAGED, None)
+    )
 
     called = False
 
@@ -287,7 +309,9 @@ async def test_managed_peer_creates_no_terminal(monkeypatch):
 @pytest.mark.asyncio
 async def test_every_profile_value_is_refused_for_a_managed_peer(monkeypatch):
     """No ``agent_profile`` value buys a managed peer anything."""
-    monkeypatch.setattr(channel, "classify_peer_origin", lambda pid, m: channel.PeerOrigin.MANAGED)
+    monkeypatch.setattr(
+        channel, "classify_peer_origin", lambda pid, m: (channel.PeerOrigin.MANAGED, None)
+    )
     for profile in ("code_supervisor", "supervisor", "developer", "memory_manager"):
         outcome = await channel.handle_supervisor_terminal_create(
             {"agent_profile": profile},

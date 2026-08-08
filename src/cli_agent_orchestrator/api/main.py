@@ -747,6 +747,12 @@ async def lifespan(app: FastAPI):
     # asked for, a bind failure is a startup failure by design — a truncated
     # path or a second live owner must not degrade to "no channel", which a
     # client would read as an ordinary refusal.
+    # The gate-2 proof designation is read once, here, whether or not the
+    # channel listens: an operator who wrote a malformed one believes a proof
+    # run is scoped, and starting as though it were absent would silently
+    # falsify that. Absence is ordinary and leaves the pipeline running nowhere.
+    supervisor_create_channel.load_designation_at_start()
+
     app.state.supervisor_create_channel = None
     if supervisor_create_channel.channel_enabled():
         channel = supervisor_create_channel.SupervisorCreateChannel()
