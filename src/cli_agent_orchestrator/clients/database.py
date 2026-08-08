@@ -692,6 +692,12 @@ class ProjectSupervisorAuthorityModel(Base):
     established_at = Column(Text, nullable=True)
     rotated_at = Column(Text, nullable=True)
     revoked_at = Column(Text, nullable=True)
+    # What the existing-run witness observed when this row was established or
+    # rotated, and on what basis: the trit, where the fork looked, and the
+    # observed ``project.json`` digest or its positively observed absence.
+    # ``(1, 1)`` is the most consequential value this protocol mints, so the
+    # basis is recorded beside the result rather than only in a log line.
+    witness_provenance_json = Column(Text, nullable=True)
 
 
 class ProjectSupervisorAuthorityHistoryModel(Base):

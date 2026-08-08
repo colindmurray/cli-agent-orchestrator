@@ -117,6 +117,14 @@ SET_B_REFUSED_FIELDS: FrozenSet[str] = frozenset(
         "project_incarnation",
         "supervisor_generation",
         "terminal_generation",
+        # A witness value is a Set B field by nature: the fork derives the trit
+        # by its own observation, so a caller offering one is trying to choose
+        # the answer. Refused, never ignored.
+        "witness",
+        "existing_run_witness",
+        "project_json_sha256",
+        "project_state_dir",
+        "project_json_observed_absent",
     }
 )
 
@@ -134,6 +142,11 @@ REASON_SET_B_PRESENT = "operation-admission-unproven"
 #: a terminal survived.
 DETAIL_G10_UNPROVEN = "g10-unproven"
 DETAIL_BOOTSTRAP_PRECONDITION = "bootstrap-precondition"
+
+#: The second bypass interval. Emitting ``g10-unproven`` here would be false —
+#: G10 *is* proven by then — so the interval gets its own detail rather than a
+#: new reason code.
+DETAIL_WITNESS_BINDING_UNAVAILABLE = "witness-binding-unavailable"
 
 #: `authority-lineage-unproven` carries the cause, so an operator can tell a
 #: broken host from a refused peer. These are detail strings, not reason codes:
@@ -172,20 +185,47 @@ _MAX_ANCESTRY_HOPS = 64
 #: pipeline runs nowhere — is both the default and the safe state.
 _DESIGNATION_AT_START = None
 
+#: The gate-2 receipt state as it stood at server start. Together with the
+#: designation these are the whole of what the server reads to decide which
+#: interval it is in — durable state, never a request.
+_RECEIPT_STATE_AT_START = None
+
 
 def load_designation_at_start() -> None:
-    """Read the designation once, at server start. Fails closed on a bad one.
+    """Read both start-state artifacts once, and enforce the honor window.
 
-    Absence is ordinary and leaves the pipeline running nowhere. A malformed,
-    ambiguous, or multi-project designation raises, because an operator who
-    wrote one believes a proof run is scoped, and continuing as if it were
-    absent would silently falsify that belief.
+    Absence of either is ordinary and safe: no designation means the pipeline
+    runs nowhere, and no receipt state means the bypass continues. A malformed,
+    ambiguous, or multi-project designation, or a malformed or
+    digest-mismatched receipt state, raises — each is server-scoped and
+    singular, and an operator who wrote one believes something about this
+    deployment that starting quietly would falsify.
     """
-    global _DESIGNATION_AT_START
+    global _DESIGNATION_AT_START, _RECEIPT_STATE_AT_START
 
-    from cli_agent_orchestrator.services import gate2_proof_designation
+    from cli_agent_orchestrator.services import (
+        gate2_proof_designation,
+        gate2_proof_receipt_state,
+    )
 
-    _DESIGNATION_AT_START = gate2_proof_designation.load_designation()
+    designation = gate2_proof_designation.load_designation()
+    receipt_state = gate2_proof_receipt_state.load_receipt_state()
+
+    # The honor window: a designation is honored only while the deployment's
+    # gate-2 receipt is unrecorded. Once both proofs are recorded the proof run
+    # is over, so a designation still sitting there is stale and is refused
+    # rather than silently kept honoring a scratch project.
+    if designation is not None and receipt_state is not None and receipt_state.records_both_proofs:
+        raise SupervisorCreateChannelError(
+            f"a gate-2 proof designation for {designation.project!r} is still present at "
+            f"{designation.path}, but this deployment's gate-2 receipt state already records "
+            "both proofs. The proof run is over; remove the designation. It is refused "
+            "rather than honored, because honoring it would run the pre-closure pipeline "
+            "for a project that ordinary operation now covers."
+        )
+
+    _DESIGNATION_AT_START = designation
+    _RECEIPT_STATE_AT_START = receipt_state
 
 
 def _set_designation_for_test(designation) -> None:
@@ -193,6 +233,13 @@ def _set_designation_for_test(designation) -> None:
     global _DESIGNATION_AT_START
 
     _DESIGNATION_AT_START = designation
+
+
+def _set_receipt_state_for_test(receipt_state) -> None:
+    """Test seam for the start-only read. Not reachable from any request path."""
+    global _RECEIPT_STATE_AT_START
+
+    _RECEIPT_STATE_AT_START = receipt_state
 
 
 class SupervisorCreateChannelError(RuntimeError):
@@ -600,30 +647,32 @@ async def handle_supervisor_terminal_create(
         return refusal
 
     project = _project_for(args)
-    pipeline = _pipeline_admitted(project)
+    bypass_detail = _bypass_detail(project)
 
-    if not pipeline:
-        # Ordinary operation on a deployment whose gate-2 receipt records no
-        # proofs: no decision, no allocation, no phase-C bind. The terminal is
-        # still created with full launch fidelity and retained — this is the one
-        # outcome where the command succeeds while carrying no authority, and
-        # treating it as a failure would break bring-up everywhere.
+    if bypass_detail is not None:
+        # The ordinary-operation bypass: no decision, no allocation, no phase-C
+        # bind. The terminal is still created with full launch fidelity and
+        # retained — the one outcome where the command succeeds while carrying no
+        # authority. Treating it as a failure would break bring-up everywhere,
+        # across every interval before the binding lands.
         terminal = await _create_terminal_from_set_a(args)
         return ChannelOutcome(
             ok=True,
             reason_code=REASON_BOOTSTRAP_UNAVAILABLE,
-            detail=DETAIL_G10_UNPROVEN,
+            detail=bypass_detail,
             authority_granted=False,
             terminal=terminal,
             terminal_created=True,
         )
 
     # ---- phase A: decide and commit the allocation, before anything is created
+    observation = _observe_witness(project)
     decision = authority.decide(
         authority.SupervisorTuple(
             project=project, supervisor_terminal_id="", supervisor_generation=""
         ),
-        witness=_existing_run_witness(project),
+        witness=_witness_trit(observation),
+        witness_provenance=observation.as_provenance(),
     )
     if decision.decision is authority.Decision.REFUSE:
         # A decision-table refusal is reached in phase A, before phase B, so it
@@ -702,17 +751,51 @@ def _project_for(args: Dict[str, Any]) -> str:
     return str(args.get("session_name") or "")
 
 
-def _pipeline_admitted(project: str) -> bool:
-    """Whether the pre-closure pipeline may run for this project.
+def _bypass_detail(project: str) -> Optional[str]:
+    """Which bypass interval this project is in, or ``None`` to run the pipeline.
 
-    Two ways in, and only two: the deployment's gate-2 receipt records both
-    proofs, or this exact project is the one named by the operator-written
-    designation. Absence of a designation means the pipeline runs nowhere.
+    Three intervals, selected entirely from durable start-state — never from a
+    request:
+
+    * gate 2 open (no recorded receipt state) → ``g10-unproven``, unless this is
+      the designated proof project, which is how gate 2 gets proven at all;
+    * gate 2 closed but this project's witness binding not yet recorded →
+      ``witness-binding-unavailable``. Saying ``g10-unproven`` here would be
+      false, because G10 *is* proven by then;
+    * gate 2 closed and the binding recorded → ``None``: the full pipeline runs
+      and the witness is observed.
+
+    Ending the bypass at gate-2 closure alone would break every ordinary
+    bring-up for the whole interval before the binding lands, because such a
+    project has empty ``SOURCES`` and an ``UNKNOWN`` witness, so phase A would
+    refuse and create no terminal.
+    """
+    from cli_agent_orchestrator.services import project_state_binding
+
+    if _designation() is not None and bool(project) and _designation().project == project:
+        return None
+
+    if not _gate2_receipt_recorded():
+        return DETAIL_G10_UNPROVEN
+
+    if not project_state_binding.binding_recorded(project):
+        return DETAIL_WITNESS_BINDING_UNAVAILABLE
+
+    return None
+
+
+def _gate2_receipt_recorded() -> bool:
+    """Whether this deployment durably records **both** gate-2 proofs.
+
+    Read from the start-state cache. A partial ``proofs_recorded`` list does not
+    satisfy this, which is what stops mere file presence from standing in for the
+    two deployment proofs. ``g10_proofs_recorded()`` remains a hard ``False``
+    source-level backstop and is honored as well.
     """
     if g10_proofs_recorded():
         return True
-    designation = _designation()
-    return designation is not None and bool(project) and designation.project == project
+    state = _RECEIPT_STATE_AT_START
+    return state is not None and state.records_both_proofs
 
 
 def _designation():
@@ -724,20 +807,37 @@ def _designation():
     return _DESIGNATION_AT_START
 
 
-def _existing_run_witness(project: str):
-    """Whether a prior run of this project is known to survive.
+def _observe_witness(project: str):
+    """Observe the existing-run witness, with the provenance an auditor needs.
 
     A designated proof project is disposable by construction — created for the
-    run and destroyed with it — so its prior-run state is positively absent.
-    For any other project this server cannot see ``project.json``, so the honest
-    answer is ``UNKNOWN``, which fails closed rather than minting ``(1, 1)``.
+    run and destroyed with it — so it has no prior run *by definition*, and that
+    is the only ``ABSENT`` reachable while gate 2 is open. Every other project is
+    observed through its binding, by looking where the binding points; the fork
+    derives the trit itself and is never handed one.
     """
-    from cli_agent_orchestrator.services import supervisor_authority as authority
+    from cli_agent_orchestrator.services import project_state_binding
 
     designation = _designation()
     if designation is not None and designation.project == project:
-        return authority.ExistingRunWitness.ABSENT
-    return authority.ExistingRunWitness.UNKNOWN
+        return project_state_binding.WitnessObservation(
+            witness="absent",
+            source_path=designation.path,
+            project_json_sha256=None,
+            project_json_observed_absent=True,
+            detail="designated-proof-project",
+        )
+    return project_state_binding.observe_witness(project)
+
+
+def _witness_trit(observation):
+    """Map an observation onto the decision's three-state input."""
+    from cli_agent_orchestrator.services import supervisor_authority as authority
+
+    return {
+        "absent": authority.ExistingRunWitness.ABSENT,
+        "present": authority.ExistingRunWitness.PRESENT,
+    }.get(observation.witness, authority.ExistingRunWitness.UNKNOWN)
 
 
 async def _teardown(terminal_id: str) -> None:

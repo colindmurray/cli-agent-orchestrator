@@ -38,6 +38,7 @@ the note on :class:`ExistingRunWitness` for why that asymmetry matters.
 from __future__ import annotations
 
 import enum
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,6 +61,18 @@ CLOSE_REVOKED = "revoked"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _encode_provenance(provenance: Optional[dict]) -> Optional[str]:
+    """Serialize the witness provenance for the authority row.
+
+    Stored as JSON text rather than spread across columns because it is an audit
+    record read by humans and never queried on, and because the observation's
+    shape belongs to the observer.
+    """
+    if provenance is None:
+        return None
+    return json.dumps(provenance, separators=(",", ":"), sort_keys=True)
 
 
 class ExistingRunWitness(enum.Enum):
@@ -107,6 +120,10 @@ class AuthorityDecision:
     detail: Optional[str] = None
     project_incarnation: Optional[int] = None
     authority_epoch: Optional[int] = None
+    #: What the witness observation saw and on what basis. Carried on every
+    #: decision, refusals included: an auditor asking why `(1, 1)` was minted —
+    #: or why a bring-up refused — needs the basis, not just the verdict.
+    witness_provenance: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -126,13 +143,21 @@ def compute_high_water(project: str) -> HighWater:
     cannot contribute to another project's maxima, so no proof run can lower,
     raise, or reuse a real project's epoch.
 
-    *Slice note:* the design's union also names surviving finality records and
-    grants. Neither store exists on this fork — finality is a conductor-owned
-    JSON file and grants belong to the route-observation operation, which is a
-    later gate — so they contribute nothing here. Because every contributor can
-    only *raise* the maxima, a missing contributor is safe in the conservative
-    direction only while those stores genuinely do not exist; the moment either
-    lands it must be added here.
+    **Two named contributors are intentionally omitted, each with the gate that
+    creates its store:**
+
+    * ``route_observation_finality`` — **ordered gate 4**, conductor lane. It is a
+      conductor-owned JSON file per run; no such store exists on this fork.
+    * surviving **grants** (``route_observation_grant``) — added **with the grant
+      work**, which belongs to the route-observation operation behind gate 2.
+
+    Each must be added **in the same change that creates its store**, not
+    earlier: a reader for a table that does not exist is dead code that looks
+    like coverage. Their absence is conservative *only* because every
+    contributor can only ever *raise* the maxima — so omitting one can never
+    lower a high-water and can never license a reuse. That reasoning stops
+    holding the moment either store exists, which is why the gate is named here
+    rather than left to a changelog.
     """
     from cli_agent_orchestrator.clients.database import (
         ProjectSupervisorAuthorityHistoryModel,
@@ -217,6 +242,7 @@ def decide(
     tuple_: SupervisorTuple,
     *,
     witness: ExistingRunWitness = ExistingRunWitness.UNKNOWN,
+    witness_provenance: Optional[dict] = None,
 ) -> AuthorityDecision:
     """The single decision, over server-derived state only.
 
@@ -257,6 +283,7 @@ def decide(
                     decision=Decision.BOOTSTRAP,
                     project_incarnation=1,
                     authority_epoch=1,
+                    witness_provenance=witness_provenance,
                 )
             # Either a prior run is known to survive, or we cannot tell. Both
             # refuse: an existing run whose epoch high-water is unrecoverable
@@ -270,6 +297,7 @@ def decide(
                     if witness is ExistingRunWitness.PRESENT
                     else "existing-run-unknown"
                 ),
+                witness_provenance=witness_provenance,
             )
         # Ordinary partial loss: the run survived, so the incarnation is
         # preserved and the epoch is allocated strictly above every observed
@@ -279,6 +307,7 @@ def decide(
             decision=Decision.RECOVER,
             project_incarnation=high_water.incarnation_max,
             authority_epoch=high_water.epoch_max + 1,
+            witness_provenance=witness_provenance,
         )
 
     state, incarnation, terminal_id, generation, epoch = current_snapshot
@@ -288,6 +317,7 @@ def decide(
             decision=Decision.ADOPT,
             project_incarnation=incarnation,
             authority_epoch=high_water.epoch_max + 1,
+            witness_provenance=witness_provenance,
         )
 
     if terminal_id == tuple_.supervisor_terminal_id and generation == tuple_.supervisor_generation:
@@ -298,6 +328,7 @@ def decide(
             decision=Decision.NOOP,
             project_incarnation=incarnation,
             authority_epoch=epoch,
+            witness_provenance=witness_provenance,
         )
 
     if is_supervisor_live(str(terminal_id), str(generation)):
@@ -305,12 +336,14 @@ def decide(
             decision=Decision.REFUSE,
             reason_code=REASON_LIVE_SUPERVISOR_PRESENT,
             detail=f"live-supervisor:{terminal_id}",
+            witness_provenance=witness_provenance,
         )
 
     return AuthorityDecision(
         decision=Decision.ADOPT,
         project_incarnation=incarnation,
         authority_epoch=high_water.epoch_max + 1,
+        witness_provenance=witness_provenance,
     )
 
 
@@ -393,6 +426,7 @@ def phase_c_bind(
                     channel_socket_path=channel_socket_path,
                     state=STATE_LIVE,
                     established_at=_now(),
+                    witness_provenance_json=_encode_provenance(decision.witness_provenance),
                 )
             )
             db.commit()
@@ -427,6 +461,7 @@ def phase_c_bind(
                 "authority_epoch": decision.authority_epoch,
                 "state": STATE_LIVE,
                 "rotated_at": _now(),
+                "witness_provenance_json": _encode_provenance(decision.witness_provenance),
             }
             if channel_socket_path is not None:
                 new_values["channel_socket_path"] = channel_socket_path
