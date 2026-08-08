@@ -72,6 +72,78 @@ def test_extract_composer_text_for_kimi():
     assert extracted == TEXT
 
 
+def test_extract_composer_text_for_kimi_0330():
+    # The 0.33.0 pin reuses the same rounded-box rule; extraction must still
+    # return the exact payload from a one-row composer box.
+    rows = [
+        "transcript row",
+        "╭──────────────────────────────────────────────────────╮",
+        f"│ > {TEXT} │",
+        "╰──────────────────────────────────────────────────────╯",
+        "  footer/status",
+    ]
+    pin = native_pane_input.composer_observation_pin_for("kimi_cli", "0.33.0")
+    assert pin is not None
+    extracted = extract_composer_text(rows, pin)
+    assert extracted == TEXT
+
+
+def test_extract_composer_text_for_kimi_0330_uses_expected_bytes_to_remove_box_padding():
+    text = (
+        "[conduct] Continue the retained round: re-read the durable task at "
+        "/Users/colin/.local/state/cao-conductor/p1-closure/runs/"
+        "cond-0225-0230-native-attestation-spec-review-k3-r12/task-round-5.md "
+        "and proceed."
+    )
+    rows = [
+        "transcript row",
+        " ╭────────────────────────────────────────────────────────────────╮",
+        f" │ > {text}{' ' * 68}│",
+        " ╰────────────────────────────────────────────────────────────────╯",
+        " footer/status",
+    ]
+    pin = native_pane_input.composer_observation_pin_for("kimi_cli", "0.33.0")
+    assert pin is not None
+    assert (
+        extract_composer_text(
+            rows,
+            pin,
+            expected_text_bytes=len(text.encode("utf-8")),
+        )
+        == text
+    )
+
+
+def test_extract_composer_text_for_kimi_refuses_trailing_space_ambiguity():
+    # A composer holding "text" paints the same prefix as an expected
+    # "text  " followed by frame padding.  Refuse instead of treating box
+    # padding as user-supplied trailing whitespace.
+    rows = [
+        "╭────────────────────────╮",
+        f"│ > text{' ' * 16}│",
+        "╰────────────────────────╯",
+    ]
+    assert extract_composer_text(rows, _kimi_pin(), expected_text_bytes=len(b"text  ")) is None
+
+
+def test_extract_composer_text_for_kimi_refuses_non_padding_suffix():
+    rows = [
+        "╭────────────────────────╮",
+        "│ > expected-extra      │",
+        "╰────────────────────────╯",
+    ]
+    assert extract_composer_text(rows, _kimi_pin(), expected_text_bytes=len(b"expected")) is None
+
+
+def test_extract_composer_text_for_kimi_refuses_partial_utf8_character():
+    rows = [
+        "╭────────────────────────╮",
+        "│ > café                 │",
+        "╰────────────────────────╯",
+    ]
+    assert extract_composer_text(rows, _kimi_pin(), expected_text_bytes=4) is None
+
+
 def test_extract_composer_text_returns_none_when_region_unreadable():
     rows = ["no composer here"]
     assert extract_composer_text(rows, _codex_pin()) is None
@@ -89,4 +161,9 @@ def test_composer_observation_pin_is_build_exact():
     assert native_pane_input.composer_observation_pin_for("codex", "0.145.0") is None
     assert native_pane_input.composer_observation_pin_for("kimi_cli", "0.29.2") is not None
     assert native_pane_input.composer_observation_pin_for("kimi_cli", "0.29.1") is None
+    # 0.33.0 is a separate pinned build; adjacent/unverified builds refuse.
+    assert native_pane_input.composer_observation_pin_for("kimi_cli", "0.33.0") is not None
+    assert native_pane_input.composer_observation_pin_for("kimi_cli", "0.32.0") is None
+    assert native_pane_input.composer_observation_pin_for("kimi_cli", "0.33.1") is None
+    assert native_pane_input.composer_observation_pin_for("kimi_cli", "0.34.0") is None
     assert native_pane_input.composer_observation_pin_for("claude_code", "2.1.220") is None

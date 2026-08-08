@@ -246,17 +246,69 @@ class TestPositiveObservation:
         assert body["protocol"] == COMPOSER_OBSERVATION_PROTOCOL
         assert body["observed"] is True
         assert body["terminal_id"] == TERMINAL
+        # The observation is later consumed as an identity-bound recovery
+        # proof.  Echo the declarable control identity under its exact wire
+        # names, not only the lower-level pane fields used to take the sample.
+        assert body["terminal_incarnation"] is None
         assert body["terminal_generation"] == GENERATION
+        assert body["pane_birth_id"] == PANE
+        assert body["provider_process_id"] == f"{PANE_PID}@marker-1"
         assert body["pane_id"] == PANE
         assert body["pane_pid"] == PANE_PID
         assert body["provider"] == "codex"
         assert body["provider_version"] == "0.146.0"
         assert body["execution_mode"] == EXECUTION_MODE_NATIVE_TUI
         assert body["native_session_id"] == "native-sess-1"
+        assert body["session_name"] == "cao"
         assert body["content_sha256"] == _sha256(TEXT)
         assert body["content_bytes"] == len(TEXT.encode("utf-8"))
         assert body["submission_observed"] == "unsubmitted"
         assert body["evidence_ref"].startswith(f"capture-pane:{PANE}:")
+
+    def test_kimi_box_padding_is_removed_using_the_expected_byte_count(
+        self, client, tmux, monkeypatch
+    ):
+        text = (
+            "[conduct] Continue the retained round: re-read the durable task at "
+            "/tmp/task-round-5.md and proceed."
+        )
+        resolved = service.ResolvedControlIdentity(
+            terminal_id=TERMINAL,
+            terminal_incarnation=None,
+            terminal_generation=GENERATION,
+            provider="kimi_cli",
+            native_session_id="native-sess-1",
+            execution_mode=EXECUTION_MODE_NATIVE_TUI,
+            session_name="cao",
+            provider_version="0.33.0",
+            managed_reservation_id="res-1",
+            pane_id=PANE,
+            window_id=WINDOW,
+            pane_pid=PANE_PID,
+            managed=True,
+            bound_server_socket_path=SOCKET,
+        )
+        monkeypatch.setattr(service, "resolve_control_identity", lambda terminal_id: resolved)
+        monkeypatch.setattr(
+            native_pane_input,
+            "capture_pane_screen",
+            lambda pane_id, timeout=10.0: [
+                "transcript row",
+                " ╭────────────────────────────────────────────────────────────────╮",
+                f" │ > {text}{' ' * 68}│",
+                " ╰────────────────────────────────────────────────────────────────╯",
+                " footer/status",
+            ],
+        )
+
+        response = _get(client, sha256=_sha256(text), bytes_=len(text.encode("utf-8")))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["observed"] is True
+        assert body["submission_observed"] == "unsubmitted"
+        assert body["content_sha256"] == _sha256(text)
+        assert body["content_bytes"] == len(text.encode("utf-8"))
 
 
 class TestNegativeObservation:
@@ -287,6 +339,20 @@ class TestNegativeObservation:
         body = response.json()
         assert body["observed"] is False
         assert body["submission_observed"] == "unknown"
+        assert {
+            key: body[key]
+            for key in (
+                "terminal_id",
+                "terminal_incarnation",
+                "terminal_generation",
+                "pane_birth_id",
+                "provider_process_id",
+                "provider",
+                "native_session_id",
+                "execution_mode",
+                "session_name",
+            )
+        } == service.resolve_control_identity(TERMINAL).expected_identity_view()
 
     def test_a_byte_count_mismatch_returns_observed_false(self, client, tmux, monkeypatch):
         monkeypatch.setattr(
@@ -451,6 +517,34 @@ class TestUnsupportedProvider:
                     "native_session_id": "native-sess-1",
                     "provider_process_id": f"{PANE_PID}@marker-1",
                     "provider_version": "0.1.0",
+                }
+                if terminal_id == TERMINAL
+                else None
+            ),
+        )
+        response = _get(client, sha256=_sha256(TEXT), bytes_=len(TEXT.encode("utf-8")))
+        assert response.status_code == 409
+        body = response.json()
+        assert body["refusal"]["reason"] == "provider-unsupported"
+
+    def test_an_unpinned_kimi_neighbour_does_not_serve_the_route(self, client, tmux, monkeypatch):
+        # 0.33.0 is pinned; its neighbours must fail closed rather than inherit.
+        monkeypatch.setattr(
+            service,
+            "_terminal_metadata",
+            lambda terminal_id: _metadata(provider="kimi_cli") if terminal_id == TERMINAL else None,
+        )
+        monkeypatch.setattr(
+            service,
+            "_managed_identity",
+            lambda terminal_id: (
+                {
+                    "reservation_id": "res-1",
+                    "generation": GENERATION,
+                    "execution_mode": EXECUTION_MODE_NATIVE_TUI,
+                    "native_session_id": "native-sess-1",
+                    "provider_process_id": f"{PANE_PID}@marker-1",
+                    "provider_version": "0.33.1",
                 }
                 if terminal_id == TERMINAL
                 else None
