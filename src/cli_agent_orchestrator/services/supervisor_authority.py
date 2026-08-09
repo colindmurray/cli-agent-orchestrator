@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 REASON_LIVE_SUPERVISOR_PRESENT = "authority-live-supervisor-present"
 REASON_RECOVERY_HIGH_WATER_UNAVAILABLE = "recovery-high-water-unavailable"
 REASON_ROTATION_CONFLICT = "authority-rotation-conflict"
+REASON_EPOCH_ALLOCATION_CONFLICT = "authority-epoch-allocation-conflict"
 REASON_BOOTSTRAP_UNAVAILABLE = "authority-bootstrap-unavailable"
 
 STATE_LIVE = "live"
@@ -73,6 +74,10 @@ def _encode_provenance(provenance: Optional[dict]) -> Optional[str]:
     if provenance is None:
         return None
     return json.dumps(provenance, separators=(",", ":"), sort_keys=True)
+
+
+class EpochAllocationConflict(RuntimeError):
+    """Another creator allocated this epoch first. Surfaced, never silent."""
 
 
 class ExistingRunWitness(enum.Enum):
@@ -368,7 +373,18 @@ def phase_a_allocate(project: str, incarnation: int, epoch: int) -> None:
                 allocated_at=_now(),
             )
         )
-        db.commit()
+        try:
+            db.commit()
+        except Exception as exc:
+            # Two legitimate creators can race here, and the primary key is what
+            # makes the epoch un-reissuable. The loser gets a named outcome
+            # rather than a raw integrity error, because a client is waiting for
+            # an answer and an unnamed failure is indistinguishable from a hang.
+            db.rollback()
+            raise EpochAllocationConflict(
+                f"epoch {epoch} is already allocated for {project!r}; it is "
+                "consumed and never reissued"
+            ) from exc
 
 
 def phase_c_bind(

@@ -207,19 +207,35 @@ def _verify_against_canonical_receipt(state_path: Path, declared_digest: str) ->
     except OSError as exc:
         raise ReceiptStateError(f"{receipt} cannot be read: {exc}") from exc
 
-    # Wrong-schema is its own refusal: a partial's digest could otherwise be
-    # declared here, and a partial must never serve as a receipt-state referent.
+    # The referent is validated in **full**, not merely by schema tag and digest.
+    # A digest only proves the bytes are the ones the pointer named; it says
+    # nothing about whether those bytes are a receipt the writer would ever have
+    # emitted. Checking the tag alone let a hand-written document that
+    # `validate_receipt` refuses — an unproven outcome, a non-disposable
+    # instance, an incomplete teardown — be accepted at start, so the strongest
+    # checks in the codec applied only to documents this process happened to
+    # write itself.
     try:
         parsed = json.loads(raw.decode("utf-8"))
-        schema = parsed.get("schema") if isinstance(parsed, dict) else None
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        schema = None
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReceiptStateError(f"{receipt} is not valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ReceiptStateError(f"{receipt} must contain a JSON object")
+
+    schema = parsed.get("schema")
     if schema != gate2_proof_receipt.RECEIPT_SCHEMA:
         raise ReceiptStateError(
             f"{receipt} declares schema {schema!r}; only "
             f"{gate2_proof_receipt.RECEIPT_SCHEMA!r} may be a receipt-state referent. "
             "A partial can never attest."
         )
+
+    try:
+        gate2_proof_receipt.validate_receipt(parsed)
+    except gate2_proof_receipt.ReceiptError as exc:
+        raise ReceiptStateError(
+            f"{receipt} is not a valid canonical gate-2 receipt: {exc}"
+        ) from exc
 
     actual = hashlib.sha256(raw).hexdigest()
     if actual != declared_digest:

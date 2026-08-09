@@ -180,23 +180,95 @@ def run(
 
     try:
         document = executor(request)
-    except Exception as exc:  # noqa: BLE001 - any failure becomes a truthful partial
-        print(f"cao-gate2-proof-run: proof did not complete: {exc}", file=sys.stderr)
+    except ProofRunRefused as exc:
+        # The executor refused *before* executing anything — the "no executor
+        # configured" case. Nothing began, so this belongs with the other
+        # pre-execution refusals: non-zero, and neither artifact. Writing a
+        # partial here would claim a proof attempt that never happened.
+        print(f"cao-gate2-proof-run: refused: {exc}", file=sys.stderr)
         return EXIT_REFUSED
+    except Exception as exc:  # noqa: BLE001 - a begun run always leaves a partial
+        # The run has begun. From here every exit writes exactly one artifact.
+        # A run that started and then failed is not a precondition refusal, and
+        # reporting it as one would lose the record of what was observed before
+        # it stopped.
+        print(f"cao-gate2-proof-run: proof did not complete: {exc}", file=sys.stderr)
+        document = _partial_from_failure(request, exc)
 
     schema = document.get("schema")
-    if schema == codec.RECEIPT_SCHEMA:
-        payload, sha = codec.emit_receipt(request.state_root / codec.RECEIPT_BASENAME, document)
-        print(f"receipt written: sha256={sha} bytes={len(payload)}")
-        return EXIT_OK
+    if schema not in (codec.RECEIPT_SCHEMA, codec.PARTIAL_SCHEMA):
+        print(
+            f"cao-gate2-proof-run: executor returned unknown schema {schema!r}",
+            file=sys.stderr,
+        )
+        document = _partial_from_failure(
+            request, RuntimeError(f"executor returned unknown schema {schema!r}")
+        )
+        schema = codec.PARTIAL_SCHEMA
 
-    if schema == codec.PARTIAL_SCHEMA:
+    try:
+        if schema == codec.RECEIPT_SCHEMA:
+            payload, sha = codec.emit_receipt(request.state_root / codec.RECEIPT_BASENAME, document)
+            print(f"receipt written: sha256={sha} bytes={len(payload)}")
+            return EXIT_OK
+
         payload, sha = codec.emit_partial(request.state_root / codec.PARTIAL_BASENAME, document)
         print(f"partial written: sha256={sha} bytes={len(payload)}", file=sys.stderr)
         return EXIT_PARTIAL
+    except Exception as exc:  # noqa: BLE001 - an emitter failure is still an exit
+        # An uncaught emitter exception satisfies no row of the exit table, so it
+        # would be a defect rather than an outcome.
+        print(f"cao-gate2-proof-run: could not write the artifact: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
 
-    print(f"cao-gate2-proof-run: executor returned unknown schema {schema!r}", file=sys.stderr)
-    return EXIT_REFUSED
+
+def _partial_from_failure(request: "ProofRunRequest", exc: BaseException) -> dict:
+    """A truthful partial for a run that began and did not finish.
+
+    It records what the run can actually say -- nothing observed, and no teardown
+    asserted -- rather than borrowing a receipt's success values.
+    """
+    return {
+        "schema": codec.PARTIAL_SCHEMA,
+        "target": {
+            "fork_source_sha256": "",
+            "deployed_artifact_sha256": "",
+            "server_start_id": "",
+        },
+        "isolation": {
+            "state_root": str(request.state_root),
+            "proof_project": request.project,
+            "is_disposable_instance": True,
+        },
+        "observed_fact_names": [],
+        "unobserved_fact_names": ["lineage_isolation", "supervisor_creation_discriminator"],
+        "refusal_reason": f"proof-run-failed: {exc}",
+        "steps": [
+            {
+                "seq": 1,
+                "command": "cao-gate2-proof-run",
+                "outcome": "failed",
+                "reason_code": "",
+                "reason_detail": str(exc),
+                "terminal_created": False,
+                "terminal_torn_down": False,
+                "epoch_allocated": False,
+                "epoch_reused": False,
+                "observed_at": "",
+            }
+        ],
+        "teardown": {
+            "instance_destroyed": False,
+            "state_root_removed": False,
+            "artifacts_deleted": False,
+        },
+        "identities": {
+            "operator_ref": "",
+            "tool_version": "",
+            "spec_head": "",
+            "reviewed_source_head": "",
+        },
+    }
 
 
 def main() -> None:

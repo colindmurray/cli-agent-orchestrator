@@ -266,7 +266,7 @@ async def test_g10_unproven_creates_the_terminal_and_refuses_only_authority(monk
     monkeypatch.setattr(channel, "_create_terminal_from_set_a", fake_create)
 
     outcome = await channel.handle_supervisor_terminal_create(
-        {"agent_profile": "code_supervisor"},
+        {"agent_profile": "code_supervisor", "session_name": "scratch"},
         credentials=PeerCredentials(pid=42, uid=501),
         managed=_managed(999),
     )
@@ -296,7 +296,7 @@ async def test_managed_peer_creates_no_terminal(monkeypatch):
     monkeypatch.setattr(channel, "_create_terminal_from_set_a", fake_create)
 
     outcome = await channel.handle_supervisor_terminal_create(
-        {"agent_profile": "code_supervisor"},
+        {"agent_profile": "code_supervisor", "session_name": "scratch"},
         credentials=PeerCredentials(pid=42, uid=501),
         managed=_managed(42),
     )
@@ -314,7 +314,7 @@ async def test_every_profile_value_is_refused_for_a_managed_peer(monkeypatch):
     )
     for profile in ("code_supervisor", "supervisor", "developer", "memory_manager"):
         outcome = await channel.handle_supervisor_terminal_create(
-            {"agent_profile": profile},
+            {"agent_profile": profile, "session_name": "scratch"},
             credentials=PeerCredentials(pid=7, uid=501),
             managed=_managed(7),
         )
@@ -336,7 +336,9 @@ def test_reason_codes_are_from_the_closed_vocabulary():
     assert channel.REASON_DISCRIMINATOR_ABSENT == "supervisor-creation-discriminator-absent"
     assert channel.REASON_LINEAGE_UNPROVEN == "authority-lineage-unproven"
     assert channel.REASON_BOOTSTRAP_UNAVAILABLE == "authority-bootstrap-unavailable"
-    assert channel.REASON_SET_B_PRESENT == "operation-admission-unproven"
+    # P3-3: channel parse and Set B refusals are protocol refusals, not authority
+    # outcomes, so they deliberately carry no section-13 code at all.
+    assert channel.REASON_PROTOCOL_REFUSED is None
 
 
 # --------------------------------------------------------------------------

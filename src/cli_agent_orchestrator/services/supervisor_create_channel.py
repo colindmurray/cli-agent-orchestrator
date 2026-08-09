@@ -134,7 +134,12 @@ SET_B_REFUSED_FIELDS: FrozenSet[str] = frozenset(
 REASON_DISCRIMINATOR_ABSENT = "supervisor-creation-discriminator-absent"
 REASON_LINEAGE_UNPROVEN = "authority-lineage-unproven"
 REASON_BOOTSTRAP_UNAVAILABLE = "authority-bootstrap-unavailable"
-REASON_SET_B_PRESENT = "operation-admission-unproven"
+
+#: Channel parse and Set B refusals are **protocol** refusals, not authority
+#: outcomes, so they carry no reason code at all. Reusing a section-13 code here
+#: pointed operators at an unrelated admission path; the closed vocabulary
+#: describes authority decisions, and a malformed frame never reached one.
+REASON_PROTOCOL_REFUSED = None
 
 #: ``authority-bootstrap-unavailable`` is emitted on two paths whose terminals
 #: have *opposite* fates — retained here, torn down at the phase-C precondition.
@@ -402,8 +407,17 @@ def managed_pid_set() -> ManagedPidSet:
             TerminalModel,
         )
 
+        # Live rows only, as the rule words it. A terminal this server has
+        # already retired cannot be a peer's ancestor, and counting its pid
+        # forever would refuse an operator who later recycled it.
+        dead_states = ("exited", "superseded", "dead", "retired")
+
         with SessionLocal() as db:
-            for (pid,) in db.query(TerminalModel.pane_pid).all():
+            live_terminals = db.query(TerminalModel.pane_pid).filter(
+                (TerminalModel.lifecycle_state.is_(None))
+                | (~TerminalModel.lifecycle_state.in_(dead_states))
+            )
+            for (pid,) in live_terminals.all():
                 if pid is None:
                     # A recorded terminal whose own pane pid is missing leaves
                     # the set incomplete. This refuses even though the tmux
@@ -414,7 +428,11 @@ def managed_pid_set() -> ManagedPidSet:
                     # continued correctness.
                     return ManagedPidSet(pids=frozenset(), enumerable=False)
                 pids.add(int(pid))
-            for (pid,) in db.query(ManagedLaunchV2TerminalModel.v2_pane_pid).all():
+            live_v2 = db.query(ManagedLaunchV2TerminalModel.v2_pane_pid).filter(
+                (ManagedLaunchV2TerminalModel.v2_lifecycle_state.is_(None))
+                | (~ManagedLaunchV2TerminalModel.v2_lifecycle_state.in_(dead_states))
+            )
+            for (pid,) in live_v2.all():
                 if pid is None:
                     return ManagedPidSet(pids=frozenset(), enumerable=False)
                 pids.add(int(pid))
@@ -540,6 +558,15 @@ def validate_request(payload: Any) -> Dict[str, Any]:
     """
     if not isinstance(payload, dict):
         raise SupervisorCreateChannelError("request must be a JSON object")
+
+    unknown_top_level = sorted(set(payload) - {"verb", "args"})
+    if unknown_top_level:
+        raise SupervisorCreateChannelError(
+            "unknown top-level request keys: "
+            f"{', '.join(unknown_top_level)}. Refusal-not-ignoring applies at every "
+            "level of the request: a caller answered success has been taught the "
+            "field was read."
+        )
 
     verb = payload.get("verb")
     if verb != VERB_SUPERVISOR_TERMINAL_CREATE:
@@ -718,7 +745,19 @@ async def handle_supervisor_terminal_create(
         # asserts state that rather than leaving it to the reader.
         assert decision.project_incarnation is not None
         assert decision.authority_epoch is not None
-        authority.phase_a_allocate(project, decision.project_incarnation, decision.authority_epoch)
+        try:
+            authority.phase_a_allocate(
+                project, decision.project_incarnation, decision.authority_epoch
+            )
+        except authority.EpochAllocationConflict as exc:
+            # Reachable by ordinary concurrency between two legitimate creators,
+            # so it gets a named authority outcome rather than an internal error.
+            # Nothing was created: phase A precedes phase B.
+            return ChannelOutcome(
+                ok=False,
+                reason_code=authority.REASON_EPOCH_ALLOCATION_CONFLICT,
+                detail=str(exc),
+            )
 
     # ---- phase B: create the terminal; no transaction and no lock held here
     terminal = await _create_terminal_from_set_a(args)
@@ -737,6 +776,24 @@ async def handle_supervisor_terminal_create(
             ok=False,
             reason_code=recheck.reason_code,
             detail=recheck.detail,
+            terminal_created=True,
+        )
+
+    # Phase C proves phase B's terminal is in the session the project key names.
+    # By construction it always is, so a mismatch is a fork defect rather than an
+    # authority outcome: there is no §13 code for "internal invariant violated",
+    # and minting one would breach the closed vocabulary. It still aborts, tears
+    # the terminal down, and consumes the epoch — and it is surfaced rather than
+    # closed silently, so the defect cannot hide.
+    if tmux_session != project:
+        await _teardown(terminal_id)
+        return ChannelOutcome(
+            ok=False,
+            reason_code=None,
+            detail=(
+                "internal-invariant: phase-B terminal is in session "
+                f"{tmux_session!r} but the project key is {project!r}"
+            ),
             terminal_created=True,
         )
 
@@ -773,15 +830,66 @@ async def handle_supervisor_terminal_create(
     )
 
 
-def _project_for(args: Dict[str, Any]) -> str:
-    """The project key this creation belongs to.
+class SessionIdentityError(SupervisorCreateChannelError):
+    """A ``session_name`` that cannot be normalized. Refused, never defaulted."""
 
-    Derived from the session name, which is a Set A launch parameter: it says
-    *where to run*, and using it as the project key grants the caller no say in
-    who the authority is. The authority decision reads only server-derived state
-    for that key.
+
+def normalize_session_identity(session_name: Any) -> str:
+    """The project key: the normalized session identity, derived once.
+
+    ``"foo"`` and ``"cao-foo"`` name the **same tmux session**, so if they became
+    two authority keys each would carry its own ``SOURCES`` high-water and its own
+    epoch sequence — and epoch non-reuse, the guarantee this whole protocol
+    exists to hold, would hold only *per key* rather than per supervisor tree.
+    **One tmux session, one project key**, always.
+
+    Derived **exactly once, at the channel boundary**; every later use — the
+    designation match, the bypass interval, the binding lookup, the ``SOURCES``
+    scope, and the epoch identity — reads that one value. A name that cannot be
+    normalized is refused rather than defaulted, because defaulting would invent
+    a project the caller never named.
     """
-    return str(args.get("session_name") or "")
+    from cli_agent_orchestrator.constants import SESSION_PREFIX
+
+    if not isinstance(session_name, str):
+        raise SessionIdentityError("session_name must be a string")
+    candidate = session_name.strip()
+    if not candidate or candidate != session_name:
+        raise SessionIdentityError(
+            f"session_name {session_name!r} is empty or padded and cannot be "
+            "normalized; it is refused rather than defaulted"
+        )
+    if "\x00" in candidate or "\n" in candidate:
+        raise SessionIdentityError(f"session_name {session_name!r} is not a session name")
+
+    normalized = (
+        candidate if candidate.startswith(SESSION_PREFIX) else f"{SESSION_PREFIX}{candidate}"
+    )
+    validate_tmux_session_name(normalized)
+    return normalized
+
+
+def validate_tmux_session_name(normalized: str) -> None:
+    """Reject a normalized name the backend itself would refuse."""
+    from cli_agent_orchestrator.utils.terminal import validate_tmux_name
+
+    try:
+        validate_tmux_name(normalized, "session_name")
+    except Exception as exc:  # noqa: BLE001 - any rejection is a refusal
+        raise SessionIdentityError(
+            f"session_name normalizes to {normalized!r}, which is not a usable "
+            f"session name: {exc}"
+        ) from exc
+
+
+def _project_for(args: Dict[str, Any]) -> str:
+    """The project key, read from the value normalized at the boundary.
+
+    Set A selects the **scope** of the decision and can never select its
+    **subject**: the authority tuple is derived only from the terminal the fork
+    itself created in phase B, and Set B is empty and refused.
+    """
+    return normalize_session_identity(args.get("session_name"))
 
 
 def _bypass_detail(project: str) -> Optional[str]:
@@ -1011,7 +1119,7 @@ class SupervisorCreateChannel:
                     encode_response(
                         ChannelOutcome(
                             ok=False,
-                            reason_code=REASON_SET_B_PRESENT,
+                            reason_code=REASON_PROTOCOL_REFUSED,
                             detail=str(exc),
                         )
                     )
@@ -1019,9 +1127,19 @@ class SupervisorCreateChannel:
                 await writer.drain()
                 return
 
-            outcome = await handle_supervisor_terminal_create(
-                args, credentials=credentials, managed=managed_pid_set()
-            )
+            try:
+                outcome = await handle_supervisor_terminal_create(
+                    args, credentials=credentials, managed=managed_pid_set()
+                )
+            except Exception as exc:  # noqa: BLE001 - answer, never EOF
+                # A client is waiting. Closing without a response is
+                # indistinguishable from a hang, so an unexpected failure is
+                # reported as an internal error with no §13 code rather than
+                # dropped.
+                logger.exception("supervisor-create: handler failed")
+                outcome = ChannelOutcome(
+                    ok=False, reason_code=None, detail=f"internal-error: {exc}"
+                )
             writer.write(encode_response(outcome))
             await writer.drain()
         except Exception:

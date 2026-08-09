@@ -665,6 +665,7 @@ def test_the_default_executor_refuses_rather_than_driving_a_real_server(tmp_path
 
     code = runner.run(_argv(root, designation))
 
+    # A configuration refusal is not a begun run, so it writes neither artifact.
     assert code == runner.EXIT_REFUSED
     assert not (root / codec.RECEIPT_BASENAME).exists()
     assert not (root / codec.PARTIAL_BASENAME).exists()

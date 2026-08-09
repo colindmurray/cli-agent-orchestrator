@@ -268,6 +268,33 @@ def redact(document: Mapping[str, Any]) -> dict:
 # --- validation ----------------------------------------------------------
 
 
+#: Expected types per field, so a wrong type is refused rather than serialized.
+#: A digest over a document nobody type-checked proves only that the bytes were
+#: not altered, not that they mean what a reader will assume.
+_STRING_FIELDS = {
+    "target": TARGET_ORDER,
+    "designation": DESIGNATION_ORDER,
+    "identities": IDENTITIES_ORDER,
+}
+_BOOL_FIELDS = {
+    "capability_dark": CAPABILITY_DARK_ORDER,
+    "teardown": TEARDOWN_ORDER,
+}
+
+
+def _require_types(obj: Mapping[str, Any], order: Sequence[str], where: str, kind: type) -> None:
+    for key in order:
+        value = obj[key]
+        if kind is bool:
+            if not isinstance(value, bool):
+                raise ReceiptError(f"{where}.{key} must be a boolean, got {type(value).__name__}")
+        elif kind is int:
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ReceiptError(f"{where}.{key} must be an integer, got {type(value).__name__}")
+        elif not isinstance(value, str):
+            raise ReceiptError(f"{where}.{key} must be a string, got {type(value).__name__}")
+
+
 def _require_exact_keys(obj: Any, order: Sequence[str], where: str) -> None:
     if not isinstance(obj, Mapping):
         raise ReceiptError(f"{where} must be an object")
@@ -304,8 +331,27 @@ def validate_receipt(document: Mapping[str, Any]) -> None:
     _require_exact_keys(document["teardown"], TEARDOWN_ORDER, "teardown")
     _require_exact_keys(document["identities"], IDENTITIES_ORDER, "identities")
 
+    for where, order in _STRING_FIELDS.items():
+        _require_types(document[where], order, where, str)
+    for where, order in _BOOL_FIELDS.items():
+        _require_types(document[where], order, where, bool)
+    _require_types(
+        document["ordinary_project_non_effect"],
+        NON_EFFECT_ORDER,
+        "ordinary_project_non_effect",
+        int,
+    )
+    for key in ("state_root", "proof_project"):
+        if not isinstance(document["isolation"][key], str):
+            raise ReceiptError(f"isolation.{key} must be a string")
+    if not isinstance(document["isolation"]["is_disposable_instance"], bool):
+        raise ReceiptError("isolation.is_disposable_instance must be a boolean")
+
     for name in PROOFS_ORDER:
         _require_exact_keys(document["proofs"][name], PROOF_ENTRY_ORDER, f"proofs.{name}")
+        for key in ("outcome", "observed_at"):
+            if not isinstance(document["proofs"][name][key], str):
+                raise ReceiptError(f"proofs.{name}.{key} must be a string")
         entry = document["proofs"][name]
         if not isinstance(entry["evidence_refs"], (list, tuple)):
             raise ReceiptError(f"proofs.{name}.evidence_refs must be an array")
@@ -345,6 +391,12 @@ def _validate_steps(steps: Any) -> None:
         _require_exact_keys(step, STEP_ORDER, f"steps[{index}]")
         if not isinstance(step["seq"], int) or isinstance(step["seq"], bool):
             raise ReceiptError(f"steps[{index}].seq must be an integer")
+        for key in ("command", "outcome", "reason_code", "reason_detail", "observed_at"):
+            if not isinstance(step[key], str):
+                raise ReceiptError(f"steps[{index}].{key} must be a string")
+        for key in ("terminal_created", "terminal_torn_down", "epoch_allocated", "epoch_reused"):
+            if not isinstance(step[key], bool):
+                raise ReceiptError(f"steps[{index}].{key} must be a boolean")
 
 
 def validate_partial(document: Mapping[str, Any]) -> None:
