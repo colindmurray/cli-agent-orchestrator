@@ -206,6 +206,21 @@ def run(
         )
         schema = codec.PARTIAL_SCHEMA
 
+    # A returned receipt is validated *before* anything is written, because a
+    # document that fails validation is a begun run that failed — not an I/O
+    # problem, and certainly not a pre-execution refusal. Discovering that inside
+    # the write attempt conflated the two and lost the artifact Gate 2 needs.
+    if schema == codec.RECEIPT_SCHEMA:
+        try:
+            codec.validate_receipt(codec.redact(document))
+        except codec.ReceiptError as exc:
+            print(
+                f"cao-gate2-proof-run: the run produced an invalid receipt: {exc}",
+                file=sys.stderr,
+            )
+            document = _partial_from_failure(request, exc)
+            schema = codec.PARTIAL_SCHEMA
+
     try:
         if schema == codec.RECEIPT_SCHEMA:
             payload, sha = codec.emit_receipt(request.state_root / codec.RECEIPT_BASENAME, document)
@@ -216,9 +231,14 @@ def run(
         print(f"partial written: sha256={sha} bytes={len(payload)}", file=sys.stderr)
         return EXIT_PARTIAL
     except Exception as exc:  # noqa: BLE001 - an emitter failure is still an exit
-        # An uncaught emitter exception satisfies no row of the exit table, so it
-        # would be a defect rather than an outcome.
-        print(f"cao-gate2-proof-run: could not write the artifact: {exc}", file=sys.stderr)
+        # Only a genuine write failure reaches here now — the disk, not the
+        # document. There is no artifact to leave when the artifact itself cannot
+        # be written, so a no-artifact refusal is unavoidable; it is caught and
+        # named distinctly so it is never confused with a validation outcome.
+        print(
+            f"cao-gate2-proof-run: I/O failure writing the artifact: {exc}",
+            file=sys.stderr,
+        )
         return EXIT_REFUSED
 
 

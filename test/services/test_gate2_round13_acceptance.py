@@ -633,3 +633,122 @@ def test_no_handler_failure_closes_the_connection_without_a_response():
     source = inspect.getsource(channel.SupervisorCreateChannel._handle_connection)
     assert "internal-error" in source
     assert "writer.write(encode_response(outcome))" in source
+
+
+# ==========================================================================
+# F-1 — a begun run that produces an INVALID receipt writes a partial only
+# ==========================================================================
+
+
+def _invalid_receipt(request):
+    """A receipt-shaped document that fails validation, with disk writes healthy.
+
+    The reviewer's exact case: the run began and produced something, but what it
+    produced is not a receipt anyone may act on.
+    """
+    doc = minimal_receipt()
+    doc["proofs"]["lineage_isolation"]["outcome"] = "failed"
+    return doc
+
+
+def test_an_invalid_returned_receipt_writes_a_partial_only(tmp_path, designation):
+    """A run that began and then failed validation must not vanish.
+
+    Exiting with neither artifact loses the audit artifact Gate 2 needs, and it
+    reports a begun run with the pre-execution exit code.
+    """
+    root = _iso_root(tmp_path)
+    code = runner.run(_argv(root, designation), executor=_invalid_receipt)
+
+    assert code != runner.EXIT_OK
+    assert code != runner.EXIT_REFUSED, "a begun run is not a pre-execution refusal"
+    assert (root / codec.PARTIAL_BASENAME).exists()
+    assert not (root / codec.RECEIPT_BASENAME).exists(), "never a receipt"
+
+    doc = json.loads((root / codec.PARTIAL_BASENAME).read_bytes())
+    assert "proofs" not in doc
+    assert "lineage_isolation" in doc["refusal_reason"]
+    assert "proven" in doc["refusal_reason"], "the validation evidence is preserved"
+    assert doc["teardown"] == {
+        "instance_destroyed": False,
+        "state_root_removed": False,
+        "artifacts_deleted": False,
+    }, "the actual teardown, never a borrowed success"
+
+
+def test_a_partial_emitter_io_failure_leaves_no_artifact_without_escaping(
+    tmp_path, designation, monkeypatch
+):
+    """When the artifact itself cannot be written, no-artifact is unavoidable.
+
+    It must still be caught and named as an I/O failure rather than escaping or
+    masquerading as a validation outcome.
+    """
+    root = _iso_root(tmp_path)
+
+    def exploding(path, document):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(codec, "emit_partial", exploding)
+
+    code = runner.run(_argv(root, designation), executor=_invalid_receipt)
+
+    assert code == runner.EXIT_REFUSED
+    assert not (root / codec.PARTIAL_BASENAME).exists()
+    assert not (root / codec.RECEIPT_BASENAME).exists()
+
+
+def test_an_io_failure_is_distinguished_from_a_validation_outcome(
+    tmp_path, designation, monkeypatch, capsys
+):
+    root = _iso_root(tmp_path)
+
+    def exploding(path, document):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(codec, "emit_partial", exploding)
+    runner.run(_argv(root, designation), executor=_invalid_receipt)
+
+    err = capsys.readouterr().err
+    assert "invalid receipt" in err, "the validation failure is reported"
+    assert "I/O failure" in err, "and the write failure is named distinctly"
+
+
+def test_an_invalid_receipt_never_writes_both_artifacts(tmp_path, designation):
+    root = _iso_root(tmp_path)
+    runner.run(_argv(root, designation), executor=_invalid_receipt)
+    both = (root / codec.RECEIPT_BASENAME).exists() and (root / codec.PARTIAL_BASENAME).exists()
+    assert not both
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"isolation.is_disposable_instance": False},
+        {"teardown.instance_destroyed": False},
+        {"capability_dark.advertisement_enabled": True},
+        {"ordinary_project_non_effect.grants_minted": 3},
+        {"proofs.supervisor_creation_discriminator.outcome": "unobserved"},
+    ],
+)
+def test_every_invalid_receipt_shape_routes_to_a_partial(tmp_path, designation, mutation):
+    """Not just the reviewer's case: any validation failure is a begun-run failure."""
+    root = _iso_root(tmp_path)
+
+    def executor(request):
+        return _mutate(**mutation)
+
+    code = runner.run(_argv(root, designation), executor=executor)
+    assert code == runner.EXIT_PARTIAL
+    assert (root / codec.PARTIAL_BASENAME).exists()
+    assert not (root / codec.RECEIPT_BASENAME).exists()
+
+
+def test_a_valid_receipt_still_succeeds_unchanged(tmp_path, designation):
+    """No regression on the success row: validation before write changes nothing."""
+    root = _iso_root(tmp_path)
+    code = runner.run(_argv(root, designation), executor=lambda r: minimal_receipt())
+    assert code == runner.EXIT_OK
+    assert (root / codec.RECEIPT_BASENAME).exists()
+    assert not (root / codec.PARTIAL_BASENAME).exists()
+    codec.validate_receipt(json.loads((root / codec.RECEIPT_BASENAME).read_bytes()))
