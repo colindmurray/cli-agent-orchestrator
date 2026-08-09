@@ -213,7 +213,15 @@ def run(
     if schema == codec.RECEIPT_SCHEMA:
         try:
             codec.validate_receipt(codec.redact(document))
-        except codec.ReceiptError as exc:
+        except Exception as exc:  # noqa: BLE001 - any document failure owes a partial
+            # Deliberately broad. `ReceiptError` alone covers documents that fail
+            # a *value* check, but a document can also be structurally broken --
+            # a `steps` entry that is not a mapping makes `redact` raise
+            # `AttributeError` while walking it. That is still a run that began
+            # and produced something unusable, so it owes a partial just the
+            # same; letting it escape would surface as a traceback and a process
+            # exit of 1 with no partial written, which is exactly the code a
+            # runbook reads as "archive the partial".
             print(
                 f"cao-gate2-proof-run: the run produced an invalid receipt: {exc}",
                 file=sys.stderr,

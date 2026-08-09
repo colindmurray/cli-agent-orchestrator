@@ -724,15 +724,30 @@ def test_an_invalid_receipt_never_writes_both_artifacts(tmp_path, designation):
 @pytest.mark.parametrize(
     "mutation",
     [
+        # Value mutations on well-formed objects.
         {"isolation.is_disposable_instance": False},
         {"teardown.instance_destroyed": False},
         {"capability_dark.advertisement_enabled": True},
         {"ordinary_project_non_effect.grants_minted": 3},
         {"proofs.supervisor_creation_discriminator.outcome": "unobserved"},
+        # Structural shapes. These do not merely fail validation -- they break
+        # the walk itself, which is a different failure mode and the one the
+        # value mutations above could never reach.
+        {"steps": ["x"]},
+        {"steps": [None]},
+        {"steps": "not-a-list"},
+        {"proofs": "not-an-object"},
+        {"teardown": ["not", "an", "object"]},
+        {"identities": 7},
     ],
 )
 def test_every_invalid_receipt_shape_routes_to_a_partial(tmp_path, designation, mutation):
-    """Not just the reviewer's case: any validation failure is a begun-run failure."""
+    """Any post-execution document failure is a begun-run failure.
+
+    Value mutations and structural shapes alike: a document that cannot even be
+    walked is still a run that began and produced something unusable, so it owes
+    a partial exactly as a document that merely fails a value check does.
+    """
     root = _iso_root(tmp_path)
 
     def executor(request):
@@ -742,6 +757,30 @@ def test_every_invalid_receipt_shape_routes_to_a_partial(tmp_path, designation, 
     assert code == runner.EXIT_PARTIAL
     assert (root / codec.PARTIAL_BASENAME).exists()
     assert not (root / codec.RECEIPT_BASENAME).exists()
+
+
+def test_a_structurally_broken_receipt_does_not_escape_the_runner(tmp_path, designation):
+    """F-3, the reviewer's exact case: `steps=["x"]`.
+
+    `redact` walks each step with `.items()`, so a non-mapping entry raises
+    `AttributeError` -- not a `ReceiptError`. Escaping `run()` surfaces through
+    `main()` as a traceback and a process exit of 1, which is *`EXIT_PARTIAL`'s
+    code with no partial written*, so a runbook keyed on "exit 1 means archive
+    the partial" finds none.
+    """
+    root = _iso_root(tmp_path)
+
+    def executor(request):
+        return _mutate(**{"steps": ["x"]})
+
+    # No exception may escape.
+    code = runner.run(_argv(root, designation), executor=executor)
+
+    assert code == runner.EXIT_PARTIAL
+    assert (root / codec.PARTIAL_BASENAME).exists(), "exit 1 must mean a partial exists"
+    assert not (root / codec.RECEIPT_BASENAME).exists()
+    doc = json.loads((root / codec.PARTIAL_BASENAME).read_bytes())
+    assert "proofs" not in doc
 
 
 def test_a_valid_receipt_still_succeeds_unchanged(tmp_path, designation):
