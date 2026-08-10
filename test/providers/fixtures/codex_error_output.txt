@@ -1,2 +1,0 @@
-You Fix bug
-Error: failed to initialize environment

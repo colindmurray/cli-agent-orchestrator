@@ -1,3 +1,0 @@
-Welcome to Codex
-workdir: /home/user/repo
-❯ 
