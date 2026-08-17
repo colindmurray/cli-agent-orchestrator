@@ -161,6 +161,16 @@ That pairing is worth more than either string. It lets a detector separate
 self-retry from terminal off the screen alone, without timing heuristics, for a
 provider whose failures otherwise look identical at both stages.
 
+**Neither transport string is provider-exclusive, and the qualifier is what
+makes each row safe.** Counted in the shipped binaries: `request timed out`
+appears 11 times in Codex and 18 times in Claude Code; `ConnectionRefused`
+appears 15 and 18. Anchoring on either bare string would match the wrong
+provider. What disambiguates is the accompanying text, and only because those
+are exclusive: `Falling back from WebSockets` appears 7 times in Codex and never
+in Claude Code, and `API Error` appears 13 times in Claude Code and never in
+Codex. Check exclusivity by count in both binaries before adding a row, rather
+than assuming a string belongs to the provider it was first seen on.
+
 Both rows were confirmed against Codex 0.147.0 and the Claude `Connection
 refused` row against Claude Code 2.1.233, rather than the builds these tables
 were first derived from. The strings are present in each shipped binary — 7 and
