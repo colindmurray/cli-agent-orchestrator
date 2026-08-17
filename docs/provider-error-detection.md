@@ -114,6 +114,7 @@ paths and lower-confidence rows are in the research reports.
 | pattern | action | tier |
 |---|---|---|
 | `API Error: Connection closed mid-response` | nudge | binary + observed |
+| `API Error: Connection refused` + `\(ConnectionRefused\)` | nudge | binary + observed |
 | `API Error: Server error mid-response` | nudge | binary + observed |
 | `API Error: Response stalled mid-stream` | nudge | binary |
 | `API Error: Connection closed while thinking` | nudge | binary |
@@ -146,6 +147,26 @@ paths and lower-confidence rows are in the research reports.
 | `ran out of room in the model's context window` | route | binary |
 | `Quota exceeded\. Check your plan and billing details` | escalate | binary |
 | `Reconnecting\.\.\. \d+/\d+` | **ignore** | observed |
+| `Falling back from WebSockets to HTTPS transport` | **ignore** | binary + observed |
+| `request timed out`, after that fallback line | nudge | binary + observed |
+
+The last two rows are one sequence, and reading them separately gets the action
+backwards. The fallback line **is** Codex retrying — it switches transport in
+response to a timeout, so on its own it means recovery is in progress and the
+correct action is none. A bare `request timed out` following it means that retry
+also failed. Confirmed terminal by observation: the turn stayed dead and did not
+resume.
+
+That pairing is worth more than either string. It lets a detector separate
+self-retry from terminal off the screen alone, without timing heuristics, for a
+provider whose failures otherwise look identical at both stages.
+
+Both rows were confirmed against Codex 0.147.0 and the Claude `Connection
+refused` row against Claude Code 2.1.233, rather than the builds these tables
+were first derived from. The strings are present in each shipped binary — 7 and
+11 occurrences respectively in the Codex native binary, and `firewall or proxy
+may be blocking` once with `ConnectionRefused` 18 times in the Claude binary —
+and each was also seen on a live pane.
 
 Codex also ships a wire-level code enum (`cyber_policy`, `usage_limit_exceeded`,
 `server_overloaded`, `context_window_exceeded`, …). **Anchoring on those in JSON
@@ -224,9 +245,20 @@ one of the reasons layer 1 cannot be replaced by layer 0.
 
 ## 6. Coverage gaps, stated rather than filled
 
-- **No OpenAI error data in the captured corpus.** All six `codex-headless` runs
-  were smoke tests that exited 0. Codex patterns above come from the binary and
-  from one supervisor log.
+- **Almost no OpenAI error data in the captured corpus.** All six
+  `codex-headless` runs were smoke tests that exited 0, so most Codex patterns
+  above come from the binary and from one supervisor log. The two transport rows
+  are the exception: captured twice from a live pane, two minutes apart and
+  byte-identical, with the outcome confirmed.
+- **The transport failures here were caused by the shared network path, not by
+  either provider.** All provider traffic on this installation routes through one
+  residential proxy, so a single upstream fault surfaces as two different
+  provider-shaped errors. The Codex and Claude captures above are from the same
+  incident window: Codex at 09:57:40 and 09:58:37, Claude Code at 09:59:43. That
+  simultaneity across providers is the only reliable tell, and it is computable
+  from evidence the detector already emits — a per-provider classifier is not.
+  Claude Code's own text declines to blame Anthropic (`a firewall or proxy may be
+  blocking it`), so recording the line verbatim attributes nothing.
 - **Kimi produced no provider-level failure string** across ~2,700 rendered
   segments, and emits no structured terminal event type at all — only exit code,
   stderr, and the pane.
