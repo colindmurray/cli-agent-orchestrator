@@ -1251,9 +1251,14 @@ def _complete_once(
     # body. cond-0441 made the delivery record roster-verify the recipient's
     # terminal and generation; the CAS above proves only that the caller named
     # the same incarnation id. Stamping the caller's terminal_id/generation
-    # would write an unverified pane onto the occurrence — the
-    # finalize-by-occurrence-id recovery paths would then act on a pane the
-    # roster never bound to the recipient (cond-0478). A NULL generation on
+    # would write an unverified pane onto the occurrence, permanently: nothing
+    # rewrites the model after open. No programmatic consumer reads those two
+    # fields today — they are durable provenance on read-only surfaces, and the
+    # recovery paths compare incarnation_id and the roster's own binding — so
+    # the defect this closes is a false record, not a control-flow flip
+    # (cond-0478). It is worth closing because these are the fields
+    # cond-0441's own refusal text names as roster-established. A NULL
+    # generation on
     # the row means the delivery established none, so the successor records
     # none rather than adopting the caller's unverified assertion; and the
     # row's terminal_id cannot be NULL here, because a delivered packet
