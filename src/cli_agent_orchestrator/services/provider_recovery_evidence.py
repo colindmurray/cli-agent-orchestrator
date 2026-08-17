@@ -62,8 +62,12 @@ _CONNECTION_LOST = re.compile(
     r"The response above may be incomplete\.\s*$"
 )
 _MID_RESPONSE_TERMINALS = (
-    (_CONNECTION_CLOSED, "claude.connection-closed-mid-response"),
-    (_CONNECTION_LOST, "claude.connection-lost-mid-response"),
+    # (expression, pattern, provenance) -- the two wordings do NOT share
+    # provenance.  The closed wording was captured on a live pane here; the lost
+    # wording is read out of the 2.1.233 bundle and has never been seen render.
+    # The journal must not report the second as observed.
+    (_CONNECTION_CLOSED, "claude.connection-closed-mid-response", "locally observed"),
+    (_CONNECTION_LOST, "claude.connection-lost-mid-response", "read from the shipped bundle"),
 )
 _RETRY_BANNER = re.compile(
     rf"^\s*{_GLYPH}API error\s*[·-]\s*Retrying in\s+\S+\s*[·-]\s*" r"attempt\s+\d+/\d+\s*$",
@@ -206,7 +210,7 @@ def detect(provider: str, screen_lines: Optional[Sequence[str]]) -> Optional[Rec
         # above a later successful response and a new composer.
         candidates = _tail_candidates(rows[:composer_top])
         for candidate in candidates:
-            for expression, pattern in _MID_RESPONSE_TERMINALS:
+            for expression, pattern, provenance in _MID_RESPONSE_TERMINALS:
                 if expression.fullmatch(candidate):
                     return _match(
                         pattern=pattern,
@@ -215,7 +219,7 @@ def detect(provider: str, screen_lines: Optional[Sequence[str]]) -> Optional[Rec
                         status=TerminalStatus.ERROR,
                         confidence="high",
                         reason=(
-                            "locally observed Claude mid-response terminal line "
+                            f"Claude mid-response terminal line ({provenance}) "
                             "ended at the boxed idle composer"
                         ),
                         raw_text=candidate,

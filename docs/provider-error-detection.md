@@ -7,13 +7,20 @@ shows whatever the CLI chose to render, and only the second is visible to a
 detector reading a screen.
 
 Status: the narrow M6a initial contract is implemented dark. Static provider-
-name dispatch recognizes only the locally proven Claude mid-response terminal
-line as `terminal`/`nudge` — in both the `Connection closed` and `Connection
-lost` wordings, which are the same condition in different builds — the observed
-retry banner as `self-retrying`/`ignore`, and an anchored generic Claude API
-error as `unknown`/`layer-2`. The other patterns below remain research
-candidates and have no executing action until a targeted local evidence gate
-admits them.
+name dispatch recognizes the Claude mid-response terminal line as
+`terminal`/`nudge`, the observed retry banner as `self-retrying`/`ignore`, and an
+anchored generic Claude API error as `unknown`/`layer-2`. The other patterns
+below remain research candidates and have no executing action until a targeted
+local evidence gate admits them.
+
+The mid-response line is matched in two wordings, and **they do not share
+provenance.** `Connection closed` was captured on a live pane here.
+`Connection lost` is the 2.1.233 replacement, read out of the bundle and never
+seen to render — it is carried because the observed wording is absent from every
+current build, so matching only the proven one would recognise nothing. Each
+match records which of the two it was, so a reader of the journal can tell an
+observed detection from a bundle-derived one rather than inheriting the older
+row's evidence.
 
 Each active match is published as one nested, bounded
 `recovery_evidence` object. Its occurrence id is durable per exact terminal
@@ -53,6 +60,17 @@ against the shipped executables, not the launcher shims — Codex's is the nativ
 `codex-darwin-arm64` vendor binary and Claude Code's is `claude.exe` in the npm
 package. Running that grep against `/opt/homebrew/bin/codex`, which is a Node
 wrapper, returns zero for every string and reads as a corpus-wide refutation.
+
+**A count is only ever the literal in its own row.** Where a pattern is a regex,
+or carries a character the bundle does not store as bytes, the count column names
+the plain substring that was actually counted. Do not read a count as
+verification of the regex beside it.
+
+The character that catches this is `·` (U+00B7), which appears in many rendered
+Claude Code lines. The bundle contains **zero** U+00B7 bytes and 267 instances of
+the source escape `\xB7`, so `grep -cF '· Please run /login'` returns 0 while the
+line renders normally. Count the fragment on one side of the separator, or search
+for the escape form; never conclude from a zero that a `·` line does not exist.
 
 Two composition rules explain most zero counts on strings that plainly render.
 Codex is Rust and stores format templates with `{}` holes, so one rendered line
@@ -165,7 +183,7 @@ otherwise. Patterns are body fragments, for the composition reason in §1.
 | `Server is temporarily limiting requests \(not your usage limit\)` | wait | binary | 2 |
 | `Request rejected \(429\)` | wait | binary + observed | 2 |
 | `(session\|weekly\|Opus\|Sonnet\|Fable 5\|usage credit) limit` | wait | binary | 6/3/3/2/6/10 |
-| `You've hit your .+ · resets ` | wait | binary + observed | 13 |
+| `You've hit your .+ · resets ` | wait | binary + observed | 13 (`You've hit your `) |
 | `is experiencing high load, please use /model` | route | binary | 3 |
 | `Prompt is too long` / `reached its context window limit` | route | binary + observed | 3 / 2 |
 | `safeguards flagged this message` | route | binary + observed | 8 |
@@ -173,8 +191,8 @@ otherwise. Patterns are body fragments, for the composition reason in §1.
 | `Claude ended this conversation` | route | binary | 14 |
 | `monthly spend limit` | escalate | binary | 17 |
 | `Credit balance is too low` | escalate | binary + observed | 2 |
-| `· Please run /login` | escalate | binary | 25 |
-| `· Retrying in .+ · attempt \d+/\d+` | **ignore** | binary + observed | 2 |
+| `· Please run /login` | escalate | binary | 25 (`Please run /login`) |
+| `· Retrying in .+ · attempt \d+/\d+` | **ignore** | binary + observed | 2 (`Retrying in `) |
 | `Waiting for API response` | **ignore** | binary | 2 |
 | `grace window active` | **ignore** | binary | 1 |
 
@@ -271,7 +289,7 @@ following is safe bare:
 | `ConnectionRefused` | 15 | 18 | Claude Code's rendered line is `firewall or proxy may be blocking` (0/1) |
 | `context_window_exceeded` | 8 | 13 | needs a second Codex-only field |
 | `You've hit your ` | 7 | 13 | keep the limit-name suffix |
-| `Not logged in` | 3 | 10 | qualify with `· Please run /login` (0/25) |
+| `Not logged in` | 3 | 10 | qualify with `Please run /login` (0/25) |
 | `Usage limit reached` | 2 | 1 | qualify with a Codex suffix |
 | `API error` (lowercase) | 1 | 50 | not usable at any casing |
 | `ECONNRESET` | 2 | 76 | Bun internals dominate; no clean anchor |
@@ -303,24 +321,56 @@ with a second Codex-only field before treating a match as Codex, or the JSON pat
 inherits exactly the cross-provider collision the prose path was avoiding. The
 other four codes are exclusive and safe alone.
 
-### Kimi Code (0.34.0)
+### Kimi Code (0.36.1)
 
-Kimi ships `KIMI_ERROR_INFO`, a machine-readable registry where **the vendor
-marks each code retryable or not**. Prefer it over any regex.
+Kimi ships `KIMI_ERROR_INFO`, a machine-readable registry of
+`{title, retryable, public, action}` per code, where **the vendor marks each code
+retryable or not**. Prefer it over any regex.
 
-| pattern | action | vendor `retryable` |
-|---|---|---|
-| `error: Provider connection error` | nudge | true |
-| `error: Provider rate limit` | wait | true |
-| `error: Provider filtered response` | route | false |
-| `error: Provider API error` | escalate | false |
-| `error: Provider authentication error` | escalate | false |
-| `error: Context window overflow` | route | true |
+| pattern | action | vendor `retryable` | K |
+|---|---|---|---|
+| `Provider connection error` | nudge | true | 1 |
+| `Provider rate limit` | wait | true | 4 |
+| `Provider overloaded` | wait | true | 1 |
+| `Provider filtered response` | route | false | 2 |
+| `Provider API error` | escalate | false | 1 |
+| `Provider authentication error` | escalate | false | 1 |
+| `Context window overflow` | route | true | 1 |
+
+Counts are the bare titles. The rendered line is `error: ${title}`, composed at
+runtime by `formatStartupError`, so the joined form `error: Provider rate limit`
+is not a shipped literal and counts 0 — the same composition trap as Codex's
+format holes and Claude Code's `API Error` constant. All three providers hit it,
+which is why §1 says to anchor on the distinctive fragment rather than the line.
+
+`formatStartupError` is the only renderer of `title`, and it covers the
+startup/migration/upgrade path. **A mid-run provider failure does not surface
+through these rows at all** — it goes through the wire protocol, where the
+`turn.step.retrying` event carries `failedAttempt`, `nextAttempt`, `maxAttempts`
+and `statusCode`. That event is the best retry signal any of these providers
+ships: it gives the attempt counter as data instead of as text to be scraped, and
+retries are exhausted when the turn ends in an error payload with
+`retryable: false`. **Prefer it over every Kimi row above.**
+
+Kimi carries a second registry, `ProtocolErrors` in `agent-core-v2`, which
+re-declares the provider domain with different titles for the same conditions —
+`Provider authentication failed` rather than `...error`, `Context overflow`
+rather than `Context window overflow`. Match either, and do not assume one title
+per condition.
+
+`error; no more retries left` (K 9) and `error; not retryable` (K 3) look like
+ideal exhaustion anchors and are **not exclusive** — both appear in Claude Code
+(4 and 2), because the two bundle the same upstream SDK retry loops. Use them
+only behind a Kimi-exclusive qualifier such as a `provider.*` code.
 
 Note the vendor's own distinction: a quota-exhausted 429 is deliberately
-re-mapped away from `rate_limit`, with the shipped comment that requeueing
-"cannot help until the account is recharged." That is `wait` versus `escalate`,
-decided by the vendor.
+re-mapped away from `rate_limit` to `api_error` with `retryable: false`, and the
+transport retry predicate refuses it, with the shipped comment that the
+rate-limit code "would re-mint a rate-limit error across the wire boundary and
+drive the swarm requeue/suspend loop, which cannot help until the account is
+recharged." That is `wait` versus `escalate`, decided by the vendor — and it is
+the clearest statement any of these vendors makes that a retryable-looking status
+can be a terminal condition.
 
 ### OpenCode (1.17.8)
 
@@ -405,8 +455,11 @@ one of the reasons layer 1 cannot be replaced by layer 0.
   Claude Code's own text declines to blame Anthropic (`a firewall or proxy may be
   blocking it`), so recording the line verbatim attributes nothing.
 - **Kimi produced no provider-level failure string** across ~2,700 rendered
-  segments, and emits no structured terminal event type at all — only exit code,
-  stderr, and the pane.
+  segments. It does emit structured events — `turn.step.retrying` carries the
+  attempt counters and the terminal payload carries `retryable` — so the earlier
+  reading that only exit code, stderr and the pane were available was wrong. What
+  is still missing is an *observation*: no Kimi failure has been captured on a
+  pane or in a transcript here, so every Kimi row is binary-tier.
 - **`muse_cli` and `opencode_cli` have zero terminal logs.** Every GLM hit was a
   supervisor writing prose about routing to them.
 - **Claude Code has no quota banner in the corpus**, so no rate-limit regex was
@@ -432,7 +485,7 @@ asserted. Re-counting the earlier tables against nine Claude Code patch releases
 |---|---|---|
 | Claude Code | `Connection closed mid-response` | `Connection lost mid-response` |
 | Claude Code | `Response stalled mid-stream` | `The response stalled before a response was produced` |
-| Claude Code | `Connection closed while thinking` | survives only in bundled docs text |
+| Claude Code | `Connection closed while thinking` | removed; absent from the whole package |
 | Claude Code | `API Error: Connection refused` | `Connection refused — a firewall or proxy may be blocking it` |
 | Codex | `Additional safety checks` | the safety-buffering dialog in §2 |
 | Codex | `SSE stream disconnected in the middle of a turn` | `stream disconnected before completion: ` |
@@ -443,11 +496,19 @@ roughly one minor version, so a detector that hard-codes this table needs the
 re-count wired into upgrade, not into someone's memory. The `strings | grep -cF`
 command in §1 is the whole procedure.
 
-The drift is also nearly all suffix growth: `Server error mid-response` survived
-because the change appended `The response above may be incomplete.` rather than
-rewording the head. **Anchor on the distinctive head of a literal, never on
-end-of-string.** That single habit would have preserved every retired row above
-except `Connection closed`→`Connection lost`.
+**Anchor on the distinctive head of a literal, never on end-of-string.** The
+evidence for that rule here is a survivor rather than a casualty:
+`Server error mid-response` still matches because the change only appended
+`The response above may be incomplete.`, and a head anchor rode it out.
+
+Be clear about what head-anchoring does not buy. None of the four retired rows
+would have survived it — `Connection closed`→`Connection lost` and
+`Response stalled mid-stream`→`The response stalled before a response was
+produced` both reworded the head (`Response stalled` counts 0), one row was
+removed outright, and `Connection refused` was replaced by a different formatter.
+Head-anchoring buys resilience to the most *common* edit, not to a rewrite. Only
+the re-count catches those, which is why it belongs in upgrade rather than in
+judgement.
 
 That rule governs corpus anchors, and the executing detector deliberately does
 not follow it. `_CONNECTION_CLOSED` and `_CONNECTION_LOST` in
@@ -473,5 +534,12 @@ older two match archived transcripts and never a live pane.
 Do not hard-code model names. They appear inside the interstitial text
 (`gpt-5.4-mini`, `Opus 4.8`) and change; capture them instead.
 
-Unicode: `·` is U+00B7 and `—` is U+2014. Both appear in real messages and both
-are avoidable in patterns. No pattern here requires either.
+Unicode: `·` is U+00B7 and `—` is U+2014. Both appear in real rendered messages.
+
+Several Claude Code rows above are written with `·` because that is what the pane
+shows, but **no row needs it and every one is better without it.** The separator
+is where a line is most likely to gain a segment between releases, and the bundle
+does not store the character as bytes at all (§1), so a `·`-bearing pattern is
+both the most brittle form and the one that cannot be verified by the documented
+count. Match a fragment on one side of the separator instead: `Please run /login`
+rather than `· Please run /login`.
