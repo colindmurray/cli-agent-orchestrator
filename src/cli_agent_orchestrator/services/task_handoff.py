@@ -1247,6 +1247,25 @@ def _complete_once(
         ),
         db=db,
     )
+    # The successor's stamp resolves from the handoff row, not the caller's
+    # body. cond-0441 made the delivery record roster-verify the recipient's
+    # terminal and generation; the CAS above proves only that the caller named
+    # the same incarnation id. Stamping the caller's terminal_id/generation
+    # would write an unverified pane onto the occurrence — the
+    # finalize-by-occurrence-id recovery paths would then act on a pane the
+    # roster never bound to the recipient (cond-0478). A NULL generation on
+    # the row means the delivery established none, so the successor records
+    # none rather than adopting the caller's unverified assertion; and the
+    # row's terminal_id cannot be NULL here, because a delivered packet
+    # required a named incarnation and EffectIncarnation refuses an empty
+    # terminal. lineage_id alone still comes from the caller: the row has no
+    # roster-verified copy of it.
+    successor_incarnation = occurrence.EffectIncarnation(
+        incarnation_id=row.to_incarnation_id,
+        terminal_id=row.to_terminal_id,
+        generation=row.to_generation,
+        lineage_id=incarnation.lineage_id,
+    )
     opened = occurrence.open_occurrence(
         occurrence.OpenRequest(
             task_occurrence_id=successor_id,
@@ -1254,7 +1273,7 @@ def _complete_once(
             agent_id=row.to_agent_id,
             round_index=_next_round_index(db, row.session_name, row.to_agent_id),
             dispatch_digest=donor["dispatch_digest"],
-            incarnation=incarnation,
+            incarnation=successor_incarnation,
             seed=seed,
             # The only link the goal track, the auditor, or a later
             # reconstruction has back to the round this one continues. It is an
