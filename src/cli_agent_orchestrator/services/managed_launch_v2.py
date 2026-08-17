@@ -1130,11 +1130,12 @@ def native_tui_capabilities() -> dict[str, Any]:
             "id_source": _ISSUANCE_SOURCES[provider],
             "readiness_receipt_kind": _NATIVE_TUI_READINESS_RECEIPT_KINDS[provider],
             "executable": executable,
+            # Advisory: the known-good reference build, not a ceiling.
             "pinned_version": contracts.PINNED_VERSIONS[executable],
-            # The exact accepted set, not a range: this is the list of
-            # proven builds that carry feature-specific authority.  In open
-            # enforcement mode a launch may also accept any semver-shaped
-            # version, but unproven builds get no advanced capabilities.
+            # The strict-mode quarantine set, not a capability gate: in
+            # open enforcement a launch accepts any semver-shaped version
+            # and unlisted builds receive full capability through the
+            # per-surface conservative defaults and runtime bundle reads.
             "supported_versions": list(contracts.SUPPORTED_VERSIONS[executable]),
             "version_enforcement": contracts.version_enforcement_mode(executable),
         }
@@ -4419,10 +4420,14 @@ def _prepare_muse_fresh_launch(
             "Muse profile carrier is unavailable for this installed wrapper/binary pair "
             f"({carrier.reason}); stage-verify it before enabling profile launch"
         )
-    if not provider_contracts.is_proven_version(_PINNED_PROVIDER["muse_cli"], version_output):
+    # Semver-level listing is not required either: the /status observation
+    # below discovers the provider-minted id from the pane at runtime, so an
+    # unlisted build proves — or loudly fails — the identity observation.
+    # What still refuses is the failed observation (an unparseable banner).
+    if not normalized_version(version_output):
         raise ManagedLaunchConflict(
-            "Muse native status observation is unavailable for this provider build; "
-            "stage-verify it before enabling native identity"
+            "Muse native status observation requires an observed provider "
+            f"version; got {version_output.strip()!r}"
         )
     try:
         pinned_model = muse_native_launch.validate_requested_model(request["expected_model"])
@@ -4659,14 +4664,16 @@ def _mint_claude_native_session(
         glm_native_launch,
     )
 
-    # Open launch admission permits a newly installed semver build, but a
-    # native Claude session id/readiness claim is an advanced capability.  Do
-    # not mint an identity for an unproven build and accidentally inherit the
-    # previous build's hook semantics.
-    if not provider_contracts.is_proven_version(_PINNED_PROVIDER["claude_code"], version_output):
+    # Open launch admission permits a newly installed semver build, and the
+    # identity needs no build listing: the SessionStart hook this launch
+    # installs is itself the runtime proof — a build whose hook semantics
+    # changed writes nothing, and the readiness wait fails loudly.  What
+    # still refuses before minting is the failed observation: an
+    # unparseable version banner.
+    if not normalized_version(version_output):
         raise ManagedLaunchConflict(
-            "Claude native session proof is unavailable for this provider build; "
-            "stage-verify it before enabling native identity"
+            "Claude native session proof requires an observed provider "
+            f"version; got {version_output.strip()!r}"
         )
 
     # Pinned before the id is minted, for the same reason the version is:

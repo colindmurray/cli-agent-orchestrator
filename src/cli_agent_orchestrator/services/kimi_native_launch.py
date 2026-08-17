@@ -249,10 +249,13 @@ def resumes_exactly(argv: Sequence[str], session_id: str) -> bool:
 #
 # The proof is fail-closed and per-build.  A build appears in
 # :data:`_RENDERED_SESSION_PROVEN_BUILDS` only when its title-rewrite and its
-# header layout were both read, so an unknown future build that also rewrites
-# its title cannot inherit the proof by accident: it freezes, and earns the
-# proof only when somebody reads it.  Same discipline as the composer/execution
-# pins -- a separate proven build, never a range widening.
+# header layout were both read and live-verified.  An unlisted build is not
+# refused outright: :func:`rendered_session_proof_for` reads the same facts
+# from the installed bundle (version-bound to the build being driven) and a
+# successful read derives a proof whose evidence says so; a build whose
+# bundle matches neither the table nor the known layout still freezes, and
+# the header painted on the admitted pane remains the session proof in
+# every case.
 # ---------------------------------------------------------------------------
 
 #: The rule name recorded on a rendered-header session proof.
@@ -387,18 +390,41 @@ _RENDERED_SESSION_PROVEN_BUILDS: dict[str, RenderedSessionProof] = {
 def rendered_session_proof_for(provider_version: Optional[str]) -> Optional[RenderedSessionProof]:
     """The rendered-header proof for this exact build, or ``None``.
 
-    ``None`` means "this build's title-rewrite and header layout were not
-    read", and a caller that needs the proof must fail closed rather than
-    guess at a header it has never seen.  The version is normalized the way
-    the rest of the per-build tables normalize theirs, so a bare ``0.31.0``
-    and a banner ``kimi 0.31.0`` name the same build.
+    For a listed build the stage-verified table entry answers.  For an
+    unlisted build the same facts are read at runtime from the installed
+    bundle (the process-title rewrite and the four header labels the
+    strict parser requires, version-bound to the build being driven), and
+    a successful read yields a proof whose evidence says it is
+    bundle-derived — recorded as derived, never as stage-proven.
+
+    ``None`` means "neither the table nor the installed bundle
+    establishes this build's title-rewrite and header layout" — a caller
+    that needs the proof must fail closed rather than guess at a header
+    it has never seen.  A build whose bundle shows the rewrite but a
+    *different* header layout gets ``None`` too: the argv proof is
+    known-erased for it, so the attachment freezes loudly rather than
+    proving off a stranger.  The version is normalized the way the rest
+    of the per-build tables normalize theirs, so a bare ``0.31.0`` and a
+    banner ``kimi 0.31.0`` name the same build.
     """
     if not isinstance(provider_version, str) or not provider_version.strip():
         return None
-    from cli_agent_orchestrator.services import provider_contracts
+    from cli_agent_orchestrator.services import (
+        installed_bundle_facts,
+        provider_contracts,
+    )
 
-    return _RENDERED_SESSION_PROVEN_BUILDS.get(
-        provider_contracts.normalized_version(provider_version)
+    normalized = provider_contracts.normalized_version(provider_version)
+    proof = _RENDERED_SESSION_PROVEN_BUILDS.get(normalized)
+    if proof is not None:
+        return proof
+    derived_evidence = installed_bundle_facts.kimi_rendered_header_hint(normalized)
+    if derived_evidence is None:
+        return None
+    return RenderedSessionProof(
+        provider="kimi_cli",
+        rule=RULE_KIMI_NATIVE_HEADER,
+        evidence=derived_evidence,
     )
 
 

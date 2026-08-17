@@ -528,29 +528,26 @@ async def test_a_kimi_0320_pane_that_rewrote_its_title_is_certified_via_the_rend
 
 
 @pytest.mark.asyncio
-async def test_a_kimi_0321_banner_still_blocks_before_any_pane_session_or_task(
+async def test_a_kimi_0321_banner_launches_and_proves_itself_at_runtime(
     isolated_memory_db, worktree, tmp_path, harness, monkeypatch
 ):
-    """An unproven neighbour of 0.32.0 stays refused, with zero mutation.
+    """An unlisted neighbour of 0.32.0 launches under the unpinned policy.
 
-    The admission is exact-set membership, never a range: 0.32.1 was not
-    read, so the same fail-closed drift refusal that 0.32.0 hit before its
-    stage attestation must still fire — before any pane, provider session,
-    or task byte.
+    The bootstrap's ACP exchange against the installed binary is itself the
+    identity proof — an unlisted build runs it rather than being refused on
+    a missing table row.  The harness's fake transport honors the exchange,
+    the pane's observed argv binds the minted session, and the launch
+    publishes its receipt with the banner recorded verbatim.
     """
     monkeypatch.setattr(bridge, "provider_version_banner", lambda *a, **k: "kimi 0.32.1")
 
-    _, result = await _launch(worktree, tmp_path)
+    record, result = await _launch(worktree, tmp_path)
 
-    assert result["state"] == "preflight_blocked"
-    failure = result["preflight_failure"]
-    assert failure["reason"] == v2.PREFLIGHT_REASON_SESSION_BOOTSTRAP
-    assert failure["task_bytes_submitted"] is False
-    assert "native session proof is unavailable" in failure["detail"]
-    # Zero pane/session/task mutation: no pane was created and the bootstrap
-    # transport saw no ACP method at all — the refusal precedes initialize.
-    assert harness.terminals == []
-    assert harness.transport.calls == []
+    receipt = _published_receipt(record["reservation_id"])
+    assert receipt["provider_receipt_kind"] == "kimi-native-tui-attached"
+    assert receipt["provider_version"] == "kimi 0.32.1"
+    assert result["execution_mode"] == em.NATIVE_TUI
+    assert "session/prompt" not in harness.transport.calls
 
 
 @pytest.mark.asyncio
@@ -605,27 +602,26 @@ async def test_a_kimi_0330_pane_is_certified_via_the_rendered_header_on_the_real
 
 
 @pytest.mark.asyncio
-async def test_a_kimi_0331_banner_still_blocks_before_any_pane_session_or_task(
+async def test_a_kimi_0331_banner_launches_and_proves_itself_at_runtime(
     isolated_memory_db, worktree, tmp_path, harness, monkeypatch
 ):
-    """The build beyond the current pin stays refused, with zero mutation.
+    """The build beyond the current pin launches under the unpinned policy.
 
-    Exact-set membership, never a range: 0.33.1 was not read, so the same
-    fail-closed drift refusal that 0.32.0 and 0.33.0 each hit before their
-    stage attestations must still fire — before any pane, provider session,
-    or task byte.
+    Unlisted is merely nothing written down: the bootstrap exchange runs
+    against the installed binary and proves the identity contract at
+    runtime, and the observed pane argv binds the minted session.  A failed
+    observation — an unparseable banner — would still refuse before any
+    pane, provider session, or task byte.
     """
     monkeypatch.setattr(bridge, "provider_version_banner", lambda *a, **k: "kimi 0.33.1")
 
-    _, result = await _launch(worktree, tmp_path)
+    record, result = await _launch(worktree, tmp_path)
 
-    assert result["state"] == "preflight_blocked"
-    failure = result["preflight_failure"]
-    assert failure["reason"] == v2.PREFLIGHT_REASON_SESSION_BOOTSTRAP
-    assert failure["task_bytes_submitted"] is False
-    assert "native session proof is unavailable" in failure["detail"]
-    assert harness.terminals == []
-    assert harness.transport.calls == []
+    receipt = _published_receipt(record["reservation_id"])
+    assert receipt["provider_receipt_kind"] == "kimi-native-tui-attached"
+    assert receipt["provider_version"] == "kimi 0.33.1"
+    assert result["execution_mode"] == em.NATIVE_TUI
+    assert "session/prompt" not in harness.transport.calls
 
 
 @pytest.mark.asyncio
