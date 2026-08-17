@@ -449,6 +449,17 @@ rewording the head. **Anchor on the distinctive head of a literal, never on
 end-of-string.** That single habit would have preserved every retired row above
 except `Connection closed`→`Connection lost`.
 
+That rule governs corpus anchors, and the executing detector deliberately does
+not follow it. `_CONNECTION_CLOSED` and `_CONNECTION_LOST` in
+`provider_recovery_evidence.py` match the whole rendered sentence anchored to
+end-of-line, because their action is `nudge` — a write into a live composer — and
+§3's rule against firing on an agent *quoting* an error is worth more there than
+resilience to a future suffix. The two rules point opposite ways because they
+price different mistakes: a corpus row that stops matching costs a missed
+detection, while an executing pattern that matches too much costs an interrupted
+worker. Expect this pair to need re-measuring on Claude Code upgrades, and treat
+the `strings` re-count as the thing that catches it.
+
 The durable anchors are structural: the `API Error:` prefix, Codex's
 `cyber_policy` code, Kimi's `error: ${title}` shape and its `retryable` field,
 OpenCode's short constant strings. A short head also survives line wrapping in a
