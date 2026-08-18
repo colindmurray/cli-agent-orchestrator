@@ -270,7 +270,11 @@ def _isolated_state(isolated_memory_db, monkeypatch, tmp_path):
     """Pane locks and the journal both follow the state root, never the host's."""
     from cli_agent_orchestrator import constants
 
-    monkeypatch.setattr("cli_agent_orchestrator.constants.CAO_HOME_DIR", str(tmp_path / "state"))
+    # A ``Path``, matching the constant's real type: modules imported lazily
+    # mid-test build their own paths from it (``CAO_HOME_DIR / "config.json"``),
+    # and a ``str`` here makes this file pass only when some earlier module
+    # already cached those derived values.
+    monkeypatch.setattr("cli_agent_orchestrator.constants.CAO_HOME_DIR", tmp_path / "state")
     monkeypatch.setattr(constants, "COMPANION_DIR", tmp_path / "companion")
     reset_pane_input_arbiter()
     service.reset_control_input_journal()
