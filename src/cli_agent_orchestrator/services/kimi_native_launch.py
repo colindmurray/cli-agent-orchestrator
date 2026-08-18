@@ -428,6 +428,29 @@ def rendered_session_proof_for(provider_version: Optional[str]) -> Optional[Rend
     )
 
 
+def session_proof_gap_for(provider_version: Optional[str]) -> Optional[str]:
+    """Why this exact build provably has no native session proof, or None.
+
+    The preflight question behind the launch: is this build *known* to be
+    unable to prove its session either way?  A build with any proof — a
+    stage-verified table row, a bundle-derived rendered proof, or an
+    argv-preserving build whose kernel argv still names the resumed
+    session — answers ``None`` and launches.  So does a build the
+    installed bundle says nothing about: unknown is not a refusal, and
+    the launch's own bounded, fail-closed proofs answer it at runtime.
+    A reason is returned only when the version-matched bundle of the exact
+    build being driven establishes both halves of the gap — the argv-
+    erasing title rewrite and the absence of the header the rendered proof
+    reads — because that launch could only mint, start a pane, and freeze
+    the attachment.
+    """
+    if rendered_session_proof_for(provider_version) is not None:
+        return None
+    from cli_agent_orchestrator.services import installed_bundle_facts
+
+    return installed_bundle_facts.kimi_session_proof_gap(provider_version)
+
+
 def parse_native_header(rows: object) -> Optional[dict[str, str]]:
     """The Kimi native header as one value per label, or ``None`` when unproven.
 

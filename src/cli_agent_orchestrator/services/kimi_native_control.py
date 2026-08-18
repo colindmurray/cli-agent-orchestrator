@@ -668,6 +668,22 @@ def plan_composer_keystrokes(
         evidence = (
             f"{hint.description}; bundle {hint.bundle_path} " f"(version {hint.bundle_version})"
         )
+    burst_reset_keystroke: Optional[str] = None
+    if pin is not None:
+        burst_reset_keystroke = pin.get("burst_reset_keystroke")
+    elif hint is not None:
+        # The bundle-derived plan gets its reset key the same derived way
+        # as its newline key: the reset dispatch every proven row records
+        # as evidence is read from this build's own bundle.  Without it a
+        # derived plan would rest the submit on the settle alone -- the
+        # two defences fail independently (the table docstring above), and
+        # the unpin routes the longest, most exposed payloads onto exactly
+        # this plan shape.  A bundle whose reset dispatch does not read
+        # keeps None: the settle-only boundary, never an assumed key.
+        reset_fact = installed_bundle_facts.kimi_burst_reset_hint(provider_version)
+        if reset_fact is not None:
+            burst_reset_keystroke = reset_fact.keystroke
+            evidence = f"{evidence}; {reset_fact.description}"
 
     plan: dict[str, Any] = {
         "schema": KEYSTROKE_PLAN_SCHEMA,
@@ -687,7 +703,7 @@ def plan_composer_keystrokes(
         "trailing_terminator": terminator,
         "provider_version": provider_version,
         "soft_newline_keystroke": keystroke,
-        "burst_reset_keystroke": None if pin is None else pin.get("burst_reset_keystroke"),
+        "burst_reset_keystroke": burst_reset_keystroke,
         "submit_settle_seconds": (
             _SUBMIT_SETTLE_FLOOR_SECONDS if pin is None else float(pin["submit_settle_seconds"])
         ),

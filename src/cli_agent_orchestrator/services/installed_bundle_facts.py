@@ -23,7 +23,13 @@ Measured readability (2026-08-17, operator's installation):
 - Kimi 0.36.1 ``dist/main.mjs``: declares ``"tui.input.newLine":
   {defaultKeys: ["shift+enter", "ctrl+j"]}`` and the steer dispatch
   ``matchesKey(normalized, Key.ctrl("s"))``; ``main()`` begins with
-  ``process.title = PROCESS_NAME``.
+  ``process.title = PROCESS_NAME``.  The paste-burst instrumentation reads
+  too: ``PASTE_ENTER_SUPPRESS_WINDOW_MS = 120`` and the reset dispatch
+  ``if (!this.disablePasteBurst && !isEnterKey && printableForBurst ===
+  void 0) this.pasteBurst.reset();`` are both present verbatim.  Its
+  header labels are ``Directory``/``Session``/``Model`` only — ``Version``
+  is absent — so no rendered-header session proof derives for this build
+  while its argv proof is known-erased.
 - Muse 0.1.0-R708.1 inner binary: its keymap table is readable as
   ``newline`` + ``shift+enter``/``ctrl+j``/``ctrl+m`` + ``Insert a newline
   without submitting``.
@@ -253,6 +259,12 @@ def _extract(
                 b'label: "Session"',
                 b'label: "Model"',
                 b'label: "Version"',
+                # The paste-burst reset dispatch: any key that is neither
+                # Enter nor a single printable zeroes the Enter-suppression
+                # window.  Exactly the statement the proven rows record as
+                # their ``burst_reset_keystroke`` evidence.
+                b"if (!this.disablePasteBurst && !isEnterKey && "
+                b"printableForBurst === void 0) this.pasteBurst.reset();",
             ),
         )
     if provider == "claude_code":
@@ -281,11 +293,17 @@ def _facts(
     path, bundle_version = bundle
     try:
         stat = os.stat(path)
+        answers = _extract(provider, path, bundle_version, stat.st_mtime_ns, stat.st_size)
     except OSError:
+        # A bundle that stats but cannot be read — permissions, a mid-read
+        # unlink, an unreadable mount — is the same answer an absent bundle
+        # always gave: None, so the caller keeps its typed refusal rather
+        # than propagating a bare OSError past the seam's "typed outcome for
+        # every terminal-level failure" contract.  ``lru_cache`` does not
+        # memoize the raise, so a later healthy read is not poisoned by this
+        # one.
         return None
-    return (path, bundle_version), _extract(
-        provider, path, bundle_version, stat.st_mtime_ns, stat.st_size
-    )
+    return (path, bundle_version), answers
 
 
 def newline_keystroke_hint(provider: str, provider_version: Optional[str]) -> Optional[BundleFact]:
@@ -376,7 +394,9 @@ def kimi_rendered_header_hint(provider_version: Optional[str]) -> Optional[str]:
     if found is None:
         return None
     (path, bundle_version), answers = found
-    title_rewrite, labels = answers[3], answers[4:]
+    # The header labels are exactly positions 4..7; position 8 is the
+    # paste-burst reset dispatch, which is no part of this proof.
+    title_rewrite, labels = answers[3], answers[4:8]
     if not (title_rewrite and all(labels)):
         return None
     return (
@@ -387,4 +407,87 @@ def kimi_rendered_header_hint(provider_version: Optional[str]) -> Optional[str]:
         "stage-verified live proof: the rendered header on the admitted pane "
         "remains the session proof, and a build whose painted header does not "
         "match freezes exactly as an unproven build does."
+    )
+
+
+def kimi_burst_reset_hint(provider_version: Optional[str]) -> Optional[BundleFact]:
+    """The paste-burst reset keystroke read from the installed Kimi bundle.
+
+    The override for a missing ``burst_reset_keystroke`` pin: the reset
+    dispatch every proven row records as evidence — any key event that is
+    neither Enter nor a single printable calls ``pasteBurst.reset()``,
+    zeroing the window in which Enter inserts a newline instead of
+    submitting — is looked for in the exact build being driven.  The
+    dispatch's existence is what the needle proves; ``End`` is the key the
+    table documents for it, chosen because it is content-neutral and
+    leaves the cursor where Enter expects it, and it is neither Enter nor
+    a printable by construction.  ``None`` means the dispatch was not read
+    (unreadable bundle, version mismatch, or a build whose paste-burst
+    handling changed shape), and the caller keeps the pin's ``None`` —
+    the submit then rests on the settle alone, exactly as a pre-pin build
+    always did.
+    """
+    if not isinstance(provider_version, str):
+        return None
+    found = _facts("kimi_cli", provider_contracts.normalized_version(provider_version))
+    if found is None:
+        return None
+    (path, bundle_version), answers = found
+    if not answers[8]:
+        return None
+    return BundleFact(
+        provider="kimi_cli",
+        keystroke="End",
+        bundle_path=path,
+        bundle_version=bundle_version,
+        description=(
+            "installed bundle carries the paste-burst reset dispatch "
+            "(any key that is neither Enter nor a single printable calls "
+            "pasteBurst.reset(), zeroing the Enter-suppression window), so "
+            "the content-neutral End reset key precedes the submit Enter "
+            "(runtime bundle read, not a stage-verified pin)"
+        ),
+    )
+
+
+def kimi_session_proof_gap(provider_version: Optional[str]) -> Optional[str]:
+    """Why this exact Kimi build provably cannot prove its session, or None.
+
+    A proven *negative*, answered only from a version-matched bundle read.
+    The resumed session id is proven one of two ways at launch: from the
+    kernel argv, or from the rendered native header when the build erases
+    that argv.  A build whose own bundle shows the post-parse title
+    rewrite (argv proof erased) but not the four header labels the
+    rendered proof reads has no path at all: a launch could only mint a
+    session, start a pane, and freeze the attachment when neither proof
+    answers.  The reason string says so, naming the bundle it was read
+    from.
+
+    ``None`` is not "the build is fine" — it is "no gap is established".
+    It covers argv-preserving builds (no title rewrite: the argv proof
+    still works), builds whose header reads cleanly, and — critically —
+    builds the installed bundle says nothing about (unreadable, or a
+    different version installed).  An unknown build is answered at runtime
+    by the launch's own bounded, fail-closed proofs, not by a refusal
+    here.
+    """
+    if not isinstance(provider_version, str):
+        return None
+    normalized = provider_contracts.normalized_version(provider_version)
+    found = _facts("kimi_cli", normalized)
+    if found is None:
+        return None
+    (path, bundle_version), answers = found
+    title_rewrite, labels = answers[3], answers[4:8]
+    if not title_rewrite or all(labels):
+        return None
+    return (
+        f"runtime read of the installed Kimi {bundle_version} bundle ({path}): "
+        "the build rewrites process.title to PROCESS_NAME after parsing its "
+        "argv — erasing the resumed --session id from the kernel argv the "
+        "argv proof reads — but its bundle does not declare the "
+        "Directory/Session/Model/Version header labels the rendered proof "
+        "requires, so neither session proof can ever answer for this build; "
+        "refusing before the mint rather than freezing the attachment after "
+        "the pane"
     )

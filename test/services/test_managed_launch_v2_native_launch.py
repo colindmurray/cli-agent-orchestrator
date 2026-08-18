@@ -18,6 +18,7 @@ one confused run.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -35,6 +36,7 @@ from cli_agent_orchestrator.models.managed_launch_v2 import (
 )
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.services import execution_mode as em
+from cli_agent_orchestrator.services import installed_bundle_facts as ibf
 from cli_agent_orchestrator.services import kimi_native_bootstrap as boot
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
 from cli_agent_orchestrator.services import managed_provider_bridge as bridge
@@ -371,6 +373,49 @@ async def test_a_kimi_version_probe_beyond_the_bound_blocks_before_any_pane_sess
     assert executable in failure["detail"]
     assert "--version" in failure["detail"]
     assert "timed out after 20.0 seconds" in failure["detail"]
+    # Zero pane/session/task mutation.
+    assert harness.terminals == []
+    assert harness.bootstrap_kwargs == {}
+
+
+@pytest.mark.asyncio
+async def test_a_kimi_build_with_no_session_proof_path_blocks_before_any_pane_session_or_task(
+    isolated_memory_db, worktree, tmp_path, harness, monkeypatch
+):
+    """The 0.36.1 shape: a provable session-proof gap blocks at preflight.
+
+    The installed bundle of the exact build being driven shows the
+    argv-erasing title rewrite but not the header labels the rendered
+    proof reads, so neither session proof can ever answer and the launch
+    could only mint a session, start a pane, and freeze the attachment.
+    Post-unpin the mint admits any parseable banner, so the refusal must
+    happen here — before the mint, the trust record, and the pane.  An
+    *unknown* build is not refused (the 0.32.1/0.33.1 tests above pin
+    that): this one is refused because the gap is proven, version-bound,
+    from the build's own bytes.
+    """
+    package = tmp_path / "kimi-package"
+    (package / "dist").mkdir(parents=True)
+    (package / "dist" / "main.mjs").write_bytes(
+        b"function main() {\n\tprocess.title = PROCESS_NAME;\n}\n"
+        b'rows = [{label: "Model"}, {label: "Directory"}, {label: "Session"}]\n'
+    )
+    (package / "package.json").write_text(json.dumps({"version": "9.9.9"}))
+    link = tmp_path / "bin" / "kimi"
+    link.parent.mkdir(exist_ok=True)
+    link.symlink_to(package / "dist" / "main.mjs")
+    monkeypatch.setattr(
+        ibf.shutil, "which", lambda name: str(link) if os.path.basename(name) == "kimi" else None
+    )
+    monkeypatch.setattr(bridge, "provider_version_banner", lambda *a, **k: "kimi 9.9.9")
+
+    _, result = await _launch(worktree, tmp_path)
+
+    assert result["state"] == "preflight_blocked"
+    failure = result["preflight_failure"]
+    assert failure["reason"] == v2.PREFLIGHT_REASON_NATIVE_PREFLIGHT
+    assert failure["task_bytes_submitted"] is False
+    assert "9.9.9" in failure["detail"]
     # Zero pane/session/task mutation.
     assert harness.terminals == []
     assert harness.bootstrap_kwargs == {}

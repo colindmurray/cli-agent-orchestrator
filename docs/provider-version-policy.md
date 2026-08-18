@@ -247,7 +247,17 @@ derive and no safe constant, because a wrong keystroke types junk into the compo
 submits mid-message. So that one operation keeps its typed refusal on an unlisted Codex
 build while the rest of the provider stays open, which is exactly the §3 carve-out.
 
-Claude, Kimi, and Muse hints are all verified readable on the installed builds.
+Claude and Kimi hints were verified readable on the builds installed when this landed
+(Claude Code 2.1.233, Kimi 0.36.1). **Muse is not currently derivable.** Its 0.1.0-R708.1
+layout was readable; 0.2.1-R1215.1 moved the key run and the description into separate
+tables 1339 bytes apart, and the extractor requires them adjacent. The outcome is a typed
+refusal with nothing typed, so Muse multi-line delivery is refused exactly as it was
+before — no regression, and the loud direction.
+
+That update landed **six minutes after this conversion was written**, by the self-updating
+launcher, with nobody involved. Treat it as the standing evidence for §1: a readability
+measurement names a build and expires with it, so state the build you measured and expect
+to re-measure rather than recording a fact about "the installed build" in the abstract.
 
 ### Still gating on an exact build
 

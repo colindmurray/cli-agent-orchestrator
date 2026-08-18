@@ -244,3 +244,149 @@ class TestComposerPlanDerivation:
         )
         assert plan["deliverable"] is False
         assert plan["undeliverable_reason"] is not None
+
+
+# The paste-burst reset dispatch, byte-identical to the statement the
+# proven Kimi rows record as their ``burst_reset_keystroke`` evidence and
+# present verbatim in the installed 0.36.1 dist/main.mjs.
+KIMI_RESET_DISPATCH = (
+    b"if (!this.disablePasteBurst && !isEnterKey && printableForBurst === void 0) "
+    b"this.pasteBurst.reset();\n"
+)
+KIMI_BUNDLE_WITH_HINTS_AND_RESET = KIMI_BUNDLE_WITH_HINTS + KIMI_RESET_DISPATCH
+
+
+class TestKimiBurstResetDerivation:
+    """A bundle-derived Kimi plan must not rest the submit on the settle alone.
+
+    The reset keystroke and the settle are independent, non-redundant
+    defences (the adapter's table docstring): if the event loop stalls
+    past the settle, the trailing printables and the Enter arrive in one
+    batched pty read and the sleep bought nothing, while a reset key in
+    that same batch still zeroes the suppression window first.  A derived
+    plan therefore carries ``End`` only when this build's own bundle
+    carries the reset dispatch — derived, never assumed.
+    """
+
+    def test_a_derived_plan_carries_the_bundle_read_reset_keystroke(self, tmp_path, monkeypatch):
+        _patch_which(monkeypatch, {"kimi": _kimi_tree(tmp_path, KIMI_BUNDLE_WITH_HINTS_AND_RESET)})
+        plan = kimi_control.plan_composer_keystrokes("one\ntwo", provider_version="kimi 9.9.9")
+        assert plan["composer_keystroke_source"] == "installed-bundle-hint"
+        assert plan["burst_reset_keystroke"] == "End"
+        assert "paste-burst reset dispatch" in plan["composer_evidence"]
+
+    def test_the_derived_reset_key_is_sent_before_the_enter(self, tmp_path, monkeypatch):
+        """The ingredient is pinned above; this pins the wiring: the plan's
+        reset key is what ``submit_composer_plan`` actually sends, before
+        the settle and the Enter."""
+        _patch_which(monkeypatch, {"kimi": _kimi_tree(tmp_path, KIMI_BUNDLE_WITH_HINTS_AND_RESET)})
+        monkeypatch.setattr(kimi_control.time, "sleep", lambda _seconds: None)
+        plan = kimi_control.plan_composer_keystrokes("one\ntwo", provider_version="kimi 9.9.9")
+
+        sent: list[tuple[str, str]] = []
+
+        class _Transport:
+            def send_key(self, key):
+                sent.append(("key", key))
+
+            def send_literal(self, text):
+                sent.append(("literal", text))
+
+            def send_enter(self):
+                sent.append(("enter", ""))
+
+        kimi_control.submit_composer_plan(plan=plan, transport=_Transport())
+        assert sent == [("key", "End"), ("enter", "")]
+
+    def test_a_bundle_without_the_reset_dispatch_keeps_no_reset_key(self, tmp_path, monkeypatch):
+        """The newline declaration reads but the reset dispatch does not:
+        the settle-only boundary, never an assumed key."""
+        _patch_which(monkeypatch, {"kimi": _kimi_tree(tmp_path, KIMI_BUNDLE_WITH_HINTS)})
+        plan = kimi_control.plan_composer_keystrokes("one\ntwo", provider_version="kimi 9.9.9")
+        assert plan["composer_keystroke_source"] == "installed-bundle-hint"
+        assert plan["burst_reset_keystroke"] is None
+
+    def test_a_listed_build_keeps_its_table_reset_key(self, bundle_trees):
+        plan = kimi_control.plan_composer_keystrokes("one\ntwo", provider_version="kimi 0.29.2")
+        assert plan["composer_keystroke_source"] == "proven-build-table"
+        assert plan["burst_reset_keystroke"] == "End"
+
+
+class TestBundleReadOSError:
+    """A bundle that stats but cannot be read keeps the typed refusal.
+
+    Permissions, a mid-read unlink, an unreadable mount: an ``OSError``
+    out of the extractor must not propagate past the seam whose route
+    promises a typed outcome for every terminal-level failure.  The
+    existing "unreadable bundle" case models a *successful* read yielding
+    no needle; this one models the read itself failing.
+    """
+
+    def test_an_oserror_reading_the_bundle_keeps_the_typed_refusal(self, tmp_path, monkeypatch):
+        link = _claude_tree(tmp_path, CLAUDE_BUNDLE_WITH_HINT)
+        _patch_which(monkeypatch, {"claude": link})
+        bundle_path = os.path.realpath(link)
+        real_open = open
+
+        def _unreadable(path, *args, **kwargs):
+            if str(path) == bundle_path:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(ibf, "open", _unreadable, raising=False)
+
+        # The hint read degrades to None, and the plan keeps its typed
+        # refusal — no OSError escapes toward the route.
+        assert ibf.newline_keystroke_hint("claude_code", "9.9.9") is None
+        plan = claude_control.plan_composer_keystrokes("one\ntwo", provider_version="9.9.9")
+        assert plan["deliverable"] is False
+        assert "none could be read from the installed bundle" in plan["undeliverable_reason"]
+
+
+class TestKimiSessionProofGap:
+    """The proven negative: a build whose own bundle rules out both proofs.
+
+    A gap is established only from a version-matched bundle showing the
+    argv-erasing title rewrite *and* an incomplete header label set — the
+    0.36.1 shape.  Everything else answers ``None``: argv-preserving
+    builds, complete headers, and builds the installed bundle says nothing
+    about (unknown is answered by the launch's runtime proofs, not by a
+    refusal).
+    """
+
+    def test_a_rewritten_title_with_an_unknown_layout_is_a_proven_gap(self, tmp_path, monkeypatch):
+        _patch_which(
+            monkeypatch, {"kimi": _kimi_tree(tmp_path, KIMI_BUNDLE_REWRITTEN_UNKNOWN_LAYOUT)}
+        )
+        gap = ibf.kimi_session_proof_gap("kimi 9.9.9")
+        assert gap is not None
+        assert "9.9.9" in gap
+
+    def test_an_argv_preserving_build_has_no_gap(self, tmp_path, monkeypatch):
+        """No title rewrite: the kernel argv still names the resumed session."""
+        _patch_which(monkeypatch, {"kimi": _kimi_tree(tmp_path, KIMI_BUNDLE_WITHOUT_HINTS)})
+        assert ibf.kimi_session_proof_gap("kimi 9.9.9") is None
+
+    def test_a_complete_header_has_no_gap(self, tmp_path, monkeypatch):
+        _patch_which(monkeypatch, {"kimi": _kimi_tree(tmp_path, KIMI_BUNDLE_WITH_HINTS)})
+        assert ibf.kimi_session_proof_gap("kimi 9.9.9") is None
+
+    def test_a_build_the_bundle_says_nothing_about_has_no_gap(self, bundle_trees):
+        """The installed fixture bundle is 9.9.9; the driven build is not."""
+        assert ibf.kimi_session_proof_gap("kimi 9.9.8") is None
+
+    def test_the_launch_wrapper_prefers_a_table_proof(self, tmp_path, monkeypatch):
+        """A table-row build keeps its proof even when the installed bundle
+        of that exact build reads as the gap shape: any proof closes the
+        gap question before the bundle read is consulted."""
+        _patch_which(
+            monkeypatch,
+            {"kimi": _kimi_tree(tmp_path, KIMI_BUNDLE_REWRITTEN_UNKNOWN_LAYOUT, version="0.34.0")},
+        )
+        assert kimi_native_launch.session_proof_gap_for("kimi 0.34.0") is None
+
+    def test_the_launch_wrapper_surfaces_the_gap_for_an_unlisted_build(self, tmp_path, monkeypatch):
+        _patch_which(
+            monkeypatch, {"kimi": _kimi_tree(tmp_path, KIMI_BUNDLE_REWRITTEN_UNKNOWN_LAYOUT)}
+        )
+        assert kimi_native_launch.session_proof_gap_for("kimi 9.9.9") is not None

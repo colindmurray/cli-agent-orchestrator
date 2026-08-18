@@ -2171,7 +2171,9 @@ def _validate_readiness_for_bind(row: Any, receipt: dict[str, Any]) -> None:
     # 0.147.0) while unrelated advanced surfaces stay unproven, and a build
     # outside this table still fails closed here even when open launch
     # policy admitted it. Composer delivery is gated separately by the
-    # provider adapter's own exact-build table during admission.
+    # provider adapter's per-build composer facts — the stage-proven table
+    # or, for a missing row, the version-bound read of the installed bundle
+    # — during admission.
     if not provider_contracts.is_native_bind_capable(
         _PINNED_PROVIDER[row.provider], receipt["provider_version"]
     ):
@@ -3875,6 +3877,20 @@ async def _launch_native_tui(
                 provider_version_banner, bridge_request, environment=environment
             )
         if provider == "kimi_cli":
+            # A build provably unable to prove its native session — its
+            # own bundle shows the argv-erasing title rewrite and no
+            # rendered header to take the argv's place — is refused here,
+            # before the mint, the trust record, and the pane.  Post-unpin
+            # the mint admits any parseable banner, so without this gate
+            # such a build (the installed 0.36.1 is one) mints a session,
+            # starts a pane, and only then freezes the attachment when
+            # neither session proof can answer.  An *unknown* build — no
+            # version-matched bundle read — is not refused: the launch's
+            # bounded fail-closed proofs answer it at runtime, which is
+            # the unpinned-policy contract the native launch tests pin.
+            proof_gap = kimi_native_launch.session_proof_gap_for(version_output)
+            if proof_gap is not None:
+                raise ManagedLaunchConflict(proof_gap)
             environment = _kimi_profile_environment(
                 record=record,
                 profile_material=profile_material,
