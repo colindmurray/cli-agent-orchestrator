@@ -398,6 +398,28 @@ class TestIdentityAndCapabilityGates:
         assert result.outcome == "refused"
         assert result.reason_code == "provider-unsupported"
 
+    def test_a_managed_row_without_a_generation_is_refused_not_asserted(self, wire, monkeypatch):
+        """cond-0413 on the operator lane, which the control lane's tests
+        cannot reach.
+
+        This lane holds the shared fence through the adapter's own durable
+        claim, so it asks the generation question from inside the admission
+        rather than before it.  A managed row that names no generation must
+        still leave with a typed zero-byte refusal naming what was observed:
+        a bare ``assert`` here would exit as an untyped 500 and tell an
+        operator nothing about whether the message was typed.
+        """
+        adapter = _FakeAdapter(record=_record(_op_id()))
+        wire(_resolved(managed=True, terminal_generation=None), adapter, {"deliverable": True})
+        expected = {**EXPECTED, "terminal_generation": None}
+
+        result = _submit(operation_id=_op_id(), expected_identity=expected)
+
+        assert result.outcome == "refused"
+        assert result.reason_code == "lineage-unproven"
+        assert "no generation" in result.detail
+        assert adapter.calls == []
+
 
 class TestAttachmentBindingAndSubstitution:
     def _bound(self, monkeypatch, records):

@@ -1968,6 +1968,15 @@ def deliver_control_input(
     # past ``open_intent`` would leave a non-terminal record no verb resolves,
     # since the sweep only reclaims rows whose owning process is gone and this
     # server is alive.
+    #
+    # Sitting before the claim also puts it before the at-most-once replay,
+    # which is safe only because its answer cannot change once a control has
+    # been delivered: a managed row always names a generation -- the
+    # reservation column is NOT NULL and the resolution takes the generation
+    # from the reservation -- so this can never tell a caller "nothing was
+    # typed" about a control the journal records as delivered.  That invariant
+    # is pinned by ``TestAManagedRowAlwaysNamesItsGeneration``; a schema that
+    # broke it would have to move this check after the replay return.
     unselectable = _generation_unselectable(resolved)
     if unselectable is not None:
         return _refuse(REASON_LINEAGE_UNPROVEN, unselectable, resolved=resolved)

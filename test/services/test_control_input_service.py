@@ -4482,3 +4482,82 @@ class TestTheInboxLaneAnswersTheSameQuestion:
         assert "durable sources name no generation" in result.detail
         assert "nothing was typed" in result.detail
         assert result.chunks_sent == 0 and result.enter_sent is False
+
+
+class TestAManagedRowAlwaysNamesItsGeneration:
+    """Why asking the generation question before the journal is truthful.
+
+    ``_generation_unselectable`` is answered before ``open_intent``, which
+    puts it before the at-most-once replay.  A control id whose record is
+    already ``delivered`` would therefore be answered "nothing was typed"
+    if a managed row could ever resolve without a generation -- a false
+    zero-byte proof licensing a duplicate send.  It cannot, and these pin
+    the two legs that make that so: a durable managed reservation cannot
+    store a NULL generation, and a resolution that finds one takes the
+    generation from the reservation rather than from the nullable terminal
+    row.  Break either leg and the ordering starts lying, so it fails here
+    first rather than at a duplicated ``/compact``.
+    """
+
+    def test_no_managed_reservation_can_store_a_null_generation(self):
+        """The durable leg: the reservation column that cannot be empty."""
+        from cli_agent_orchestrator.clients import database
+
+        assert database.ManagedLaunchReservationModel.__table__.c.generation.nullable is False
+        assert database.ManagedLaunchV2ReservationModel.__table__.c.generation.nullable is False
+        # Named alongside them because it is the contrast the whole fix
+        # rests on: the terminal row's generation *is* nullable, which is
+        # what makes a legacy unmanaged row's None ordinary rather than a
+        # fault.
+        assert database.TerminalModel.__table__.c.generation.nullable is True
+
+    def test_a_managed_resolution_names_a_generation_the_terminal_row_lacks(self, monkeypatch):
+        """The resolution leg, read from real rows rather than a fixture.
+
+        The terminal row here is the generation-less legacy shape; the
+        reservation is what makes it managed.  A resolution that read the
+        generation from the terminal row alone would report a managed row
+        with none, which is exactly the state the pre-journal check would
+        then answer falsely on a replay.
+        """
+        from datetime import datetime
+
+        from cli_agent_orchestrator.clients import database
+
+        monkeypatch.setattr(service, "_tmux_client", lambda: FakeTmux())
+        database.create_terminal(
+            TERMINAL,
+            "cao",
+            "worker-abcd",
+            "claude_code",
+            generation=None,
+            pane_id=PANE,
+            pane_pid=PANE_PID,
+            server_socket_path=SOCKET,
+        )
+        assert database.get_terminal_metadata(TERMINAL)["generation"] is None
+        now = datetime.now().isoformat()
+        with database.SessionLocal() as db:
+            db.add(
+                database.ManagedLaunchReservationModel(
+                    reservation_id="rsv-gen-1",
+                    terminal_id=TERMINAL,
+                    generation="gen-from-the-reservation",
+                    session_name="cao",
+                    provider="claude_code",
+                    agent_profile="worker",
+                    caller_id="test",
+                    working_directory="/tmp",
+                    state="admitted",
+                    request_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            db.commit()
+
+        resolved = service.resolve_control_identity(TERMINAL)
+
+        assert resolved.managed is True
+        assert resolved.terminal_generation == "gen-from-the-reservation"
+        assert service._generation_unselectable(resolved) is None
