@@ -876,8 +876,11 @@ def submit_operator_message(
 
         # Hold the shared generation fence through the adapter's durable claim
         # and every literal/submit key.  The dashboard/operator lane otherwise
-        # had only a pane lease and could race a completed park receipt.
-        assert binding.generation is not None
+        # had only a pane lease and could race a completed park receipt.  A
+        # managed row that names no generation cannot select that fence and
+        # raises ``GenerationUnselectable`` from inside the admission, which
+        # the ``FencedError`` handler below settles as a typed zero-byte
+        # refusal rather than an ``AssertionError`` that states nothing.
         with (
             control_input_service.provider_byte_admission(
                 resolved, terminal_id, binding.generation

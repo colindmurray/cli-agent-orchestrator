@@ -4242,3 +4242,243 @@ def test_unmanaged_control_ignores_an_unrelated_park_receipt_and_writes(
 
     assert result.outcome == ACCEPTED
     assert tmux.writes
+
+
+class TestAGenerationlessBinding:
+    """cond-0413: a legacy row that never recorded a generation.
+
+    ``TerminalModel.generation`` is nullable, so a pre-generation row is a
+    legitimate durable shape -- ``conduct status`` reports one as
+    ``<id>@None(legacy-no-generation/live)``. It is unmanaged by
+    construction: a generation exists to name the managed reservation a
+    write is fenced against, and a row with no reservation has nothing to
+    fence against. Its bytes are fenced by the pane lease and the in-lease
+    pane identity re-proof instead, which these tests exercise on exactly
+    that row rather than on a fixture that supplies a generation the
+    unmanaged branch never reads.
+    """
+
+    @pytest.fixture
+    def legacy(self, tmux, monkeypatch):
+        """The live shape: unmanaged, generation NULL, no roster lineage."""
+        monkeypatch.setattr(
+            service,
+            "_terminal_metadata",
+            lambda terminal_id: _metadata(provider="claude_code", generation=None),
+        )
+        resolved = service.resolve_control_identity(TERMINAL)
+        assert resolved.managed is False
+        assert resolved.terminal_generation is None
+        return tmux
+
+    def test_the_admission_gate_admits_the_legacy_row_it_is_asked_about(self, legacy):
+        """The gate this control passes before the fence question arises.
+
+        Asserted directly, so a later change that closes the gate for legacy
+        rows cannot leave the delivery tests below passing for the wrong
+        reason.
+        """
+        from cli_agent_orchestrator.services import unmanaged_native_identity as seam
+
+        seam.assert_unmanaged_admission_ready(
+            TERMINAL,
+            {"provider": "claude_code", "generation": None, "pre_task_identity_state": None},
+        )
+
+    def test_a_generationless_control_is_delivered_rather_than_crashed(self, legacy, journal):
+        """The live remedy: /compact to a supervisor near its context limit.
+
+        The record is read back rather than taken from the reply, because
+        the defect this pins left a committed intent behind while returning
+        nothing at all.
+        """
+        result = _deliver(journal, text="/compact")
+
+        assert result.outcome == ACCEPTED
+        assert legacy.writes == [
+            {
+                "pane_id": PANE,
+                "text": "/compact",
+                "submit": True,
+                "expected_server_identity": SOCKET,
+            }
+        ]
+        record = journal.get(CONTROL)
+        assert record.state == DELIVERED
+        assert record.is_terminal
+
+    def test_the_pane_lease_still_fences_the_generationless_write(self, legacy, journal):
+        """The mutual exclusion an unmanaged row is fenced by."""
+        with _pane_held_elsewhere():
+            result = _deliver(journal, text="/compact")
+
+        assert result.outcome == REFUSED
+        assert result.reason_code == REASON_PANE_BUSY
+        assert legacy.writes == []
+        assert journal.get(CONTROL).is_terminal
+
+    def test_the_in_lease_identity_reproof_still_fences_it(self, monkeypatch, journal):
+        """A pane replaced between resolution and write is the transition an
+        unmanaged row has instead of a generation fence."""
+        replaced = FakeTmux(
+            identities=[FakePaneIdentity(), FakePaneIdentity(pane_pid=PANE_PID + 1)]
+        )
+        monkeypatch.setattr(service, "_tmux_client", lambda: replaced)
+        monkeypatch.setattr(
+            service,
+            "_terminal_metadata",
+            lambda terminal_id: _metadata(provider="claude_code", generation=None),
+        )
+        monkeypatch.setattr(service, "_managed_identity", lambda terminal_id: None)
+
+        result = _deliver(journal, text="/compact")
+
+        assert result.outcome == REFUSED
+        assert result.reason_code == REASON_IDENTITY_MISMATCH
+        assert replaced.writes == []
+        assert journal.get(CONTROL).state == STATE_REFUSED
+
+    def test_a_managed_row_without_a_generation_is_refused_before_the_journal(
+        self, tmux, journal, monkeypatch
+    ):
+        """The other half of the same question, and the ordering that matters.
+
+        A managed row's bytes must pass a fence this row cannot name, so it
+        is refused -- and refused from the resolution, before ``open_intent``
+        commits anything. A refusal decided after the claim would leave a
+        record in ``intent`` that no verb resolves: the journal's sweep only
+        reclaims rows whose owning process is gone, and this server is alive.
+        """
+        resolved = _seq_resolved(terminal_generation=None)
+        monkeypatch.setattr(service, "resolve_control_identity", lambda _terminal: resolved)
+
+        result = _deliver(journal, text="/compact")
+
+        assert result.outcome == REFUSED
+        assert result.reason_code == REASON_LINEAGE_UNPROVEN
+        assert "durable sources name no generation" in result.detail
+        assert tmux.writes == []
+        with pytest.raises(ControlInputNotFound):
+            journal.get(CONTROL)
+
+    def test_a_managed_row_without_a_generation_never_reaches_an_unfenced_write(self):
+        """The admission itself refuses, not only the caller that asks first.
+
+        ``deliver_control_input`` screens this before the journal, but the
+        admission is the choke point every managed byte lane shares -- and
+        ``assert`` is stripped under ``python -O``, so the guard has to be a
+        raise rather than an assertion.
+        """
+        resolved = _seq_resolved(terminal_generation=None)
+        with pytest.raises(gf.GenerationUnselectable):
+            with service.provider_byte_admission(resolved, TERMINAL, None):
+                pytest.fail("a managed row with no generation was admitted")
+
+    def test_an_unselectable_generation_is_not_reported_as_a_fence(self):
+        """A fence says advance to the successor; there is no successor of
+        nothing, so a caller told 'fenced' would chase a remedy that cannot
+        exist."""
+        assert (
+            service._admission_refusal_reason(gf.GenerationUnselectable("none"))
+            == REASON_LINEAGE_UNPROVEN
+        )
+        assert (
+            service._admission_refusal_reason(gf.FencedError("sealed")) == REASON_GENERATION_FENCED
+        )
+        assert REASON_LINEAGE_UNPROVEN != REASON_GENERATION_FENCED
+
+
+class TestAManagedRowKeepsItsFence:
+    """The polarity cond-0413 must not invert: narrowing which rows need a
+    generation never removes the fence from a row that has one."""
+
+    def test_a_sealed_generation_still_refuses_a_managed_control(
+        self, tmux, journal, monkeypatch, tmp_path
+    ):
+        from cli_agent_orchestrator import constants
+
+        companion = tmp_path / "companion"
+        monkeypatch.setattr(constants, "COMPANION_DIR", companion)
+        resolved = _seq_resolved()
+        monkeypatch.setattr(service, "resolve_control_identity", lambda _terminal: resolved)
+        gf.install_fence(
+            companion,
+            terminal_id=TERMINAL,
+            generation=resolved.terminal_generation,
+            vintage="v2",
+            fencing_token_id="token-1",
+            request={
+                "schema": gf.FENCE_REQUEST_SCHEMA,
+                "terminal_generation": resolved.terminal_generation,
+                "obligation_generation": "obligation-1",
+                "attempt_id": "attempt-1",
+                "intent_id": "11111111-1111-4111-8111-111111111111",
+                "report_sha256": "a" * 64,
+            },
+        )
+
+        result = _deliver(journal, text="/compact")
+
+        assert result.outcome == REFUSED
+        assert result.reason_code == REASON_GENERATION_FENCED
+        assert tmux.writes == []
+        assert journal.get(CONTROL).state == STATE_REFUSED
+
+    def test_a_stale_generation_binding_still_refuses_the_managed_bytes(
+        self, tmux, journal, monkeypatch
+    ):
+        """The corrupt state this machinery exists to prevent: the reservation
+        moved on, so these bytes would reach a generation that is no longer
+        the one the row resolves."""
+        from cli_agent_orchestrator.services import managed_launch_v2
+
+        resolved = _seq_resolved(managed_reservation_id="res-stale")
+        monkeypatch.setattr(service, "resolve_control_identity", lambda _terminal: resolved)
+        monkeypatch.setattr(
+            managed_launch_v2,
+            "get",
+            lambda _rid: {
+                "terminal_id": TERMINAL,
+                # The reservation has advanced past the generation this
+                # control resolved and would be admitted under.
+                "generation": "99999999-9999-4999-8999-999999999999",
+                "binding": {"attempt_id": "att-1", "fencing_token_id": "tok-1"},
+            },
+        )
+
+        result = _deliver(journal, text="/compact")
+
+        assert result.outcome == REFUSED
+        assert result.reason_code == REASON_GENERATION_FENCED
+        assert "binding changed" in result.detail
+        assert tmux.writes == []
+        assert journal.get(CONTROL).state == STATE_REFUSED
+
+
+class TestTheInboxLaneAnswersTheSameQuestion:
+    """The second byte lane through the same admission (control_input_service
+    :4787 on origin/main). Its caller gates on a managed reservation, so a
+    managed row that resolves no generation is a narrow race -- and one that
+    used to escape as an AssertionError into ``inbox_service``'s broad
+    handler, marking every message in the batch FAILED though provably no
+    byte was sent."""
+
+    def test_a_managed_payload_without_a_generation_is_typed_refused(self, monkeypatch):
+        resolved = replace(
+            TestNativeInboxPayload()._resolved(),
+            managed=True,
+            managed_reservation_id="res-1",
+            terminal_generation=None,
+        )
+        monkeypatch.setattr(service, "resolve_control_identity", lambda tid: resolved)
+
+        result = service.deliver_native_inbox_payload("a1b2c3d4", text="hello")
+
+        assert result.outcome == REFUSED
+        assert result.reason_code == REASON_LINEAGE_UNPROVEN
+        # The lane answers from what it read, before it enters the session
+        # barrier or the admission -- so the refusal names the observation
+        # rather than restating the admission's own terser message.
+        assert "durable sources name no generation" in result.detail
+        assert "nothing was typed" in result.detail
+        assert result.chunks_sent == 0 and result.enter_sent is False
