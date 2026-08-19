@@ -1,15 +1,17 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   api, ApiError, errorText, conflictDetail, TrackerProject, TrackerIssue, TrackerIssuePage,
-  TrackerVocabulary, TrackerScope, TrackerLabelFacets,
+  TrackerVocabulary, TrackerScope, TrackerOptionField,
 } from '../api'
 import { linkPhrase } from '../lib/issueMap'
 import { useStore } from '../store'
 import { ConfirmModal } from './ConfirmModal'
 import { WayfinderPanel } from './WayfinderPanel'
+import { SearchableMultiSelect, SearchableOption, SearchableSelect } from './SearchablePicker'
 import {
   FolderGit2, Plus, Search, Trash2, X, Loader2, Archive, ChevronRight, MessageSquare,
   History, Link2, Save, FileDown, CircleDot, CheckCircle2, Lightbulb, Compass, List,
+  SlidersHorizontal, ChevronDown,
 } from 'lucide-react'
 
 /**
@@ -144,8 +146,11 @@ interface TabFilters {
   statusFilter: string[]
   severityFilter: string[]
   openOnly: boolean
-  /** One exact label (the server's label filter is exact-match, single). */
-  label: string | null
+  /** Repeated exact labels compose as AND on the server. */
+  labels: string[]
+  component: string
+  assignee: string
+  reporter: string
   unlabeled: boolean
   offset: number
 }
@@ -156,7 +161,10 @@ function defaultTabFilters(): TabFilters {
     statusFilter: [],
     severityFilter: [],
     openOnly: true,
-    label: null,
+    labels: [],
+    component: '',
+    assignee: '',
+    reporter: '',
     unlabeled: false,
     offset: 0,
   }
@@ -183,10 +191,10 @@ export function ProjectsPanel() {
     feature: defaultTabFilters(),
     all: defaultTabFilters(),
   })
-  // List ⇄ Wayfinder view, the open map, and the project's label facets.
+  // List ⇄ Wayfinder view and the open map.
   const [view, setView] = useState<'list' | 'wayfinder'>('list')
   const [mapKey, setMapKey] = useState<string | null>(null)
-  const [facets, setFacets] = useState<TrackerLabelFacets | null>(null)
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
   // Bumped whenever tracker state changes so the map projection re-reads.
   const [trackerVersion, setTrackerVersion] = useState(0)
 
@@ -210,7 +218,9 @@ export function ProjectsPanel() {
       const urlKey = params.get('key')
       const urlView = params.get('view')
       const urlMap = params.get('map')
-      const urlLabel = params.get('label')
+      const urlLabels = params.getAll('label')
+      const urlStatuses = params.getAll('status')
+      const urlSeverities = params.getAll('severity')
       const urlUnlabeled = params.get('unlabeled') === '1'
       const tab: TabKind =
         urlKind && (['issue', 'feature', 'all'] as TabKind[]).includes(urlKind) ? urlKind : 'issue'
@@ -220,12 +230,21 @@ export function ProjectsPanel() {
       if (urlKey) setSelectedKey(urlKey)
       if (urlView === 'wayfinder') setView('wayfinder')
       if (urlMap) setMapKey(urlMap)
-      if (urlLabel || urlUnlabeled) {
-        setFiltersByKind(prev => ({
-          ...prev,
-          [tab]: { ...prev[tab], label: urlLabel, unlabeled: urlUnlabeled, offset: 0 },
-        }))
-      }
+      setFiltersByKind(prev => ({
+        ...prev,
+        [tab]: {
+          ...prev[tab],
+          labels: urlLabels,
+          statusFilter: urlStatuses,
+          severityFilter: urlSeverities,
+          component: params.get('component') ?? '',
+          assignee: params.get('assignee') ?? '',
+          reporter: params.get('reporter') ?? '',
+          unlabeled: urlUnlabeled,
+          openOnly: params.get('open') !== '0',
+          offset: 0,
+        },
+      }))
       // Defer project override until after projects load; store intent
       if (urlProject) {
         ;(window as unknown as { __caoInitialProject?: string }).__caoInitialProject = urlProject
@@ -268,15 +287,6 @@ export function ProjectsPanel() {
     api.getTrackerProject(activeId).then(setProject).catch(() => setProject(null))
   }, [activeId])
 
-  // Label facets power the filter bar's discoverable labels + counts. A
-  // missing/foreign shape degrades to "no bar" rather than a crash.
-  useEffect(() => {
-    if (!activeId) { setFacets(null); return }
-    api.getTrackerLabels(activeId)
-      .then(data => setFacets(data && Array.isArray(data.labels) ? data : null))
-      .catch(() => setFacets(null))
-  }, [activeId, trackerVersion])
-
   const loadIssues = useCallback(async () => {
     if (!activeId) { setPage(null); return }
     setIssuesLoading(true)
@@ -286,7 +296,10 @@ export function ProjectsPanel() {
       q: f.query.trim() || undefined,
       status: f.statusFilter.length ? f.statusFilter : undefined,
       severity: f.severityFilter.length ? f.severityFilter : undefined,
-      label: f.label ?? undefined,
+      label: f.labels.length ? f.labels : undefined,
+      component: f.component || undefined,
+      assignee: f.assignee || undefined,
+      reporter: f.reporter || undefined,
       unlabeled: f.unlabeled || undefined,
       openOnly: f.openOnly,
       limit: PAGE_SIZE,
@@ -335,8 +348,22 @@ export function ProjectsPanel() {
       else params.delete('view')
       if (view === 'wayfinder' && mapKey) params.set('map', mapKey)
       else params.delete('map')
-      if (currentFilters.label) params.set('label', currentFilters.label)
-      else params.delete('label')
+      params.delete('label')
+      for (const label of currentFilters.labels) params.append('label', label)
+      params.delete('status')
+      for (const status of currentFilters.statusFilter) params.append('status', status)
+      params.delete('severity')
+      for (const severity of currentFilters.severityFilter) params.append('severity', severity)
+      for (const [name, value] of [
+        ['component', currentFilters.component],
+        ['assignee', currentFilters.assignee],
+        ['reporter', currentFilters.reporter],
+      ] as const) {
+        if (value) params.set(name, value)
+        else params.delete(name)
+      }
+      if (currentFilters.openOnly) params.delete('open')
+      else params.set('open', '0')
       if (currentFilters.unlabeled) params.set('unlabeled', '1')
       else params.delete('unlabeled')
       const newSearch = params.toString()
@@ -347,7 +374,7 @@ export function ProjectsPanel() {
       if (newUrl === window.location.pathname + window.location.search) return
       window.history.pushState(null, '', newUrl)
     } catch { /* test env */ }
-  }, [activeId, kind, selectedKey, view, mapKey, currentFilters.label, currentFilters.unlabeled])
+  }, [activeId, kind, selectedKey, view, mapKey, currentFilters])
 
   // Cleanup stale key on unmount so next test starts collapsed
   useEffect(() => {
@@ -375,7 +402,9 @@ export function ProjectsPanel() {
         const urlKey = params.get('key')
         const urlView = params.get('view')
         const urlMap = params.get('map')
-        const urlLabel = params.get('label')
+        const urlLabels = params.getAll('label')
+        const urlStatuses = params.getAll('status')
+        const urlSeverities = params.getAll('severity')
         const urlUnlabeled = params.get('unlabeled') === '1'
         const tab: TabKind =
           urlKind && (['issue', 'feature', 'all'] as TabKind[]).includes(urlKind) ? urlKind : 'issue'
@@ -386,7 +415,18 @@ export function ProjectsPanel() {
         setMapKey(urlMap)
         setFiltersByKind(prev => ({
           ...prev,
-          [tab]: { ...prev[tab], label: urlLabel, unlabeled: urlUnlabeled, offset: 0 },
+          [tab]: {
+            ...prev[tab],
+            labels: urlLabels,
+            statusFilter: urlStatuses,
+            severityFilter: urlSeverities,
+            component: params.get('component') ?? '',
+            assignee: params.get('assignee') ?? '',
+            reporter: params.get('reporter') ?? '',
+            unlabeled: urlUnlabeled,
+            openOnly: params.get('open') !== '0',
+            offset: 0,
+          },
         }))
       } catch { /* */ }
     }
@@ -421,9 +461,6 @@ export function ProjectsPanel() {
     setTrackerVersion(v => v + 1)
   }, [loadIssues, activeId])
 
-  const toggle = useCallback((list: string[], value: string, set: (next: string[]) => void) =>
-    set(list.includes(value) ? list.filter(v => v !== value) : [...list, value]), [])
-
   const updateStatusFilter = useCallback((value: string) => {
     const list = currentFilters.statusFilter
     const next = list.includes(value) ? list.filter(v => v !== value) : [...list, value]
@@ -435,6 +472,39 @@ export function ProjectsPanel() {
     const next = list.includes(value) ? list.filter(v => v !== value) : [...list, value]
     updateCurrentFilters({ severityFilter: next, offset: 0 })
   }, [currentFilters.severityFilter, updateCurrentFilters])
+
+  const loadFieldOptions = useCallback(async (
+    field: TrackerOptionField,
+    query: string,
+  ): Promise<SearchableOption[]> => {
+    if (!activeId) return []
+    const result = await api.getTrackerFieldOptions(activeId, field, query, 16)
+    return result.options.map(option => ({
+      value: option.value,
+      label: option.value,
+      description: `${option.open} open · ${option.total} total`,
+    }))
+  }, [activeId, trackerVersion])
+  const loadLabelOptions = useCallback(
+    (query: string) => loadFieldOptions('label', query), [loadFieldOptions],
+  )
+  const loadComponentOptions = useCallback(
+    (query: string) => loadFieldOptions('component', query), [loadFieldOptions],
+  )
+  const loadAssigneeOptions = useCallback(
+    (query: string) => loadFieldOptions('assignee', query), [loadFieldOptions],
+  )
+  const loadReporterOptions = useCallback(
+    (query: string) => loadFieldOptions('reporter', query), [loadFieldOptions],
+  )
+
+  const advancedFilterCount = currentFilters.statusFilter.length
+    + currentFilters.severityFilter.length
+    + currentFilters.labels.length
+    + Number(Boolean(currentFilters.component))
+    + Number(Boolean(currentFilters.assignee))
+    + Number(Boolean(currentFilters.reporter))
+    + Number(currentFilters.unlabeled)
 
   if (loading) {
     return <div className="text-gray-500 text-sm py-12 text-center">Loading projects…</div>
@@ -602,84 +672,127 @@ export function ProjectsPanel() {
                   )
                 })}
                 <span className="w-px h-4 bg-gray-800 mx-2" />
-                {(vocab?.severities ?? []).map(s => (
+                <button
+                  type="button"
+                  aria-expanded={showAdvancedFilters}
+                  aria-controls="tracker-advanced-filters"
+                  onClick={() => setShowAdvancedFilters(open => !open)}
+                  className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] transition-colors ${
+                    showAdvancedFilters || advancedFilterCount
+                      ? 'border-emerald-600/50 bg-emerald-500/10 text-emerald-300'
+                      : 'border-gray-800 text-gray-500 hover:border-gray-700 hover:text-gray-300'
+                  }`}
+                >
+                  <SlidersHorizontal size={12} />
+                  Advanced filters
+                  {advancedFilterCount > 0 && (
+                    <span className="rounded-full bg-emerald-500/20 px-1.5 text-[10px]">{advancedFilterCount}</span>
+                  )}
+                  <ChevronDown size={12} className={`transition-transform ${showAdvancedFilters ? 'rotate-180' : ''}`} />
+                </button>
+                {advancedFilterCount > 0 && (
                   <button
-                    key={s}
-                    onClick={() => updateSeverityFilter(s)}
-
-                    className={`px-2 py-0.5 rounded text-[11px] border transition-colors ${
-                      currentFilters.severityFilter.includes(s)
-                        ? SEVERITY_CLASS[s] ?? SEVERITY_CLASS.unset
-                        : 'border-gray-800 text-gray-500 hover:text-gray-300'
-                    }`}
+                    type="button"
+                    onClick={() => updateCurrentFilters({
+                      statusFilter: [], severityFilter: [], labels: [], component: '',
+                      assignee: '', reporter: '', unlabeled: false, offset: 0,
+                    })}
+                    className="text-[11px] text-gray-500 hover:text-gray-300"
                   >
-                    {s}
+                    Clear filters
                   </button>
-                ))}
-                <span className="w-px bg-gray-800 mx-1" />
-                {(vocab?.statuses ?? []).map(s => (
-                  <button
-                    key={s}
-                    onClick={() => updateStatusFilter(s)}
-                    className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
-                      currentFilters.statusFilter.includes(s)
-                        ? STATUS_CLASS[s] ?? 'bg-gray-700 text-gray-200'
-                        : 'text-gray-500 hover:text-gray-300'
-                    }`}
-                  >
-                    {s}
-                  </button>
-                ))}
+                )}
               </div>
 
-              {/* Exact-label filters with counts, discovered from the project.
-                  Label and unlabeled are mutually exclusive in the UI (their
-                  intersection is empty by definition). */}
-              {facets && (facets.labels.length > 0 || facets.unlabeled > 0) && (
-                <div className="flex flex-wrap gap-1.5 items-center" data-testid="label-filter-bar">
-                  <span className="text-[11px] font-medium text-gray-500 mr-1">Labels:</span>
-                  {facets.labels.map(f => {
-                    const active = currentFilters.label === f.label
-                    return (
-                      <button
-                        key={f.label}
-                        onClick={() =>
-                          updateCurrentFilters({ label: active ? null : f.label, unlabeled: false, offset: 0 })
-                        }
-                        aria-pressed={active}
-                        aria-label={`Filter by label ${f.label}`}
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] border transition-colors ${
-                          active
-                            ? 'bg-emerald-600 border-emerald-500 text-white'
-                            : 'border-gray-800 text-gray-500 hover:text-gray-300 hover:border-gray-700'
-                        }`}
-                      >
-                        {f.label.startsWith('wayfinder:') && <Compass size={10} />}
-                        {f.label}
-                        <span className={`text-[10px] ${active ? 'text-emerald-200' : 'text-gray-600'}`}>
-                          {f.open}/{f.total}
-                        </span>
-                      </button>
-                    )
-                  })}
-                  {facets.unlabeled > 0 && (
-                    <button
-                      onClick={() =>
-                        updateCurrentFilters({ unlabeled: !currentFilters.unlabeled, label: null, offset: 0 })
-                      }
-                      aria-pressed={currentFilters.unlabeled}
-                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] border border-dashed transition-colors ${
-                        currentFilters.unlabeled
-                          ? 'bg-amber-600/80 border-amber-500 text-white'
-                          : 'border-gray-700 text-gray-500 hover:text-gray-300'
-                      }`}
-                    >
-                      unlabeled
-                      <span className={`text-[10px] ${currentFilters.unlabeled ? 'text-amber-100' : 'text-gray-600'}`}>
-                        {facets.unlabeled_open}/{facets.unlabeled}
-                      </span>
-                    </button>
-                  )}
+              {showAdvancedFilters && (
+                <div
+                  id="tracker-advanced-filters"
+                  data-testid="advanced-filters"
+                  className="grid gap-4 rounded-lg border border-gray-800 bg-gray-950/50 p-4 lg:grid-cols-2"
+                >
+                  <div className="space-y-4">
+                    <div>
+                      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-gray-600">Priority</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(vocab?.severities ?? []).map(s => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => updateSeverityFilter(s)}
+                            aria-pressed={currentFilters.severityFilter.includes(s)}
+                            className={`rounded border px-2 py-0.5 text-[11px] transition-colors ${
+                              currentFilters.severityFilter.includes(s)
+                                ? SEVERITY_CLASS[s] ?? SEVERITY_CLASS.unset
+                                : 'border-gray-800 text-gray-500 hover:text-gray-300'
+                            }`}
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-gray-600">Status</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(vocab?.statuses ?? []).map(s => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => updateStatusFilter(s)}
+                            aria-pressed={currentFilters.statusFilter.includes(s)}
+                            className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
+                              currentFilters.statusFilter.includes(s)
+                                ? STATUS_CLASS[s] ?? 'bg-gray-700 text-gray-200'
+                                : 'text-gray-500 hover:text-gray-300'
+                            }`}
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <label className="block">
+                      <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-gray-600">Labels</span>
+                      <SearchableMultiSelect
+                        values={currentFilters.labels}
+                        onChange={labels => updateCurrentFilters({ labels, unlabeled: false, offset: 0 })}
+                        loadOptions={loadLabelOptions}
+                        placeholder="Search labels"
+                        ariaLabel="Filter labels"
+                        emptyMessage="No matching labels"
+                      />
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-gray-400">
+                      <input
+                        type="checkbox"
+                        checked={currentFilters.unlabeled}
+                        onChange={event => updateCurrentFilters({
+                          unlabeled: event.target.checked,
+                          labels: event.target.checked ? [] : currentFilters.labels,
+                          offset: 0,
+                        })}
+                        className="accent-emerald-600"
+                      />
+                      Only items without labels
+                    </label>
+                  </div>
+                  <div className="space-y-3">
+                    <label className="block">
+                      <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-gray-600">Component</span>
+                      <SearchableSelect value={currentFilters.component} onChange={component => updateCurrentFilters({ component, offset: 0 })}
+                        loadOptions={loadComponentOptions} placeholder="Search components" ariaLabel="Filter component" />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-gray-600">Assignee / owner</span>
+                      <SearchableSelect value={currentFilters.assignee} onChange={assignee => updateCurrentFilters({ assignee, offset: 0 })}
+                        loadOptions={loadAssigneeOptions} placeholder="Search assignees" ariaLabel="Filter assignee" />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-gray-600">Reporter / requester</span>
+                      <SearchableSelect value={currentFilters.reporter} onChange={reporter => updateCurrentFilters({ reporter, offset: 0 })}
+                        loadOptions={loadReporterOptions} placeholder="Search reporters" ariaLabel="Filter reporter" />
+                    </label>
+                  </div>
                 </div>
               )}
             </div>
@@ -1046,7 +1159,7 @@ function ItemDetail({
   const { showSnackbar } = useStore()
   const [issue, setIssue] = useState<TrackerIssue | null>(null)
   const [draft, setDraft] = useState<Record<string, string>>({})
-  const [labelText, setLabelText] = useState('')
+  const [labelValues, setLabelValues] = useState<string[]>([])
   const [comment, setComment] = useState('')
   const [showHistory, setShowHistory] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -1076,10 +1189,11 @@ function ItemDetail({
           assignee: row.assignee ?? '',
           reporter: row.reporter ?? '',
           failing_command: row.failing_command ?? '',
+          reproduction_steps: row.reproduction_steps ?? '',
           evidence: row.evidence ?? '',
           resolution: row.resolution ?? '',
         })
-        setLabelText(row.labels.join(', '))
+        setLabelValues(row.labels)
         setDuplicateOf(row.duplicate_of ?? '')
         setCasConflict(null)
       }
@@ -1099,13 +1213,12 @@ function ItemDetail({
       const current = (base as unknown as Record<string, unknown>)[field]
       if ((current ?? '') !== value) changes[field] = value
     }
-    const next = labelText.split(',').map(s => s.trim()).filter(Boolean)
-    const added = next.filter(l => !base.labels.includes(l))
-    const removed = base.labels.filter(l => !next.includes(l))
+    const added = labelValues.filter(l => !base.labels.includes(l))
+    const removed = base.labels.filter(l => !labelValues.includes(l))
     if (added.length) changes.add_labels = added
     if (removed.length) changes.remove_labels = removed
     return changes
-  }, [draft, labelText])
+  }, [draft, labelValues])
 
   const dirty = useMemo(() => (issue ? computeChanges(issue) : {}), [issue, computeChanges])
 
@@ -1119,22 +1232,19 @@ function ItemDetail({
     try {
       const changes = opts?.changesOverride ?? dirty
       const body: Record<string, unknown> = { ...changes, ...extra, actor: 'dashboard' }
-      if (isFeature) {
-        // Feature-specific validation: duplicate requires canonical key
-        if (extra?.status === 'duplicate' && !duplicateOf.trim()) {
-          showSnackbar({ type: 'error', message: 'Duplicate requires a canonical key' })
-          setSaving(false)
-          return
-        }
-        if (extra?.status === 'duplicate') body.duplicate_of = duplicateOf.trim()
+      if (extra?.status === 'duplicate' && !duplicateOf.trim()) {
+        showSnackbar({ type: 'error', message: 'Duplicate requires a canonical issue' })
+        setSaving(false)
+        return
       }
+      if (extra?.status === 'duplicate') body.duplicate_of = duplicateOf.trim()
       // Body edits carry optimistic concurrency: the draft was written against
       // the loaded version, and a concurrent edit must not be overwritten
       // silently. Other field-only patches stay unconditional, as before.
       const expected =
         opts?.expectedUpdatedAt !== undefined
           ? opts.expectedUpdatedAt
-          : 'body' in changes
+          : 'body' in changes || 'reproduction_steps' in changes
             ? issue?.updated_at ?? null
             : null
       if (expected) body.expected_updated_at = expected
@@ -1241,6 +1351,40 @@ function ItemDetail({
     }
   }
 
+  const loadFieldOptions = useCallback(async (
+    field: TrackerOptionField,
+    query: string,
+  ): Promise<SearchableOption[]> => {
+    if (!issue?.project_id) return []
+    const result = await api.getTrackerFieldOptions(issue.project_id, field, query, 12)
+    return result.options.map(option => ({
+      value: option.value,
+      label: option.value,
+      description: `${option.open} open · ${option.total} total`,
+    }))
+  }, [issue?.project_id, issue?.updated_at])
+  const loadLabels = useCallback((query: string) => loadFieldOptions('label', query), [loadFieldOptions])
+  const loadComponents = useCallback((query: string) => loadFieldOptions('component', query), [loadFieldOptions])
+  const loadAssignees = useCallback((query: string) => loadFieldOptions('assignee', query), [loadFieldOptions])
+  const loadReporters = useCallback((query: string) => loadFieldOptions('reporter', query), [loadFieldOptions])
+  const loadIssueOptions = useCallback(async (query: string): Promise<SearchableOption[]> => {
+    if (!issue?.project_id) return []
+    const result = await api.listTrackerIssues({
+      projectId: issue.project_id,
+      kind: 'all',
+      q: query.trim() || undefined,
+      limit: 12,
+      order: 'updated_desc',
+    })
+    return result.issues
+      .filter(candidate => candidate.key !== issue.key)
+      .map(candidate => ({
+        value: candidate.key,
+        label: candidate.key,
+        description: `${candidate.title} · ${candidate.status}`,
+      }))
+  }, [issue?.project_id, issue?.key, issue?.updated_at])
+
   const removeLink = async (linkId: number) => {
     try {
       if (isFeature) {
@@ -1279,14 +1423,11 @@ function ItemDetail({
   const terminalStatuses = vocab.terminal_statuses_by_kind?.[presentation.kind] ?? vocab.terminal_statuses
   const isTerminal = terminalStatuses.includes(issue.status)
 
-  // Fields to render: for feature, hide failing_command when null/empty
+  // Free-form evidence fields stay text inputs; reusable vocabulary fields use
+  // searchable, creatable pickers below.
   const editableFields: Array<{ field: keyof TrackerIssue; label: string; mono?: boolean; hideWhenEmpty?: boolean }> = [
-    { field: 'component' as keyof TrackerIssue, label: 'Component' },
-    { field: 'assignee' as keyof TrackerIssue, label: presentation.assigneeLabel },
-    { field: 'reporter' as keyof TrackerIssue, label: presentation.reporterLabel },
     { field: 'failing_command' as keyof TrackerIssue, label: 'Failing command', mono: true, hideWhenEmpty: isFeature },
     { field: 'evidence' as keyof TrackerIssue, label: 'Evidence', mono: true },
-    { field: 'resolution' as keyof TrackerIssue, label: presentation.resolutionLabel },
   ].filter(f => !(f.hideWhenEmpty && !draft[f.field as string] && !issue[f.field]))
 
   return (
@@ -1312,7 +1453,10 @@ function ItemDetail({
         </select>
         <select
           value={issue.status}
-          onChange={e => patch({ status: e.target.value })}
+          onChange={e => {
+            if (e.target.value === 'duplicate') setClosingChoice('duplicate')
+            else patch({ status: e.target.value })
+          }}
           aria-label="Status"
           className="px-2 py-1.5 rounded bg-gray-900 border border-gray-800 text-xs text-gray-200"
         >
@@ -1396,27 +1540,32 @@ function ItemDetail({
               {opt.uiLabel}
             </button>
           ))}
-          {closingChoice === 'duplicate' && (
-            <span className="flex items-center gap-2 ml-2">
-              <input
-                value={duplicateOf}
-                onChange={e => setDuplicateOf(e.target.value)}
-                placeholder="canonical key (e.g. cond-0039)"
-                aria-label="Canonical key"
-                className="px-2 py-1 rounded bg-gray-950 border border-gray-700 text-[11px] text-gray-200 w-40"
-              />
-              <button
-                onClick={() => { patch({ status: 'duplicate' }); setClosingChoice('') }}
-                disabled={!duplicateOf.trim()}
-                className="px-2 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white text-[11px] disabled:opacity-40"
-              >
-                Confirm
-              </button>
-              <button onClick={() => setClosingChoice('')} className="text-gray-500 hover:text-gray-300">
-                <X size={12} />
-              </button>
-            </span>
-          )}
+        </div>
+      )}
+
+      {closingChoice === 'duplicate' && (
+        <div className="flex flex-wrap items-end gap-2 rounded border border-violet-700/40 bg-violet-500/10 p-3">
+          <label className="min-w-[260px] flex-1">
+            <span className="mb-1 block text-[11px] uppercase tracking-wide text-violet-300">Canonical issue</span>
+            <SearchableSelect
+              value={duplicateOf}
+              onChange={setDuplicateOf}
+              loadOptions={loadIssueOptions}
+              placeholder="Search by issue key or title"
+              ariaLabel="Canonical issue"
+              emptyMessage="No matching issues"
+            />
+          </label>
+          <button
+            onClick={() => { patch({ status: 'duplicate' }); setClosingChoice('') }}
+            disabled={!duplicateOf}
+            className="rounded bg-violet-600 px-3 py-2 text-xs text-white hover:bg-violet-500 disabled:opacity-40"
+          >
+            Mark duplicate
+          </button>
+          <button onClick={() => setClosingChoice('')} aria-label="Cancel duplicate" className="mb-2 text-gray-500 hover:text-gray-300">
+            <X size={13} />
+          </button>
         </div>
       )}
 
@@ -1458,6 +1607,42 @@ function ItemDetail({
       />
 
       <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className="text-[11px] uppercase tracking-wide text-gray-600">Component</span>
+          <SearchableSelect
+            value={draft.component ?? ''}
+            onChange={component => setDraft({ ...draft, component })}
+            loadOptions={loadComponents}
+            placeholder="Search or create a component"
+            ariaLabel="Component"
+            allowCreate
+            className="mt-1"
+          />
+        </label>
+        <label className="block">
+          <span className="text-[11px] uppercase tracking-wide text-gray-600">{presentation.assigneeLabel}</span>
+          <SearchableSelect
+            value={draft.assignee ?? ''}
+            onChange={assignee => setDraft({ ...draft, assignee })}
+            loadOptions={loadAssignees}
+            placeholder={`Search or create ${presentation.assigneeLabel.toLowerCase()}`}
+            ariaLabel={presentation.assigneeLabel}
+            allowCreate
+            className="mt-1"
+          />
+        </label>
+        <label className="block col-span-2">
+          <span className="text-[11px] uppercase tracking-wide text-gray-600">{presentation.reporterLabel}</span>
+          <SearchableSelect
+            value={draft.reporter ?? ''}
+            onChange={reporter => setDraft({ ...draft, reporter })}
+            loadOptions={loadReporters}
+            placeholder={`Search or create ${presentation.reporterLabel.toLowerCase()}`}
+            ariaLabel={presentation.reporterLabel}
+            allowCreate
+            className="mt-1"
+          />
+        </label>
         {editableFields.map(({ field, label, mono }) => (
           <label key={field as string} className="block">
             <span className="text-[11px] uppercase tracking-wide text-gray-600">{label}</span>
@@ -1470,24 +1655,47 @@ function ItemDetail({
           </label>
         ))}
         <label className="block col-span-2">
-          <span className="text-[11px] uppercase tracking-wide text-gray-600">Labels (comma separated)</span>
-          <input
-            value={labelText}
-            onChange={e => setLabelText(e.target.value)}
-            aria-label="Labels"
-            className="mt-1 w-full px-2 py-1.5 rounded bg-gray-900 border border-gray-800 text-xs text-gray-200"
+          <span className="text-[11px] uppercase tracking-wide text-gray-600">Labels</span>
+          <SearchableMultiSelect
+            values={labelValues}
+            onChange={setLabelValues}
+            loadOptions={loadLabels}
+            placeholder="Search or create labels"
+            ariaLabel="Labels"
+            allowCreate
+            className="mt-1"
           />
         </label>
-        {isFeature && issue.duplicate_of && (
+        {!isFeature && (
           <label className="block col-span-2">
-            <span className="text-[11px] uppercase tracking-wide text-gray-600">Duplicate of</span>
-            <input
-              value={duplicateOf}
-              onChange={e => setDuplicateOf(e.target.value)}
-              aria-label="Duplicate of"
-              className="mt-1 w-full px-2 py-1.5 rounded bg-gray-900 border border-gray-800 text-xs text-gray-200 font-mono"
+            <span className="text-[11px] uppercase tracking-wide text-gray-600">Reproduction steps</span>
+            <textarea
+              value={draft.reproduction_steps ?? ''}
+              onChange={e => setDraft({ ...draft, reproduction_steps: e.target.value })}
+              rows={4}
+              aria-label="Reproduction steps"
+              placeholder="Numbered steps, required setup, and the observed result"
+              className="mt-1 w-full rounded bg-gray-900 border border-gray-800 px-3 py-2 text-xs text-gray-200 font-mono leading-relaxed focus:outline-none focus:border-emerald-600/50"
             />
           </label>
+        )}
+        <label className="block col-span-2">
+          <span className="text-[11px] uppercase tracking-wide text-gray-600">{presentation.resolutionLabel}</span>
+          <textarea
+            value={draft.resolution ?? ''}
+            onChange={e => setDraft({ ...draft, resolution: e.target.value })}
+            rows={3}
+            aria-label={presentation.resolutionLabel}
+            className="mt-1 w-full rounded bg-gray-900 border border-gray-800 px-3 py-2 text-xs text-gray-200 leading-relaxed focus:outline-none focus:border-emerald-600/50"
+          />
+        </label>
+        {issue.duplicate_of && (
+          <div className="col-span-2 text-xs text-gray-500">
+            Duplicate of{' '}
+            <button onClick={() => onNavigate?.(issue.duplicate_of!)} className="font-mono text-emerald-400 hover:underline">
+              {issue.duplicate_of}
+            </button>
+          </div>
         )}
       </div>
 
@@ -1534,18 +1742,20 @@ function ItemDetail({
             })}
           </div>
         )}
-        <div className="flex gap-2">
-          <input
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+          <SearchableSelect
             value={linkTo}
-            onChange={e => setLinkTo(e.target.value)}
-            placeholder="Link to key (e.g. cond-0042)"
-            aria-label="Link target key"
-            className="flex-1 px-3 py-1.5 rounded bg-gray-900 border border-gray-800 text-xs text-gray-200 placeholder-gray-600"
+            onChange={setLinkTo}
+            loadOptions={loadIssueOptions}
+            placeholder="Search issue key or title"
+            ariaLabel="Link target issue"
+            emptyMessage="No matching issues"
+            className="flex-1"
           />
           <select value={linkKind} onChange={e => setLinkKind(e.target.value)} aria-label="Link kind" className="px-2 py-1.5 rounded bg-gray-900 border border-gray-800 text-xs text-gray-200">
             {vocab.link_kinds.map(k => <option key={k} value={k}>{k}</option>)}
           </select>
-          <button onClick={addLink} disabled={!linkTo.trim()} className="px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 disabled:opacity-40">Link</button>
+          <button onClick={addLink} disabled={!linkTo} className="px-3 py-2 rounded bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 disabled:opacity-40">Link</button>
         </div>
       </div>
 
@@ -1744,11 +1954,12 @@ function NewItemModal({
   const [severity, setSeverity] = useState('unset')
   const [status, setStatus] = useState('open')
   const [component, setComponent] = useState('')
-  const [requester, setRequester] = useState('')
+  const [requester, setRequester] = useState(kind === 'issue' ? 'dashboard' : '')
   const [owner, setOwner] = useState('')
-  const [labels, setLabels] = useState('')
+  const [labels, setLabels] = useState<string[]>([])
   const [evidence, setEvidence] = useState('')
   const [failingCommand, setFailingCommand] = useState('')
+  const [reproductionSteps, setReproductionSteps] = useState('')
   const [busy, setBusy] = useState(false)
 
   // Reset body when kind switches (modal is remounted via key, but guard anyway)
@@ -1767,7 +1978,7 @@ function NewItemModal({
         status: status || undefined,
         component: component.trim() || undefined,
         evidence: evidence.trim() || undefined,
-        labels: labels.split(',').map(s => s.trim()).filter(Boolean),
+        labels,
       }
       if (kind === 'feature') {
         base.reporter = requester.trim() || undefined
@@ -1775,8 +1986,10 @@ function NewItemModal({
         // feature creation must not send failing_command
       } else {
         base.failing_command = failingCommand.trim() || undefined
+        base.reproduction_steps = reproductionSteps.trim() || undefined
         base.evidence = evidence.trim() || undefined
-        base.reporter = 'dashboard'
+        base.reporter = requester.trim() || 'dashboard'
+        base.assignee = owner.trim() || undefined
       }
       const creator = kind === 'feature' ? api.createTrackerFeature : api.createTrackerIssue
       const created = await creator(base)
@@ -1794,6 +2007,22 @@ function NewItemModal({
     : kind === 'issue' && vocab.statuses_by_kind?.issue
       ? vocab.statuses_by_kind.issue
       : vocab.statuses
+
+  const loadFieldOptions = useCallback(async (
+    field: TrackerOptionField,
+    query: string,
+  ): Promise<SearchableOption[]> => {
+    const result = await api.getTrackerFieldOptions(project.id, field, query, 12)
+    return result.options.map(option => ({
+      value: option.value,
+      label: option.value,
+      description: `${option.open} open · ${option.total} total`,
+    }))
+  }, [project.id])
+  const loadLabels = useCallback((query: string) => loadFieldOptions('label', query), [loadFieldOptions])
+  const loadComponents = useCallback((query: string) => loadFieldOptions('component', query), [loadFieldOptions])
+  const loadAssignees = useCallback((query: string) => loadFieldOptions('assignee', query), [loadFieldOptions])
+  const loadReporters = useCallback((query: string) => loadFieldOptions('reporter', query), [loadFieldOptions])
 
   return (
     <Modal title={presentation.modalTitle(project.name)} onClose={onClose}>
@@ -1826,8 +2055,8 @@ function NewItemModal({
       <div className="grid grid-cols-2 gap-3">
         <label className="block">
           <span className="text-[11px] uppercase tracking-wide text-gray-500">Component</span>
-          <input value={component} onChange={e => setComponent(e.target.value)} aria-label="Component"
-            className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-sm text-gray-200" />
+          <SearchableSelect value={component} onChange={setComponent} loadOptions={loadComponents}
+            placeholder="Search or create a component" ariaLabel="Component" allowCreate className="mt-1" />
         </label>
         <label className="block">
           <span className="text-[11px] uppercase tracking-wide text-gray-500">Evidence path</span>
@@ -1840,30 +2069,48 @@ function NewItemModal({
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
               <span className="text-[11px] uppercase tracking-wide text-gray-500">Requester</span>
-              <input value={requester} onChange={e => setRequester(e.target.value)} aria-label="Requester"
-                className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-sm text-gray-200" />
+              <SearchableSelect value={requester} onChange={setRequester} loadOptions={loadReporters}
+                placeholder="Search or create a requester" ariaLabel="Requester" allowCreate className="mt-1" />
             </label>
             <label className="block">
               <span className="text-[11px] uppercase tracking-wide text-gray-500">Owner</span>
-              <input value={owner} onChange={e => setOwner(e.target.value)} aria-label="Owner"
-                className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-sm text-gray-200" />
+              <SearchableSelect value={owner} onChange={setOwner} loadOptions={loadAssignees}
+                placeholder="Search or create an owner" ariaLabel="Owner" allowCreate className="mt-1" />
             </label>
           </div>
-          <label className="block">
-            <span className="text-[11px] uppercase tracking-wide text-gray-500">Labels (comma separated)</span>
-            <input value={labels} onChange={e => setLabels(e.target.value)} aria-label="Labels"
-              className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-xs text-gray-200" />
-          </label>
         </>
       ) : (
         <>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-[11px] uppercase tracking-wide text-gray-500">Reporter</span>
+              <SearchableSelect value={requester} onChange={setRequester} loadOptions={loadReporters}
+                placeholder="Search or create a reporter" ariaLabel="Reporter" allowCreate className="mt-1" />
+            </label>
+            <label className="block">
+              <span className="text-[11px] uppercase tracking-wide text-gray-500">Assignee</span>
+              <SearchableSelect value={owner} onChange={setOwner} loadOptions={loadAssignees}
+                placeholder="Search or create an assignee" ariaLabel="Assignee" allowCreate className="mt-1" />
+            </label>
+          </div>
           <label className="block">
             <span className="text-[11px] uppercase tracking-wide text-gray-500">Failing command</span>
             <input value={failingCommand} onChange={e => setFailingCommand(e.target.value)} aria-label="Failing command"
               className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-xs text-gray-200 font-mono" />
           </label>
+          <label className="block">
+            <span className="text-[11px] uppercase tracking-wide text-gray-500">Reproduction steps</span>
+            <textarea value={reproductionSteps} onChange={e => setReproductionSteps(e.target.value)} rows={4}
+              aria-label="Reproduction steps" placeholder="Numbered steps, required setup, and the observed result"
+              className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-xs text-gray-200 font-mono" />
+          </label>
         </>
       )}
+      <label className="block">
+        <span className="text-[11px] uppercase tracking-wide text-gray-500">Labels</span>
+        <SearchableMultiSelect values={labels} onChange={setLabels} loadOptions={loadLabels}
+          placeholder="Search or create labels" ariaLabel="Labels" allowCreate className="mt-1" />
+      </label>
       <button onClick={create} disabled={busy || !title.trim()}
         className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm disabled:opacity-50">
         {busy && <Loader2 size={14} className="animate-spin" />} {presentation.createActionLabel}

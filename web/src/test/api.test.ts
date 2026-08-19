@@ -351,7 +351,7 @@ describe('Tracker wayfinding wrappers (cond-0394)', () => {
 
   it('passes the unlabeled and exact-label filters through to the query string', async () => {
     mockResponse({ total: 0, limit: 100, offset: 0, issues: [] })
-    await api.listTrackerIssues({ projectId: 'cao-system', label: 'wayfinder:map', unlabeled: true })
+    await api.listTrackerIssues({ projectId: 'cao-system', label: ['wayfinder:map'], unlabeled: true })
     const url = mockFetch.mock.calls[0][0] as string
     expect(url).toContain('project_id=cao-system')
     expect(url).toContain('label=wayfinder%3Amap')

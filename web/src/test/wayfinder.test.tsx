@@ -92,6 +92,7 @@ function issue(over: Record<string, unknown>): TrackerIssue {
     assignee: null,
     labels: [],
     failing_command: null,
+    reproduction_steps: null,
     evidence: null,
     resolution: null,
     session_name: null,
@@ -173,6 +174,14 @@ describe('Wayfinder view', () => {
     const path = url.split('?')[0]
     if (path === '/tracker/vocabulary') return VOCAB
     if (path === '/tracker/projects/cao-system/labels') return FACETS
+    if (path === '/tracker/projects/cao-system/options') {
+      const params = new URLSearchParams(url.split('?')[1] ?? '')
+      const field = params.get('field') ?? 'label'
+      const options = field === 'label'
+        ? FACETS.labels.map(item => ({ value: item.label, total: item.total, open: item.open }))
+        : []
+      return { project_id: 'cao-system', field, query: params.get('q') ?? '', matching_total: options.length, options }
+    }
     if (path === '/tracker/projects/cao-system') return PROJECT
     if (path === '/tracker/projects') return [PROJECT]
     if (path === '/tracker/issues/cond-0001/map') return PROJECTION
@@ -244,9 +253,11 @@ describe('Wayfinder view', () => {
   it('discovers labels with counts and filters by exact label', async () => {
     render(<ProjectsPanel />)
     await screen.findByText('CAO System')
-    const chip = await screen.findByRole('button', { name: 'Filter by label effort:deploy' })
-    expect(within(chip).getByText('4/5')).toBeInTheDocument()
-    fireEvent.click(chip)
+    expect(screen.queryByText('effort:deploy')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Filter labels' }))
+    const option = await screen.findByRole('option', { name: /effort:deploy.*4 open.*5 total/ })
+    fireEvent.click(option)
     await waitFor(() => expect(calls.some(c => c.url.includes('label=effort%3Adeploy'))).toBe(true))
     await waitFor(() => expect(window.location.search).toContain('label=effort%3Adeploy'))
   })
@@ -254,7 +265,8 @@ describe('Wayfinder view', () => {
   it('offers the unlabeled bucket with its count', async () => {
     render(<ProjectsPanel />)
     await screen.findByText('CAO System')
-    fireEvent.click(await screen.findByRole('button', { name: /unlabeled/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
+    fireEvent.click(screen.getByLabelText('Only items without labels'))
     await waitFor(() => expect(calls.some(c => c.url.includes('unlabeled=true'))).toBe(true))
     expect(await screen.findByText('migrate the store')).toBeInTheDocument()
     expect(screen.queryByText('research providers')).not.toBeInTheDocument()
@@ -467,7 +479,9 @@ describe('Wayfinder view', () => {
     fireEvent.click(within(list).getByText('migrate the store'))
     const detail = await screen.findByTestId('wayfinder-detail')
     const labels = await within(detail).findByLabelText('Labels')
-    fireEvent.change(labels, { target: { value: 'bug, ready-for-agent' } })
+    fireEvent.click(within(detail).getByRole('button', { name: 'Remove needs-triage' }))
+    fireEvent.change(labels, { target: { value: 'ready-for-agent' } })
+    fireEvent.click(await within(detail).findByRole('option', { name: 'Create “ready-for-agent”' }))
     // The delta is two changes (one add, one remove), not one replacement.
     fireEvent.click(within(detail).getByRole('button', { name: /Save 2 changes/ }))
     await waitFor(() => expect(calls.some(c => c.method === 'PATCH')).toBe(true))
@@ -550,9 +564,11 @@ describe('Wayfinder view', () => {
     await waitFor(() => expect(window.location.search).toContain('project=cao-system'))
     const depth = window.history.length
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Filter by label effort:deploy' }))
+    fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Filter labels' }))
+    fireEvent.click(await screen.findByRole('option', { name: /effort:deploy/ }))
     await waitFor(() => expect(window.location.search).toContain('label=effort%3Adeploy'))
-    fireEvent.click(await screen.findByRole('button', { name: /unlabeled/ }))
+    fireEvent.click(screen.getByLabelText('Only items without labels'))
     await waitFor(() => expect(window.location.search).toContain('unlabeled=1'))
     expect(window.location.search).not.toContain('label=')
     expect(window.history.length).toBe(depth + 2)

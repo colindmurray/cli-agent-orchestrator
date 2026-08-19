@@ -160,6 +160,8 @@ class TestIssueCommands:
             "conduct",
             "--label",
             "noisy",
+            "--reproduction",
+            "1. run the probe",
         )
         run(runner, issue_cli.issue, "edit", "cond-0001", "--assignee", "terra", "--actor", "colin")
         run(
@@ -176,6 +178,7 @@ class TestIssueCommands:
         out = run(runner, issue_cli.issue, "show", "cond-0001")
         assert "status:    closed" in out
         assert "resolution: fixed in #12" in out
+        assert "reproduction_steps:1. run the probe" in out
         assert "reproduced" in out
 
     def test_an_edit_with_nothing_to_change_is_refused(self, runner):

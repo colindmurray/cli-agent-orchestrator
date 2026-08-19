@@ -363,6 +363,25 @@ class TestListingAndSearch:
         got = tracker.list_issues(project_id="cao-system", query="conduct spawn")
         assert [i["title"] for i in got["issues"]] == ["beta"]
 
+    def test_search_covers_first_class_reproduction_steps(self, cao_system):
+        tracker.create_issue(
+            project_id="cao-system",
+            title="intermittent reconnect",
+            reproduction_steps="1. suspend the laptop\n2. resume while the pane is busy",
+        )
+        got = tracker.list_issues(project_id="cao-system", query="resume while the pane")
+        assert [i["title"] for i in got["issues"]] == ["intermittent reconnect"]
+
+    def test_repeated_label_filters_require_every_selected_label(self, cao_system):
+        tracker.create_issue(
+            project_id="cao-system", title="both", labels=["wayfinder:task", "initiative:alpha"]
+        )
+        tracker.create_issue(project_id="cao-system", title="one", labels=["wayfinder:task"])
+        got = tracker.list_issues(
+            project_id="cao-system", label=["wayfinder:task", "initiative:alpha"]
+        )
+        assert [i["title"] for i in got["issues"]] == ["both"]
+
     def test_open_only_excludes_terminal_statuses(self, cao_system):
         a = tracker.create_issue(project_id="cao-system", title="a")
         tracker.create_issue(project_id="cao-system", title="b")
@@ -384,6 +403,46 @@ class TestListingAndSearch:
 
     def test_limit_is_bounded(self, cao_system):
         assert tracker.list_issues(project_id="cao-system", limit=100000)["limit"] == 500
+
+
+class TestFirstClassReproduction:
+    def test_create_read_update_and_clear_round_trip(self, cao_system):
+        created = tracker.create_issue(
+            project_id="cao-system", title="a", reproduction_steps="1. run it"
+        )
+        assert created["reproduction_steps"] == "1. run it"
+        updated = tracker.update_issue(created["key"], reproduction_steps="1. run it twice")
+        assert updated["reproduction_steps"] == "1. run it twice"
+        cleared = tracker.update_issue(created["key"], reproduction_steps="")
+        assert cleared["reproduction_steps"] is None
+        detail = tracker.get_issue(created["key"])
+        events = [e for e in detail["events"] if e["field"] == "reproduction_steps"]
+        assert len(events) == 2
+
+
+class TestFieldOptions:
+    def test_search_is_bounded_and_reports_counts(self, cao_system):
+        tracker.create_issue(
+            project_id="cao-system", title="a", component="dashboard", labels=["initiative:ux"]
+        )
+        closed = tracker.create_issue(
+            project_id="cao-system", title="b", component="dashboard", labels=["initiative:ux"]
+        )
+        tracker.update_issue(closed["key"], status="closed")
+        tracker.create_issue(
+            project_id="cao-system", title="c", component="conduct", labels=["unrelated"]
+        )
+
+        components = tracker.field_options("cao-system", field="component", query="dash", limit=1)
+        assert components["matching_total"] == 1
+        assert components["options"] == [{"value": "dashboard", "total": 2, "open": 1}]
+        labels = tracker.field_options("cao-system", field="label", query="initiative")
+        assert labels["options"] == [{"value": "initiative:ux", "total": 2, "open": 1}]
+
+    def test_unknown_option_field_is_refused(self, cao_system):
+        with pytest.raises(TrackerError) as exc:
+            tracker.field_options("cao-system", field="status")
+        assert exc.value.code == "invalid"
 
 
 class TestCommentsAndLinks:
@@ -469,12 +528,14 @@ class TestMarkdownExport:
             severity="P2",
             reporter="13e6fe47",
             failing_command="python3 -B probes.py",
+            reproduction_steps="1. run the probe\n2. observe the traceback",
             body="Independent validation confirmed the mirror stays bounded.",
         )
         rendered = tracker.render_markdown("cao-system")
         assert "## cond-0001 — [P2] event-mirror lock contention" in rendered
         assert "- **reporter:** 13e6fe47" in rendered
         assert "python3 -B probes.py" in rendered
+        assert "1. run the probe\n2. observe the traceback" in rendered
 
     def test_the_export_defaults_to_open_issues(self, cao_system):
         a = tracker.create_issue(project_id="cao-system", title="done")

@@ -386,6 +386,7 @@ class TrackerIssueModel(Base):
     assignee = Column(String, nullable=True)
     labels = Column(Text, nullable=False, default="[]", server_default="[]")  # JSON array
     failing_command = Column(Text, nullable=True)
+    reproduction_steps = Column(Text, nullable=True)
     evidence = Column(Text, nullable=True)
     resolution = Column(Text, nullable=True)
     # Where it was filed from. Recorded as evidence, never as identity — a
@@ -2236,6 +2237,36 @@ def _migrate_tracker_kind_column() -> None:
         raise RuntimeError(f"tracker kind migration failed: {exc}") from exc
 
 
+def _migrate_tracker_reproduction_steps_column() -> None:
+    """Add the nullable first-class reproduction field to existing trackers.
+
+    Fresh databases receive the column from ORM metadata. Existing stores need
+    an explicit additive migration because ``create_all`` never alters a table
+    it finds. The field is nullable, so every historical issue remains a valid
+    row and the migration has no backfill or policy decision to make.
+    """
+    from sqlalchemy import text as sa_text
+
+    try:
+        with engine.begin() as conn:
+            info = list(conn.execute(sa_text("PRAGMA table_info(tracker_issues)")))
+            if not info:
+                return
+            cols = {row[1] for row in info}
+            if "key" not in cols or "project_id" not in cols:
+                raise RuntimeError("tracker_issues table is malformed: missing expected columns")
+            if "reproduction_steps" in cols:
+                return
+            conn.execute(
+                sa_text("ALTER TABLE tracker_issues ADD COLUMN reproduction_steps TEXT NULL")
+            )
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "duplicate column name" in msg and "reproduction_steps" in msg:
+            return
+        raise RuntimeError(f"tracker reproduction-steps migration failed: {exc}") from exc
+
+
 def ensure_tracker_schema() -> None:
     """Create the issue-tracker tables if they are absent.
 
@@ -2255,6 +2286,7 @@ def ensure_tracker_schema() -> None:
         tables=[t for t in Base.metadata.sorted_tables if t.name in _TRACKER_ORM_TABLE_NAMES],
     )
     _migrate_tracker_kind_column()
+    _migrate_tracker_reproduction_steps_column()
 
 
 def _ensure_db_dir() -> None:
@@ -2305,6 +2337,7 @@ def init_db() -> None:
     )
     _restrict_db_file_permissions()
     _migrate_tracker_kind_column()
+    _migrate_tracker_reproduction_steps_column()
     _migrate_terminals_schema()
     inbox_schema_ready = _migrate_callback_recovery_inbox_schema()
     _migrate_callback_recovery_schema(inbox_schema_ready=inbox_schema_ready)

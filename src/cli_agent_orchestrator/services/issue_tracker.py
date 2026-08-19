@@ -101,6 +101,7 @@ _EDITABLE_FIELDS: Tuple[str, ...] = (
     "assignee",
     "reporter",
     "failing_command",
+    "reproduction_steps",
     "evidence",
     "resolution",
     "duplicate_of",
@@ -881,6 +882,7 @@ def _issue_row(row: TrackerIssueModel) -> Dict[str, Any]:
         "assignee": row.assignee,
         "labels": _parse_labels(row.labels),
         "failing_command": row.failing_command,
+        "reproduction_steps": row.reproduction_steps,
         "evidence": row.evidence,
         "resolution": row.resolution,
         "session_name": row.session_name,
@@ -930,6 +932,7 @@ def create_issue(
     assignee: Optional[str] = None,
     labels: Optional[Iterable[Any]] = None,
     failing_command: Optional[str] = None,
+    reproduction_steps: Optional[str] = None,
     evidence: Optional[str] = None,
     session_name: Optional[str] = None,
     terminal_id: Optional[str] = None,
@@ -1013,6 +1016,7 @@ def create_issue(
             assignee=(assignee or None),
             labels=json.dumps(label_list),
             failing_command=(failing_command or None),
+            reproduction_steps=(reproduction_steps or None),
             evidence=(evidence or None),
             session_name=(session_name or None),
             terminal_id=(terminal_id or None),
@@ -1143,7 +1147,7 @@ def list_issues(
     component: Optional[str] = None,
     assignee: Optional[str] = None,
     reporter: Optional[str] = None,
-    label: Optional[str] = None,
+    label: Optional[Sequence[str] | str] = None,
     unlabeled: bool = False,
     query: Optional[str] = None,
     open_only: bool = False,
@@ -1191,13 +1195,14 @@ def list_issues(
         if reporter:
             q = q.filter(TrackerIssueModel.reporter == reporter)
         if label:
-            # Substring match against the JSON array. Quoted on both sides so
-            # `ui` cannot match `ui-polish`. `%` and `_` are LIKE wildcards and
-            # are legal label characters, so they are escaped — otherwise a
-            # label of `_` matches every single-character label, which is a
-            # silently over-broad filter rather than an error anybody sees.
-            needle = label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            q = q.filter(TrackerIssueModel.labels.like(f'%"{needle}"%', escape="\\"))
+            # Repeated labels compose as AND: selecting `wayfinder:task` and
+            # `initiative:alpha` means issues carrying both. Each comparison is
+            # exact inside the JSON array; quoted boundaries stop `ui` matching
+            # `ui-polish`, and LIKE metacharacters remain literal label text.
+            wanted_labels = [label] if isinstance(label, str) else list(label)
+            for raw_label in normalise_labels(wanted_labels):
+                needle = raw_label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                q = q.filter(TrackerIssueModel.labels.like(f'%"{needle}"%', escape="\\"))
         if unlabeled:
             # The stored value is always a JSON array ("[]" when empty), so an
             # exact comparison is the whole rule — no LIKE, no ambiguity.
@@ -1209,6 +1214,7 @@ def list_issues(
                 | TrackerIssueModel.body.ilike(needle)
                 | TrackerIssueModel.key.ilike(needle)
                 | TrackerIssueModel.failing_command.ilike(needle)
+                | TrackerIssueModel.reproduction_steps.ilike(needle)
                 | TrackerIssueModel.evidence.ilike(needle)
             )
 
@@ -1872,6 +1878,61 @@ def map_projection(map_key: str) -> Dict[str, Any]:
         }
 
 
+def field_options(
+    project_id: str,
+    *,
+    field: str,
+    query: Optional[str] = None,
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """Return a bounded, searchable vocabulary for an open-ended issue field.
+
+    Components and actor names are deliberately not mechanism-level enums:
+    callers may create a new value. This endpoint lets the dashboard reuse
+    existing spellings without downloading an unbounded corpus. Labels live in
+    a JSON array; the other fields are scalar columns, but the response shape
+    is identical for every picker.
+    """
+    allowed = {"label", "component", "assignee", "reporter"}
+    if field not in allowed:
+        raise TrackerError(
+            "invalid",
+            f"invalid option field {field!r}: expected one of {', '.join(sorted(allowed))}",
+        )
+    slug = _validate_slug(project_id)
+    limit = max(1, min(int(limit or 20), 50))
+    needle = str(query or "").strip().casefold()
+    with SessionLocal() as db:
+        if db.get(TrackerProjectModel, slug) is None:
+            raise TrackerError("not-found", f"no such project: {slug}")
+        rows = db.query(TrackerIssueModel).filter(TrackerIssueModel.project_id == slug).all()
+
+    counts: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        values = _parse_labels(row.labels) if field == "label" else [getattr(row, field)]
+        for raw in values:
+            value = str(raw or "").strip()
+            if not value or (needle and needle not in value.casefold()):
+                continue
+            entry = counts.setdefault(value, {"total": 0, "open": 0})
+            entry["total"] += 1
+            if row.status not in TERMINAL_STATUSES:
+                entry["open"] += 1
+
+    ordered = sorted(
+        counts.items(), key=lambda item: (-item[1]["open"], -item[1]["total"], item[0])
+    )
+    return {
+        "project_id": slug,
+        "field": field,
+        "query": str(query or ""),
+        "matching_total": len(ordered),
+        "options": [
+            {"value": value, **counts_for_value} for value, counts_for_value in ordered[:limit]
+        ],
+    }
+
+
 def label_facets(project_id: str) -> Dict[str, Any]:
     """Label discovery for one project: every label with total and open counts.
 
@@ -2194,6 +2255,10 @@ def render_markdown(
             lines.append(f"- **labels:** {', '.join(issue['labels'])}")
         if issue["failing_command"]:
             lines.append(f"- **failing command:** `{issue['failing_command']}`")
+        if issue["reproduction_steps"]:
+            lines.append("- **reproduction steps:**")
+            lines.append("")
+            lines.append(issue["reproduction_steps"].rstrip())
         if issue["evidence"]:
             lines.append(f"- **evidence:** {issue['evidence']}")
         if issue["resolution"]:

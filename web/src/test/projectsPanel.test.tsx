@@ -38,6 +38,7 @@ const PROJECT = {
 const ISSUE = {
   key: 'cond-0039',
   project_id: 'cao-system',
+  kind: 'issue',
   title: 'event-mirror lock contention logs full traceback every tick',
   body: 'Independent validation confirmed the mirror stays bounded.',
   status: 'open',
@@ -47,6 +48,7 @@ const ISSUE = {
   assignee: null,
   labels: ['deferred'],
   failing_command: 'python3 -B probes.py',
+  reproduction_steps: '1. run python3 -B probes.py',
   evidence: '/Users/colin/runs/report.md',
   resolution: null,
   session_name: null,
@@ -62,21 +64,43 @@ const ISSUE = {
   links: [],
 }
 
+const RELATED_ISSUE = {
+  ...ISSUE,
+  key: 'cond-0040',
+  title: 'restart the dashboard after reconnect',
+}
+
 describe('ProjectsPanel', () => {
   const mockFetch = vi.fn()
   const calls: Array<{ url: string; method: string; body: unknown }> = []
 
   function respond(url: string): unknown {
     if (url.startsWith('/tracker/vocabulary')) return VOCAB
+    if (url.startsWith('/tracker/projects/cao-system/options')) {
+      const params = new URLSearchParams(url.split('?')[1] ?? '')
+      const field = params.get('field') ?? 'label'
+      const values: Record<string, string[]> = {
+        label: ['deferred', 'initiative:dashboard'],
+        component: ['conduct', 'dashboard'],
+        assignee: ['terra'],
+        reporter: ['13e6fe47', 'dashboard'],
+      }
+      const options = (values[field] ?? []).map(value => ({ value, total: 1, open: 1 }))
+      return { project_id: 'cao-system', field, query: params.get('q') ?? '', matching_total: options.length, options }
+    }
     if (url.startsWith('/tracker/projects/cao-system')) return PROJECT
     if (url.startsWith('/tracker/projects')) return [PROJECT]
     if (url.startsWith('/tracker/issues/cond-0039')) return ISSUE
-    if (url.startsWith('/tracker/issues')) return { total: 1, limit: 50, offset: 0, issues: [ISSUE] }
+    if (url.startsWith('/tracker/issues')) {
+      const rows = url.includes('q=') ? [ISSUE, RELATED_ISSUE] : [ISSUE]
+      return { total: rows.length, limit: 50, offset: 0, issues: rows }
+    }
     return {}
   }
 
   beforeEach(() => {
     calls.length = 0
+    window.history.replaceState(null, '', '/')
     mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
       calls.push({
         url,
@@ -106,6 +130,7 @@ describe('ProjectsPanel', () => {
     // dropdown built from a local constant would have silently omitted it.
     render(<ProjectsPanel />)
     await screen.findByText('CAO System')
+    fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
     const filters = await screen.findAllByRole('button', { name: 'P0' })
     expect(filters.length).toBeGreaterThan(0)
   })
@@ -137,7 +162,8 @@ describe('ProjectsPanel', () => {
     render(<ProjectsPanel />)
     fireEvent.click(await screen.findByText(/event-mirror lock contention/))
     const assignee = await screen.findByLabelText('Assignee')
-    fireEvent.change(assignee, { target: { value: 'terra' } })
+    fireEvent.focus(assignee)
+    fireEvent.click(await screen.findByRole('option', { name: /terra/ }))
     fireEvent.click(await screen.findByRole('button', { name: /Save 1 change/ }))
 
     await waitFor(() => expect(calls.some(c => c.method === 'PATCH')).toBe(true))
@@ -175,11 +201,61 @@ describe('ProjectsPanel', () => {
     })
   })
 
+  it('keeps unbounded filters collapsed and loads suggestions only on demand', async () => {
+    render(<ProjectsPanel />)
+    await screen.findByText('cond-0039')
+    expect(screen.queryByTestId('advanced-filters')).not.toBeInTheDocument()
+    expect(calls.some(call => call.url.includes('/options'))).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Filter labels' }))
+    expect(await screen.findByRole('option', { name: /deferred/ })).toBeInTheDocument()
+    expect(calls.some(call => call.url.includes('field=label'))).toBe(true)
+  })
+
+  it('creates a label through the searchable picker and files reproduction steps', async () => {
+    render(<ProjectsPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: /Log issue/ }))
+    fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'reconnect fails' } })
+    fireEvent.change(screen.getByLabelText('Reproduction steps'), {
+      target: { value: '1. suspend\n2. resume' },
+    })
+    const labels = screen.getByRole('combobox', { name: 'Labels' })
+    fireEvent.change(labels, { target: { value: 'initiative:new-ui' } })
+    fireEvent.click(await screen.findByRole('option', { name: /Create “initiative:new-ui”/ }))
+    fireEvent.click(screen.getByRole('button', { name: /File issue/ }))
+
+    await waitFor(() => expect(calls.some(c => c.url === '/tracker/issues' && c.method === 'POST')).toBe(true))
+    const post = calls.find(c => c.url === '/tracker/issues' && c.method === 'POST')!
+    expect(post.body).toMatchObject({
+      labels: ['initiative:new-ui'],
+      reproduction_steps: '1. suspend\n2. resume',
+    })
+  })
+
+  it('links only a searched existing issue and identifies it by key and title', async () => {
+    render(<ProjectsPanel />)
+    fireEvent.click(await screen.findByText(/event-mirror lock contention/))
+    const target = await screen.findByRole('combobox', { name: 'Link target issue' })
+    fireEvent.change(target, { target: { value: 'restart' } })
+    expect(screen.getByRole('button', { name: 'Link' })).toBeDisabled()
+
+    const option = await screen.findByRole('option', { name: /cond-0040.*restart the dashboard/ })
+    fireEvent.click(option)
+    fireEvent.click(screen.getByRole('button', { name: 'Link' }))
+
+    await waitFor(() => expect(calls.some(c =>
+      c.url === '/tracker/issues/cond-0039/links' && c.method === 'POST',
+    )).toBe(true))
+    const post = calls.find(c => c.url === '/tracker/issues/cond-0039/links' && c.method === 'POST')!
+    expect(post.body).toEqual({ to_key: 'cond-0040', kind: 'relates' })
+  })
+
   it('sends repeated status params rather than a comma list', async () => {
     // The server reads repeated params as an OR; a comma list would be one
     // unknown status and 400.
     render(<ProjectsPanel />)
     await screen.findByText('cond-0039')
+    fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
     fireEvent.click(await screen.findByRole('button', { name: 'blocked' }))
     await waitFor(() => expect(calls.some(c => c.url.includes('status=blocked'))).toBe(true))
     expect(calls.some(c => c.url.includes('status=blocked%2C'))).toBe(false)

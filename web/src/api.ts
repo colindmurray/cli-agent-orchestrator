@@ -953,6 +953,7 @@ export interface TrackerIssue {
   assignee: string | null
   labels: string[]
   failing_command: string | null
+  reproduction_steps: string | null
   evidence: string | null
   resolution: string | null
   session_name: string | null
@@ -985,7 +986,8 @@ export interface TrackerIssueFilters {
   severity?: string[]
   component?: string
   assignee?: string
-  label?: string
+  reporter?: string
+  label?: string[]
   unlabeled?: boolean
   q?: string
   openOnly?: boolean
@@ -1005,6 +1007,22 @@ export interface TrackerLabelFacets {
   labels: TrackerLabelFacet[]
   unlabeled: number
   unlabeled_open: number
+}
+
+export type TrackerOptionField = 'label' | 'component' | 'assignee' | 'reporter'
+
+export interface TrackerFieldOption {
+  value: string
+  total: number
+  open: number
+}
+
+export interface TrackerFieldOptions {
+  project_id: string
+  field: TrackerOptionField
+  query: string
+  matching_total: number
+  options: TrackerFieldOption[]
 }
 
 /** A child row in the map projection: the issue plus its server-computed
@@ -1075,7 +1093,8 @@ function trackerQuery(filters?: TrackerIssueFilters): string {
   if (filters.kind) parts.push(`kind=${encodeURIComponent(filters.kind)}`)
   if (filters.component) parts.push(`component=${encodeURIComponent(filters.component)}`)
   if (filters.assignee) parts.push(`assignee=${encodeURIComponent(filters.assignee)}`)
-  if (filters.label) parts.push(`label=${encodeURIComponent(filters.label)}`)
+  if (filters.reporter) parts.push(`reporter=${encodeURIComponent(filters.reporter)}`)
+  for (const label of filters.label ?? []) parts.push(`label=${encodeURIComponent(label)}`)
   if (filters.unlabeled) parts.push('unlabeled=true')
   if (filters.q) parts.push(`q=${encodeURIComponent(filters.q)}`)
   if (filters.openOnly) parts.push('open_only=true')
@@ -1639,6 +1658,16 @@ export const api = {
   // cond-0394: map membership, frontier, claim lifecycle, discovery
   getTrackerLabels: (projectId: string) =>
     fetchJSON<TrackerLabelFacets>(`/tracker/projects/${encodeURIComponent(projectId)}/labels`),
+  getTrackerFieldOptions: (
+    projectId: string,
+    field: TrackerOptionField,
+    query = '',
+    limit = 20,
+  ) =>
+    fetchJSON<TrackerFieldOptions>(
+      `/tracker/projects/${encodeURIComponent(projectId)}/options` +
+      `?field=${encodeURIComponent(field)}&q=${encodeURIComponent(query)}&limit=${limit}`,
+    ),
   listTrackerChildren: (key: string) =>
     fetchJSON<{ parent: string; children: TrackerIssue[] }>(
       `/tracker/issues/${encodeURIComponent(key)}/children`,

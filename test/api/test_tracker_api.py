@@ -175,6 +175,43 @@ class TestIssueRoutes:
         body = client.get("/tracker/issues?status=blocked&status=open").json()
         assert body["total"] == 2
 
+    def test_repeated_label_params_are_an_and(self, client, project):
+        _issue(client, title="both", labels=["wayfinder:task", "initiative:alpha"])
+        _issue(client, title="one", labels=["wayfinder:task"])
+        body = client.get(
+            "/tracker/issues",
+            params=[
+                ("project_id", "cao-system"),
+                ("label", "wayfinder:task"),
+                ("label", "initiative:alpha"),
+            ],
+        ).json()
+        assert [issue["title"] for issue in body["issues"]] == ["both"]
+
+    def test_reproduction_steps_round_trip_through_post_and_patch(self, client, project):
+        issue = _issue(client, reproduction_steps="1. run the probe")
+        assert issue["reproduction_steps"] == "1. run the probe"
+        response = client.patch(
+            f"/tracker/issues/{issue['key']}",
+            json={"reproduction_steps": "1. run twice"},
+        )
+        assert response.status_code == 200
+        assert response.json()["reproduction_steps"] == "1. run twice"
+
+    def test_project_field_options_are_searchable_and_bounded(self, client, project):
+        _issue(client, component="dashboard", labels=["initiative:ux"])
+        _issue(client, component="conduct", labels=["other"])
+        body = client.get(
+            "/tracker/projects/cao-system/options",
+            params={"field": "component", "q": "dash", "limit": 1},
+        ).json()
+        assert body["matching_total"] == 1
+        assert body["options"][0]["value"] == "dashboard"
+
+    def test_project_field_options_reject_unknown_fields(self, client, project):
+        response = client.get("/tracker/projects/cao-system/options", params={"field": "status"})
+        assert response.status_code == 400
+
 
 class TestPatchSemantics:
     def test_an_absent_field_is_untouched(self, client, project):

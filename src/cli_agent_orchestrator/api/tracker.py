@@ -108,6 +108,7 @@ class IssueCreateBody(StrictBody):
     assignee: Optional[str] = None
     labels: List[str] = Field(default_factory=list)
     failing_command: Optional[str] = None
+    reproduction_steps: Optional[str] = None
     evidence: Optional[str] = None
     session_name: Optional[str] = None
     terminal_id: Optional[str] = None
@@ -144,6 +145,7 @@ class IssueUpdateBody(StrictBody):
     remove_labels: Optional[List[str]] = None
     clear_labels: Optional[bool] = None
     failing_command: Optional[str] = None
+    reproduction_steps: Optional[str] = None
     evidence: Optional[str] = None
     resolution: Optional[str] = None
     duplicate_of: Optional[str] = None
@@ -339,6 +341,21 @@ async def project_label_facets(project_id: str, _scopes: List[str] = _READ) -> D
         raise _http(exc) from exc
 
 
+@router.get("/tracker/projects/{project_id}/options")
+async def project_field_options(
+    project_id: str,
+    field: str = Query(..., description="label|component|assignee|reporter"),
+    q: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=50),
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    """Search a bounded vocabulary for an open-ended issue field."""
+    try:
+        return tracker.field_options(project_id, field=field, query=q, limit=limit)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
 @router.get("/tracker/projects/{project_id}/export")
 async def export_project_markdown(
     project_id: str,
@@ -396,7 +413,7 @@ async def list_issues(
     component: Optional[str] = Query(None),
     assignee: Optional[str] = Query(None),
     reporter: Optional[str] = Query(None),
-    label: Optional[str] = Query(None),
+    label_filter: Optional[List[str]] = Query(None, alias="label"),
     unlabeled: bool = Query(False, description="only issues with an empty label set"),
     q: Optional[str] = Query(None),
     open_only: bool = Query(False),
@@ -416,7 +433,7 @@ async def list_issues(
             component=component,
             assignee=assignee,
             reporter=reporter,
-            label=label,
+            label=label_filter,
             unlabeled=unlabeled,
             query=q,
             open_only=open_only,
@@ -457,6 +474,7 @@ async def create_issue(
             assignee=body.assignee,
             labels=body.labels,
             failing_command=body.failing_command,
+            reproduction_steps=body.reproduction_steps,
             evidence=body.evidence,
             session_name=body.session_name,
             terminal_id=body.terminal_id,

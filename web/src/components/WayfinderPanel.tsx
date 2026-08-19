@@ -79,7 +79,7 @@ export function WayfinderPanel({
     try {
       const page = await api.listTrackerIssues({
         projectId,
-        label: MAP_LABEL,
+        label: [MAP_LABEL],
         kind: 'all',
         openOnly: false,
         limit: 200,

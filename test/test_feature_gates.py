@@ -62,6 +62,7 @@ class TestSchemaMigration:
         with db.connect() as conn:
             cols = {row[1] for row in conn.execute(sa_text("PRAGMA table_info(tracker_issues)"))}
             assert "kind" in cols
+            assert "reproduction_steps" in cols
             idxs = [
                 row[0]
                 for row in conn.execute(
@@ -125,6 +126,35 @@ class TestSchemaMigration:
         with engine.connect() as conn:
             cols = {row[1] for row in conn.execute(sa_text("PRAGMA table_info(tracker_issues)"))}
             assert "kind" in cols
+
+    def test_legacy_tracker_gains_nullable_reproduction_steps(self, tmp_path, monkeypatch):
+        engine = create_engine(f"sqlite:///{tmp_path}/legacy-reproduction.db")
+        with engine.begin() as conn:
+            conn.execute(
+                sa_text(
+                    "CREATE TABLE tracker_issues ("
+                    "key TEXT PRIMARY KEY, project_id TEXT, title TEXT, status TEXT, "
+                    "kind TEXT NOT NULL DEFAULT 'issue')"
+                )
+            )
+            conn.execute(
+                sa_text(
+                    "INSERT INTO tracker_issues (key, project_id, title, status) "
+                    "VALUES ('cond-0001', 'cao-system', 'old issue', 'open')"
+                )
+            )
+        import cli_agent_orchestrator.clients.database as dbmod
+
+        monkeypatch.setattr(dbmod, "engine", engine)
+        dbmod._migrate_tracker_reproduction_steps_column()
+        dbmod._migrate_tracker_reproduction_steps_column()
+        with engine.connect() as conn:
+            cols = {row[1] for row in conn.execute(sa_text("PRAGMA table_info(tracker_issues)"))}
+            assert "reproduction_steps" in cols
+            value = conn.execute(
+                sa_text("SELECT reproduction_steps FROM tracker_issues WHERE key='cond-0001'")
+            ).scalar_one()
+        assert value is None
 
 
 class TestFeatureKindGuards:

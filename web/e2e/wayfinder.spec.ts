@@ -37,6 +37,7 @@ function issue(over: Record<string, unknown>) {
     assignee: null,
     labels: [],
     failing_command: null,
+    reproduction_steps: null,
     evidence: null,
     resolution: null,
     session_name: null,
@@ -150,6 +151,13 @@ async function stubTracker(page: Page, options?: TrackerStubOptions) {
     if (path === "/tracker/vocabulary") return json(VOCAB);
     if (path === "/tracker/projects" && method === "GET") return json([PROJECT]);
     if (path === `/tracker/projects/${PROJECT.id}/labels`) return json(FACETS);
+    if (path === `/tracker/projects/${PROJECT.id}/options`) {
+      const field = url.searchParams.get("field") ?? "label";
+      const values = field === "label"
+        ? FACETS.labels.map((item) => ({ value: item.label, total: item.total, open: item.open }))
+        : [];
+      return json({ project_id: PROJECT.id, field, query: url.searchParams.get("q") ?? "", matching_total: values.length, options: values });
+    }
     if (path === `/tracker/projects/${PROJECT.id}`) return json(PROJECT);
     if (path === "/tracker/issues/cond-0001/map") {
       return json(options?.noMaps ? { detail: "no such issue" } : PROJECTION, options?.noMaps ? 404 : 200);
@@ -259,24 +267,24 @@ test("map browser → map view: destination, progress, frontier, graph, legend, 
   await page.screenshot({ path: `${SHOTS}/${testInfo.project.name}-map-view.png`, fullPage: true });
 });
 
-test("label filters: chips carry counts and drive the list; URL shares the view", async ({ page }) => {
+test("advanced label search drives the list without rendering the whole vocabulary", async ({ page }) => {
   await stubBackend(page);
   await stubTracker(page);
   await page.goto("/");
   await page.getByRole("tab", { name: "Projects" }).click();
   await page.getByText("CAO System").first().waitFor();
-  const bar = page.getByTestId("label-filter-bar");
-  const effortChip = bar.getByRole("button", { name: "Filter by label effort:deploy" });
-  await expect(effortChip).toContainText("4/5");
-  await effortChip.evaluate((el) => el.scrollIntoView({ block: "center" }));
-  await effortChip.click();
-  // Let the filtered list settle before the next interaction, or the reload
-  // moves the bar under the pointer on mobile. Keyboard activation of the
-  // second chip doubles as the keyboard-accessibility check.
-  await expect(page).toHaveURL(/label=effort%3Adeploy/);
-  const unlabeledChip = bar.getByRole("button", { name: /unlabeled/ });
-  await unlabeledChip.focus();
+  await expect(page.getByTestId("label-filter-bar")).toHaveCount(0);
+  const advanced = page.getByRole("button", { name: /Advanced filters/ });
+  await advanced.scrollIntoViewIfNeeded();
+  await advanced.focus();
   await page.keyboard.press("Enter");
+  const labelSearch = page.getByRole("combobox", { name: "Filter labels" });
+  await labelSearch.fill("effort");
+  await page.getByRole("option", { name: /effort:deploy.*4 open.*5 total/ }).click();
+  await expect(page).toHaveURL(/label=effort%3Adeploy/);
+  const unlabeled = page.getByLabel("Only items without labels");
+  await unlabeled.focus();
+  await page.keyboard.press("Space");
   await expect(page).toHaveURL(/unlabeled=1/);
   await expect(page.getByText("migrate the store")).toBeVisible();
   await expect(page.getByText("research providers")).not.toBeVisible();

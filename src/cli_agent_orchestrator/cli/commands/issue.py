@@ -300,6 +300,8 @@ def issue():
 @click.option("--assignee", default=None)
 @click.option("--label", "labels", multiple=True)
 @click.option("--command", "failing_command", default=None, help="the failing command")
+@click.option("--reproduction", default=None, help="steps that reproduce the issue")
+@click.option("--reproduction-file", type=click.Path(exists=True), default=None)
 @click.option("--evidence", default=None, help="absolute path to a log or run dir")
 @click.option("--key", default=None, help="explicit issue key (migration only)")
 @click.option("--json", "as_json", is_flag=True)
@@ -318,6 +320,8 @@ def issue_file(
     assignee,
     labels,
     failing_command,
+    reproduction,
+    reproduction_file,
     evidence,
     key,
     as_json,
@@ -326,6 +330,11 @@ def issue_file(
     if body_file:
         with open(body_file, "r", encoding="utf-8") as handle:
             body = handle.read()
+    if reproduction and reproduction_file:
+        raise click.UsageError("use only one of --reproduction or --reproduction-file")
+    if reproduction_file:
+        with open(reproduction_file, "r", encoding="utf-8") as handle:
+            reproduction = handle.read()
     try:
         row = tracker.create_issue(
             project_id=project_id,
@@ -338,6 +347,7 @@ def issue_file(
             assignee=assignee,
             labels=list(labels),
             failing_command=failing_command,
+            reproduction_steps=reproduction,
             evidence=evidence,
             session_name=session_name,
             source_path=cwd or os.getcwd(),
@@ -448,6 +458,7 @@ def issue_show(issue_key, as_json):
             "reporter",
             "assignee",
             "failing_command",
+            "reproduction_steps",
             "evidence",
             "resolution",
             "duplicate_of",
@@ -492,6 +503,8 @@ def issue_show(issue_key, as_json):
     help="refuse the edit unless the issue's updated_at still equals this ISO timestamp",
 )
 @click.option("--command", "failing_command", default=None)
+@click.option("--reproduction", "reproduction_steps", default=None)
+@click.option("--reproduction-file", type=click.Path(exists=True), default=None)
 @click.option("--evidence", default=None)
 @click.option("--resolution", default=None)
 @click.option("--duplicate-of", default=None)
@@ -513,6 +526,7 @@ def issue_edit(
     remove_labels,
     clear_labels,
     expect_updated_at,
+    reproduction_file,
     actor,
     as_json,
     **fields,
@@ -522,6 +536,11 @@ def issue_edit(
     if body_file:
         with open(body_file, "r", encoding="utf-8") as handle:
             changes["body"] = handle.read()
+    if fields.get("reproduction_steps") is not None and reproduction_file:
+        raise click.UsageError("use only one of --reproduction or --reproduction-file")
+    if reproduction_file:
+        with open(reproduction_file, "r", encoding="utf-8") as handle:
+            changes["reproduction_steps"] = handle.read()
     if labels:
         changes["labels"] = list(labels)
     if add_labels:
