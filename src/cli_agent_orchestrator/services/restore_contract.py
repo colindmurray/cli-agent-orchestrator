@@ -194,6 +194,8 @@ def _validate_route_provenance(value: Any) -> Optional[dict[str, str]]:
     """Bound and closed route provenance: only the known keys, bounded values."""
     if value is None:
         return None
+    if isinstance(value, MappingProxyType):
+        value = dict(value)
     if not isinstance(value, dict):
         raise RestoreContractInvalid(f"route_provenance must be a mapping; got {value!r}")
     if not value:
@@ -238,6 +240,8 @@ def _validate_reference_dict(value: Any, *, field: str) -> Optional[dict[str, st
     """
     if value is None:
         return None
+    if isinstance(value, MappingProxyType):
+        value = dict(value)
     if not isinstance(value, dict):
         raise RestoreContractInvalid(
             f"{field} must be a mapping of references/digests; got {value!r}"
@@ -273,6 +277,8 @@ def _validate_executable(value: Any, *, field: str) -> Optional[dict[str, str]]:
     """The exact resolved executable identity: path + binary digest (+ version)."""
     if value is None:
         return None
+    if isinstance(value, MappingProxyType):
+        value = dict(value)
     if not isinstance(value, dict):
         raise RestoreContractInvalid(f"{field} value must be a mapping; got {value!r}")
     unknown = sorted(set(value) - {"path", "sha256", "version"})

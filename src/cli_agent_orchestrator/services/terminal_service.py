@@ -1377,13 +1377,25 @@ def _roster_retire_incarnation_best_effort(terminal_id: str, generation: Optiona
     survive regardless; the audit reports anything left un-retired.
     """
     try:
+        from cli_agent_orchestrator.services import restore_contract as rc
         from cli_agent_orchestrator.services import stable_agent_roster
 
-        stable_agent_roster.retire_incarnation(
-            terminal_id=terminal_id,
-            generation=generation,
-            reason="terminal teardown",
-        )
+        contract = rc.get_contract_by_incarnation(terminal_id=terminal_id, generation=generation)
+        if contract is not None:
+            stable_agent_roster.transition_dormant(
+                terminal_id=terminal_id,
+                generation=generation,
+                agent_id=contract["agent_id"],
+                lineage_id=contract["lineage_id"],
+                contract_digest=contract["contract_digest"],
+                reason="terminal teardown",
+            )
+        else:
+            stable_agent_roster.retire_incarnation(
+                terminal_id=terminal_id,
+                generation=generation,
+                reason="terminal teardown",
+            )
     except Exception as e:  # noqa: BLE001 - teardown must never be blocked
         logger.warning(f"Failed to retire roster incarnation for {terminal_id}: {e}")
 
@@ -1601,7 +1613,7 @@ def _pre_task_bind_and_resolve(
     route_prov: dict[str, Any] = {"issuance_source": identity["acquisition_method"]}
     if route_data:
         route_prov["provider_route"] = json.dumps(route_data, sort_keys=True)[:512]
-    stable_agent_roster.record_native_identity(
+    roster_record = stable_agent_roster.record_native_identity(
         terminal_id=terminal_id,
         generation=terminal_generation,
         native_session_id=identity["native_session_id"],
@@ -1610,6 +1622,54 @@ def _pre_task_bind_and_resolve(
         route_provenance=route_prov,
         continuity_note=unmanaged_native_identity.PRE_TASK_IDENTITY_CAPTURED,
     )
+    try:
+        from cli_agent_orchestrator.services import restore_contract as rc
+
+        exec_fact = rc.ContractFact.unavailable("executable facts unavailable at unmanaged pre-task bind")
+        exec_path = identity.get("binary_path") or identity.get("executable_path")
+        exec_hash = identity.get("binary_sha256") or identity.get("executable_hash")
+        if exec_path and exec_hash:
+            try:
+                exec_val = {
+                    "path": exec_path,
+                    "sha256": exec_hash,
+                }
+                exec_ver = identity.get("executable_version") or identity.get("version_output")
+                if exec_ver:
+                    exec_val["version"] = exec_ver
+                exec_fact = rc.ContractFact.present(exec_val)
+            except Exception:
+                pass
+
+        contract = rc.RestoreContract(
+            agent_id=roster_record["agent"]["agent_id"],
+            lineage_id=roster_record["lineage"]["lineage_id"],
+            terminal_id=terminal_id,
+            generation=terminal_generation,
+            native_session_id=identity["native_session_id"],
+            harness=provider,
+            provider=provider,
+            route_provenance=roster_record["lineage"]["route_provenance"],
+            execution_mode=roster_record["incarnation"]["execution_mode"] or em.NATIVE_TUI,
+            working_directory=identity.get("working_directory") or unmanaged_native_identity.canonical_working_directory(working_directory),
+            trusted_project_root=identity.get("trusted_project_root") or (unmanaged_native_identity.canonical_working_directory(working_directory) if provider == "codex" else None),
+            model=(
+                rc.ContractFact.present(identity["model"])
+                if identity.get("model")
+                else rc.ContractFact.unavailable("no model fact recorded at unmanaged pre-task bind")
+            ),
+            effort=(
+                rc.ContractFact.present(identity["effort"])
+                if identity.get("effort")
+                else rc.ContractFact.unavailable("no effort fact recorded at unmanaged pre-task bind")
+            ),
+            executable=exec_fact,
+            profile_material=rc.ContractFact.unavailable("no profile material carrier facts at unmanaged launch"),
+            provider_home_facts=rc.ContractFact.unavailable("no provider-home carrier facts at this source seam"),
+        )
+        rc.publish_contract(contract)
+    except Exception as exc:  # noqa: BLE001 - publication failure must never fail the launch
+        logger.warning("Failed to publish restore contract for terminal %s: %s", terminal_id, exc)
     return identity
 
 

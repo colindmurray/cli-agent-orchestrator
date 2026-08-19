@@ -91,12 +91,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Optional, Sequence
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -1272,6 +1275,7 @@ class _Execution:
         self.effective_provider_version: Optional[str] = None
         self.expected_inner_executable: Optional[str] = None
         self.expected_inner_executable_sha256: Optional[str] = None
+        self.contract: Optional[restore_contract.RestoreContract] = None
 
     # -- journal steps ----------------------------------------------------
 
@@ -1466,6 +1470,7 @@ async def _execute_locked(
         execution.record_refused(detail)
         raise ExactExecutorRefused(detail)
     execution = _Execution(request, material, transport_factory, registry)
+    execution.contract = contract
     execution.evidence["restore_contract_id"] = request.restore_contract_id
     execution.evidence["restore_contract_digest"] = request.restore_contract_digest
 
@@ -2443,6 +2448,33 @@ def _bind_successor(
                 f"{roster.INCARNATION_BOUND!r}; B3 binds and never admits — a drifted "
                 "disposition is reconciliation, not an accepted result"
             )
+        try:
+            prior_contract = getattr(execution, "contract", None)
+            if prior_contract is None:
+                stored = restore_contract.get_contract(request.restore_contract_id, db=session)
+                if stored is not None:
+                    prior_contract = restore_contract.decode_stored_contract(stored["contract"])
+            if prior_contract is not None:
+                successor_contract = replace(
+                    prior_contract,
+                    terminal_id=successor_terminal_id,
+                    generation=successor_generation,
+                    lineage_id=bind["lineage"]["lineage_id"],
+                    agent_id=bind["agent"]["agent_id"],
+                    native_session_id=bind["lineage"]["native_session_id"],
+                    harness=bind["lineage"]["harness"],
+                    route_provenance=bind["lineage"]["route_provenance"],
+                    execution_mode=bind["incarnation"]["execution_mode"],
+                )
+                restore_contract.publish_contract(successor_contract, db=session)
+        except Exception as exc:  # noqa: BLE001 - publication failure must never fail the resume
+            logger.warning(
+                "Failed to publish restore contract for successor %s/%s: %s",
+                successor_terminal_id,
+                successor_generation,
+                exc,
+            )
+            execution.evidence["restore_contract_publish_error"] = str(exc)
         operation_journal.record_result(
             request.operation_id,
             operation_journal.RESULT_ACCEPTED,

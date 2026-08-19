@@ -193,12 +193,25 @@ def retire_worker_pane(request: RetireRequest) -> dict[str, Any]:
     collected = False
     if terminal_id:
         try:
-            retired = roster.retire_incarnation(
-                terminal_id=str(terminal_id),
-                generation=str(generation) if generation else None,
-                reason=request.reason,
-            )
-        except roster.StableAgentError:
+            tid = str(terminal_id)
+            gen = str(generation) if generation else None
+            contract = rc.get_contract_by_incarnation(terminal_id=tid, generation=gen)
+            if contract is not None:
+                retired = roster.transition_dormant(
+                    terminal_id=tid,
+                    generation=gen,
+                    agent_id=contract["agent_id"],
+                    lineage_id=contract["lineage_id"],
+                    contract_digest=contract["contract_digest"],
+                    reason=request.reason,
+                )
+            else:
+                retired = roster.retire_incarnation(
+                    terminal_id=tid,
+                    generation=gen,
+                    reason=request.reason,
+                )
+        except (roster.StableAgentError, rc.RestoreContractError):
             # Roster bookkeeping never blocks a teardown; the pane collection
             # below is the act that matters and it is still exact.
             retired = None
@@ -469,14 +482,25 @@ def admit_fresh_successor(
 
     if live and incarnation.get("terminal_id"):
         try:
-            roster.retire_incarnation(
-                terminal_id=str(incarnation["terminal_id"]),
-                generation=(
-                    str(incarnation["generation"]) if incarnation.get("generation") else None
-                ),
-                reason=f"pane lost; recovery {recovery_id}",
-            )
-        except roster.StableAgentError as exc:
+            tid = str(incarnation["terminal_id"])
+            gen = str(incarnation["generation"]) if incarnation.get("generation") else None
+            contract = rc.get_contract_by_incarnation(terminal_id=tid, generation=gen)
+            if contract is not None:
+                roster.transition_dormant(
+                    terminal_id=tid,
+                    generation=gen,
+                    agent_id=str(incarnation.get("agent_id") or contract["agent_id"]),
+                    lineage_id=str(incarnation.get("lineage_id") or contract["lineage_id"]),
+                    contract_digest=contract["contract_digest"],
+                    reason=f"pane lost; recovery {recovery_id}",
+                )
+            else:
+                roster.retire_incarnation(
+                    terminal_id=tid,
+                    generation=gen,
+                    reason=f"pane lost; recovery {recovery_id}",
+                )
+        except (roster.StableAgentError, rc.RestoreContractError) as exc:
             return {
                 "mode": ADMIT_REFUSED,
                 "task_occurrence_id": occurrence_id,

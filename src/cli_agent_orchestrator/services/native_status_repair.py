@@ -135,6 +135,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -1605,7 +1606,7 @@ def _commit_repair(db: Any, facts: Mapping[str, Any]) -> Optional[Mapping[str, A
             "overwrite whoever won",
         )
     try:
-        roster.record_native_identity(
+        repaired = roster.record_native_identity(
             terminal_id=facts["terminal_id"],
             generation=facts["model_generation"],
             native_session_id=facts["session_id"],
@@ -1626,6 +1627,69 @@ def _commit_repair(db: Any, facts: Mapping[str, Any]) -> Optional[Mapping[str, A
     except roster.StableAgentError as exc:
         logger.warning("repair %s: roster repair unavailable: %s", facts["operation_id"], exc)
         raise NativeStatusRepairUnavailable("the roster repair could not be recorded") from exc
+    try:
+        from cli_agent_orchestrator.services import restore_contract as rc
+
+        reservation = (
+            db.query(database.ManagedLaunchV2ReservationModel)
+            .filter(database.ManagedLaunchV2ReservationModel.terminal_id == facts["terminal_id"])
+            .first()
+        )
+        reserved_request: dict[str, Any] = {}
+        if reservation and reservation.request_json:
+            try:
+                reserved_request = json.loads(str(reservation.request_json))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                reserved_request = {}
+        working_directory = (
+            reservation.working_directory
+            if reservation and reservation.working_directory
+            else os.path.realpath(os.getcwd())
+        )
+        trusted_project_root = reservation.trusted_project_root if reservation else None
+
+        exec_fact = rc.ContractFact.unavailable("executable not captured during status repair")
+        if reserved_request.get("provider_executable") and reserved_request.get("provider_executable_sha256"):
+            try:
+                exec_val = {
+                    "path": reserved_request["provider_executable"],
+                    "sha256": reserved_request["provider_executable_sha256"],
+                }
+                if facts.get("provider_version"):
+                    exec_val["version"] = facts["provider_version"]
+                exec_fact = rc.ContractFact.present(exec_val)
+            except Exception:
+                pass
+
+        contract = rc.RestoreContract(
+            agent_id=repaired["agent"]["agent_id"],
+            lineage_id=repaired["lineage"]["lineage_id"],
+            terminal_id=facts["terminal_id"],
+            generation=facts["model_generation"],
+            native_session_id=facts["session_id"],
+            harness=facts["provider"],
+            provider=facts["provider"],
+            route_provenance=repaired["lineage"]["route_provenance"],
+            execution_mode=repaired["incarnation"]["execution_mode"] or em.NATIVE_TUI,
+            working_directory=working_directory,
+            trusted_project_root=trusted_project_root,
+            model=(
+                rc.ContractFact.present(reserved_request["expected_model"])
+                if reserved_request.get("expected_model")
+                else rc.ContractFact.unavailable("model not captured during status repair")
+            ),
+            effort=(
+                rc.ContractFact.present(reserved_request["expected_effort"])
+                if reserved_request.get("expected_effort")
+                else rc.ContractFact.unavailable("effort not captured during status repair")
+            ),
+            executable=exec_fact,
+            profile_material=rc.ContractFact.unavailable("profile material not captured during status repair"),
+            provider_home_facts=rc.ContractFact.unavailable("provider home not captured during status repair"),
+        )
+        rc.publish_contract(contract, db=db)
+    except Exception as exc:  # noqa: BLE001 - repair must never fail closed on contract publication
+        logger.warning("Failed to publish restore contract during repair %s: %s", facts["operation_id"], exc)
     db.add(
         database.NativeStatusRepairEvidenceModel(
             operation_id=facts["operation_id"],

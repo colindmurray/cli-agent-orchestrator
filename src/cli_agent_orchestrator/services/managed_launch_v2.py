@@ -2712,7 +2712,7 @@ def _reconcile_and_complete_bind(
     # silently keeps a pre-roster path.
     reserved_request = _parse_json(row.request_json, {})
     try:
-        stable_agent_roster.bind_generation(
+        bind = stable_agent_roster.bind_generation(
             _roster_binding_contract(db, row, expected_record, reserved_request), db=db
         )
     except stable_agent_roster.StableAgentConflict as exc:
@@ -2724,6 +2724,49 @@ def _reconcile_and_complete_bind(
         raise ManagedLaunchUnavailable(
             f"stable-agent roster unavailable for the bind: {exc}"
         ) from exc
+    try:
+        from cli_agent_orchestrator.services import restore_contract as rc
+
+        exec_fact = rc.ContractFact.unavailable("executable facts unavailable in managed reservation")
+        if reserved_request.get("provider_executable") and reserved_request.get("provider_executable_sha256"):
+            try:
+                exec_val = {
+                    "path": reserved_request["provider_executable"],
+                    "sha256": reserved_request["provider_executable_sha256"],
+                }
+                exec_fact = rc.ContractFact.present(exec_val)
+            except Exception:
+                pass
+
+        contract = rc.RestoreContract(
+            agent_id=bind["agent"]["agent_id"],
+            lineage_id=bind["lineage"]["lineage_id"],
+            terminal_id=row.terminal_id,
+            generation=row.generation,
+            native_session_id=expected_record["native_session_id"],
+            harness=row.provider,
+            provider=row.provider,
+            route_provenance=bind["lineage"]["route_provenance"],
+            execution_mode=bind["incarnation"]["execution_mode"],
+            working_directory=row.working_directory,
+            trusted_project_root=row.trusted_project_root,
+            model=(
+                rc.ContractFact.present(reserved_request["expected_model"])
+                if reserved_request.get("expected_model")
+                else rc.ContractFact.unavailable("no model fact in managed reservation")
+            ),
+            effort=(
+                rc.ContractFact.present(reserved_request["expected_effort"])
+                if reserved_request.get("expected_effort")
+                else rc.ContractFact.unavailable("no effort fact in managed reservation")
+            ),
+            executable=exec_fact,
+            profile_material=rc.ContractFact.unavailable("no profile material carrier facts in managed reservation"),
+            provider_home_facts=rc.ContractFact.unavailable("no provider-home carrier facts at this source seam"),
+        )
+        rc.publish_contract(contract, db=db)
+    except Exception as exc:  # noqa: BLE001 - publication failure must never fail the launch
+        logger.warning("Failed to publish restore contract for reservation %s: %s", row.reservation_id, exc)
     row.binding_json = _canonical_json(intent["binding"])
     row.state = "bound"
     row.updated_at = _now()
