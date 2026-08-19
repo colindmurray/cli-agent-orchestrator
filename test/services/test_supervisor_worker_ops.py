@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 
 import pytest
@@ -186,11 +187,21 @@ def test_retire_refuses_an_agent_from_another_session(_no_tmux):
 # ---------------------------------------------------------------------------
 
 
-def _publish_contract(bound, tmp_path):
+def _real_executable(tmp_path):
+    exe = tmp_path / "fake-claude-bin"
+    exe.write_bytes(b"#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    return exe, hashlib.sha256(exe.read_bytes()).hexdigest()
+
+
+def _publish_contract(bound, tmp_path, *, executable=None):
     """The immutable restore contract an exact resume needs to exist at all."""
     from cli_agent_orchestrator.services import restore_contract as rc
 
     unavailable = rc.ContractFact.unavailable("not captured at this test seam")
+    if executable is None:
+        exe_path, exe_sha = _real_executable(tmp_path)
+        executable = rc.ContractFact.present({"path": str(exe_path), "sha256": exe_sha})
     return rc.publish_contract(
         rc.RestoreContract(
             agent_id=bound["agent"]["agent_id"],
@@ -204,7 +215,7 @@ def _publish_contract(bound, tmp_path):
             working_directory=str(tmp_path),
             model=unavailable,
             effort=unavailable,
-            executable=unavailable,
+            executable=executable,
             profile_material=unavailable,
             provider_home_facts=unavailable,
         )
@@ -330,6 +341,54 @@ def test_recovery_prefers_exact_restoration_when_cao_still_holds_the_identity(
 
 async def _never_launch(agent, fallback, occurrence_id):  # pragma: no cover - must not run
     raise AssertionError("a fresh worker must never be launched when an exact resume is possible")
+
+
+def test_an_executable_less_contract_falls_through_to_fresh_recovery(monkeypatch, tmp_path):
+    """F1: a claude_code unmanaged worker whose contract cannot clear the exact
+    executor's fact gate must NOT be routed down MODE_EXACT — it falls through
+    to fresh recovery instead of being left down behind a doomed exact attempt."""
+    from cli_agent_orchestrator.services import restore_contract as rc
+
+    worker = _bind()
+    _publish_contract(
+        worker,
+        tmp_path,
+        executable=rc.ContractFact.unavailable("executable not captured at test seam"),
+    )
+    _open_round(worker)
+
+    plan = ops.plan_lost_pane_recovery(
+        SESSION,
+        worker["agent"]["agent_id"],
+        fallback=ops.FreshFallback(_complete_seed(), _DIGEST_A, 1),
+    )
+    assert plan["mode"] != ops.MODE_EXACT
+    assert plan["mode"] == ops.MODE_FRESH
+
+    seen: list[str] = []
+
+    async def _launch(agent, fallback, occurrence_id):
+        seen.append(occurrence_id)
+        return {
+            "incarnation_id": "inc-fresh",
+            "terminal_id": "term-fresh",
+            "generation": "gen-fresh",
+            "lineage_id": worker["lineage"]["lineage_id"],
+            "native_session_id": "native-fresh",
+        }
+
+    result = asyncio.run(
+        ops.recover_lost_pane(
+            SESSION,
+            worker["agent"]["agent_id"],
+            recovery_id=str(uuid.uuid4()),
+            requested_by="supervisor",
+            fallback=ops.FreshFallback(_complete_seed(), _DIGEST_A, 1),
+            fresh_launcher=_launch,
+        )
+    )
+    assert result["outcome"] == ops.OUTCOME_FRESH_FALLBACK
+    assert len(seen) == 1
 
 
 def test_a_lost_pane_with_no_identity_and_no_context_stays_paused():

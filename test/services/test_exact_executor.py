@@ -1245,7 +1245,7 @@ def test_working_directory_drift_refuses_before_effects(launch_root, monkeypatch
     gone = os.path.realpath("/definitely/not/a/real/dir/b3")
 
     def _mutate(payload):
-        payload["working_directory"] = gone
+        payload["working_directory"] = {"state": "present", "value": gone, "reason": None}
 
     _retamper_contract(bind, _mutate)
     _reap_noop(monkeypatch)

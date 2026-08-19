@@ -302,6 +302,21 @@ def _validate_model_effort(value: Any, *, field: str) -> str:
     return _require_text(value, field=field, max_len=MAX_MODEL_LEN)
 
 
+def _coerce_workdir(value: Any, *, field: str) -> "ContractFact":
+    """A plain canonical path string is the present-shorthand for the fact."""
+    if isinstance(value, ContractFact):
+        return value
+    if isinstance(value, str):
+        return ContractFact.present(value)
+    raise RestoreContractInvalid(
+        f"{field} must be a ContractFact or a canonical path string; got {value!r}"
+    )
+
+
+def _validate_workdir(value: Any, *, field: str) -> str:
+    return _require_canonical_realpath(value, field=field)
+
+
 def _validated_fact(fact: "ContractFact", *, field: str, validator: Callable) -> "ContractFact":
     """Normalize a present fact's value through its structural validator."""
     if fact.state != FACT_PRESENT:
@@ -414,7 +429,7 @@ class RestoreContract:
     harness: str
     model: ContractFact
     effort: ContractFact
-    working_directory: str
+    working_directory: ContractFact
     executable: ContractFact
     profile_material: ContractFact
     provider_home_facts: ContractFact
@@ -468,7 +483,13 @@ class RestoreContract:
         object.__setattr__(
             self,
             "working_directory",
-            _require_canonical_realpath(self.working_directory, field="working_directory"),
+            _freeze_fact_value(
+                _validated_fact(
+                    _coerce_workdir(self.working_directory, field="working_directory"),
+                    field="working_directory",
+                    validator=_validate_workdir,
+                )
+            ),
         )
         object.__setattr__(
             self,
@@ -535,7 +556,7 @@ def _payload_dict(contract: RestoreContract) -> dict[str, Any]:
         "execution_mode": contract.execution_mode,
         "model": contract.model.to_json(),
         "effort": contract.effort.to_json(),
-        "working_directory": contract.working_directory,
+        "working_directory": contract.working_directory.to_json(),
         "trusted_project_root": contract.trusted_project_root,
         "executable": contract.executable.to_json(),
         "profile_material": contract.profile_material.to_json(),
@@ -687,7 +708,14 @@ def identity_mismatch_reason(
     return None
 
 
-_FACT_FIELDS = ("model", "effort", "executable", "profile_material", "provider_home_facts")
+_FACT_FIELDS = (
+    "model",
+    "effort",
+    "working_directory",
+    "executable",
+    "profile_material",
+    "provider_home_facts",
+)
 
 
 def _decode_contract_fact(raw: Any) -> "ContractFact":

@@ -41,6 +41,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from cli_agent_orchestrator.services import exact_executor
 from cli_agent_orchestrator.services import operation_journal as oj
 from cli_agent_orchestrator.services import restore_contract as rc
@@ -197,23 +199,36 @@ def retire_worker_pane(request: RetireRequest) -> dict[str, Any]:
             gen = str(generation) if generation else None
             contract = rc.get_contract_by_incarnation(terminal_id=tid, generation=gen)
             if contract is not None:
-                retired = roster.transition_dormant(
-                    terminal_id=tid,
-                    generation=gen,
-                    agent_id=contract["agent_id"],
-                    lineage_id=contract["lineage_id"],
-                    contract_digest=contract["contract_digest"],
-                    reason=request.reason,
-                )
+                try:
+                    retired = roster.transition_dormant(
+                        terminal_id=tid,
+                        generation=gen,
+                        agent_id=contract["agent_id"],
+                        lineage_id=contract["lineage_id"],
+                        contract_digest=contract["contract_digest"],
+                        reason=request.reason,
+                    )
+                except roster.StableAgentConflict:
+                    # The dormant transition is stricter than the plain
+                    # retirement: a stored contract that cannot authorize it
+                    # (stored-record gate) must not leave the incarnation LIVE
+                    # with no backing pane — fall back to the plain retirement.
+                    retired = roster.retire_incarnation(
+                        terminal_id=tid,
+                        generation=gen,
+                        reason=request.reason,
+                    )
             else:
                 retired = roster.retire_incarnation(
                     terminal_id=tid,
                     generation=gen,
                     reason=request.reason,
                 )
-        except (roster.StableAgentError, rc.RestoreContractError):
+        except (roster.StableAgentError, rc.RestoreContractError, SQLAlchemyError):
             # Roster bookkeeping never blocks a teardown; the pane collection
-            # below is the act that matters and it is still exact.
+            # below is the act that matters and it is still exact.  The
+            # widened tuple covers a raw SQLAlchemy error from the contract
+            # read's fresh session (F3).
             retired = None
         collected = bool(
             terminal_service.delete_terminal(
@@ -271,7 +286,14 @@ def _exact_resume_request(
 
 
 def has_exact_resume_identity(agent: Mapping[str, Any]) -> bool:
-    """Whether CAO still holds everything an exact restoration needs."""
+    """Whether CAO still holds a restore contract an exact resume could run.
+
+    A stored contract row is not enough: the contract must also clear the
+    exact executor's fact gate.  An exact resume is refused (never attempted)
+    when the recorded executable or working-directory facts cannot authorize a
+    launch, so routing such a worker down ``MODE_EXACT`` would leave it down
+    behind a doomed attempt; it must be recovered fresh instead.
+    """
     incarnation = agent.get("current_incarnation") or {}
     lineage = agent.get("current_lineage") or {}
     if not incarnation.get("terminal_id") or not incarnation.get("incarnation_id"):
@@ -281,7 +303,12 @@ def has_exact_resume_identity(agent: Mapping[str, Any]) -> bool:
     contract = rc.get_contract_by_incarnation(
         str(incarnation["terminal_id"]), incarnation.get("generation")
     )
-    return contract is not None
+    if contract is None:
+        return False
+    decoded = rc.decode_stored_contract(contract["contract"])
+    if decoded is None:
+        return False
+    return exact_executor._fact_refusal(decoded) is None
 
 
 async def resume_worker(
@@ -500,7 +527,7 @@ def admit_fresh_successor(
                     generation=gen,
                     reason=f"pane lost; recovery {recovery_id}",
                 )
-        except (roster.StableAgentError, rc.RestoreContractError) as exc:
+        except (roster.StableAgentError, rc.RestoreContractError, SQLAlchemyError) as exc:
             return {
                 "mode": ADMIT_REFUSED,
                 "task_occurrence_id": occurrence_id,

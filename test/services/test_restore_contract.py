@@ -818,7 +818,7 @@ def test_canonical_real_path_accepted(isolated_memory_db):
         working_directory=_WORKTREE,
         trusted_project_root=_WORKTREE,
     )
-    assert contract.working_directory == _WORKTREE
+    assert contract.working_directory.value == _WORKTREE
 
 
 def test_executable_refuses_unknown_keys(isolated_memory_db):

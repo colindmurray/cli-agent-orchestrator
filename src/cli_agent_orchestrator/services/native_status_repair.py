@@ -135,7 +135,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import time
 import uuid
@@ -1641,11 +1640,12 @@ def _commit_repair(db: Any, facts: Mapping[str, Any]) -> Optional[Mapping[str, A
                 reserved_request = json.loads(str(reservation.request_json))
             except (json.JSONDecodeError, TypeError, ValueError):
                 reserved_request = {}
-        working_directory = (
-            reservation.working_directory
-            if reservation and reservation.working_directory
-            else os.path.realpath(os.getcwd())
-        )
+        if reservation and reservation.working_directory:
+            working_directory = rc.ContractFact.present(reservation.working_directory)
+        else:
+            working_directory = rc.ContractFact.unavailable(
+                "working directory not captured during status repair"
+            )
         trusted_project_root = reservation.trusted_project_root if reservation else None
 
         exec_fact = rc.ContractFact.unavailable("executable not captured during status repair")
@@ -1688,6 +1688,13 @@ def _commit_repair(db: Any, facts: Mapping[str, Any]) -> Optional[Mapping[str, A
             provider_home_facts=rc.ContractFact.unavailable("provider home not captured during status repair"),
         )
         rc.publish_contract(contract, db=db)
+    except rc.RestoreContractUnavailable:
+        # Per publish_contract's documented contract, the caller's transaction
+        # is poisoned after the race: roll back and let the caller retry the
+        # whole repair (adoption happens on that retry). Continuing would turn
+        # the retryable race into a PendingRollbackError on the commit below.
+        db.rollback()
+        raise
     except Exception as exc:  # noqa: BLE001 - repair must never fail closed on contract publication
         logger.warning("Failed to publish restore contract during repair %s: %s", facts["operation_id"], exc)
     db.add(

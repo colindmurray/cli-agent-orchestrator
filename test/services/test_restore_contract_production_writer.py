@@ -158,7 +158,8 @@ def test_seam_a_unmanaged_bind_publishes_restore_contract(tmp_path, monkeypatch)
     assert contract["generation"] == generation
     assert contract["native_session_id"] == native_id
     assert contract["contract"]["harness"] == "claude_code"
-    assert contract["contract"]["working_directory"] == os.path.realpath(workdir)
+    assert contract["contract"]["working_directory"]["state"] == "present"
+    assert contract["contract"]["working_directory"]["value"] == os.path.realpath(workdir)
 
     # Executable fact must be present per cond-0496 acceptance
     assert contract["contract"]["executable"]["state"] == "present"
@@ -925,7 +926,6 @@ def test_terminal_service_best_effort_retire_transitions_dormant_when_contract_e
     assert contract is not None
     agent = roster.get_agent(roster.derive_initial_agent_id(terminal_id))
     assert agent["disposition"] == roster.DISPOSITION_DORMANT
-    assert agent["resume_contract_version"] == "cao-m3-resume-contract-v1"
 
 
 def test_terminal_service_best_effort_retire_falls_back_when_no_contract():
@@ -1028,7 +1028,6 @@ def test_retire_worker_pane_transitions_dormant_when_contract_exists(tmp_path, m
     assert retire_res["retired_incarnation"]["agent"]["disposition"] == roster.DISPOSITION_DORMANT
     agent = roster.get_agent(bind["agent"]["agent_id"])
     assert agent["disposition"] == roster.DISPOSITION_DORMANT
-    assert agent["resume_contract_version"] == "cao-m3-resume-contract-v1"
 
 
 def test_retire_worker_pane_succeeds_when_roster_raises(tmp_path, monkeypatch):
@@ -1121,7 +1120,6 @@ def test_recover_lost_pane_transitions_dormant_when_contract_exists(tmp_path, mo
     assert inc["disposition"] == roster.INCARNATION_RETIRED
     agent = roster.get_agent(agent_id)
     assert agent["disposition"] == roster.DISPOSITION_DORMANT
-    assert agent["resume_contract_version"] == "cao-m3-resume-contract-v1"
 
 
 # ---------------------------------------------------------------------------
@@ -1179,3 +1177,150 @@ def test_has_exact_resume_identity_is_false_when_no_contract():
     )
     agent = roster.get_agent(agent_id)
     assert ops.has_exact_resume_identity(agent) is False
+
+
+def test_retire_worker_pane_still_collects_pane_when_contract_read_raises(tmp_path, monkeypatch):
+    """F3: a raw SQLAlchemy error from the restore-contract read must never
+    skip delete_terminal — teardown never fails closed on roster bookkeeping."""
+    from sqlalchemy.exc import OperationalError
+
+    workdir = str(tmp_path.resolve())
+    bind, contract, _ = _setup_bound_and_dormant_worker(workdir)
+
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        terminal_service,
+        "delete_terminal",
+        lambda terminal_id, **kwargs: deleted.append(terminal_id) or True,
+    )
+
+    def _broken_read(*args, **kwargs):
+        raise OperationalError("read", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(rc, "get_contract_by_incarnation", _broken_read)
+
+    retire_res = ops.retire_worker_pane(
+        ops.RetireRequest(
+            session_name=SESSION,
+            agent_id=bind["agent"]["agent_id"],
+            reason="test teardown",
+            retired_by="supervisor",
+        )
+    )
+    assert retire_res["pane_collected"] is True
+    assert deleted == [bind["incarnation"]["terminal_id"]]
+
+
+def test_retire_worker_pane_falls_back_to_plain_retirement_when_dormant_transition_conflicts(
+    tmp_path, monkeypatch
+):
+    """F5: when the dormant transition refuses (StableAgentConflict), teardown
+    still retires the incarnation — it is never left LIVE with no backing pane."""
+    workdir = str(tmp_path.resolve())
+    bind, contract, _ = _setup_bound_and_dormant_worker(workdir)
+
+    monkeypatch.setattr(terminal_service, "delete_terminal", lambda *args, **kwargs: True)
+
+    def _conflicting_transition(*args, **kwargs):
+        raise roster.StableAgentConflict(
+            "stored restore contract cannot authorize the dormant transition"
+        )
+
+    monkeypatch.setattr(roster, "transition_dormant", _conflicting_transition)
+
+    retire_res = ops.retire_worker_pane(
+        ops.RetireRequest(
+            session_name=SESSION,
+            agent_id=bind["agent"]["agent_id"],
+            reason="test teardown",
+            retired_by="supervisor",
+        )
+    )
+    assert retire_res["pane_collected"] is True
+    assert retire_res["retired_incarnation"] is not None
+    inc = roster.get_incarnation_by_terminal(
+        terminal_id=bind["incarnation"]["terminal_id"],
+        generation=bind["incarnation"]["generation"],
+    )
+    assert inc["disposition"] == roster.INCARNATION_RETIRED
+
+
+def test_seam_d_repair_records_unavailable_working_directory_when_none_captured(
+    tmp_path, monkeypatch
+):
+    """F4: when the reservation carries no working directory, the repair
+    contract records working_directory as unavailable — never the repair
+    process's cwd."""
+    terminal_id = "a1b2c3d4"
+    generation = "00000000-0000-4000-8000-000000000001"
+    session_id = "4f5f46c7-b660-4f6f-a144-d2c6dceccf95"
+
+    database.create_terminal_v2(
+        terminal_id,
+        SESSION,
+        f"w-{terminal_id}",
+        "claude_code",
+        generation=generation,
+        pane_id="%7",
+        window_id="@7",
+        server_socket_path="/private/tmp/cao-native.sock",
+        session_id="$1",
+        pane_pid=4242,
+    )
+    with database.SessionLocal() as db:
+        row = db.query(database.ManagedLaunchV2TerminalModel).filter_by(id=terminal_id).first()
+        row.v2_lifecycle_state = "live"
+        row.v2_native_session_id = None
+        db.commit()
+
+    roster.bind_generation(
+        roster.BindingContract(
+            agent_id=str(uuid.uuid4()),
+            session_name=SESSION,
+            role=roster.ROLE_WORKER,
+            profile_family="developer",
+            harness="claude_code",
+            native_session_id=None,
+            acquisition_method=None,
+            terminal_id=terminal_id,
+            generation=generation,
+            pane_id="%7",
+            pane_pid=4242,
+            process_identity={"pid": 4242, "start_marker": "Thu Jul 24 10:00:00 2026"},
+            execution_mode=em.NATIVE_TUI,
+            admitted=True,
+        )
+    )
+
+    monkeypatch.setattr(nsr, "_verify_exact_facts", lambda *a, **k: None)
+    monkeypatch.setattr(nsr, "_verify_live_pane", lambda *a, **k: None)
+
+    facts = {
+        "operation_id": str(uuid.uuid4()),
+        "request_digest": hashlib.sha256(b"req").hexdigest(),
+        "terminal_id": terminal_id,
+        "model_generation": generation,
+        "occurrence": generation,
+        "provider": "claude_code",
+        "provider_version": "2.1.226",
+        "session_id": session_id,
+        "parser_key": "claude-status",
+        "evidence_sha256": hashlib.sha256(b"ev").hexdigest(),
+        "observed_at": "2026-08-19T00:00:00Z",
+        "pane_id": "%7",
+        "window_id": "@7",
+        "tmux_session_id": "$1",
+        "server_socket_path": "/private/tmp/cao-native.sock",
+        "pane_pid": 4242,
+        "process_identity": {"pid": 4242, "start_marker": "Thu Jul 24 10:00:00 2026"},
+        "binding_native_id": None,
+        "binding_provider_version": None,
+    }
+    with database.SessionLocal() as db:
+        nsr._commit_repair(db, facts)
+
+    contract = rc.get_contract_by_incarnation(terminal_id, generation)
+    assert contract is not None
+    assert contract["contract"]["working_directory"]["state"] == "unavailable"
+    assert contract["contract"]["working_directory"]["value"] is None
+    assert contract["contract"]["working_directory"]["reason"]

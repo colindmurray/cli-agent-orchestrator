@@ -2765,6 +2765,13 @@ def _reconcile_and_complete_bind(
             provider_home_facts=rc.ContractFact.unavailable("no provider-home carrier facts at this source seam"),
         )
         rc.publish_contract(contract, db=db)
+    except rc.RestoreContractUnavailable:
+        # Per publish_contract's documented contract, the caller's transaction
+        # is poisoned after the race: roll back and let the caller retry the
+        # whole bind (adoption happens on that retry). Continuing would turn
+        # the retryable race into a PendingRollbackError on the commit below.
+        db.rollback()
+        raise
     except Exception as exc:  # noqa: BLE001 - publication failure must never fail the launch
         logger.warning("Failed to publish restore contract for reservation %s: %s", row.reservation_id, exc)
     row.binding_json = _canonical_json(intent["binding"])

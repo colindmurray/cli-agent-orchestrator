@@ -484,8 +484,15 @@ def _fact_refusal(contract: restore_contract.RestoreContract) -> Optional[str]:
             "refusing to launch a provider whose image is not the one that was admitted"
         )
     working_directory = contract.working_directory
-    if not os.path.isdir(working_directory):
-        return f"the recorded canonical working directory no longer exists: " f"{working_directory}"
+    if working_directory.state != restore_contract.FACT_PRESENT:
+        return (
+            f"the restore contract's working directory is {working_directory.state!r}"
+            + (f" ({working_directory.reason})" if working_directory.reason else "")
+            + "; an exact restore requires the present canonical working directory"
+        )
+    wd_path = working_directory.value
+    if not isinstance(wd_path, str) or not os.path.isdir(wd_path):
+        return f"the recorded canonical working directory no longer exists: {wd_path}"
     return None
 
 
@@ -1769,6 +1776,7 @@ async def _execute_locked(
         except (
             IntegrityError,
             OperationalError,
+            restore_contract.RestoreContractUnavailable,
             roster.StableAgentUnavailable,
             operation_journal.OperationJournalUnavailable,
         ) as exc:
@@ -2227,7 +2235,7 @@ async def _launch_successor_effect_inner(
             generation=successor_generation,
             provider=execution.request.harness,
             agent_profile=execution.request.profile_family,
-            working_directory=contract.working_directory,
+            working_directory=contract.working_directory.value,
             trusted_project_root=(
                 contract.trusted_project_root if execution.request.harness == "codex" else None
             ),
@@ -2256,7 +2264,7 @@ async def _launch_successor_effect_inner(
             intent=intent,
             binary=str(executable["path"]),
             binary_sha256=str(executable["sha256"]),
-            working_directory=contract.working_directory,
+            working_directory=contract.working_directory.value,
             transport=transport,
             extra_args=launch_args or None,
             launch_kind=native_tui_launch.LAUNCH_KIND_RESUME,
@@ -2467,6 +2475,14 @@ def _bind_successor(
                     execution_mode=bind["incarnation"]["execution_mode"],
                 )
                 restore_contract.publish_contract(successor_contract, db=session)
+        except restore_contract.RestoreContractUnavailable:
+            # Per publish_contract's documented contract, the caller's transaction
+            # is poisoned after the race: roll back and re-raise so the bind loop
+            # retries the whole bind in a fresh transaction (adoption happens on
+            # that retry). Continuing would convert the retryable race into a
+            # PendingRollbackError on the commit below.
+            session.rollback()
+            raise
         except Exception as exc:  # noqa: BLE001 - publication failure must never fail the resume
             logger.warning(
                 "Failed to publish restore contract for successor %s/%s: %s",
