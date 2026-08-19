@@ -1095,3 +1095,111 @@ def test_row_count_is_taken_inside_exclusive_transaction(tmp_path, monkeypatch):
     # — the ordering assertion above is the load-bearing check.
     # Mutation: moving the SELECT COUNT(*) back before BEGIN IMMEDIATE makes
     # this test fail at the index assertion.
+
+
+# ---------------------------------------------------------------------------
+# Wiring: real init_db() against a populated pre-#132 store, then health
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_populated_store_boots_through_real_init_db_and_serves_health(tmp_path, monkeypatch):
+    """Wiring gap: the migration unit tests prove the reconcile, not the boot.
+
+    ``test/clients/test_database.py::TestInitDb::test_init_db`` mocks ``Base`` so
+    the real ``create_all``/migrations never run — a change to ``init_db()`` that
+    hangs or raises at server boot would stay green. This test boots the app
+    through the *real* ``init_db()`` against a legacy pre-#132 store (the
+    populated shape that triggers the rebuild) and proves the server is
+    serviceable afterwards.
+
+    Placement: ``test/services/test_task_handoff_migration.py`` rather than
+    ``test/api/test_session_env_lifespan.py`` because the only factory for a
+    legacy store (``_PRE132_DDL`` / ``_pre132_store``) already lives here; a
+    second copy in ``test/api/`` would be the same DDL drifting in two places.
+    The ``test_session_env_lifespan`` precedent is the app-boot pattern, not the
+    store shape, so co-locating with the shape keeps the wire and its fixture
+    together.
+
+    Bound trade: ``init_db()`` is 57 ms on a fresh store and well under a
+    second on a legacy store here. A tight bound (e.g. 1 s) would be meaningful
+    but flakes on slow CI — the repo already has one wall-clock flake
+    (``test_a_native_identity_timeout_is_bounded_and_releases_the_lease``). The
+    bound here is 10 s: an order of magnitude above the observed latency, so a
+    genuine hang (``BEGIN IMMEDIATE`` blocked, infinite loop) trips it, but a
+    slow runner does not. If 10 s still flakes, drop the timing assert and keep
+    completion + serviceability — a hanging ``init_db()`` would instead be proved
+    by the test timing out.
+
+    Isolation: the suite already injects a per-session ``CAO_STATE_ROOT`` via
+    ``test/conftest.py``; this test additionally monkeypatches
+    ``constants.DATABASE_FILE`` and the import-time ``database.engine``/
+    ``SessionLocal`` so the lifespan's ``init_db()`` hits the tmp store and
+    cannot touch the operator's or suite's DB file. No ``Base``/migration mock.
+    """
+
+    import time
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from cli_agent_orchestrator import constants
+    from cli_agent_orchestrator.api.main import app as cao_app
+
+    # Populated legacy store — the population that actually triggers the rebuild.
+    path = _pre132_store(tmp_path, monkeypatch, with_row=True)
+
+    # Redirect the import-time engine/session to the legacy file. The migration
+    # itself uses ``sqlite3.connect(DATABASE_FILE)`` so ``DATABASE_FILE`` alone
+    # would be enough for the DDL, but ``init_db`` also runs ``Base.metadata.
+    # create_all(bind=engine)`` which is bound at import time.
+    engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(
+        database, "SessionLocal", sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    )
+    # Keep DATABASE_URL consistent — not read by init_db after import, but
+    # re-exported by callers that rebuild an engine from it.
+    monkeypatch.setattr(database, "DATABASE_URL", f"sqlite:///{path}")
+    monkeypatch.setattr(constants, "DATABASE_FILE", path)
+
+    # The migrations must genuinely execute — do not mock Base/create_all/_migrate_*.
+    start = time.monotonic()
+    try:
+        database.init_db()
+    except Exception as exc:  # pragma: no cover - failure path is the assertion
+        raise AssertionError(f"init_db() raised on legacy store: {exc}") from exc
+    elapsed = time.monotonic() - start
+    # Loose but bounded — see docstring trade. Under a competing held write
+    # lock ``BEGIN IMMEDIATE`` respects the 5 s busy timeout and returns
+    # ``database is locked`` (caught as warning, next boot repairs), so 10 s
+    # covers both the happy path and the lock path without hanging the suite.
+    assert elapsed < 10, f"init_db() hung or was pathologically slow: {elapsed:.2f}s"
+
+    # Post-migration: the legacy row is still there, donor_revision is NULL, and
+    # the new shape is readable through the ORM the server uses (not just via
+    # raw sqlite3) — the cheapest proof the store is usable after boot short of
+    # a full HTTP serve.
+    with database.SessionLocal() as session:
+        row = (
+            session.query(database.TaskOccurrenceHandoffModel)
+            .filter_by(handoff_id="h-legacy")
+            .one()
+        )
+        d = th._row_dict(row)
+        assert d["donor_revision"] is None
+
+    # Cheapest honest proof the wiring holds: the app actually serves after the
+    # migrated boot. ``TestClient`` drives the real lifespan (which reruns
+    # ``init_db()`` idempotently — that second run is also part of the wiring
+    # proof; the first timed run above is what carries the hang bound).
+    try:
+        with TestClient(cao_app, base_url="http://localhost") as client:
+            resp = client.get("/health")
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body.get("status") == "ok"
+            # Health is backend-agnostic; just prove we got *a* health body back,
+            # not that a particular provider is installed on this runner.
+    finally:
+        engine.dispose()
