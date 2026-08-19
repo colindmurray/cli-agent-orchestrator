@@ -1625,7 +1625,9 @@ def _pre_task_bind_and_resolve(
     try:
         from cli_agent_orchestrator.services import restore_contract as rc
 
-        exec_fact = rc.ContractFact.unavailable("executable facts unavailable at unmanaged pre-task bind")
+        exec_fact = rc.ContractFact.unavailable(
+            "executable facts unavailable at unmanaged pre-task bind"
+        )
         exec_path = identity.get("binary_path") or identity.get("executable_path")
         exec_hash = identity.get("binary_sha256") or identity.get("executable_hash")
         if exec_path and exec_hash:
@@ -1651,21 +1653,35 @@ def _pre_task_bind_and_resolve(
             provider=provider,
             route_provenance=roster_record["lineage"]["route_provenance"],
             execution_mode=roster_record["incarnation"]["execution_mode"] or em.NATIVE_TUI,
-            working_directory=identity.get("working_directory") or unmanaged_native_identity.canonical_working_directory(working_directory),
-            trusted_project_root=identity.get("trusted_project_root") or (unmanaged_native_identity.canonical_working_directory(working_directory) if provider == "codex" else None),
+            working_directory=identity.get("working_directory")
+            or unmanaged_native_identity.canonical_working_directory(working_directory),
+            trusted_project_root=identity.get("trusted_project_root")
+            or (
+                unmanaged_native_identity.canonical_working_directory(working_directory)
+                if provider == "codex"
+                else None
+            ),
             model=(
                 rc.ContractFact.present(identity["model"])
                 if identity.get("model")
-                else rc.ContractFact.unavailable("no model fact recorded at unmanaged pre-task bind")
+                else rc.ContractFact.unavailable(
+                    "no model fact recorded at unmanaged pre-task bind"
+                )
             ),
             effort=(
                 rc.ContractFact.present(identity["effort"])
                 if identity.get("effort")
-                else rc.ContractFact.unavailable("no effort fact recorded at unmanaged pre-task bind")
+                else rc.ContractFact.unavailable(
+                    "no effort fact recorded at unmanaged pre-task bind"
+                )
             ),
             executable=exec_fact,
-            profile_material=rc.ContractFact.unavailable("no profile material carrier facts at unmanaged launch"),
-            provider_home_facts=rc.ContractFact.unavailable("no provider-home carrier facts at this source seam"),
+            profile_material=rc.ContractFact.unavailable(
+                "no profile material carrier facts at unmanaged launch"
+            ),
+            provider_home_facts=rc.ContractFact.unavailable(
+                "no provider-home carrier facts at this source seam"
+            ),
         )
         rc.publish_contract(contract)
     except Exception as exc:  # noqa: BLE001 - publication failure must never fail the launch

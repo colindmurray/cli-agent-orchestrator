@@ -1649,7 +1649,9 @@ def _commit_repair(db: Any, facts: Mapping[str, Any]) -> Optional[Mapping[str, A
         trusted_project_root = reservation.trusted_project_root if reservation else None
 
         exec_fact = rc.ContractFact.unavailable("executable not captured during status repair")
-        if reserved_request.get("provider_executable") and reserved_request.get("provider_executable_sha256"):
+        if reserved_request.get("provider_executable") and reserved_request.get(
+            "provider_executable_sha256"
+        ):
             try:
                 exec_val = {
                     "path": reserved_request["provider_executable"],
@@ -1684,8 +1686,12 @@ def _commit_repair(db: Any, facts: Mapping[str, Any]) -> Optional[Mapping[str, A
                 else rc.ContractFact.unavailable("effort not captured during status repair")
             ),
             executable=exec_fact,
-            profile_material=rc.ContractFact.unavailable("profile material not captured during status repair"),
-            provider_home_facts=rc.ContractFact.unavailable("provider home not captured during status repair"),
+            profile_material=rc.ContractFact.unavailable(
+                "profile material not captured during status repair"
+            ),
+            provider_home_facts=rc.ContractFact.unavailable(
+                "provider home not captured during status repair"
+            ),
         )
         rc.publish_contract(contract, db=db)
     except rc.RestoreContractUnavailable:
@@ -1696,7 +1702,9 @@ def _commit_repair(db: Any, facts: Mapping[str, Any]) -> Optional[Mapping[str, A
         db.rollback()
         raise
     except Exception as exc:  # noqa: BLE001 - repair must never fail closed on contract publication
-        logger.warning("Failed to publish restore contract during repair %s: %s", facts["operation_id"], exc)
+        logger.warning(
+            "Failed to publish restore contract during repair %s: %s", facts["operation_id"], exc
+        )
     db.add(
         database.NativeStatusRepairEvidenceModel(
             operation_id=facts["operation_id"],

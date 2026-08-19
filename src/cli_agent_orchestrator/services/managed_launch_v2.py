@@ -2727,8 +2727,12 @@ def _reconcile_and_complete_bind(
     try:
         from cli_agent_orchestrator.services import restore_contract as rc
 
-        exec_fact = rc.ContractFact.unavailable("executable facts unavailable in managed reservation")
-        if reserved_request.get("provider_executable") and reserved_request.get("provider_executable_sha256"):
+        exec_fact = rc.ContractFact.unavailable(
+            "executable facts unavailable in managed reservation"
+        )
+        if reserved_request.get("provider_executable") and reserved_request.get(
+            "provider_executable_sha256"
+        ):
             try:
                 exec_val = {
                     "path": reserved_request["provider_executable"],
@@ -2761,8 +2765,12 @@ def _reconcile_and_complete_bind(
                 else rc.ContractFact.unavailable("no effort fact in managed reservation")
             ),
             executable=exec_fact,
-            profile_material=rc.ContractFact.unavailable("no profile material carrier facts in managed reservation"),
-            provider_home_facts=rc.ContractFact.unavailable("no provider-home carrier facts at this source seam"),
+            profile_material=rc.ContractFact.unavailable(
+                "no profile material carrier facts in managed reservation"
+            ),
+            provider_home_facts=rc.ContractFact.unavailable(
+                "no provider-home carrier facts at this source seam"
+            ),
         )
         rc.publish_contract(contract, db=db)
     except rc.RestoreContractUnavailable:
@@ -2773,7 +2781,9 @@ def _reconcile_and_complete_bind(
         db.rollback()
         raise
     except Exception as exc:  # noqa: BLE001 - publication failure must never fail the launch
-        logger.warning("Failed to publish restore contract for reservation %s: %s", row.reservation_id, exc)
+        logger.warning(
+            "Failed to publish restore contract for reservation %s: %s", row.reservation_id, exc
+        )
     row.binding_json = _canonical_json(intent["binding"])
     row.state = "bound"
     row.updated_at = _now()

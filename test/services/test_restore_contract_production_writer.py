@@ -451,7 +451,11 @@ def test_seam_c_exact_resume_publishes_successor_contract(tmp_path, monkeypatch)
     oj.claim_operation(req)
 
     with database.SessionLocal() as db:
-        row = db.query(database.ReincarnationOperationModel).filter_by(operation_id=req.operation_id).first()
+        row = (
+            db.query(database.ReincarnationOperationModel)
+            .filter_by(operation_id=req.operation_id)
+            .first()
+        )
         row.phase = oj.EFFECT_STEP_VERIFY_IDENTITY
         db.commit()
 
@@ -500,7 +504,11 @@ def test_seam_c_publish_failure_does_not_fail_resume(tmp_path, monkeypatch):
     oj.claim_operation(req)
 
     with database.SessionLocal() as db:
-        row = db.query(database.ReincarnationOperationModel).filter_by(operation_id=req.operation_id).first()
+        row = (
+            db.query(database.ReincarnationOperationModel)
+            .filter_by(operation_id=req.operation_id)
+            .first()
+        )
         row.phase = oj.EFFECT_STEP_VERIFY_IDENTITY
         db.commit()
 
@@ -870,7 +878,9 @@ def test_seam_d_publish_failure_does_not_fail_repair(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_terminal_service_best_effort_retire_transitions_dormant_when_contract_exists(tmp_path, monkeypatch):
+def test_terminal_service_best_effort_retire_transitions_dormant_when_contract_exists(
+    tmp_path, monkeypatch
+):
     """_roster_retire_incarnation_best_effort transitions dormant when contract exists."""
     workdir = str(tmp_path.resolve())
     terminal_id = f"term-{uuid.uuid4().hex[:8]}"
@@ -960,6 +970,7 @@ def test_terminal_service_best_effort_retire_falls_back_when_no_contract():
 
 def test_terminal_service_best_effort_retire_never_raises(monkeypatch):
     """_roster_retire_incarnation_best_effort swallows any roster error during teardown."""
+
     def _broken(*args, **kwargs):
         raise RuntimeError("catastrophic roster error")
 
@@ -1127,7 +1138,9 @@ def test_recover_lost_pane_transitions_dormant_when_contract_exists(tmp_path, mo
 # ---------------------------------------------------------------------------
 
 
-def test_has_exact_resume_identity_is_true_for_normally_launched_agent(worktree, tmp_path, monkeypatch):
+def test_has_exact_resume_identity_is_true_for_normally_launched_agent(
+    worktree, tmp_path, monkeypatch
+):
     """The acceptance line: has_exact_resume_identity is True for a normally launched agent."""
     record = _reserve_and_claim_v2(worktree, tmp_path, provider="codex")
     provider_session_id = _setup_v2_ready_state(record, monkeypatch)
@@ -1144,7 +1157,11 @@ def test_has_exact_resume_identity_is_true_for_normally_launched_agent(worktree,
     # Fetch agent from roster
     db = database.SessionLocal()
     try:
-        res = db.query(database.ManagedLaunchV2ReservationModel).filter_by(reservation_id=record["reservation_id"]).first()
+        res = (
+            db.query(database.ManagedLaunchV2ReservationModel)
+            .filter_by(reservation_id=record["reservation_id"])
+            .first()
+        )
         assert res.stable_agent_id is not None
         agent_id = res.stable_agent_id
     finally:
