@@ -482,7 +482,7 @@ def _row_dict(row: Any) -> dict[str, Any]:
         "from_incarnation_id": row.from_incarnation_id,
         "from_terminal_id": row.from_terminal_id,
         "from_generation": row.from_generation,
-        "donor_revision": int(row.donor_revision or 0),
+        "donor_revision": row.donor_revision,
         "packet_digest": row.packet_digest,
         "packet_control_id": row.packet_control_id,
         "quiescence": _parse_json(row.quiescence_json),
@@ -679,8 +679,13 @@ def _begin_once(db: Any, request: BeginRequest) -> dict[str, Any]:
             )
         # The recorded donor_revision IS the expected revision the first
         # attempt pinned. A replay naming a different one is not the same
-        # request, even if every stored field happens to agree.
-        if int(existing.donor_revision or 0) != request.expected_donor_revision:
+        # request, even if every stored field happens to agree. A stored NULL
+        # means the handoff predates the revision pin and can never satisfy a
+        # caller that names one.
+        if (
+            existing.donor_revision is None
+            or int(existing.donor_revision) != request.expected_donor_revision
+        ):
             raise TaskHandoffConflict(
                 f"handoff {request.handoff_id} already exists with different immutable content"
             )
@@ -1190,8 +1195,16 @@ def _complete_once(
     # while held, something wrote to it after the digest was taken, and the
     # context the recipient read is not the round it is being given. Refusing
     # is recoverable -- roll back and begin again with a fresh packet -- and
-    # transferring is not.
-    if int(donor["revision"]) != int(row.donor_revision or 0):
+    # transferring is not. A stored NULL predates the revision pin and can never
+    # satisfy the CAS: the packet cannot be shown to describe the round being
+    # transferred.
+    if row.donor_revision is None:
+        raise TaskHandoffConflict(
+            f"handoff {handoff_id} predates the revision pin (donor_revision is NULL), "
+            f"so the packet cannot be shown to describe the round being transferred "
+            f"(donor at revision {donor['revision']}); roll this handoff back and begin a new one"
+        )
+    if int(donor["revision"]) != int(row.donor_revision):
         raise TaskHandoffConflict(
             f"task occurrence {row.task_occurrence_id} moved from revision {row.donor_revision} "
             f"to {donor['revision']} while held; the catch-up packet no longer describes the "
