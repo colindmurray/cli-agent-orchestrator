@@ -1272,6 +1272,7 @@ def list_issues(
     assignee: Optional[str] = None,
     reporter: Optional[str] = None,
     label: Optional[Sequence[str] | str] = None,
+    without_label: Optional[Sequence[str] | str] = None,
     unlabeled: bool = False,
     query: Optional[str] = None,
     open_only: bool = False,
@@ -1285,8 +1286,12 @@ def list_issues(
     ``total`` is the count BEFORE limit/offset so a caller can page without
     guessing whether a short page means the end.
 
-    ``unlabeled`` selects issues with an empty label set — the never-triaged
-    bucket a triage pass starts from. It composes with every other filter.
+    ``without_label`` excludes issues carrying any named label. Repeated
+    exclusions compose as AND (the row must carry none of them), which lets a
+    triage pass ignore workflow-state labels without losing provenance labels.
+
+    ``unlabeled`` selects issues with an empty label set. It composes with
+    every other filter.
     """
     limit = max(1, min(int(limit or 100), 500))
     offset = max(0, int(offset or 0))
@@ -1327,6 +1332,19 @@ def list_issues(
             for raw_label in normalise_labels(wanted_labels):
                 needle = raw_label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 q = q.filter(TrackerIssueModel.labels.like(f'%"{needle}"%', escape="\\"))
+        if without_label:
+            excluded_labels = (
+                [without_label]
+                if isinstance(without_label, str)
+                else list(without_label)
+            )
+            for raw_label in normalise_labels(excluded_labels):
+                needle = (
+                    raw_label.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
+                q = q.filter(~TrackerIssueModel.labels.like(f'%"{needle}"%', escape="\\"))
         if unlabeled:
             # The stored value is always a JSON array ("[]" when empty), so an
             # exact comparison is the whole rule — no LIKE, no ambiguity.
@@ -1364,6 +1382,7 @@ def list_features(
     assignee: Optional[str] = None,
     reporter: Optional[str] = None,
     label: Optional[str] = None,
+    without_label: Optional[Sequence[str] | str] = None,
     unlabeled: bool = False,
     query: Optional[str] = None,
     open_only: bool = False,
@@ -1380,6 +1399,7 @@ def list_features(
         assignee=assignee,
         reporter=reporter,
         label=label,
+        without_label=without_label,
         unlabeled=unlabeled,
         query=query,
         open_only=open_only,

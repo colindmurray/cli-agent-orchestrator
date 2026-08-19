@@ -496,6 +496,9 @@ async def list_issues(
     assignee: Optional[str] = Query(None),
     reporter: Optional[str] = Query(None),
     label_filter: Optional[List[str]] = Query(None, alias="label"),
+    without_label: Optional[List[str]] = Query(
+        None, description="exclude issues carrying any of these exact labels"
+    ),
     unlabeled: bool = Query(False, description="only issues with an empty label set"),
     q: Optional[str] = Query(None),
     open_only: bool = Query(False),
@@ -517,6 +520,7 @@ async def list_issues(
             assignee=assignee,
             reporter=reporter,
             label=label_filter,
+            without_label=without_label,
             unlabeled=unlabeled,
             query=q,
             open_only=open_only,
@@ -797,6 +801,9 @@ async def list_features(
     assignee: Optional[str] = Query(None),
     reporter: Optional[str] = Query(None),
     label: Optional[str] = Query(None),
+    without_label: Optional[List[str]] = Query(
+        None, description="exclude features carrying any of these exact labels"
+    ),
     unlabeled: bool = Query(False, description="only features with an empty label set"),
     q: Optional[str] = Query(None),
     open_only: bool = Query(False),
@@ -814,6 +821,7 @@ async def list_features(
             assignee=assignee,
             reporter=reporter,
             label=label,
+            without_label=without_label,
             unlabeled=unlabeled,
             query=q,
             open_only=open_only,

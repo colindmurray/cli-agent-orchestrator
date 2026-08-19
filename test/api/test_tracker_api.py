@@ -736,6 +736,19 @@ class TestTriageDiscoveryRoutes:
         default = client.get("/tracker/issues").json()
         assert [i["title"] for i in default["issues"]] == ["bare issue"]
 
+    def test_repeated_without_label_excludes_any_exact_match(self, client, project):
+        _issue(client, title="ready", labels=["source:wayfinder"])
+        _issue(client, title="triaged", labels=["needs-triage"])
+        _issue(client, title="waiting", labels=["needs-info"])
+        _issue(client, title="similar", labels=["needs-info-extra"])
+
+        body = client.get(
+            "/tracker/issues",
+            params=[("without_label", "needs-triage"), ("without_label", "needs-info")],
+        ).json()
+
+        assert {i["title"] for i in body["issues"]} == {"ready", "similar"}
+
 
 class TestLabelFacetRoute:
     def test_label_counts_for_a_project(self, client, project):
@@ -871,3 +884,21 @@ class TestFeatureParity:
         )
         body = client.get("/tracker/features", params={"unlabeled": True}).json()
         assert [i["title"] for i in body["issues"]] == ["bare"]
+
+    def test_the_features_list_accepts_without_label(self, client, project):
+        client.post(
+            "/tracker/features",
+            json={
+                "project_id": "cao-system",
+                "title": "ready",
+                "labels": ["source:wayfinder"],
+            },
+        )
+        client.post(
+            "/tracker/features",
+            json={"project_id": "cao-system", "title": "waiting", "labels": ["needs-info"]},
+        )
+        body = client.get(
+            "/tracker/features", params={"without_label": "needs-info"}
+        ).json()
+        assert [i["title"] for i in body["issues"]] == ["ready"]

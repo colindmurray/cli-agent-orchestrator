@@ -402,6 +402,12 @@ def issue_file(
 @click.option("--assignee", default=None)
 @click.option("--reporter", default=None)
 @click.option("--label", default=None)
+@click.option(
+    "--without-label",
+    "without_labels",
+    multiple=True,
+    help="exclude issues carrying this exact label (repeatable)",
+)
 @click.option("--unlabeled", is_flag=True, help="only issues with no labels (never triaged)")
 @click.option(
     "--kind",
@@ -427,6 +433,7 @@ def issue_list(
     assignee,
     reporter,
     label,
+    without_labels,
     unlabeled,
     kind,
     query,
@@ -446,6 +453,7 @@ def issue_list(
             assignee=assignee,
             reporter=reporter,
             label=label,
+            without_label=list(without_labels) or None,
             unlabeled=unlabeled,
             query=query,
             open_only=open_only,

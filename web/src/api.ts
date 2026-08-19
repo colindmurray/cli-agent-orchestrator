@@ -1075,6 +1075,7 @@ export interface TrackerIssueFilters {
   assignee?: string
   reporter?: string
   label?: string[]
+  withoutLabel?: string[]
   unlabeled?: boolean
   q?: string
   openOnly?: boolean
@@ -1216,6 +1217,7 @@ function trackerQuery(filters?: TrackerIssueFilters): string {
   if (filters.assignee) parts.push(`assignee=${encodeURIComponent(filters.assignee)}`)
   if (filters.reporter) parts.push(`reporter=${encodeURIComponent(filters.reporter)}`)
   for (const label of filters.label ?? []) parts.push(`label=${encodeURIComponent(label)}`)
+  for (const label of filters.withoutLabel ?? []) parts.push(`without_label=${encodeURIComponent(label)}`)
   if (filters.unlabeled) parts.push('unlabeled=true')
   if (filters.q) parts.push(`q=${encodeURIComponent(filters.q)}`)
   if (filters.openOnly) parts.push('open_only=true')

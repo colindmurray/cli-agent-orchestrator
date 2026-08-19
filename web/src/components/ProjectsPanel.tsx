@@ -188,6 +188,8 @@ interface TabFilters {
   openOnly: boolean
   /** Repeated exact labels compose as AND on the server. */
   labels: string[]
+  /** Rows carrying any of these exact labels are excluded. */
+  excludedLabels: string[]
   component: string
   assignee: string
   reporter: string
@@ -202,6 +204,7 @@ function defaultTabFilters(): TabFilters {
     severityFilter: [],
     openOnly: true,
     labels: [],
+    excludedLabels: [],
     component: '',
     assignee: '',
     reporter: '',
@@ -251,7 +254,7 @@ export function ProjectsPanel() {
 
   // URL state: ?project=cao-system&kind=feature&key=cond-0342 plus
   // &view=graph&root=cond-0001 (or &view=wayfinder&map=cond-0001) plus
-  // filters such as &label=effort:x&unlabeled=1 — shareable and
+  // filters such as &label=effort:x&without_label=needs-info — shareable and
   // Back/Forward traverses it.
   const urlSyncRef = useRef(false)
 
@@ -267,6 +270,7 @@ export function ProjectsPanel() {
       const urlRoot = params.get('root')
       const urlMap = params.get('map')
       const urlLabels = params.getAll('label')
+      const urlExcludedLabels = params.getAll('without_label')
       const urlStatuses = params.getAll('status')
       const urlSeverities = params.getAll('severity')
       const urlUnlabeled = params.get('unlabeled') === '1'
@@ -286,6 +290,7 @@ export function ProjectsPanel() {
         [tab]: {
           ...prev[tab],
           labels: urlLabels,
+          excludedLabels: urlExcludedLabels,
           statusFilter: urlStatuses,
           severityFilter: urlSeverities,
           component: params.get('component') ?? '',
@@ -374,6 +379,7 @@ export function ProjectsPanel() {
       status: f.statusFilter.length ? f.statusFilter : undefined,
       severity: f.severityFilter.length ? f.severityFilter : undefined,
       label: f.labels.length ? f.labels : undefined,
+      withoutLabel: f.excludedLabels.length ? f.excludedLabels : undefined,
       component: f.component || undefined,
       assignee: f.assignee || undefined,
       reporter: f.reporter || undefined,
@@ -424,6 +430,8 @@ export function ProjectsPanel() {
       else params.delete('map')
       params.delete('label')
       for (const label of currentFilters.labels) params.append('label', label)
+      params.delete('without_label')
+      for (const label of currentFilters.excludedLabels) params.append('without_label', label)
       params.delete('status')
       for (const status of currentFilters.statusFilter) params.append('status', status)
       params.delete('severity')
@@ -479,6 +487,7 @@ export function ProjectsPanel() {
         const urlRoot = params.get('root')
         const urlMap = params.get('map')
         const urlLabels = params.getAll('label')
+        const urlExcludedLabels = params.getAll('without_label')
         const urlStatuses = params.getAll('status')
         const urlSeverities = params.getAll('severity')
         const urlUnlabeled = params.get('unlabeled') === '1'
@@ -497,6 +506,7 @@ export function ProjectsPanel() {
           [tab]: {
             ...prev[tab],
             labels: urlLabels,
+            excludedLabels: urlExcludedLabels,
             statusFilter: urlStatuses,
             severityFilter: urlSeverities,
             component: params.get('component') ?? '',
@@ -586,6 +596,7 @@ export function ProjectsPanel() {
   const advancedFilterCount = currentFilters.statusFilter.length
     + currentFilters.severityFilter.length
     + currentFilters.labels.length
+    + currentFilters.excludedLabels.length
     + Number(Boolean(currentFilters.component))
     + Number(Boolean(currentFilters.assignee))
     + Number(Boolean(currentFilters.reporter))
@@ -829,7 +840,7 @@ export function ProjectsPanel() {
                   <button
                     type="button"
                     onClick={() => updateCurrentFilters({
-                      statusFilter: [], severityFilter: [], labels: [], component: '',
+                      statusFilter: [], severityFilter: [], labels: [], excludedLabels: [], component: '',
                       assignee: '', reporter: '', unlabeled: false, offset: 0,
                     })}
                     className="text-[11px] text-gray-500 hover:text-gray-300"
@@ -887,13 +898,24 @@ export function ProjectsPanel() {
                       </div>
                     </div>
                     <label className="block">
-                      <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-gray-600">Labels</span>
+                      <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-gray-600">Include labels</span>
                       <SearchableMultiSelect
                         values={currentFilters.labels}
                         onChange={labels => updateCurrentFilters({ labels, unlabeled: false, offset: 0 })}
                         loadOptions={loadLabelOptions}
                         placeholder="Search labels"
                         ariaLabel="Filter labels"
+                        emptyMessage="No matching labels"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-gray-600">Exclude labels</span>
+                      <SearchableMultiSelect
+                        values={currentFilters.excludedLabels}
+                        onChange={excludedLabels => updateCurrentFilters({ excludedLabels, unlabeled: false, offset: 0 })}
+                        loadOptions={loadLabelOptions}
+                        placeholder="Search labels to exclude"
+                        ariaLabel="Exclude labels"
                         emptyMessage="No matching labels"
                       />
                     </label>
@@ -904,6 +926,7 @@ export function ProjectsPanel() {
                         onChange={event => updateCurrentFilters({
                           unlabeled: event.target.checked,
                           labels: event.target.checked ? [] : currentFilters.labels,
+                          excludedLabels: event.target.checked ? [] : currentFilters.excludedLabels,
                           offset: 0,
                         })}
                         className="accent-emerald-600"

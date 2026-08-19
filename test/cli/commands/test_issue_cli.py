@@ -600,6 +600,40 @@ class TestListDiscoveryFlags:
         )
         assert [i["title"] for i in payload["issues"]] == ["bare"]
 
+    def test_without_label_is_repeatable_and_exact(self, runner):
+        for title, label in [
+            ("ready", "source:wayfinder"),
+            ("triaged", "needs-triage"),
+            ("waiting", "needs-info"),
+            ("similar", "needs-info-extra"),
+        ]:
+            run(
+                runner,
+                issue_cli.issue,
+                "file",
+                "--title",
+                title,
+                "--project",
+                "cao-system",
+                "--label",
+                label,
+            )
+        payload = json.loads(
+            run(
+                runner,
+                issue_cli.issue,
+                "list",
+                "--project",
+                "cao-system",
+                "--without-label",
+                "needs-triage",
+                "--without-label",
+                "needs-info",
+                "--json",
+            )
+        )
+        assert {i["title"] for i in payload["issues"]} == {"ready", "similar"}
+
     def test_kind_selects_bug_feature_or_all_with_bug_the_default(self, runner):
         run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
         run(

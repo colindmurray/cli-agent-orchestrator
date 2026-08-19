@@ -184,6 +184,7 @@ const FACETS = {
   labels: [
     { label: 'effort:deploy', total: 5, open: 4 },
     { label: 'wayfinder:map', total: 1, open: 1 },
+    { label: 'wayfinder:research', total: 1, open: 1 },
   ],
   unlabeled: 2,
   unlabeled_open: 2,
@@ -225,6 +226,9 @@ describe('Wayfinder view', () => {
       const params = new URLSearchParams(url.split('?')[1] ?? '')
       let rows = ALL_ISSUES
       if (params.get('label') === 'wayfinder:map') rows = [MAP]
+      if (params.getAll('without_label').includes('wayfinder:research')) {
+        rows = rows.filter(row => !row.labels.includes('wayfinder:research'))
+      }
       if (params.get('unlabeled') === 'true') rows = [T_MIGRATE, EXT]
       return { total: rows.length, limit: 50, offset: 0, issues: rows }
     }
@@ -349,6 +353,17 @@ describe('Wayfinder view', () => {
     fireEvent.click(option)
     await waitFor(() => expect(calls.some(c => c.url.includes('label=effort%3Adeploy'))).toBe(true))
     await waitFor(() => expect(window.location.search).toContain('label=effort%3Adeploy'))
+  })
+
+  it('searches excluded labels and persists the exclusion in the URL', async () => {
+    render(<ProjectsPanel />)
+    await openIssues()
+    fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Exclude labels' }))
+    fireEvent.click(await screen.findByRole('option', { name: /wayfinder:research/ }))
+    await waitFor(() => expect(calls.some(c => c.url.includes('without_label=wayfinder%3Aresearch'))).toBe(true))
+    await waitFor(() => expect(window.location.search).toContain('without_label=wayfinder%3Aresearch'))
+    expect(screen.queryByText('research providers')).not.toBeInTheDocument()
   })
 
   it('offers the unlabeled bucket with its count', async () => {

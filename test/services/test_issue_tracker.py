@@ -1150,6 +1150,43 @@ class TestUnlabeledFilter:
         assert sorted(i["title"] for i in got_all["issues"]) == ["bare feature", "bare issue"]
 
 
+class TestWithoutLabelFilter:
+    def test_repeated_exclusions_remove_any_exact_match(self, cao_system):
+        tracker.create_issue(
+            project_id="cao-system", title="ready", labels=["source:wayfinder"]
+        )
+        tracker.create_issue(project_id="cao-system", title="triaged", labels=["needs-triage"])
+        tracker.create_issue(project_id="cao-system", title="waiting", labels=["needs-info"])
+        tracker.create_issue(
+            project_id="cao-system", title="similar", labels=["needs-info-extra"]
+        )
+
+        got = tracker.list_issues(
+            project_id="cao-system", without_label=["needs-triage", "needs-info"]
+        )
+
+        assert {i["title"] for i in got["issues"]} == {"ready", "similar"}
+
+    def test_exclusions_compose_with_inclusion_and_keep_unpaged_total(self, cao_system):
+        tracker.create_issue(
+            project_id="cao-system", title="a", labels=["wayfinder:task"]
+        )
+        tracker.create_issue(
+            project_id="cao-system", title="b", labels=["wayfinder:task", "needs-info"]
+        )
+        tracker.create_issue(project_id="cao-system", title="c", labels=["other"])
+
+        page = tracker.list_issues(
+            project_id="cao-system",
+            label="wayfinder:task",
+            without_label="needs-info",
+            limit=1,
+        )
+
+        assert page["total"] == 1
+        assert [i["title"] for i in page["issues"]] == ["a"]
+
+
 class TestConcurrentUpdates:
     """The write seam itself must be atomic, not the Python before it.
 
