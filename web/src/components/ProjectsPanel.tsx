@@ -1,12 +1,15 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
-  api, ApiError, TrackerProject, TrackerIssue, TrackerIssuePage, TrackerVocabulary, TrackerScope,
+  api, ApiError, errorText, conflictDetail, TrackerProject, TrackerIssue, TrackerIssuePage,
+  TrackerVocabulary, TrackerScope, TrackerLabelFacets,
 } from '../api'
+import { linkPhrase } from '../lib/issueMap'
 import { useStore } from '../store'
 import { ConfirmModal } from './ConfirmModal'
+import { WayfinderPanel } from './WayfinderPanel'
 import {
   FolderGit2, Plus, Search, Trash2, X, Loader2, Archive, ChevronRight, MessageSquare,
-  History, Link2, Save, FileDown, CircleDot, CheckCircle2, Lightbulb,
+  History, Link2, Save, FileDown, CircleDot, CheckCircle2, Lightbulb, Compass, List,
 } from 'lucide-react'
 
 /**
@@ -57,11 +60,6 @@ const FEATURE_BODY_STARTER = `## Problem / opportunity
 
 ## Constraints / alternatives
 `
-
-function errorText(err: unknown): string {
-  const api = err as ApiError
-  return api?.detail || api?.message || String(err)
-}
 
 function shortDate(iso: string | null): string {
   if (!iso) return '—'
@@ -146,11 +144,22 @@ interface TabFilters {
   statusFilter: string[]
   severityFilter: string[]
   openOnly: boolean
+  /** One exact label (the server's label filter is exact-match, single). */
+  label: string | null
+  unlabeled: boolean
   offset: number
 }
 
 function defaultTabFilters(): TabFilters {
-  return { query: '', statusFilter: [], severityFilter: [], openOnly: true, offset: 0 }
+  return {
+    query: '',
+    statusFilter: [],
+    severityFilter: [],
+    openOnly: true,
+    label: null,
+    unlabeled: false,
+    offset: 0,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +183,12 @@ export function ProjectsPanel() {
     feature: defaultTabFilters(),
     all: defaultTabFilters(),
   })
+  // List ⇄ Wayfinder view, the open map, and the project's label facets.
+  const [view, setView] = useState<'list' | 'wayfinder'>('list')
+  const [mapKey, setMapKey] = useState<string | null>(null)
+  const [facets, setFacets] = useState<TrackerLabelFacets | null>(null)
+  // Bumped whenever tracker state changes so the map projection re-reads.
+  const [trackerVersion, setTrackerVersion] = useState(0)
 
   const currentFilters = filtersByKind[kind]
 
@@ -181,7 +196,9 @@ export function ProjectsPanel() {
     setFiltersByKind(prev => ({ ...prev, [kind]: { ...prev[kind], ...patch } }))
   }, [kind])
 
-  // URL state: ?project=cao-system&kind=feature&key=cond-0342
+  // URL state: ?project=cao-system&kind=feature&key=cond-0342 plus
+  // &view=wayfinder&map=cond-0001&label=effort:x&unlabeled=1 — shareable and
+  // Back/Forward traverses it.
   const urlSyncRef = useRef(false)
 
   // Initialize from URL on first load
@@ -191,10 +208,24 @@ export function ProjectsPanel() {
       const urlProject = params.get('project')
       const urlKind = params.get('kind') as TabKind | null
       const urlKey = params.get('key')
+      const urlView = params.get('view')
+      const urlMap = params.get('map')
+      const urlLabel = params.get('label')
+      const urlUnlabeled = params.get('unlabeled') === '1'
+      const tab: TabKind =
+        urlKind && (['issue', 'feature', 'all'] as TabKind[]).includes(urlKind) ? urlKind : 'issue'
       if (urlKind && (['issue', 'feature', 'all'] as TabKind[]).includes(urlKind)) {
         setKind(urlKind)
       }
       if (urlKey) setSelectedKey(urlKey)
+      if (urlView === 'wayfinder') setView('wayfinder')
+      if (urlMap) setMapKey(urlMap)
+      if (urlLabel || urlUnlabeled) {
+        setFiltersByKind(prev => ({
+          ...prev,
+          [tab]: { ...prev[tab], label: urlLabel, unlabeled: urlUnlabeled, offset: 0 },
+        }))
+      }
       // Defer project override until after projects load; store intent
       if (urlProject) {
         ;(window as unknown as { __caoInitialProject?: string }).__caoInitialProject = urlProject
@@ -237,46 +268,39 @@ export function ProjectsPanel() {
     api.getTrackerProject(activeId).then(setProject).catch(() => setProject(null))
   }, [activeId])
 
+  // Label facets power the filter bar's discoverable labels + counts. A
+  // missing/foreign shape degrades to "no bar" rather than a crash.
+  useEffect(() => {
+    if (!activeId) { setFacets(null); return }
+    api.getTrackerLabels(activeId)
+      .then(data => setFacets(data && Array.isArray(data.labels) ? data : null))
+      .catch(() => setFacets(null))
+  }, [activeId, trackerVersion])
+
   const loadIssues = useCallback(async () => {
     if (!activeId) { setPage(null); return }
     setIssuesLoading(true)
     const f = filtersByKind[kind]
+    const shared = {
+      projectId: activeId,
+      q: f.query.trim() || undefined,
+      status: f.statusFilter.length ? f.statusFilter : undefined,
+      severity: f.severityFilter.length ? f.severityFilter : undefined,
+      label: f.label ?? undefined,
+      unlabeled: f.unlabeled || undefined,
+      openOnly: f.openOnly,
+      limit: PAGE_SIZE,
+      offset: f.offset,
+      order: 'severity',
+    }
     try {
       let result
       if (kind === 'feature') {
-        result = await api.listTrackerFeatures({
-          projectId: activeId,
-          q: f.query.trim() || undefined,
-          status: f.statusFilter.length ? f.statusFilter : undefined,
-          severity: f.severityFilter.length ? f.severityFilter : undefined,
-          openOnly: f.openOnly,
-          limit: PAGE_SIZE,
-          offset: f.offset,
-          order: 'severity',
-        })
+        result = await api.listTrackerFeatures(shared)
       } else if (kind === 'all') {
-        result = await api.listTrackerIssues({
-          projectId: activeId,
-          q: f.query.trim() || undefined,
-          status: f.statusFilter.length ? f.statusFilter : undefined,
-          severity: f.severityFilter.length ? f.severityFilter : undefined,
-          openOnly: f.openOnly,
-          limit: PAGE_SIZE,
-          offset: f.offset,
-          order: 'severity',
-          kind: 'all',
-        })
+        result = await api.listTrackerIssues({ ...shared, kind: 'all' })
       } else {
-        result = await api.listTrackerIssues({
-          projectId: activeId,
-          q: f.query.trim() || undefined,
-          status: f.statusFilter.length ? f.statusFilter : undefined,
-          severity: f.severityFilter.length ? f.severityFilter : undefined,
-          openOnly: f.openOnly,
-          limit: PAGE_SIZE,
-          offset: f.offset,
-          order: 'severity',
-        })
+        result = await api.listTrackerIssues(shared)
       }
       setPage(result)
     } catch (err) {
@@ -289,31 +313,41 @@ export function ProjectsPanel() {
 
   useEffect(() => { loadIssues() }, [loadIssues])
 
-  // Sync URL on project/kind/key changes — pushState so Back/Forward traverses history
-  const lastPushedUrlRef = useRef<string | null>(null)
+  // Sync URL on project/kind/key/view/map/label/unlabeled changes — pushState
+  // so Back/Forward traverses history. `kind` is written only when it differs
+  // from the default: the bare entry every session starts from must
+  // round-trip byte-identically, or restoring it would push a duplicate.
   useEffect(() => {
     if (!urlSyncRef.current) {
       // Skip first render until projects have loaded, to avoid clobbering incoming URL
       urlSyncRef.current = true
-      try {
-        lastPushedUrlRef.current = window.location.pathname + window.location.search
-      } catch { /* test env */ }
       return
     }
     try {
       const params = new URLSearchParams(window.location.search)
       if (activeId) params.set('project', activeId)
       else params.delete('project')
-      params.set('kind', kind)
+      if (kind !== 'issue') params.set('kind', kind)
+      else params.delete('kind')
       if (selectedKey) params.set('key', selectedKey)
       else params.delete('key')
+      if (view === 'wayfinder') params.set('view', 'wayfinder')
+      else params.delete('view')
+      if (view === 'wayfinder' && mapKey) params.set('map', mapKey)
+      else params.delete('map')
+      if (currentFilters.label) params.set('label', currentFilters.label)
+      else params.delete('label')
+      if (currentFilters.unlabeled) params.set('unlabeled', '1')
+      else params.delete('unlabeled')
       const newSearch = params.toString()
       const newUrl = `${window.location.pathname}${newSearch ? '?' + newSearch : ''}`
-      if (newUrl === lastPushedUrlRef.current) return
+      // Never push the URL the browser is already on: a popstate restore runs
+      // this effect too, and re-pushing the restored entry would duplicate it
+      // and truncate the forward stack.
+      if (newUrl === window.location.pathname + window.location.search) return
       window.history.pushState(null, '', newUrl)
-      lastPushedUrlRef.current = newUrl
     } catch { /* test env */ }
-  }, [activeId, kind, selectedKey])
+  }, [activeId, kind, selectedKey, view, mapKey, currentFilters.label, currentFilters.unlabeled])
 
   // Cleanup stale key on unmount so next test starts collapsed
   useEffect(() => {
@@ -328,7 +362,10 @@ export function ProjectsPanel() {
     }
   }, [])
 
-  // Handle back/forward
+  // Handle back/forward: the URL is the whole state, so restore every param —
+  // clearing the ones the entry does not carry, project and kind included.
+  // (The sync effect then computes the URL the browser is already on and
+  // pushes nothing, which is what keeps traversal from duplicating entries.)
   useEffect(() => {
     const handler = () => {
       try {
@@ -336,9 +373,21 @@ export function ProjectsPanel() {
         const urlProject = params.get('project')
         const urlKind = params.get('kind') as TabKind | null
         const urlKey = params.get('key')
-        if (urlProject) setActiveId(urlProject)
-        if (urlKind && (['issue', 'feature', 'all'] as TabKind[]).includes(urlKind)) setKind(urlKind)
+        const urlView = params.get('view')
+        const urlMap = params.get('map')
+        const urlLabel = params.get('label')
+        const urlUnlabeled = params.get('unlabeled') === '1'
+        const tab: TabKind =
+          urlKind && (['issue', 'feature', 'all'] as TabKind[]).includes(urlKind) ? urlKind : 'issue'
+        setActiveId(urlProject)
+        setKind(tab)
         setSelectedKey(urlKey)
+        setView(urlView === 'wayfinder' ? 'wayfinder' : 'list')
+        setMapKey(urlMap)
+        setFiltersByKind(prev => ({
+          ...prev,
+          [tab]: { ...prev[tab], label: urlLabel, unlabeled: urlUnlabeled, offset: 0 },
+        }))
       } catch { /* */ }
     }
     window.addEventListener('popstate', handler)
@@ -369,6 +418,7 @@ export function ProjectsPanel() {
     await loadIssues()
     if (activeId) api.getTrackerProject(activeId).then(setProject).catch(() => {})
     api.listTrackerProjects(true).then(setProjects).catch(() => {})
+    setTrackerVersion(v => v + 1)
   }, [loadIssues, activeId])
 
   const toggle = useCallback((list: string[], value: string, set: (next: string[]) => void) =>
@@ -393,9 +443,9 @@ export function ProjectsPanel() {
   const headerPresentation = presentationFor(kind === 'all' ? 'issue' : kind)
 
   return (
-    <div className="flex gap-6 items-start">
+    <div className="flex flex-col lg:flex-row gap-6 items-start">
       {/* Project rail */}
-      <aside className="w-60 shrink-0 space-y-2">
+      <aside className="w-full lg:w-60 shrink-0 space-y-2">
         <button
           onClick={() => setShowNewProject(true)}
           className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors"
@@ -473,6 +523,31 @@ export function ProjectsPanel() {
               />
             )}
 
+            {/* View switch — Wayfinder maps are first-class, not an easter egg
+                in the flat list. */}
+            <div className="mt-4 flex gap-1.5" role="tablist" aria-label="Tracker view">
+              {([
+                { key: 'list', label: 'List', icon: <List size={12} /> },
+                { key: 'wayfinder', label: 'Wayfinder', icon: <Compass size={12} /> },
+              ] as const).map(v => (
+                <button
+                  key={v.key}
+                  role="tab"
+                  aria-selected={view === v.key}
+                  onClick={() => setView(v.key)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                    view === v.key
+                      ? 'bg-emerald-600 border-emerald-500 text-white'
+                      : 'border-gray-800 text-gray-500 hover:text-gray-300 hover:border-gray-700'
+                  }`}
+                >
+                  {v.icon} {v.label}
+                </button>
+              ))}
+            </div>
+
+            {view === 'list' && (
+            <>
             {/* Filters */}
             <div className="mt-4 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
@@ -556,6 +631,57 @@ export function ProjectsPanel() {
                   </button>
                 ))}
               </div>
+
+              {/* Exact-label filters with counts, discovered from the project.
+                  Label and unlabeled are mutually exclusive in the UI (their
+                  intersection is empty by definition). */}
+              {facets && (facets.labels.length > 0 || facets.unlabeled > 0) && (
+                <div className="flex flex-wrap gap-1.5 items-center" data-testid="label-filter-bar">
+                  <span className="text-[11px] font-medium text-gray-500 mr-1">Labels:</span>
+                  {facets.labels.map(f => {
+                    const active = currentFilters.label === f.label
+                    return (
+                      <button
+                        key={f.label}
+                        onClick={() =>
+                          updateCurrentFilters({ label: active ? null : f.label, unlabeled: false, offset: 0 })
+                        }
+                        aria-pressed={active}
+                        aria-label={`Filter by label ${f.label}`}
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] border transition-colors ${
+                          active
+                            ? 'bg-emerald-600 border-emerald-500 text-white'
+                            : 'border-gray-800 text-gray-500 hover:text-gray-300 hover:border-gray-700'
+                        }`}
+                      >
+                        {f.label.startsWith('wayfinder:') && <Compass size={10} />}
+                        {f.label}
+                        <span className={`text-[10px] ${active ? 'text-emerald-200' : 'text-gray-600'}`}>
+                          {f.open}/{f.total}
+                        </span>
+                      </button>
+                    )
+                  })}
+                  {facets.unlabeled > 0 && (
+                    <button
+                      onClick={() =>
+                        updateCurrentFilters({ unlabeled: !currentFilters.unlabeled, label: null, offset: 0 })
+                      }
+                      aria-pressed={currentFilters.unlabeled}
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] border border-dashed transition-colors ${
+                        currentFilters.unlabeled
+                          ? 'bg-amber-600/80 border-amber-500 text-white'
+                          : 'border-gray-700 text-gray-500 hover:text-gray-300'
+                      }`}
+                    >
+                      unlabeled
+                      <span className={`text-[10px] ${currentFilters.unlabeled ? 'text-amber-100' : 'text-gray-600'}`}>
+                        {facets.unlabeled_open}/{facets.unlabeled}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Issue list */}
@@ -638,6 +764,35 @@ export function ProjectsPanel() {
                     Next
                   </button>
                 </div>
+              </div>
+            )}
+            </>
+            )}
+
+            {view === 'wayfinder' && activeId && vocab && (
+              <WayfinderPanel
+                projectId={activeId}
+                vocab={vocab}
+                mapKey={mapKey}
+                onSelectMap={key => { setMapKey(key) }}
+                selectedKey={selectedKey}
+                onSelectIssue={key => setSelectedKey(key)}
+                refreshSignal={trackerVersion}
+                onChanged={refreshAfterIssueChange}
+              />
+            )}
+
+            {/* Selecting a node or row in the map opens the same editable
+                detail, below the map — map context is never lost. */}
+            {view === 'wayfinder' && selectedKey && vocab && (
+              <div className="mt-4 rounded-lg border border-gray-800 overflow-hidden" data-testid="wayfinder-detail">
+                <ItemDetail
+                  issueKey={selectedKey}
+                  vocab={vocab}
+                  onChanged={refreshAfterIssueChange}
+                  onDeleted={() => { setSelectedKey(null); refreshAfterIssueChange() }}
+                  onNavigate={key => setSelectedKey(key)}
+                />
               </div>
             )}
           </>
@@ -879,13 +1034,14 @@ function ScopeEditor({
 // one implementation and copy is not duplicated.
 
 function ItemDetail({
-  issueKey, initialKind, vocab, onChanged, onDeleted,
+  issueKey, initialKind, vocab, onChanged, onDeleted, onNavigate,
 }: {
   issueKey: string
   initialKind?: string
   vocab: TrackerVocabulary
   onChanged: () => Promise<void>
   onDeleted: () => void
+  onNavigate?: (key: string) => void
 }) {
   const { showSnackbar } = useStore()
   const [issue, setIssue] = useState<TrackerIssue | null>(null)
@@ -894,32 +1050,39 @@ function ItemDetail({
   const [comment, setComment] = useState('')
   const [showHistory, setShowHistory] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [claimBusy, setClaimBusy] = useState(false)
   const [pendingDelete, setPendingDelete] = useState(false)
   const [duplicateOf, setDuplicateOf] = useState('')
   const [closingChoice, setClosingChoice] = useState('')
   const [linkTo, setLinkTo] = useState('')
   const [linkKind, setLinkKind] = useState('relates')
+  // Set when a body edit lost the optimistic-concurrency race: the current
+  // version the server reported. The draft is preserved while this is shown.
+  const [casConflict, setCasConflict] = useState<string | null>(null)
 
   const presentation = useMemo(() => presentationFor(issue?.kind ?? initialKind), [issue?.kind, initialKind])
   const isFeature = presentation.kind === 'feature'
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts?: { preserveDraft?: boolean }) => {
     try {
       // Use key-universal fetch; typed wrappers would 404 on cross-kind
       const row = await api.getTrackerIssue(issueKey)
       setIssue(row)
-      setDraft({
-        title: row.title,
-        body: row.body,
-        component: row.component ?? '',
-        assignee: row.assignee ?? '',
-        reporter: row.reporter ?? '',
-        failing_command: row.failing_command ?? '',
-        evidence: row.evidence ?? '',
-        resolution: row.resolution ?? '',
-      })
-      setLabelText(row.labels.join(', '))
-      setDuplicateOf(row.duplicate_of ?? '')
+      if (!opts?.preserveDraft) {
+        setDraft({
+          title: row.title,
+          body: row.body,
+          component: row.component ?? '',
+          assignee: row.assignee ?? '',
+          reporter: row.reporter ?? '',
+          failing_command: row.failing_command ?? '',
+          evidence: row.evidence ?? '',
+          resolution: row.resolution ?? '',
+        })
+        setLabelText(row.labels.join(', '))
+        setDuplicateOf(row.duplicate_of ?? '')
+        setCasConflict(null)
+      }
     } catch (err) {
       showSnackbar({ type: 'error', message: errorText(err) })
     }
@@ -927,24 +1090,35 @@ function ItemDetail({
 
   useEffect(() => { load() }, [load])
 
-  const dirty = useMemo(() => {
-    if (!issue) return {}
+  // The pending change set against a given base. Label edits go out as
+  // add/remove DELTAS rather than a full replacement, so a label another
+  // actor added concurrently is never silently dropped by this save.
+  const computeChanges = useCallback((base: TrackerIssue): Record<string, unknown> => {
     const changes: Record<string, unknown> = {}
     for (const [field, value] of Object.entries(draft)) {
-      const current = (issue as unknown as Record<string, unknown>)[field]
+      const current = (base as unknown as Record<string, unknown>)[field]
       if ((current ?? '') !== value) changes[field] = value
     }
-    const labels = labelText.split(',').map(s => s.trim()).filter(Boolean)
-    if (labels.join('\u0000') !== issue.labels.join('\u0000')) changes.labels = labels
+    const next = labelText.split(',').map(s => s.trim()).filter(Boolean)
+    const added = next.filter(l => !base.labels.includes(l))
+    const removed = base.labels.filter(l => !next.includes(l))
+    if (added.length) changes.add_labels = added
+    if (removed.length) changes.remove_labels = removed
     return changes
-  }, [issue, draft, labelText])
+  }, [draft, labelText])
+
+  const dirty = useMemo(() => (issue ? computeChanges(issue) : {}), [issue, computeChanges])
 
   const hasChanges = Object.keys(dirty).length > 0
 
-  const patch = async (extra?: Record<string, unknown>) => {
+  const patch = async (
+    extra?: Record<string, unknown>,
+    opts?: { expectedUpdatedAt?: string | null; changesOverride?: Record<string, unknown> },
+  ) => {
     setSaving(true)
     try {
-      const body: Record<string, unknown> = { ...dirty, ...extra, actor: 'dashboard' }
+      const changes = opts?.changesOverride ?? dirty
+      const body: Record<string, unknown> = { ...changes, ...extra, actor: 'dashboard' }
       if (isFeature) {
         // Feature-specific validation: duplicate requires canonical key
         if (extra?.status === 'duplicate' && !duplicateOf.trim()) {
@@ -954,15 +1128,89 @@ function ItemDetail({
         }
         if (extra?.status === 'duplicate') body.duplicate_of = duplicateOf.trim()
       }
+      // Body edits carry optimistic concurrency: the draft was written against
+      // the loaded version, and a concurrent edit must not be overwritten
+      // silently. Other field-only patches stay unconditional, as before.
+      const expected =
+        opts?.expectedUpdatedAt !== undefined
+          ? opts.expectedUpdatedAt
+          : 'body' in changes
+            ? issue?.updated_at ?? null
+            : null
+      if (expected) body.expected_updated_at = expected
       const updater = isFeature ? api.updateTrackerFeature : api.updateTrackerIssue
       await updater(issueKey, body)
+      setCasConflict(null)
       await load()
       await onChanged()
       showSnackbar({ type: 'success', message: `${issueKey} updated` })
     } catch (err) {
-      showSnackbar({ type: 'error', message: errorText(err) })
+      const current = conflictDetail(err)?.current_updated_at
+      if ((err as ApiError).status === 409 && current && !extra) {
+        // A stale body write: nothing was applied and the draft stays. The
+        // banner below offers re-read & retry / discard.
+        setCasConflict(String(current))
+      } else {
+        showSnackbar({ type: 'error', message: errorText(err) })
+      }
     } finally {
       setSaving(false)
+    }
+  }
+
+  // Re-read the issue (fresh version, server values) WITHOUT touching the
+  // draft, then retry the same draft against the fresh version. A further
+  // race re-arms the conflict banner.
+  const rereadAndRetry = async () => {
+    try {
+      const fresh = await api.getTrackerIssue(issueKey)
+      const changes = computeChanges(fresh)
+      setIssue(fresh)
+      setCasConflict(null)
+      await patch(undefined, { expectedUpdatedAt: fresh.updated_at, changesOverride: changes })
+    } catch (err) {
+      showSnackbar({ type: 'error', message: errorText(err) })
+    }
+  }
+
+  // Atomic claim/unclaim — NOT an assignee PATCH: the claim endpoint is the
+  // only path that can refuse a second claimant with the observed owner.
+  const claim = async () => {
+    setClaimBusy(true)
+    try {
+      await api.claimTrackerIssue(issueKey, 'dashboard')
+      await load()
+      await onChanged()
+      showSnackbar({ type: 'success', message: `${issueKey} claimed` })
+    } catch (err) {
+      const owner = conflictDetail(err)?.observed_assignee
+      if ((err as ApiError).status === 409 && owner) {
+        showSnackbar({
+          type: 'error',
+          message: `${issueKey} is already claimed by ${String(owner)}`,
+        })
+        // Show the state the server actually holds.
+        await load()
+        await onChanged()
+      } else {
+        showSnackbar({ type: 'error', message: errorText(err) })
+      }
+    } finally {
+      setClaimBusy(false)
+    }
+  }
+
+  const unclaim = async () => {
+    setClaimBusy(true)
+    try {
+      await api.unclaimTrackerIssue(issueKey, 'dashboard')
+      await load()
+      await onChanged()
+      showSnackbar({ type: 'success', message: `${issueKey} released` })
+    } catch (err) {
+      showSnackbar({ type: 'error', message: errorText(err) })
+    } finally {
+      setClaimBusy(false)
     }
   }
 
@@ -1078,6 +1326,34 @@ function ItemDetail({
         >
           {vocab.severities.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
+        {/* Atomic claim/unclaim — deliberately not an assignee edit, so a
+            second claimant gets the typed conflict naming the owner. */}
+        {!isTerminal && !issue.assignee && (
+          <button
+            onClick={claim}
+            disabled={claimBusy}
+            aria-label={`Claim ${issue.key}`}
+            className="px-2 py-1.5 rounded text-xs border border-emerald-700/60 text-emerald-300 hover:bg-emerald-600/20 disabled:opacity-40"
+          >
+            Claim
+          </button>
+        )}
+        {issue.assignee && (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="px-1.5 py-0.5 rounded text-[11px] bg-blue-500/15 text-blue-300 border border-blue-500/30">
+              claimed by {issue.assignee}
+            </span>
+            <button
+              onClick={unclaim}
+              disabled={claimBusy}
+              aria-label={`Unclaim ${issue.key} (claimed by ${issue.assignee})`}
+              title="Release the claim — the ordinary recovery exit"
+              className="px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-400 hover:text-gray-200 disabled:opacity-40"
+            >
+              Unclaim
+            </button>
+          </span>
+        )}
         <span className="text-[11px] text-gray-600 flex items-center gap-1.5">
           {isTerminal ? <CheckCircle2 size={12} /> : <CircleDot size={12} />}
           filed {shortDate(issue.created_at)}
@@ -1144,6 +1420,35 @@ function ItemDetail({
         </div>
       )}
 
+      {casConflict && (
+        <div
+          role="alert"
+          data-testid="cas-conflict"
+          className="rounded-lg border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+        >
+          <p>
+            {issue.key} changed while you were editing (current version{' '}
+            <code>{casConflict}</code>). Nothing was written and your draft is untouched — re-read
+            and retry to apply it against the fresh version, or discard it.
+          </p>
+          <div className="flex gap-2 mt-2">
+            <button
+              onClick={rereadAndRetry}
+              disabled={saving}
+              className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white disabled:opacity-40"
+            >
+              Re-read &amp; retry
+            </button>
+            <button
+              onClick={() => load()}
+              className="px-2.5 py-1 rounded border border-gray-700 text-gray-300"
+            >
+              Discard draft
+            </button>
+          </div>
+        </div>
+      )}
+
       <textarea
         value={draft.body ?? ''}
         onChange={e => setDraft({ ...draft, body: e.target.value })}
@@ -1196,7 +1501,7 @@ function ItemDetail({
             {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
             Save {Object.keys(dirty).length} change{Object.keys(dirty).length === 1 ? '' : 's'}
           </button>
-          <button onClick={load} className="px-3 py-1.5 rounded border border-gray-800 text-xs text-gray-400">
+          <button onClick={() => load()} className="px-3 py-1.5 rounded border border-gray-800 text-xs text-gray-400">
             Discard
           </button>
         </div>
@@ -1205,15 +1510,28 @@ function ItemDetail({
       <div className="space-y-2">
         {issue.links && issue.links.length > 0 && (
           <div className="flex flex-wrap gap-2">
-            {issue.links.map(link => (
-              <span key={link.id} className="inline-flex items-center gap-1.5 text-[11px] text-gray-400 px-2 py-1 rounded bg-gray-900 border border-gray-800">
-                <Link2 size={11} />
-                {link.from_key === issue.key ? `${link.kind} ${link.to_key}` : `${link.from_key} ${link.kind} this`}
-                <button onClick={() => removeLink(link.id)} aria-label={`Remove link ${link.id}`} className="ml-1 text-gray-500 hover:text-red-400">
-                  <X size={10} />
-                </button>
-              </span>
-            ))}
+            {issue.links.map(link => {
+              // Direction, in words: "blocks cond-2" vs "blocked by cond-1",
+              // "part of cond-1" vs "contains cond-2". JSON stays explicit;
+              // this line is for humans, and the key navigates.
+              const { phrase, other } = linkPhrase(link, issue.key)
+              return (
+                <span key={link.id} className="inline-flex items-center gap-1.5 text-[11px] text-gray-400 px-2 py-1 rounded bg-gray-900 border border-gray-800">
+                  <Link2 size={11} />
+                  {phrase}{' '}
+                  <button
+                    onClick={() => onNavigate?.(other)}
+                    aria-label={`Open ${other}`}
+                    className="font-mono text-emerald-400 hover:underline"
+                  >
+                    {other}
+                  </button>
+                  <button onClick={() => removeLink(link.id)} aria-label={`Remove link ${link.id}`} className="ml-1 text-gray-500 hover:text-red-400">
+                    <X size={10} />
+                  </button>
+                </span>
+              )
+            })}
           </div>
         )}
         <div className="flex gap-2">

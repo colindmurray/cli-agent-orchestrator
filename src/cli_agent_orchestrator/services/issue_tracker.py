@@ -30,12 +30,14 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import func
+from sqlalchemy.exc import OperationalError
 
 from cli_agent_orchestrator.clients.database import (
     SessionLocal,
@@ -77,7 +79,11 @@ SEVERITIES: Tuple[str, ...] = ("P0", "P1", "P2", "P3", "P4", "unset")
 
 SCOPE_KINDS: Tuple[str, ...] = ("path", "session", "git_remote", "project_id")
 
-LINK_KINDS: Tuple[str, ...] = ("blocks", "relates", "duplicates", "caused-by")
+# Directed link vocabulary. `blocks` runs blocker -> blocked ("a blocks b"
+# means b waits on a). `part-of` runs child -> parent/map and is the only
+# membership edge: `list_children`/`frontier` read it, and nothing else
+# implies membership.
+LINK_KINDS: Tuple[str, ...] = ("blocks", "relates", "duplicates", "caused-by", "part-of")
 
 PROJECT_STATUSES: Tuple[str, ...] = ("active", "archived")
 
@@ -100,6 +106,12 @@ _EDITABLE_FIELDS: Tuple[str, ...] = (
     "duplicate_of",
     "labels",
     "kind",
+    # Atomic label deltas (cond-0394). One strategy per update: `labels`
+    # replaces the whole set, `clear_labels` replaces it with nothing, and
+    # add/remove apply a delta — the three never combine.
+    "add_labels",
+    "remove_labels",
+    "clear_labels",
 )
 
 MAX_TITLE = 300
@@ -113,12 +125,18 @@ class TrackerError(Exception):
 
     ``code`` maps to an HTTP status at the API boundary and to an exit code at
     the CLI boundary, so the same refusal reads the same way from both.
+
+    ``details`` carries the observed record state a conflict was raised from
+    (the current assignee on a lost claim, the current version on a stale
+    write), so a programmatic caller does not have to parse the message to
+    retry.
     """
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, details: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.details: Dict[str, Any] = dict(details or {})
 
 
 def _utcnow() -> datetime:
@@ -139,6 +157,33 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_timestamp(text: str, *, field: str) -> datetime:
+    """Parse an ISO-8601 timestamp a caller read back from an issue payload.
+
+    A naive value is read as UTC, the same convention ``_iso`` writes with —
+    every stored timestamp in these tables is UTC.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        raise TrackerError("invalid", f"{field} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+    except ValueError:
+        raise TrackerError("invalid", f"{field} is not an ISO-8601 timestamp: {text!r}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _stored_moment(value: Optional[datetime]) -> Optional[datetime]:
+    """A stored timestamp as an aware UTC datetime for comparison."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _parse_labels(raw: Optional[str]) -> List[str]:
@@ -1099,6 +1144,7 @@ def list_issues(
     assignee: Optional[str] = None,
     reporter: Optional[str] = None,
     label: Optional[str] = None,
+    unlabeled: bool = False,
     query: Optional[str] = None,
     open_only: bool = False,
     limit: int = 100,
@@ -1110,6 +1156,9 @@ def list_issues(
 
     ``total`` is the count BEFORE limit/offset so a caller can page without
     guessing whether a short page means the end.
+
+    ``unlabeled`` selects issues with an empty label set — the never-triaged
+    bucket a triage pass starts from. It composes with every other filter.
     """
     limit = max(1, min(int(limit or 100), 500))
     offset = max(0, int(offset or 0))
@@ -1149,6 +1198,10 @@ def list_issues(
             # silently over-broad filter rather than an error anybody sees.
             needle = label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             q = q.filter(TrackerIssueModel.labels.like(f'%"{needle}"%', escape="\\"))
+        if unlabeled:
+            # The stored value is always a JSON array ("[]" when empty), so an
+            # exact comparison is the whole rule — no LIKE, no ambiguity.
+            q = q.filter(TrackerIssueModel.labels == "[]")
         if query:
             needle = f"%{query.strip()}%"
             q = q.filter(
@@ -1179,6 +1232,7 @@ def list_features(
     assignee: Optional[str] = None,
     reporter: Optional[str] = None,
     label: Optional[str] = None,
+    unlabeled: bool = False,
     query: Optional[str] = None,
     open_only: bool = False,
     limit: int = 100,
@@ -1194,6 +1248,7 @@ def list_features(
         assignee=assignee,
         reporter=reporter,
         label=label,
+        unlabeled=unlabeled,
         query=query,
         open_only=open_only,
         limit=limit,
@@ -1217,12 +1272,40 @@ def _apply_order(q: Any, order: str) -> Any:
     return q.order_by(TrackerIssueModel.created_at.desc(), TrackerIssueModel.id.desc())
 
 
-def update_issue(issue_key: str, *, actor: Optional[str] = None, **changes: Any) -> Dict[str, Any]:
+class _UpdateRaceLost(Exception):
+    """The guarded write matched no row: a concurrent edit landed between this
+    transaction's read and its write."""
+
+
+def update_issue(
+    issue_key: str,
+    *,
+    actor: Optional[str] = None,
+    expected_updated_at: Optional[str] = None,
+    **changes: Any,
+) -> Dict[str, Any]:
     """Apply field changes, recording one audit event per field that moved.
 
     Only fields the caller actually passed are touched, and a field whose new
     value equals the old one writes no event — an audit trail full of no-ops is
     an audit trail nobody reads.
+
+    ``expected_updated_at`` is an optimistic-concurrency precondition for
+    callers that read then write (a wayfinder session rewriting a map body):
+    when given, the update applies only if the issue's ``updated_at`` still
+    equals it, and a mismatch refuses THIS write with a conflict carrying the
+    current observable version. Callers that do not pass it get the historical
+    unconditional edit.
+
+    The precondition is enforced at the write seam, not by a Python comparison
+    before it: every persisting update is applied by ONE conditional UPDATE
+    guarded on the ``updated_at`` this transaction read. SQLite serialises
+    writers, so a concurrent commit turns the guard into a no-match instead of
+    a lost update — with ``expected_updated_at`` the loser gets the typed
+    conflict; without it the update is retried against the fresh row (a label
+    delta re-merges, so two cooperative add-label edits both land). A failed or
+    superseded attempt writes nothing and records no events: the audit trail
+    only ever records the transition that was actually established.
 
     The positional parameter is ``issue_key`` rather than ``key`` so that
     ``update_issue(k, key=...)`` reports the intended "not editable" refusal
@@ -1233,88 +1316,191 @@ def update_issue(issue_key: str, *, actor: Optional[str] = None, **changes: Any)
     if unknown:
         raise TrackerError("invalid", f"not editable: {', '.join(sorted(unknown))}")
 
+    attempts = 8
+    for attempt in range(attempts):
+        try:
+            with SessionLocal() as db:
+                return _apply_issue_update(
+                    db,
+                    key,
+                    actor=actor,
+                    expected_updated_at=expected_updated_at,
+                    changes=dict(changes),
+                )
+        except _UpdateRaceLost:
+            if expected_updated_at is not None:
+                # The precondition held at read time and the write still lost:
+                # a concurrent edit landed in between. Report the version that
+                # is observable now, exactly as the up-front check would.
+                current = _current_updated_at(key)
+                raise TrackerError(
+                    "conflict",
+                    f"{key} has changed since {expected_updated_at} "
+                    f"(current updated_at {current}); re-read and retry",
+                    details={"current_updated_at": current},
+                )
+            time.sleep(0.005 * (attempt + 1))
+        except OperationalError as exc:
+            # SQLite reports a lost lock race (or a snapshot a concurrent
+            # commit made stale) as "database is locked". Retrying re-reads
+            # the committed state, so the guarded write — not luck — decides
+            # whether this update applies.
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            time.sleep(0.005 * (attempt + 1))
+    raise TrackerError(
+        "conflict",
+        f"{key} is being updated concurrently and this edit could not be "
+        f"applied after {attempts} attempts; retry it",
+    )
+
+
+def _current_updated_at(key: str) -> Optional[str]:
     with SessionLocal() as db:
         row = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
-        if row is None:
-            raise TrackerError("not-found", f"no such issue: {key}")
+        return _iso(row.updated_at) if row is not None else None
 
-        now = _utcnow()
-        events: List[TrackerEventModel] = []
-        # Duplicate status requires canonical key (P1)
-        if (
-            changes.get("status") == "duplicate"
-            and not changes.get("duplicate_of")
-            and not getattr(row, "duplicate_of", None)
-        ):
-            raise TrackerError("invalid", "duplicate status requires duplicate_of canonical key")
-        # Determine target kind after change (for kind-switch validation)
-        # N3: explicit null/empty is treated as no-op (skip), not 400
-        if "kind" in changes and (changes["kind"] is None or not str(changes["kind"]).strip()):
-            # Remove null/empty kind from changes so loop skips it
-            del changes["kind"]
-        target_kind = (
-            _validate_kind(changes["kind"]) if "kind" in changes else getattr(row, "kind", "issue")
+
+def _apply_issue_update(
+    db: Any,
+    key: str,
+    *,
+    actor: Optional[str],
+    expected_updated_at: Optional[str],
+    changes: Dict[str, Any],
+) -> Dict[str, Any]:
+    """One attempt of ``update_issue``: read, validate, guarded write, events.
+
+    All column writes go through ``assignments`` and land in a single UPDATE
+    whose WHERE pins the ``updated_at`` read at the top of this transaction.
+    """
+    row = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
+    if row is None:
+        raise TrackerError("not-found", f"no such issue: {key}")
+
+    if expected_updated_at is not None:
+        expected = _parse_timestamp(expected_updated_at, field="expected_updated_at")
+        if _stored_moment(row.updated_at) != expected:
+            raise TrackerError(
+                "conflict",
+                f"{key} has changed since {expected_updated_at} "
+                f"(current updated_at {_iso(row.updated_at)}); re-read and retry",
+                details={"current_updated_at": _iso(row.updated_at)},
+            )
+
+    now = _utcnow()
+    events: List[TrackerEventModel] = []
+    assignments: Dict[str, Any] = {}
+
+    def _record(field: str, old: Any, new: Any) -> None:
+        assignments[field] = new
+        events.append(
+            TrackerEventModel(
+                issue_key=key,
+                actor=actor,
+                kind="field",
+                field=field,
+                old_value=_as_text(old),
+                new_value=_as_text(new),
+                created_at=now,
+            )
         )
-        if (
-            target_kind == "feature"
-            and "failing_command" in changes
-            and changes["failing_command"]
-            and str(changes["failing_command"]).strip()
-        ):
-            raise TrackerError("invalid", "failing_command is not allowed for feature requests")
-        # If switching to feature and existing failing_command would be retained, clear it
-        # Also handles explicit null (m1) where loop would skip; empty string is handled by loop
-        if (
-            target_kind == "feature"
-            and getattr(row, "failing_command", None)
-            and "kind" in changes
-            and ("failing_command" not in changes or changes.get("failing_command") is None)
-        ):
-            # Auto-clear stale failing_command when becoming a feature
-            old_fc = row.failing_command
-            row.failing_command = None
-            events.append(
-                TrackerEventModel(
-                    issue_key=key,
-                    actor=actor,
-                    kind="field",
-                    field="failing_command",
-                    old_value=_as_text(old_fc),
-                    new_value=None,
-                    created_at=now,
-                )
-            )
 
-        for field, raw in changes.items():
-            if raw is None:
-                continue
-            old, new = _coerce_field(row, field, raw, db=db)
-            if old == new:
-                continue
-            setattr(row, field, new)
-            events.append(
-                TrackerEventModel(
-                    issue_key=key,
-                    actor=actor,
-                    kind="field",
-                    field=field,
-                    old_value=_as_text(old),
-                    new_value=_as_text(new),
-                    created_at=now,
-                )
-            )
-            if field == "status":
-                row.closed_at = now if new in TERMINAL_STATUSES else None
+    # Duplicate status requires canonical key (P1)
+    if (
+        changes.get("status") == "duplicate"
+        and not changes.get("duplicate_of")
+        and not getattr(row, "duplicate_of", None)
+    ):
+        raise TrackerError("invalid", "duplicate status requires duplicate_of canonical key")
+    # Determine target kind after change (for kind-switch validation)
+    # N3: explicit null/empty is treated as no-op (skip), not 400
+    if "kind" in changes and (changes["kind"] is None or not str(changes["kind"]).strip()):
+        # Remove null/empty kind from changes so loop skips it
+        del changes["kind"]
+    target_kind = (
+        _validate_kind(changes["kind"]) if "kind" in changes else getattr(row, "kind", "issue")
+    )
+    if (
+        target_kind == "feature"
+        and "failing_command" in changes
+        and changes["failing_command"]
+        and str(changes["failing_command"]).strip()
+    ):
+        raise TrackerError("invalid", "failing_command is not allowed for feature requests")
+    # If switching to feature and existing failing_command would be retained, clear it
+    # Also handles explicit null (m1) where loop would skip; empty string is handled by loop
+    if (
+        target_kind == "feature"
+        and getattr(row, "failing_command", None)
+        and "kind" in changes
+        and ("failing_command" not in changes or changes.get("failing_command") is None)
+    ):
+        # Auto-clear stale failing_command when becoming a feature
+        _record("failing_command", row.failing_command, None)
 
-        if not events:
-            return _issue_row(row)
+    # Atomic label deltas. The merged set is computed from the row read inside
+    # this transaction — and if that read proves stale at write time, the
+    # guarded UPDATE below loses and the whole attempt is retried against the
+    # fresh labels, so a delta never silently drops a concurrent actor's label.
+    add_labels = normalise_labels(changes.pop("add_labels", None) or [])
+    remove_labels = set(normalise_labels(changes.pop("remove_labels", None) or []))
+    clear_labels = bool(changes.pop("clear_labels", None))
+    if "labels" in changes and (add_labels or remove_labels or clear_labels):
+        raise TrackerError(
+            "invalid",
+            "labels replaces the whole label set; it cannot be combined with "
+            "add_labels/remove_labels/clear_labels in one update",
+        )
+    if clear_labels and (add_labels or remove_labels):
+        raise TrackerError(
+            "invalid",
+            "clear_labels replaces the whole label set with nothing; combine it "
+            "with nothing (pass labels to replace with a specific set)",
+        )
+    if add_labels or remove_labels or clear_labels:
+        current_labels = [] if clear_labels else _parse_labels(row.labels)
+        merged = [l for l in current_labels if l not in remove_labels]
+        merged += [l for l in add_labels if l not in merged]
+        merged = normalise_labels(merged)  # the bounds apply to the result
+        if merged != _parse_labels(row.labels):
+            _record("labels", row.labels, json.dumps(merged))
 
-        row.updated_at = now
-        for event in events:
-            db.add(event)
-        db.commit()
-        db.refresh(row)
+    for field, raw in changes.items():
+        if raw is None:
+            continue
+        old, new = _coerce_field(row, field, raw, db=db)
+        if old == new:
+            continue
+        _record(field, old, new)
+        if field == "status":
+            assignments["closed_at"] = now if new in TERMINAL_STATUSES else None
+
+    if not events:
         return _issue_row(row)
+
+    assignments["updated_at"] = now
+    # The guarded write: apply only to the row version this transaction read.
+    # A concurrent commit between our read and this write makes the rowcount 0
+    # (or fails the write with a lock error the caller retries) — never a
+    # silent lost update reported as success.
+    written = (
+        db.query(TrackerIssueModel)
+        .filter(
+            TrackerIssueModel.key == key,
+            TrackerIssueModel.updated_at == row.updated_at,
+        )
+        .update(assignments, synchronize_session=False)
+    )
+    if written != 1:
+        db.rollback()
+        raise _UpdateRaceLost()
+    for event in events:
+        db.add(event)
+    db.commit()
+    db.refresh(row)
+    return _issue_row(row)
 
 
 def _as_text(value: Any) -> Optional[str]:
@@ -1485,6 +1671,409 @@ def remove_link(link_id: int, *, actor: Optional[str] = None) -> Dict[str, Any]:
         db.delete(row)
         db.commit()
         return {"id": int(link_id), "deleted": True}
+
+
+# --------------------------------------------------------------------------
+# map membership and the frontier (cond-0394)
+# --------------------------------------------------------------------------
+
+
+def _children_query(db: Any, parent: str) -> Any:
+    return (
+        db.query(TrackerIssueModel)
+        .join(TrackerLinkModel, TrackerLinkModel.from_key == TrackerIssueModel.key)
+        .filter(TrackerLinkModel.to_key == parent, TrackerLinkModel.kind == "part-of")
+    )
+
+
+def _require_issue(db: Any, key: str) -> TrackerIssueModel:
+    row = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
+    if row is None:
+        raise TrackerError("not-found", f"no such issue: {key}")
+    return row
+
+
+def list_children(parent_key: str) -> Dict[str, Any]:
+    """List the direct children of a parent/map issue.
+
+    Membership is exactly the ``part-of`` links (child -> parent); there is no
+    transitive closure, no rollup, no derived tree. Ordered by creation
+    (``created_at``, ties by row id) — the order the map was charted in.
+    """
+    parent = str(parent_key or "").strip().lower()
+    with SessionLocal() as db:
+        _require_issue(db, parent)
+        rows = (
+            _children_query(db, parent)
+            .order_by(TrackerIssueModel.created_at.asc(), TrackerIssueModel.id.asc())
+            .all()
+        )
+        return {"parent": parent, "children": [_issue_row(r) for r in rows]}
+
+
+def _incoming_blockers(db: Any, keys: List[str]) -> Dict[str, List[Tuple[str, str]]]:
+    """``blocks`` edges pointing at each key, as ``key -> [(blocker, status)]``.
+
+    Shared by ``frontier`` and ``map_projection`` so the takeable rule is
+    written once: a child is benched by an incoming ``blocks`` edge whose
+    blocker is itself nonterminal (``resolved`` still blocks — landed, not
+    verified).
+    """
+    if not keys:
+        return {}
+    rows = (
+        db.query(TrackerLinkModel.from_key, TrackerLinkModel.to_key, TrackerIssueModel.status)
+        .join(TrackerIssueModel, TrackerIssueModel.key == TrackerLinkModel.from_key)
+        .filter(TrackerLinkModel.kind == "blocks", TrackerLinkModel.to_key.in_(keys))
+        .all()
+    )
+    out: Dict[str, List[Tuple[str, str]]] = {}
+    for blocker, blocked, blocker_status in rows:
+        out.setdefault(blocked, []).append((blocker, blocker_status))
+    return out
+
+
+def _frontier_keys(
+    children: List[TrackerIssueModel], blockers: Dict[str, List[Tuple[str, str]]]
+) -> List[str]:
+    """The canonical frontier rule: nonterminal, unassigned, no nonterminal
+    incoming blocker. Input order (creation order) is preserved."""
+    return [
+        row.key
+        for row in children
+        if row.status not in TERMINAL_STATUSES
+        and row.assignee is None
+        and not any(status not in TERMINAL_STATUSES for _key, status in blockers.get(row.key, []))
+    ]
+
+
+def frontier(parent_key: str) -> Dict[str, Any]:
+    """The takeable edge of a map: its direct children that are nonterminal,
+    unassigned, and have no nonterminal incoming ``blocks`` edge.
+
+    Everything is computed from the canonical issue and link records at query
+    time — there is no stored "blocked" flag to drift. Ordering is
+    deterministic: creation order (``created_at``, ties by row id), so the
+    first row is the oldest takeable ticket and concurrent wayfinder sessions
+    picking "the first frontier ticket" see the same answer.
+    """
+    parent = str(parent_key or "").strip().lower()
+    with SessionLocal() as db:
+        _require_issue(db, parent)
+        children = (
+            _children_query(db, parent)
+            .order_by(TrackerIssueModel.created_at.asc(), TrackerIssueModel.id.asc())
+            .all()
+        )
+        by_key = {row.key: row for row in children}
+        keys = _frontier_keys(children, _incoming_blockers(db, list(by_key)))
+        return {"parent": parent, "frontier": [_issue_row(by_key[k]) for k in keys]}
+
+
+def map_projection(map_key: str) -> Dict[str, Any]:
+    """The one-request projection behind the dashboard's map view.
+
+    Returns the map itself, every direct child with its classification
+    (``blocked_by``: the nonterminal blockers benching it; ``frontier``: the
+    same canonical rule ``frontier()`` uses), every link touching the map or a
+    child, every link endpoint that is not a member (``external``), and
+    progress counts. One request, one derivation — the UI renders it rather
+    than reconstructing classifications from N detail fetches.
+
+    ``external`` covers EVERY endpoint of a returned link that is neither the
+    map nor a child — a ``relates``/``duplicates``/``caused-by`` neighbour is
+    materialized exactly like a blocker, so no returned link ever points at an
+    issue the caller cannot see. Each external row carries ``blocking``: the
+    member children it actually benches (its nonterminal incoming ``blocks``
+    edges to them). A non-empty ``blocking`` is what makes an external issue an
+    external blocker; anything else is there for context, not because it holds
+    a ticket back.
+
+    This is deliberately NOT a hierarchy engine: children are direct
+    ``part-of`` members only, and progress counts direct children — no
+    transitive closure, no rollup.
+    """
+    key = str(map_key or "").strip().lower()
+    with SessionLocal() as db:
+        map_row = _require_issue(db, key)
+        children = (
+            _children_query(db, key)
+            .order_by(TrackerIssueModel.created_at.asc(), TrackerIssueModel.id.asc())
+            .all()
+        )
+        child_keys = [c.key for c in children]
+        members = {key, *child_keys}
+        blockers = _incoming_blockers(db, child_keys)
+        frontier_set = set(_frontier_keys(children, blockers))
+
+        links = (
+            db.query(TrackerLinkModel)
+            .filter(
+                (TrackerLinkModel.from_key.in_(members)) | (TrackerLinkModel.to_key.in_(members))
+            )
+            .order_by(TrackerLinkModel.id.asc())
+            .all()
+        )
+
+        children_payload = []
+        for child in children:
+            row = _issue_row(child)
+            row["blocked_by"] = [
+                bk for bk, s in blockers.get(child.key, []) if s not in TERMINAL_STATUSES
+            ]
+            row["frontier"] = child.key in frontier_set
+            children_payload.append(row)
+
+        # External endpoints: every issue a returned link names that is neither
+        # the map nor a child — included so every link renders without a second
+        # request, and a benched child explains itself. ``blocking`` inverts
+        # the children's blocked_by lists: the member children this issue
+        # actually benches. A terminal blocker or a relates/duplicates
+        # neighbour benches nobody, so its list is empty.
+        external_keys = sorted(
+            {ep for link in links for ep in (link.from_key, link.to_key)} - members
+        )
+        benches: Dict[str, List[str]] = {}
+        for child_row in children_payload:
+            for blocker_key in child_row["blocked_by"]:
+                benches.setdefault(blocker_key, []).append(child_row["key"])
+        external = []
+        if external_keys:
+            for r in (
+                db.query(TrackerIssueModel)
+                .filter(TrackerIssueModel.key.in_(external_keys))
+                .order_by(TrackerIssueModel.key.asc())
+                .all()
+            ):
+                row = _issue_row(r)
+                row["blocking"] = benches.get(row["key"], [])
+                external.append(row)
+
+        terminal = sum(1 for c in children if c.status in TERMINAL_STATUSES)
+        return {
+            "map": _issue_row(map_row),
+            "children": children_payload,
+            "frontier": [k for k in child_keys if k in frontier_set],
+            "links": [
+                {"id": l.id, "kind": l.kind, "from_key": l.from_key, "to_key": l.to_key}
+                for l in links
+            ],
+            "external": external,
+            "progress": {
+                "total": len(children),
+                "open": len(children) - terminal,
+                "terminal": terminal,
+                "resolved": sum(1 for c in children if c.status == "resolved"),
+                "claimed": sum(
+                    1 for c in children if c.status not in TERMINAL_STATUSES and c.assignee
+                ),
+                "frontier": len(frontier_set),
+            },
+        }
+
+
+def label_facets(project_id: str) -> Dict[str, Any]:
+    """Label discovery for one project: every label with total and open counts.
+
+    Covers all item kinds — labels like ``effort:``/``wayfinder:map`` span bugs
+    and features, and a per-kind split would hide exactly the labels an operator
+    is hunting for. Ordered most-alive-first (open desc, total desc, label asc)
+    and deterministic. ``unlabeled``/``unlabeled_open`` count the never-triaged
+    bucket the ``unlabeled`` list filter selects.
+    """
+    slug = _validate_slug(project_id)
+    with SessionLocal() as db:
+        if db.get(TrackerProjectModel, slug) is None:
+            raise TrackerError("not-found", f"no such project: {slug}")
+        rows = db.query(TrackerIssueModel).filter(TrackerIssueModel.project_id == slug).all()
+    counts: Dict[str, Dict[str, int]] = {}
+    unlabeled = 0
+    unlabeled_open = 0
+    for row in rows:
+        is_open = row.status not in TERMINAL_STATUSES
+        labels = _parse_labels(row.labels)
+        if not labels:
+            unlabeled += 1
+            if is_open:
+                unlabeled_open += 1
+        for label in labels:
+            entry = counts.setdefault(label, {"total": 0, "open": 0})
+            entry["total"] += 1
+            if is_open:
+                entry["open"] += 1
+    return {
+        "project_id": slug,
+        "labels": [
+            {"label": label, **entry}
+            for label, entry in sorted(
+                counts.items(), key=lambda kv: (-kv[1]["open"], -kv[1]["total"], kv[0])
+            )
+        ],
+        "unlabeled": unlabeled,
+        "unlabeled_open": unlabeled_open,
+    }
+
+
+# --------------------------------------------------------------------------
+# claim lifecycle (cond-0394)
+# --------------------------------------------------------------------------
+
+
+def claim_issue(issue_key: str, *, claimant: str) -> Dict[str, Any]:
+    """Claim an open issue for a worker by assigning it, atomically.
+
+    The claim is one conditional UPDATE — SQLite serialises writers, so two
+    cooperative workers cannot both win the same open issue. A retry by the
+    current claimant is idempotent; a different claimant gets a conflict that
+    reports the observed owner, and ``unclaim_issue`` is the ordinary exit that
+    makes a later claim succeed. Terminal issues refuse: claiming work that is
+    already closed is a stale observation, and the refusal says which status
+    was seen.
+    """
+    key = str(issue_key or "").strip().lower()
+    who = str(claimant or "").strip()
+    if not who:
+        raise TrackerError("invalid", "claimant must not be empty")
+    with SessionLocal() as db:
+        now = _utcnow()
+        claimed = (
+            db.query(TrackerIssueModel)
+            .filter(
+                TrackerIssueModel.key == key,
+                TrackerIssueModel.assignee.is_(None),
+                TrackerIssueModel.status.notin_(tuple(TERMINAL_STATUSES)),
+            )
+            .update(
+                {TrackerIssueModel.assignee: who, TrackerIssueModel.updated_at: now},
+                synchronize_session=False,
+            )
+        )
+        if claimed:
+            db.add(
+                TrackerEventModel(
+                    issue_key=key,
+                    actor=who,
+                    kind="claim",
+                    field="assignee",
+                    old_value=None,
+                    new_value=who,
+                    created_at=now,
+                )
+            )
+            db.commit()
+            row = _require_issue(db, key)
+            payload = _issue_row(row)
+            payload["claimed"] = True
+            payload["already_claimed"] = False
+            return payload
+        # The conditional write matched nothing. Re-read the record and state
+        # what was actually observed — "claimed by someone" and "already
+        # closed" are different answers with different exits.
+        row = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
+        if row is None:
+            raise TrackerError("not-found", f"no such issue: {key}")
+        if row.assignee == who:
+            payload = _issue_row(row)
+            payload["claimed"] = True
+            payload["already_claimed"] = True
+            return payload
+        if row.assignee:
+            raise TrackerError(
+                "conflict",
+                f"{key} is already claimed by {row.assignee}",
+                details={"observed_assignee": row.assignee},
+            )
+        raise TrackerError(
+            "conflict",
+            f"{key} is {row.status}; terminal issues cannot be claimed",
+            details={"observed_status": row.status},
+        )
+
+
+def unclaim_issue(issue_key: str, *, actor: Optional[str] = None) -> Dict[str, Any]:
+    """Release a claim — the ordinary recovery exit from a stale assignment.
+
+    Any actor may release: a supervisor cleaning up after a dead worker must
+    not be blocked by the claim it is clearing. Idempotent — unclaiming an
+    unclaimed issue succeeds without writing an event.
+
+    The release is one conditional UPDATE guarded on the assignee this call
+    actually observed, pinned for the whole request. Two concurrent releasers
+    therefore cannot both report the transition: the winner writes the single
+    ``unclaim`` event, and the loser resolves idempotently from a fresh read
+    (``was_claimed=False``, no event) rather than throwing a lock error or
+    duplicating the event. The same guard means a call can never clear a
+    *successor* claim that appeared after the one it observed — it releases
+    the claim it saw, or none. To release whoever holds the issue now,
+    re-read and call again.
+    """
+    key = str(issue_key or "").strip().lower()
+    observed: Optional[str] = None
+    first_read = True
+    attempts = 8
+    for attempt in range(attempts):
+        try:
+            with SessionLocal() as db:
+                row = _require_issue(db, key)
+                if first_read:
+                    # The one claim this call is allowed to release. Retries
+                    # keep pinning it, so a successor claim that appears
+                    # mid-request is never cleared by a stale attempt.
+                    observed = row.assignee
+                    first_read = False
+                if observed is None or row.assignee != observed:
+                    # Either there was no claim, or the observed claim is
+                    # already gone — this call established nothing.
+                    payload = _issue_row(row)
+                    payload["unclaimed"] = True
+                    payload["was_claimed"] = False
+                    return payload
+                now = _utcnow()
+                released = (
+                    db.query(TrackerIssueModel)
+                    .filter(
+                        TrackerIssueModel.key == key,
+                        TrackerIssueModel.assignee == observed,
+                    )
+                    .update(
+                        {TrackerIssueModel.assignee: None, TrackerIssueModel.updated_at: now},
+                        synchronize_session=False,
+                    )
+                )
+                if released != 1:
+                    db.rollback()
+                    raise _UpdateRaceLost()
+                db.add(
+                    TrackerEventModel(
+                        issue_key=key,
+                        actor=actor,
+                        kind="unclaim",
+                        field="assignee",
+                        old_value=observed,
+                        new_value=None,
+                        created_at=now,
+                    )
+                )
+                db.commit()
+                db.refresh(row)
+                payload = _issue_row(row)
+                payload["unclaimed"] = True
+                payload["was_claimed"] = True
+                return payload
+        except _UpdateRaceLost:
+            # The observed claim changed under us (released, or changed
+            # hands). The next attempt re-reads and resolves idempotently.
+            time.sleep(0.005 * (attempt + 1))
+        except OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            time.sleep(0.005 * (attempt + 1))
+    raise TrackerError(
+        "conflict",
+        f"{key} is being updated concurrently and the unclaim could not be "
+        f"applied after {attempts} attempts; retry it",
+    )
 
 
 def stats(project_id: Optional[str] = None, *, kind: Optional[str] = "issue") -> Dict[str, Any]:

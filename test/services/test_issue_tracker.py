@@ -614,3 +614,734 @@ class TestLabelFilterWildcards:
         tracker.create_issue(project_id="cao-system", title="b", labels=["other"])
         got = tracker.list_issues(project_id="cao-system", label="%")
         assert got["total"] == 0
+
+
+class TestMapMembership:
+    """`part-of`: directed child -> parent/map membership (cond-0394).
+
+    The wayfinder skill's map is one issue; its tickets are child issues. The
+    membership edge is a first-class directed link so the tracker itself can
+    answer "what belongs to this map" instead of every agent reconstructing it
+    from bodies.
+    """
+
+    def test_a_ticket_joins_its_map_with_part_of(self, cao_system):
+        map_issue = tracker.create_issue(
+            project_id="cao-system", title="map", labels=["wayfinder:map"]
+        )
+        ticket = tracker.create_issue(project_id="cao-system", title="ticket")
+        link = tracker.add_link(ticket["key"], to_key=map_issue["key"], kind="part-of")
+        assert link["created"] is True
+        assert (link["from_key"], link["to_key"], link["kind"]) == (
+            ticket["key"],
+            map_issue["key"],
+            "part-of",
+        )
+        assert tracker.get_issue(map_issue["key"])["links"][0]["kind"] == "part-of"
+
+    def test_children_returns_direct_members_in_creation_order(self, cao_system):
+        m = tracker.create_issue(project_id="cao-system", title="map")
+        a = tracker.create_issue(project_id="cao-system", title="a")
+        b = tracker.create_issue(project_id="cao-system", title="b")
+        # Linked in reverse creation order: the ordering must come from the
+        # issue records, not from when the edge was wired.
+        tracker.add_link(b["key"], to_key=m["key"], kind="part-of")
+        tracker.add_link(a["key"], to_key=m["key"], kind="part-of")
+        got = tracker.list_children(m["key"])
+        assert [c["title"] for c in got["children"]] == ["a", "b"]
+
+    def test_children_excludes_non_members_and_grandchildren(self, cao_system):
+        m = tracker.create_issue(project_id="cao-system", title="map")
+        child = tracker.create_issue(project_id="cao-system", title="child")
+        grand = tracker.create_issue(project_id="cao-system", title="grandchild")
+        tracker.create_issue(project_id="cao-system", title="unrelated")
+        tracker.add_link(child["key"], to_key=m["key"], kind="part-of")
+        tracker.add_link(grand["key"], to_key=child["key"], kind="part-of")
+        got = tracker.list_children(m["key"])
+        # Direct membership only: no transitive closure.
+        assert [c["title"] for c in got["children"]] == ["child"]
+
+    def test_a_blocks_link_is_not_membership(self, cao_system):
+        m = tracker.create_issue(project_id="cao-system", title="map")
+        t = tracker.create_issue(project_id="cao-system", title="t")
+        tracker.add_link(t["key"], to_key=m["key"], kind="blocks")
+        assert tracker.list_children(m["key"])["children"] == []
+
+    def test_children_of_a_missing_map_is_not_found(self, cao_system):
+        with pytest.raises(TrackerError) as exc:
+            tracker.list_children("cond-9999")
+        assert exc.value.code == "not-found"
+
+
+def _map_with_tickets(cao_system, titles=("a", "b", "c")):
+    m = tracker.create_issue(project_id="cao-system", title="map")
+    tickets = [tracker.create_issue(project_id="cao-system", title=t) for t in titles]
+    for t in tickets:
+        tracker.add_link(t["key"], to_key=m["key"], kind="part-of")
+    return m, tickets
+
+
+class TestFrontier:
+    """The frontier: direct children that are nonterminal, unassigned, and
+    have no nonterminal incoming blocker (cond-0394).
+
+    Every case constructs the state from canonical issue/link records — there
+    is no derived "blocked" flag anywhere to get out of sync.
+    """
+
+    def test_all_fresh_children_are_takeable_oldest_first(self, cao_system):
+        m, _ = _map_with_tickets(cao_system)
+        got = tracker.frontier(m["key"])
+        assert [t["title"] for t in got["frontier"]] == ["a", "b", "c"]
+
+    def test_a_claimed_ticket_leaves_the_frontier(self, cao_system):
+        m, tickets = _map_with_tickets(cao_system)
+        tracker.update_issue(tickets[1]["key"], assignee="terra")
+        got = tracker.frontier(m["key"])
+        assert [t["title"] for t in got["frontier"]] == ["a", "c"]
+
+    def test_a_terminal_ticket_leaves_the_frontier(self, cao_system):
+        m, tickets = _map_with_tickets(cao_system)
+        tracker.update_issue(tickets[0]["key"], status="closed")
+        got = tracker.frontier(m["key"])
+        assert [t["title"] for t in got["frontier"]] == ["b", "c"]
+
+    def test_a_resolved_ticket_is_still_on_the_frontier(self, cao_system):
+        # `resolved` is deliberately NOT terminal: a fix landed but nobody
+        # verified it, so the ticket still needs a session's attention.
+        m, tickets = _map_with_tickets(cao_system)
+        tracker.update_issue(tickets[0]["key"], status="resolved")
+        got = tracker.frontier(m["key"])
+        assert [t["title"] for t in got["frontier"]] == ["a", "b", "c"]
+
+    def test_a_ticket_with_an_open_blocker_is_not_frontier(self, cao_system):
+        m, tickets = _map_with_tickets(cao_system)
+        blocker = tracker.create_issue(project_id="cao-system", title="blocker")
+        tracker.add_link(blocker["key"], to_key=tickets[0]["key"], kind="blocks")
+        got = tracker.frontier(m["key"])
+        assert [t["title"] for t in got["frontier"]] == ["b", "c"]
+
+    def test_closing_the_blocker_returns_the_ticket_to_the_frontier(self, cao_system):
+        m, tickets = _map_with_tickets(cao_system)
+        blocker = tracker.create_issue(project_id="cao-system", title="blocker")
+        tracker.add_link(blocker["key"], to_key=tickets[0]["key"], kind="blocks")
+        tracker.update_issue(blocker["key"], status="closed")
+        got = tracker.frontier(m["key"])
+        assert [t["title"] for t in got["frontier"]] == ["a", "b", "c"]
+
+    def test_a_resolved_blocker_still_blocks(self, cao_system):
+        # Consistent with the status vocabulary: resolved is not closed.
+        m, tickets = _map_with_tickets(cao_system)
+        blocker = tracker.create_issue(project_id="cao-system", title="blocker")
+        tracker.add_link(blocker["key"], to_key=tickets[0]["key"], kind="blocks")
+        tracker.update_issue(blocker["key"], status="resolved")
+        got = tracker.frontier(m["key"])
+        assert [t["title"] for t in got["frontier"]] == ["b", "c"]
+
+    def test_an_outgoing_blocks_edge_does_not_bench_the_blocker(self, cao_system):
+        # `a blocks x` says x waits on a — it says nothing about a itself.
+        m, tickets = _map_with_tickets(cao_system)
+        other = tracker.create_issue(project_id="cao-system", title="other")
+        tracker.add_link(tickets[0]["key"], to_key=other["key"], kind="blocks")
+        got = tracker.frontier(m["key"])
+        assert [t["title"] for t in got["frontier"]] == ["a", "b", "c"]
+
+    def test_tickets_of_another_map_and_non_members_are_not_frontier(self, cao_system):
+        m, _ = _map_with_tickets(cao_system)
+        tracker.create_issue(project_id="cao-system", title="unrelated")
+        other_map = tracker.create_issue(project_id="cao-system", title="other map")
+        stray = tracker.create_issue(project_id="cao-system", title="stray")
+        tracker.add_link(stray["key"], to_key=other_map["key"], kind="part-of")
+        got = tracker.frontier(m["key"])
+        assert [t["title"] for t in got["frontier"]] == ["a", "b", "c"]
+
+    def test_frontier_of_a_missing_map_is_not_found(self, cao_system):
+        with pytest.raises(TrackerError) as exc:
+            tracker.frontier("cond-9999")
+        assert exc.value.code == "not-found"
+
+
+class TestClaimLifecycle:
+    """Atomic claim/unclaim (cond-0394).
+
+    The claim is one conditional UPDATE, so two cooperative workers cannot both
+    win; the loser gets a typed conflict that reports the observed owner, and
+    unclaim is the ordinary exit that makes a retry possible.
+    """
+
+    def test_claiming_an_open_issue_assigns_it(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        got = tracker.claim_issue(issue["key"], claimant="terra")
+        assert got["assignee"] == "terra"
+        assert (got["claimed"], got["already_claimed"]) == (True, False)
+
+    def test_a_second_worker_gets_a_typed_conflict_naming_the_claimant(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        tracker.claim_issue(issue["key"], claimant="terra")
+        with pytest.raises(TrackerError) as exc:
+            tracker.claim_issue(issue["key"], claimant="muse")
+        assert exc.value.code == "conflict"
+        assert "terra" in exc.value.message
+        assert exc.value.details["observed_assignee"] == "terra"
+
+    def test_a_retry_by_the_current_claimant_is_idempotent(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        tracker.claim_issue(issue["key"], claimant="terra")
+        again = tracker.claim_issue(issue["key"], claimant="terra")
+        assert again["already_claimed"] is True
+        claims = [e for e in tracker.get_issue(issue["key"])["events"] if e["kind"] == "claim"]
+        # A retry writes nothing: the audit trail records the one real claim.
+        assert len(claims) == 1
+
+    def test_claiming_a_terminal_issue_is_refused_with_the_observed_status(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", status="closed")
+        with pytest.raises(TrackerError) as exc:
+            tracker.claim_issue(issue["key"], claimant="terra")
+        assert exc.value.code == "conflict"
+        assert exc.value.details["observed_status"] == "closed"
+
+    def test_claiming_a_missing_issue_is_not_found(self, cao_system):
+        with pytest.raises(TrackerError) as exc:
+            tracker.claim_issue("cond-9999", claimant="terra")
+        assert exc.value.code == "not-found"
+
+    def test_an_empty_claimant_is_invalid(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        with pytest.raises(TrackerError) as exc:
+            tracker.claim_issue(issue["key"], claimant="  ")
+        assert exc.value.code == "invalid"
+
+    def test_unclaim_is_the_exit_that_lets_another_worker_in(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        tracker.claim_issue(issue["key"], claimant="terra")
+        tracker.unclaim_issue(issue["key"], actor="colin")
+        got = tracker.claim_issue(issue["key"], claimant="muse")
+        assert (got["assignee"], got["already_claimed"]) == ("muse", False)
+
+    def test_unclaiming_an_unclaimed_issue_is_idempotent(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        got = tracker.unclaim_issue(issue["key"])
+        assert (got["unclaimed"], got["was_claimed"]) == (True, False)
+        assert [e["kind"] for e in tracker.get_issue(issue["key"])["events"]] == ["created"]
+
+    def test_claim_and_unclaim_are_audited(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        tracker.claim_issue(issue["key"], claimant="terra")
+        tracker.unclaim_issue(issue["key"], actor="colin")
+        events = [
+            (e["kind"], e["field"], e["old_value"], e["new_value"], e["actor"])
+            for e in tracker.get_issue(issue["key"])["events"]
+        ]
+        assert events == [
+            ("created", None, None, "a", None),
+            ("claim", "assignee", None, "terra", "terra"),
+            ("unclaim", "assignee", "terra", None, "colin"),
+        ]
+
+
+class TestExpectedUpdatedAt:
+    """Optimistic precondition on issue edits (cond-0394).
+
+    A wayfinder session edits the map body after reading it; the precondition
+    turns "somebody else edited first" into a typed conflict carrying the
+    current observable version, instead of a silent overwrite.
+    """
+
+    def test_a_matching_precondition_applies_the_edit(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", body="v1")
+        got = tracker.update_issue(issue["key"], body="v2", expected_updated_at=issue["updated_at"])
+        assert got["body"] == "v2"
+
+    def test_a_stale_precondition_conflicts_and_reports_the_current_version(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", body="v1")
+        stale = issue["updated_at"]
+        current = tracker.update_issue(issue["key"], body="somebody else")
+        with pytest.raises(TrackerError) as exc:
+            tracker.update_issue(issue["key"], body="v2", expected_updated_at=stale)
+        assert exc.value.code == "conflict"
+        assert exc.value.details["current_updated_at"] == current["updated_at"]
+        assert current["updated_at"] in exc.value.message
+
+    def test_the_refused_edit_changes_nothing(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", body="v1")
+        stale = issue["updated_at"]
+        tracker.update_issue(issue["key"], body="somebody else")
+        with pytest.raises(TrackerError):
+            tracker.update_issue(issue["key"], body="v2", expected_updated_at=stale)
+        after = tracker.get_issue(issue["key"])
+        assert after["body"] == "somebody else"
+        assert [e["kind"] for e in after["events"]] == ["created", "field"]
+
+    def test_without_a_precondition_the_edit_is_unconditional(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", body="v1")
+        tracker.update_issue(issue["key"], body="v2")
+        got = tracker.update_issue(issue["key"], body="v3")
+        assert got["body"] == "v3"
+
+    def test_an_unparseable_precondition_is_invalid(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        with pytest.raises(TrackerError) as exc:
+            tracker.update_issue(issue["key"], body="v2", expected_updated_at="yesterday")
+        assert exc.value.code == "invalid"
+
+
+class TestAtomicLabelUpdates:
+    """add/remove/clear label deltas in one update (cond-0394).
+
+    Triage moves an issue between role labels; that must not require a stale
+    read-modify-write of the whole set, and must not drop labels another actor
+    added concurrently. One strategy per update: full replacement (`labels`)
+    never combines with the deltas, and `clear_labels` — itself a full
+    replacement to the empty set — combines with nothing.
+    """
+
+    def test_add_labels_merges_without_touching_unrelated_labels(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", labels=["bug", "ui"])
+        got = tracker.update_issue(issue["key"], add_labels=["needs-triage"])
+        assert got["labels"] == ["bug", "ui", "needs-triage"]
+
+    def test_remove_labels_drops_only_the_named_ones(self, cao_system):
+        issue = tracker.create_issue(
+            project_id="cao-system", title="a", labels=["needs-triage", "bug"]
+        )
+        got = tracker.update_issue(issue["key"], remove_labels=["needs-triage"])
+        assert got["labels"] == ["bug"]
+
+    def test_add_and_remove_compose_in_one_update(self, cao_system):
+        issue = tracker.create_issue(
+            project_id="cao-system", title="a", labels=["needs-triage", "bug"]
+        )
+        got = tracker.update_issue(
+            issue["key"], add_labels=["ready-for-agent"], remove_labels=["needs-triage"]
+        )
+        assert got["labels"] == ["bug", "ready-for-agent"]
+
+    def test_a_label_in_both_add_and_remove_ends_up_added(self, cao_system):
+        # Defined order: removals first, additions after — so additions win.
+        issue = tracker.create_issue(project_id="cao-system", title="a", labels=["a"])
+        got = tracker.update_issue(issue["key"], add_labels=["a"], remove_labels=["a"])
+        assert got["labels"] == ["a"]
+
+    def test_clear_labels_empties_the_set(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", labels=["a", "b"])
+        got = tracker.update_issue(issue["key"], clear_labels=True)
+        assert got["labels"] == []
+
+    def test_full_replacement_cannot_combine_with_deltas(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", labels=["a"])
+        with pytest.raises(TrackerError) as exc:
+            tracker.update_issue(issue["key"], labels=["b"], add_labels=["c"])
+        assert exc.value.code == "invalid"
+        assert tracker.get_issue(issue["key"])["labels"] == ["a"]
+
+    def test_clear_cannot_combine_with_add_or_remove(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", labels=["a"])
+        with pytest.raises(TrackerError) as exc:
+            tracker.update_issue(issue["key"], clear_labels=True, add_labels=["b"])
+        assert exc.value.code == "invalid"
+
+    def test_bounds_apply_to_the_merged_result(self, cao_system):
+        labels = [f"l{i}" for i in range(tracker.MAX_LABELS)]
+        issue = tracker.create_issue(project_id="cao-system", title="a", labels=labels)
+        with pytest.raises(TrackerError) as exc:
+            tracker.update_issue(issue["key"], add_labels=["one-too-many"])
+        assert exc.value.code == "invalid"
+        assert tracker.get_issue(issue["key"])["labels"] == labels
+
+    def test_the_resulting_set_is_audited_once(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", labels=["a", "b"])
+        tracker.update_issue(issue["key"], actor="colin", add_labels=["c"], remove_labels=["a"])
+        events = [
+            e
+            for e in tracker.get_issue(issue["key"])["events"]
+            if e["kind"] == "field" and e["field"] == "labels"
+        ]
+        assert len(events) == 1
+        assert json.loads(events[0]["new_value"]) == ["b", "c"]
+        assert events[0]["actor"] == "colin"
+
+    def test_a_noop_delta_records_nothing(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", labels=["a"])
+        tracker.update_issue(issue["key"], add_labels=["a"], remove_labels=["nope"])
+        assert [e["kind"] for e in tracker.get_issue(issue["key"])["events"]] == ["created"]
+
+
+class TestUnlabeledFilter:
+    """First-class unlabeled discovery for triage (cond-0394)."""
+
+    def test_unlabeled_returns_only_labelless_issues(self, cao_system):
+        tracker.create_issue(project_id="cao-system", title="bare")
+        tracker.create_issue(project_id="cao-system", title="tagged", labels=["bug"])
+        got = tracker.list_issues(project_id="cao-system", unlabeled=True)
+        assert [i["title"] for i in got["issues"]] == ["bare"]
+
+    def test_unlabeled_composes_and_the_total_stays_honest(self, cao_system):
+        tracker.create_issue(project_id="cao-system", title="bare open")
+        tracker.create_issue(project_id="cao-system", title="bare open 2")
+        closed = tracker.create_issue(project_id="cao-system", title="bare closed")
+        tracker.create_issue(project_id="cao-system", title="tagged", labels=["x"])
+        tracker.update_issue(closed["key"], status="closed")
+        page = tracker.list_issues(project_id="cao-system", unlabeled=True, open_only=True, limit=1)
+        assert page["total"] == 2
+        assert [i["title"] for i in page["issues"]] == ["bare open 2"]
+
+    def test_unlabeled_composes_with_kind(self, cao_system):
+        tracker.create_issue(project_id="cao-system", title="bare issue")
+        tracker.create_feature(project_id="cao-system", title="bare feature")
+        got = tracker.list_issues(project_id="cao-system", unlabeled=True, kind="feature")
+        assert [i["title"] for i in got["issues"]] == ["bare feature"]
+        got_all = tracker.list_issues(project_id="cao-system", unlabeled=True, kind="all")
+        assert sorted(i["title"] for i in got_all["issues"]) == ["bare feature", "bare issue"]
+
+
+class TestConcurrentUpdates:
+    """The write seam itself must be atomic, not the Python before it.
+
+    These tests park two threads inside the vulnerable window (both rows read,
+    both preconditions passed) and only then release them at the write. Under
+    the pre-fix check-then-act implementation both commits succeeded and one
+    writer's change was silently lost — or recorded twice.
+    """
+
+    def test_only_one_of_two_concurrent_cas_writes_wins(self, cao_system, monkeypatch):
+        import threading
+
+        issue = tracker.create_issue(project_id="cao-system", title="map", body="v1")
+        version = issue["updated_at"]
+        barrier = threading.Barrier(2)
+        real_parse = tracker._parse_timestamp
+
+        def synced_parse(text, *, field):
+            result = real_parse(text, field=field)
+            # Both threads have now read the row AND validated the precondition.
+            barrier.wait(timeout=5)
+            return result
+
+        monkeypatch.setattr(tracker, "_parse_timestamp", synced_parse)
+        outcomes = []
+
+        def write(body):
+            try:
+                tracker.update_issue(issue["key"], body=body, expected_updated_at=version)
+                outcomes.append(("ok", body, None))
+            except TrackerError as exc:
+                outcomes.append((exc.code, body, exc))
+
+        threads = [threading.Thread(target=write, args=(b,)) for b in ("from-a", "from-b")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+            assert not t.is_alive(), "a writer deadlocked"
+
+        statuses = sorted(o[0] for o in outcomes)
+        assert statuses == ["conflict", "ok"], outcomes
+        loser = next(o for o in outcomes if o[0] == "conflict")[2]
+        assert loser.details["current_updated_at"] is not None
+        assert loser.details["current_updated_at"] != version
+        winner_body = next(o[1] for o in outcomes if o[0] == "ok")
+        after = tracker.get_issue(issue["key"])
+        # The winner's write is the one that survived, and the audit trail
+        # records exactly one body transition — the one that happened.
+        assert after["body"] == winner_body
+        body_events = [e for e in after["events"] if e["kind"] == "field" and e["field"] == "body"]
+        assert len(body_events) == 1
+
+    def test_concurrent_label_deltas_both_land(self, cao_system, monkeypatch):
+        import threading
+
+        issue = tracker.create_issue(project_id="cao-system", title="a", labels=["base"])
+        barrier = threading.Barrier(2)
+        synced = set()
+        real_normalise = tracker.normalise_labels
+
+        def synced_normalise(labels):
+            marker = tuple(labels) if isinstance(labels, list) else None
+            if marker in (("worker-a",), ("worker-b",)) and marker not in synced:
+                # Each worker syncs once, after its read, before its write; the
+                # loser's retry must not re-enter the barrier.
+                synced.add(marker)
+                barrier.wait(timeout=5)
+            return real_normalise(labels)
+
+        monkeypatch.setattr(tracker, "normalise_labels", synced_normalise)
+        outcomes = []
+
+        def add(label):
+            try:
+                tracker.update_issue(issue["key"], add_labels=[label])
+                outcomes.append(("ok", label))
+            except TrackerError as exc:
+                outcomes.append((exc.code, label))
+
+        threads = [threading.Thread(target=add, args=(l,)) for l in ("worker-a", "worker-b")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+            assert not t.is_alive(), "a writer deadlocked"
+
+        assert sorted(outcomes) == [("ok", "worker-a"), ("ok", "worker-b")], outcomes
+        after = tracker.get_issue(issue["key"])
+        assert sorted(after["labels"]) == ["base", "worker-a", "worker-b"]
+        # Two real transitions happened, so two label events exist — and each
+        # records the transition it actually applied, not its first attempt.
+        label_events = [
+            e for e in after["events"] if e["kind"] == "field" and e["field"] == "labels"
+        ]
+        assert len(label_events) == 2
+        for e in label_events:
+            old, new = json.loads(e["old_value"]), json.loads(e["new_value"])
+            assert len(new) == len(old) + 1
+            assert set(new) - set(old) in ({"worker-a"}, {"worker-b"})
+
+    def test_concurrent_unclaims_establish_one_release(self, cao_system, monkeypatch):
+        import threading
+
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        tracker.claim_issue(issue["key"], claimant="worker-a")
+        barrier = threading.Barrier(2)
+        synced = set()
+        real_now = tracker._utcnow
+
+        def synced_now():
+            ident = threading.get_ident()
+            if ident not in synced:
+                # Both releasers have now read the same owner and park just
+                # before the write; only the write seam may decide the winner.
+                synced.add(ident)
+                barrier.wait(timeout=5)
+            return real_now()
+
+        monkeypatch.setattr(tracker, "_utcnow", synced_now)
+        outcomes = []
+
+        def release(actor):
+            try:
+                got = tracker.unclaim_issue(issue["key"], actor=actor)
+                outcomes.append(("ok", actor, got["was_claimed"]))
+            except Exception as exc:  # noqa: BLE001 - a raw lock error is a failure mode too
+                outcomes.append(("error", actor, exc))
+
+        threads = [
+            threading.Thread(target=release, args=(a,)) for a in ("supervisor-a", "supervisor-b")
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+            assert not t.is_alive(), "a releaser deadlocked"
+
+        # Exactly one releaser established the transition; the other resolved
+        # idempotently — no exception, no duplicate claim of the release.
+        assert sorted((o[0], o[2]) for o in outcomes) == [("ok", False), ("ok", True)], outcomes
+        after = tracker.get_issue(issue["key"])
+        assert after["assignee"] is None
+        unclaim_events = [
+            (e["actor"], e["old_value"], e["new_value"])
+            for e in after["events"]
+            if e["kind"] == "unclaim"
+        ]
+        winner = next(o[1] for o in outcomes if o[2] is True)
+        assert unclaim_events == [(winner, "worker-a", None)]
+
+    def test_a_stale_unclaim_cannot_clear_a_successor_claim(self, cao_system, monkeypatch):
+        import threading
+
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        tracker.claim_issue(issue["key"], claimant="worker-a")
+        parked = threading.Event()
+        proceed = threading.Event()
+        real_now = tracker._utcnow
+
+        def parked_now():
+            if not parked.is_set():
+                # The stale releaser has read worker-a's claim and parks just
+                # before its write. The main thread then releases worker-a and
+                # worker-c claims — before the stale write lands.
+                parked.set()
+                proceed.wait(timeout=5)
+            return real_now()
+
+        monkeypatch.setattr(tracker, "_utcnow", parked_now)
+        outcomes = []
+
+        def release():
+            got = tracker.unclaim_issue(issue["key"], actor="supervisor-a")
+            outcomes.append(got)
+
+        thread = threading.Thread(target=release)
+        thread.start()
+        assert parked.wait(timeout=5)
+        tracker.unclaim_issue(issue["key"], actor="supervisor-b")
+        tracker.claim_issue(issue["key"], claimant="worker-c")
+        proceed.set()
+        thread.join(timeout=15)
+        assert not thread.is_alive(), "the stale releaser deadlocked"
+
+        # The stale call observed worker-a's claim; that claim is gone, so the
+        # call established nothing — and worker-c's successor claim survives.
+        (got,) = outcomes
+        assert got["was_claimed"] is False
+        assert got["assignee"] == "worker-c"
+        assert tracker.get_issue(issue["key"])["assignee"] == "worker-c"
+        kinds = [e["kind"] for e in tracker.get_issue(issue["key"])["events"]]
+        assert kinds == ["created", "claim", "unclaim", "claim"]
+
+
+class TestLabelFacets:
+    """Label discovery for the dashboard filter bar (cond-0394)."""
+
+    def test_counts_per_label_with_the_open_split(self, cao_system):
+        tracker.create_issue(project_id="cao-system", title="a", labels=["effort:maps", "bug"])
+        b = tracker.create_issue(project_id="cao-system", title="b", labels=["effort:maps"])
+        tracker.create_issue(project_id="cao-system", title="c", labels=["bug"])
+        tracker.update_issue(b["key"], status="closed")
+        got = tracker.label_facets("cao-system")
+        by_label = {f["label"]: f for f in got["labels"]}
+        assert by_label["effort:maps"] == {"label": "effort:maps", "total": 2, "open": 1}
+        assert by_label["bug"] == {"label": "bug", "total": 2, "open": 2}
+
+    def test_the_unlabeled_bucket_matches_the_list_filter(self, cao_system):
+        tracker.create_issue(project_id="cao-system", title="bare")
+        tracker.create_issue(project_id="cao-system", title="tagged", labels=["x"])
+        got = tracker.label_facets("cao-system")
+        assert (got["unlabeled"], got["unlabeled_open"]) == (1, 1)
+        listed = tracker.list_issues(project_id="cao-system", unlabeled=True, kind="all")
+        assert listed["total"] == got["unlabeled"]
+
+    def test_labels_span_kinds(self, cao_system):
+        tracker.create_issue(project_id="cao-system", title="bug", labels=["wayfinder:map"])
+        tracker.create_feature(project_id="cao-system", title="wish", labels=["wayfinder:map"])
+        got = tracker.label_facets("cao-system")
+        assert got["labels"][0]["label"] == "wayfinder:map"
+        assert got["labels"][0]["total"] == 2
+
+    def test_ordering_is_most_alive_first(self, cao_system):
+        tracker.create_issue(project_id="cao-system", title="a", labels=["zzz"])
+        tracker.create_issue(project_id="cao-system", title="b", labels=["aaa"])
+        tracker.create_issue(project_id="cao-system", title="c", labels=["aaa"])
+        got = tracker.label_facets("cao-system")
+        assert [f["label"] for f in got["labels"]] == ["aaa", "zzz"]
+
+    def test_scoped_to_one_project(self, cao_system):
+        tracker.create_project(name="Other", project_id="other")
+        tracker.create_issue(project_id="other", title="theirs", labels=["foreign"])
+        tracker.create_issue(project_id="cao-system", title="mine", labels=["mine"])
+        got = tracker.label_facets("cao-system")
+        assert [f["label"] for f in got["labels"]] == ["mine"]
+
+    def test_an_unknown_project_is_not_found(self, cao_system):
+        with pytest.raises(TrackerError) as exc:
+            tracker.label_facets("nope")
+        assert exc.value.code == "not-found"
+
+
+class TestMapProjection:
+    """The one-request map projection behind the dashboard map view (cond-0394)."""
+
+    def test_children_carry_their_classification(self, cao_system):
+        m, tickets = _map_with_tickets(cao_system)
+        blocker = tracker.create_issue(project_id="cao-system", title="blocker")
+        tracker.add_link(blocker["key"], to_key=tickets[0]["key"], kind="blocks")
+        tracker.update_issue(tickets[1]["key"], assignee="terra")
+        tracker.update_issue(tickets[2]["key"], status="closed")
+        got = tracker.map_projection(m["key"])
+        by_title = {c["title"]: c for c in got["children"]}
+        assert by_title["a"]["blocked_by"] == [blocker["key"]]
+        assert by_title["a"]["frontier"] is False
+        assert by_title["b"]["frontier"] is False  # claimed
+        assert by_title["c"]["frontier"] is False  # terminal
+        assert got["frontier"] == []
+
+    def test_frontier_keys_match_the_frontier_interface_exactly(self, cao_system):
+        m, tickets = _map_with_tickets(cao_system)
+        tracker.update_issue(tickets[2]["key"], assignee="terra")
+        got = tracker.map_projection(m["key"])
+        assert got["frontier"] == [tickets[0]["key"], tickets[1]["key"]]
+        direct = tracker.frontier(m["key"])
+        assert [t["key"] for t in direct["frontier"]] == got["frontier"]
+
+    def test_external_blockers_are_included_so_a_benched_child_explains_itself(self, cao_system):
+        m, tickets = _map_with_tickets(cao_system, titles=("a",))
+        outside = tracker.create_issue(project_id="cao-system", title="outside blocker")
+        tracker.add_link(outside["key"], to_key=tickets[0]["key"], kind="blocks")
+        got = tracker.map_projection(m["key"])
+        assert [e["title"] for e in got["external"]] == ["outside blocker"]
+        # The one fact that makes it an external blocker: it benches a member.
+        assert got["external"][0]["blocking"] == [tickets[0]["key"]]
+
+    def test_every_link_endpoint_is_materialized_not_just_blockers(self, cao_system):
+        """A relates/duplicates/caused-by/outgoing link to a non-member puts
+        that issue in `external` too — no returned link may point at an issue
+        the caller cannot see."""
+        m, tickets = _map_with_tickets(cao_system, titles=("a", "b"))
+        related = tracker.create_issue(project_id="cao-system", title="related work")
+        duplicate = tracker.create_issue(project_id="cao-system", title="filed twice")
+        cause = tracker.create_issue(project_id="cao-system", title="root cause")
+        downstream = tracker.create_issue(project_id="cao-system", title="waits on us")
+        tracker.add_link(tickets[0]["key"], to_key=related["key"], kind="relates")
+        tracker.add_link(tickets[0]["key"], to_key=duplicate["key"], kind="duplicates")
+        tracker.add_link(tickets[1]["key"], to_key=cause["key"], kind="caused-by")
+        # A child blocking an outsider is an endpoint too — direction and kind
+        # make it context, not a blocker OF the map.
+        tracker.add_link(tickets[0]["key"], to_key=downstream["key"], kind="blocks")
+        got = tracker.map_projection(m["key"])
+        by_key = {e["key"]: e for e in got["external"]}
+        assert set(by_key) == {related["key"], duplicate["key"], cause["key"], downstream["key"]}
+        # None of them benches a member — the blocker marker stays empty.
+        assert all(e["blocking"] == [] for e in by_key.values())
+
+    def test_blocking_marks_only_blockers_that_still_bench_a_child(self, cao_system):
+        """`blocking` inverts the children's blocked_by lists: a nonterminal
+        blocker benches; a terminal one has landed and benches nobody, though
+        its link still earns it a row."""
+        m, tickets = _map_with_tickets(cao_system, titles=("a",))
+        live = tracker.create_issue(project_id="cao-system", title="live blocker")
+        landed = tracker.create_issue(project_id="cao-system", title="landed blocker")
+        tracker.add_link(live["key"], to_key=tickets[0]["key"], kind="blocks")
+        tracker.add_link(landed["key"], to_key=tickets[0]["key"], kind="blocks")
+        tracker.update_issue(landed["key"], status="closed")
+        got = tracker.map_projection(m["key"])
+        by_key = {e["key"]: e for e in got["external"]}
+        assert by_key[live["key"]]["blocking"] == [tickets[0]["key"]]
+        assert by_key[landed["key"]]["blocking"] == []
+        # The child's own blocked_by agrees: benched by the live one only.
+        assert got["children"][0]["blocked_by"] == [live["key"]]
+
+    def test_links_cover_the_map_and_children_in_both_directions(self, cao_system):
+        m, tickets = _map_with_tickets(cao_system, titles=("a", "b"))
+        tracker.add_link(tickets[0]["key"], to_key=tickets[1]["key"], kind="relates")
+        got = tracker.map_projection(m["key"])
+        shapes = {(l["from_key"], l["to_key"], l["kind"]) for l in got["links"]}
+        assert (tickets[0]["key"], m["key"], "part-of") in shapes
+        assert (tickets[0]["key"], tickets[1]["key"], "relates") in shapes
+
+    def test_progress_counts_the_direct_children(self, cao_system):
+        m, tickets = _map_with_tickets(cao_system)
+        tracker.update_issue(tickets[0]["key"], status="closed")
+        tracker.update_issue(tickets[1]["key"], status="resolved")
+        tracker.update_issue(tickets[2]["key"], assignee="terra")
+        got = tracker.map_projection(m["key"])
+        # The resolved ticket is nonterminal, unassigned and unblocked — it is
+        # still takeable (landed ≠ verified), so it sits on the frontier.
+        assert got["progress"] == {
+            "total": 3,
+            "open": 2,
+            "terminal": 1,
+            "resolved": 1,
+            "claimed": 1,
+            "frontier": 1,
+        }
+        assert got["map"]["key"] == m["key"]
+
+    def test_a_plain_issue_projects_an_empty_map(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="not a map")
+        got = tracker.map_projection(issue["key"])
+        assert got["children"] == []
+        assert got["progress"]["total"] == 0
+
+    def test_an_unknown_map_is_not_found(self, cao_system):
+        with pytest.raises(TrackerError) as exc:
+            tracker.map_projection("cond-9999")
+        assert exc.value.code == "not-found"

@@ -14,6 +14,21 @@ export interface ApiError extends Error {
   body?: unknown
 }
 
+/** The structured detail of a typed conflict (409), when the server sent one:
+ * `{message, code, observed_assignee}` on a lost claim, `{message, code,
+ * current_updated_at}` on a stale optimistic-concurrency write. */
+export function conflictDetail(err: unknown): Record<string, unknown> | null {
+  const apiErr = err as ApiError | undefined
+  const detail = (apiErr?.body as { detail?: unknown } | undefined)?.detail
+  return detail && typeof detail === 'object' ? (detail as Record<string, unknown>) : null
+}
+
+/** The server's explanation for a failed call, falling back to the message. */
+export function errorText(err: unknown): string {
+  const apiErr = err as ApiError | undefined
+  return apiErr?.detail || apiErr?.message || String(err)
+}
+
 async function fetchJSON<T>(url: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 10000)
@@ -29,6 +44,13 @@ async function fetchJSON<T>(url: string, opts?: RequestInit & { timeoutMs?: numb
         body = await res.json()
         if (body && typeof (body as { detail?: unknown }).detail === 'string') {
           detail = (body as { detail: string }).detail
+        } else if (body && typeof (body as { detail?: unknown }).detail === 'object' && (body as { detail?: unknown }).detail !== null) {
+          // Typed conflicts carry structured detail ({message, code, ...}) —
+          // e.g. a lost claim names the observed owner, a stale write names the
+          // current version. Surface the message as `detail`; the structured
+          // fields stay readable on `err.body.detail`.
+          const d = (body as { detail: Record<string, unknown> }).detail
+          if (typeof d.message === 'string') detail = d.message
         }
       } catch { /* non-JSON error body */ }
       const err: ApiError = new Error(`${res.status} ${res.statusText}`)
@@ -875,11 +897,74 @@ export interface TrackerIssueFilters {
   component?: string
   assignee?: string
   label?: string
+  unlabeled?: boolean
   q?: string
   openOnly?: boolean
   limit?: number
   offset?: number
   order?: string
+}
+
+export interface TrackerLabelFacet {
+  label: string
+  total: number
+  open: number
+}
+
+export interface TrackerLabelFacets {
+  project_id: string
+  labels: TrackerLabelFacet[]
+  unlabeled: number
+  unlabeled_open: number
+}
+
+/** A child row in the map projection: the issue plus its server-computed
+ * classification. `blocked_by` lists the nonterminal blockers benching it;
+ * `frontier` is the canonical takeable rule (nonterminal, unassigned,
+ * unblocked) — computed once, server-side, never re-derived per widget. */
+export interface TrackerMapChild extends TrackerIssue {
+  blocked_by: string[]
+  frontier: boolean
+}
+
+/** An external row in the map projection: an issue that is neither the map
+ * nor a child but is named by one of the projection's links, so every
+ * returned link has both endpoints on screen. `blocking` lists the member
+ * children this issue actually benches (its nonterminal `blocks` edges to
+ * them) — a non-empty list is what makes it an external blocker; anything
+ * else is context (a relates/duplicates/caused-by neighbour, or a blocker
+ * that has already landed). */
+export interface TrackerMapExternal extends TrackerIssue {
+  blocking: string[]
+}
+
+export interface TrackerMapProjection {
+  map: TrackerIssue
+  children: TrackerMapChild[]
+  /** Child keys on the frontier, oldest first. */
+  frontier: string[]
+  links: TrackerLink[]
+  /** Every link endpoint that is neither the map nor a child — blockers and
+   * context alike, so no returned link points at an invisible issue. */
+  external: TrackerMapExternal[]
+  progress: {
+    total: number
+    open: number
+    terminal: number
+    resolved: number
+    claimed: number
+    frontier: number
+  }
+}
+
+export interface TrackerClaimResult extends TrackerIssue {
+  claimed: boolean
+  already_claimed: boolean
+}
+
+export interface TrackerUnclaimResult extends TrackerIssue {
+  unclaimed: boolean
+  was_claimed: boolean
 }
 
 export interface TrackerStats {
@@ -902,6 +987,7 @@ function trackerQuery(filters?: TrackerIssueFilters): string {
   if (filters.component) parts.push(`component=${encodeURIComponent(filters.component)}`)
   if (filters.assignee) parts.push(`assignee=${encodeURIComponent(filters.assignee)}`)
   if (filters.label) parts.push(`label=${encodeURIComponent(filters.label)}`)
+  if (filters.unlabeled) parts.push('unlabeled=true')
   if (filters.q) parts.push(`q=${encodeURIComponent(filters.q)}`)
   if (filters.openOnly) parts.push('open_only=true')
   if (filters.limit) parts.push(`limit=${filters.limit}`)
@@ -1445,4 +1531,30 @@ export const api = {
     ),
   getTrackerFeatureStats: (projectId?: string) =>
     fetchJSON<TrackerStats>(`/tracker/features/stats${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`),
+
+  // cond-0394: map membership, frontier, claim lifecycle, discovery
+  getTrackerLabels: (projectId: string) =>
+    fetchJSON<TrackerLabelFacets>(`/tracker/projects/${encodeURIComponent(projectId)}/labels`),
+  listTrackerChildren: (key: string) =>
+    fetchJSON<{ parent: string; children: TrackerIssue[] }>(
+      `/tracker/issues/${encodeURIComponent(key)}/children`,
+    ),
+  getTrackerFrontier: (key: string) =>
+    fetchJSON<{ parent: string; frontier: TrackerIssue[] }>(
+      `/tracker/issues/${encodeURIComponent(key)}/frontier`,
+    ),
+  getTrackerMap: (key: string) =>
+    fetchJSON<TrackerMapProjection>(`/tracker/issues/${encodeURIComponent(key)}/map`),
+  claimTrackerIssue: (key: string, claimant: string) =>
+    fetchJSON<TrackerClaimResult>(`/tracker/issues/${encodeURIComponent(key)}/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claimant }),
+    }),
+  unclaimTrackerIssue: (key: string, actor?: string) =>
+    fetchJSON<TrackerUnclaimResult>(`/tracker/issues/${encodeURIComponent(key)}/unclaim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actor }),
+    }),
 }

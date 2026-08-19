@@ -45,6 +45,32 @@ def _issue_line(issue: Dict[str, Any]) -> str:
     )
 
 
+# Human phrasing for a directed link, from the perspective of the issue being
+# shown. JSON output stays explicit (from_key/to_key/kind); only the rendered
+# line translates direction into words — `a blocks b` on a's page reads
+# "blocks b", and on b's page reads "blocked by a".
+_LINK_OUTGOING = {
+    "blocks": "blocks",
+    "part-of": "part of",
+    "relates": "relates to",
+    "duplicates": "duplicates",
+    "caused-by": "caused by",
+}
+_LINK_INCOMING = {
+    "blocks": "blocked by",
+    "part-of": "contains",
+    "relates": "relates to",
+    "duplicates": "duplicated by",
+    "caused-by": "caused",
+}
+
+
+def _link_line(link: Dict[str, Any], this_key: str) -> str:
+    if link["from_key"] == this_key:
+        return f"  link: {_LINK_OUTGOING.get(link['kind'], link['kind'])} {link['to_key']}"
+    return f"  link: {_LINK_INCOMING.get(link['kind'], link['kind'] + ' (incoming)')} {link['from_key']}"
+
+
 # --------------------------------------------------------------------------
 # cao project
 # --------------------------------------------------------------------------
@@ -333,6 +359,13 @@ def issue_file(
 @click.option("--assignee", default=None)
 @click.option("--reporter", default=None)
 @click.option("--label", default=None)
+@click.option("--unlabeled", is_flag=True, help="only issues with no labels (never triaged)")
+@click.option(
+    "--kind",
+    type=click.Choice(["issue", "feature", "all"]),
+    default="issue",
+    help="which item kinds to list (default: issue)",
+)
 @click.option("-q", "--query", default=None, help="search title, body, key and failing command")
 @click.option("--open", "open_only", is_flag=True, help="exclude closed/wontfix/duplicate")
 @click.option("--limit", default=100, type=int)
@@ -351,6 +384,8 @@ def issue_list(
     assignee,
     reporter,
     label,
+    unlabeled,
+    kind,
     query,
     open_only,
     limit,
@@ -368,11 +403,13 @@ def issue_list(
             assignee=assignee,
             reporter=reporter,
             label=label,
+            unlabeled=unlabeled,
             query=query,
             open_only=open_only,
             limit=limit,
             offset=offset,
             order=order,
+            kind=kind,
         )
     except TrackerError as exc:
         _fail(exc)
@@ -426,8 +463,7 @@ def issue_show(issue_key, as_json):
             click.echo("")
             click.echo(row["body"].rstrip())
         for link in row["links"]:
-            other = link["to_key"] if link["from_key"] == row["key"] else link["from_key"]
-            click.echo(f"  link: {link['kind']} {other}")
+            click.echo(_link_line(link, row["key"]))
         for comment in row["comments"]:
             click.echo("")
             click.echo(f"  --- {comment['author'] or 'unknown'} at {comment['created_at']}")
@@ -447,6 +483,14 @@ def issue_show(issue_key, as_json):
 @click.option("--assignee", default=None)
 @click.option("--reporter", default=None)
 @click.option("--label", "labels", multiple=True, help="replaces the whole label set")
+@click.option("--add-label", "add_labels", multiple=True, help="add without replacing others")
+@click.option("--remove-label", "remove_labels", multiple=True, help="drop only these labels")
+@click.option("--clear-labels", is_flag=True, help="remove every label")
+@click.option(
+    "--expect-updated-at",
+    default=None,
+    help="refuse the edit unless the issue's updated_at still equals this ISO timestamp",
+)
 @click.option("--command", "failing_command", default=None)
 @click.option("--evidence", default=None)
 @click.option("--resolution", default=None)
@@ -461,7 +505,18 @@ def issue_show(issue_key, as_json):
     "--actor", default=None, help="who is making this change (recorded in the audit trail)"
 )
 @click.option("--json", "as_json", is_flag=True)
-def issue_edit(issue_key, body_file, labels, actor, as_json, **fields):
+def issue_edit(
+    issue_key,
+    body_file,
+    labels,
+    add_labels,
+    remove_labels,
+    clear_labels,
+    expect_updated_at,
+    actor,
+    as_json,
+    **fields,
+):
     """Change one or more fields. Only the options you pass are applied."""
     changes = {name: value for name, value in fields.items() if value is not None}
     if body_file:
@@ -469,11 +524,19 @@ def issue_edit(issue_key, body_file, labels, actor, as_json, **fields):
             changes["body"] = handle.read()
     if labels:
         changes["labels"] = list(labels)
+    if add_labels:
+        changes["add_labels"] = list(add_labels)
+    if remove_labels:
+        changes["remove_labels"] = list(remove_labels)
+    if clear_labels:
+        changes["clear_labels"] = True
     if not changes:
         click.echo("nothing to change", err=True)
         sys.exit(1)
     try:
-        row = tracker.update_issue(issue_key, actor=actor, **changes)
+        row = tracker.update_issue(
+            issue_key, actor=actor, expected_updated_at=expect_updated_at, **changes
+        )
     except TrackerError as exc:
         _fail(exc)
     _emit(row, as_json, lambda r: click.echo(f"{r['key']}  {r['status']}  {r['title']}"))
@@ -530,12 +593,95 @@ def issue_comment(issue_key, body, body_file, author, as_json):
 @click.option("--actor", default=None)
 @click.option("--json", "as_json", is_flag=True)
 def issue_link(issue_key, to_key, kind, actor, as_json):
-    """Relate two issues."""
+    """Relate two issues. `part-of` runs child -> parent: CHILD part-of PARENT."""
     try:
         row = tracker.add_link(issue_key, to_key=to_key, kind=kind, actor=actor)
     except TrackerError as exc:
         _fail(exc)
     _emit(row, as_json, lambda r: click.echo(f"{r['from_key']} {r['kind']} {r['to_key']}"))
+
+
+@issue.command(name="children")
+@click.argument("issue_key")
+@click.option("--json", "as_json", is_flag=True)
+def issue_children(issue_key, as_json):
+    """List the direct children of a map/parent issue (its part-of members)."""
+    try:
+        payload = tracker.list_children(issue_key)
+    except TrackerError as exc:
+        _fail(exc)
+
+    def render(payload):
+        for row in payload["children"]:
+            click.echo(_issue_line(row))
+        click.echo(f"-- {len(payload['children'])} child(ren)")
+
+    _emit(payload, as_json, render)
+
+
+@issue.command(name="frontier")
+@click.argument("issue_key")
+@click.option("--json", "as_json", is_flag=True)
+def issue_frontier(issue_key, as_json):
+    """List a map's takeable tickets: open, unclaimed, no open blocker.
+
+    Ordered oldest-first (creation order), so the first line is the ticket a
+    wayfinder session should claim next.
+    """
+    try:
+        payload = tracker.frontier(issue_key)
+    except TrackerError as exc:
+        _fail(exc)
+
+    def render(payload):
+        if not payload["frontier"]:
+            click.echo(f"{payload['parent']}: nothing takeable (the frontier is empty)")
+            return
+        for row in payload["frontier"]:
+            click.echo(_issue_line(row))
+        click.echo(f"-- {len(payload['frontier'])} takeable")
+
+    _emit(payload, as_json, render)
+
+
+@issue.command(name="claim")
+@click.argument("issue_key")
+@click.option("--as", "claimant", required=True, help="who is claiming (becomes the assignee)")
+@click.option("--json", "as_json", is_flag=True)
+def issue_claim(issue_key, claimant, as_json):
+    """Claim an open issue atomically; a second claimant gets a conflict."""
+    try:
+        row = tracker.claim_issue(issue_key, claimant=claimant)
+    except TrackerError as exc:
+        _fail(exc)
+
+    def render(row):
+        if row["already_claimed"]:
+            click.echo(f"{row['key']} already claimed by {row['assignee']}")
+        else:
+            click.echo(f"{row['key']} claimed by {row['assignee']}")
+
+    _emit(row, as_json, render)
+
+
+@issue.command(name="unclaim")
+@click.argument("issue_key")
+@click.option("--actor", default=None, help="who is releasing it (recorded in the audit trail)")
+@click.option("--json", "as_json", is_flag=True)
+def issue_unclaim(issue_key, actor, as_json):
+    """Release a claim — the ordinary recovery exit from a stale assignment."""
+    try:
+        row = tracker.unclaim_issue(issue_key, actor=actor)
+    except TrackerError as exc:
+        _fail(exc)
+
+    def render(row):
+        if row["was_claimed"]:
+            click.echo(f"{row['key']} released")
+        else:
+            click.echo(f"{row['key']} is not claimed")
+
+    _emit(row, as_json, render)
 
 
 @issue.command(name="rm")
