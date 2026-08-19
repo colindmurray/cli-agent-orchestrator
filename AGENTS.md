@@ -7,6 +7,25 @@
 - Preserve unrelated work. Use dedicated worktrees for changes and do not
   rewrite or delete user state to simplify an implementation.
 
+## Agent skills
+
+### Issue tracker
+
+Issues for this repository and `cao-conductor` share CAO tracker project
+`cao-system`. Load `$cao-matt-pocock-skills` whenever an active Matt Pocock
+engineering skill reads or writes tracker state. See
+`docs/agents/issue-tracker.md`.
+
+### Triage roles
+
+Matt Pocock triage roles map to CAO labels and statuses. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses the single-context domain-doc layout while participating
+in the cross-repository CAO product. See `docs/agents/domain.md`.
+
 ## Engineering threat model and proportionality
 
 - CLI Agent Orchestrator is a trusted single-operator system running
