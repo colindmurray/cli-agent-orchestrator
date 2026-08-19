@@ -295,15 +295,28 @@ def issue():
 )
 @click.option("--severity", type=click.Choice(tracker.SEVERITIES), default="unset")
 @click.option("--status", type=click.Choice(tracker.STATUSES), default="open")
+@click.option("--kind", type=click.Choice(tracker.ITEM_KINDS), default="bug")
 @click.option("--component", default=None)
 @click.option("--reporter", default=None)
 @click.option("--assignee", default=None)
 @click.option("--label", "labels", multiple=True)
+@click.option("--collaborator", "collaborators", multiple=True)
+@click.option("--branch", "branches", multiple=True)
+@click.option("--worktree", "worktrees", multiple=True)
+@click.option("--pull-request", "pull_requests", multiple=True)
 @click.option("--command", "failing_command", default=None, help="the failing command")
 @click.option("--reproduction", default=None, help="steps that reproduce the issue")
 @click.option("--reproduction-file", type=click.Path(exists=True), default=None)
+@click.option("--expected-outcome", default=None)
+@click.option("--actual-outcome", default=None)
 @click.option("--evidence", default=None, help="absolute path to a log or run dir")
+@click.option("--favorite", is_flag=True, help="show this item prominently on project Home")
 @click.option("--key", default=None, help="explicit issue key (migration only)")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="record an explicit bug-detail or assignment-policy exception",
+)
 @click.option("--json", "as_json", is_flag=True)
 def issue_file(
     title,
@@ -315,15 +328,24 @@ def issue_file(
     alias,
     severity,
     status,
+    kind,
     component,
     reporter,
     assignee,
     labels,
+    collaborators,
+    branches,
+    worktrees,
+    pull_requests,
     failing_command,
     reproduction,
     reproduction_file,
+    expected_outcome,
+    actual_outcome,
     evidence,
+    favorite,
     key,
+    force,
     as_json,
 ):
     """File an issue against a project."""
@@ -339,22 +361,33 @@ def issue_file(
         row = tracker.create_issue(
             project_id=project_id,
             title=title,
+            kind=kind,
             body=body or "",
             status=status,
             severity=severity,
             component=component,
-            reporter=reporter,
+            reporter=reporter or os.environ.get("CAO_TERMINAL_ID"),
             assignee=assignee,
             labels=list(labels),
+            collaborators=list(collaborators),
+            branches=list(branches),
+            worktrees=list(worktrees),
+            pull_requests=list(pull_requests),
             failing_command=failing_command,
             reproduction_steps=reproduction,
+            expected_outcome=expected_outcome,
+            actual_outcome=actual_outcome,
             evidence=evidence,
             session_name=session_name,
+            terminal_id=os.environ.get("CAO_TERMINAL_ID"),
             source_path=cwd or os.getcwd(),
             cwd=cwd or os.getcwd(),
             alias=alias,
             key=key,
             origin="cli",
+            favorite=favorite,
+            force=force,
+            enforce_bug_details=True,
         )
     except TrackerError as exc:
         _fail(exc)
@@ -372,9 +405,9 @@ def issue_file(
 @click.option("--unlabeled", is_flag=True, help="only issues with no labels (never triaged)")
 @click.option(
     "--kind",
-    type=click.Choice(["issue", "feature", "all"]),
-    default="issue",
-    help="which item kinds to list (default: issue)",
+    type=click.Choice([*tracker.ITEM_KINDS, "all"]),
+    default="bug",
+    help="which item type to list (default: bug)",
 )
 @click.option("-q", "--query", default=None, help="search title, body, key and failing command")
 @click.option("--open", "open_only", is_flag=True, help="exclude closed/wontfix/duplicate")
@@ -459,6 +492,8 @@ def issue_show(issue_key, as_json):
             "assignee",
             "failing_command",
             "reproduction_steps",
+            "expected_outcome",
+            "actual_outcome",
             "evidence",
             "resolution",
             "duplicate_of",
@@ -467,6 +502,16 @@ def issue_show(issue_key, as_json):
                 click.echo(f"  {field + ':':<12}{row[field]}")
         if row["labels"]:
             click.echo(f"  labels:    {', '.join(row['labels'])}")
+        if row.get("favorite"):
+            click.echo("  favorite:  yes")
+        for field, label in (
+            ("collaborators", "collaborators"),
+            ("branches", "branches"),
+            ("worktrees", "worktrees"),
+            ("pull_requests", "pull requests"),
+        ):
+            if row.get(field):
+                click.echo(f"  {label + ':':<12}{', '.join(row[field])}")
         click.echo(f"  filed:     {row['created_at']}")
         if row["closed_at"]:
             click.echo(f"  closed:    {row['closed_at']}")
@@ -497,6 +542,14 @@ def issue_show(issue_key, as_json):
 @click.option("--add-label", "add_labels", multiple=True, help="add without replacing others")
 @click.option("--remove-label", "remove_labels", multiple=True, help="drop only these labels")
 @click.option("--clear-labels", is_flag=True, help="remove every label")
+@click.option("--collaborator", "collaborators", multiple=True, help="replace collaborators")
+@click.option("--branch", "branches", multiple=True, help="replace implementation branches")
+@click.option("--worktree", "worktrees", multiple=True, help="replace implementation worktrees")
+@click.option("--pull-request", "pull_requests", multiple=True, help="replace linked PRs")
+@click.option("--clear-collaborators", is_flag=True)
+@click.option("--clear-branches", is_flag=True)
+@click.option("--clear-worktrees", is_flag=True)
+@click.option("--clear-pull-requests", is_flag=True)
 @click.option(
     "--expect-updated-at",
     default=None,
@@ -505,6 +558,8 @@ def issue_show(issue_key, as_json):
 @click.option("--command", "failing_command", default=None)
 @click.option("--reproduction", "reproduction_steps", default=None)
 @click.option("--reproduction-file", type=click.Path(exists=True), default=None)
+@click.option("--expected-outcome", default=None)
+@click.option("--actual-outcome", default=None)
 @click.option("--evidence", default=None)
 @click.option("--resolution", default=None)
 @click.option("--duplicate-of", default=None)
@@ -512,10 +567,21 @@ def issue_show(issue_key, as_json):
     "--kind",
     type=click.Choice(tracker.ITEM_KINDS),
     default=None,
-    help="change type: issue (bug) or feature",
+    help="change the planning or work-item type",
 )
+@click.option("--favorite/--not-favorite", default=None)
 @click.option(
     "--actor", default=None, help="who is making this change (recorded in the audit trail)"
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="record an explicit bug-detail or assignment-policy exception",
+)
+@click.option(
+    "--drop-previous-assignee",
+    is_flag=True,
+    help="do not add the former assignee to collaborators during this reassignment",
 )
 @click.option("--json", "as_json", is_flag=True)
 def issue_edit(
@@ -525,9 +591,19 @@ def issue_edit(
     add_labels,
     remove_labels,
     clear_labels,
+    collaborators,
+    branches,
+    worktrees,
+    pull_requests,
+    clear_collaborators,
+    clear_branches,
+    clear_worktrees,
+    clear_pull_requests,
     expect_updated_at,
     reproduction_file,
     actor,
+    force,
+    drop_previous_assignee,
     as_json,
     **fields,
 ):
@@ -549,12 +625,30 @@ def issue_edit(
         changes["remove_labels"] = list(remove_labels)
     if clear_labels:
         changes["clear_labels"] = True
+    repeatable = {
+        "collaborators": (collaborators, clear_collaborators),
+        "branches": (branches, clear_branches),
+        "worktrees": (worktrees, clear_worktrees),
+        "pull_requests": (pull_requests, clear_pull_requests),
+    }
+    for field, (values, clear) in repeatable.items():
+        if values and clear:
+            raise click.UsageError(f"use either --{field.replace('_', '-')} or --clear-{field.replace('_', '-')}")
+        if values:
+            changes[field] = list(values)
+        elif clear:
+            changes[field] = []
     if not changes:
         click.echo("nothing to change", err=True)
         sys.exit(1)
     try:
         row = tracker.update_issue(
-            issue_key, actor=actor, expected_updated_at=expect_updated_at, **changes
+            issue_key,
+            actor=actor or os.environ.get("CAO_TERMINAL_ID"),
+            expected_updated_at=expect_updated_at,
+            force=force,
+            drop_previous_assignee=drop_previous_assignee,
+            **changes,
         )
     except TrackerError as exc:
         _fail(exc)

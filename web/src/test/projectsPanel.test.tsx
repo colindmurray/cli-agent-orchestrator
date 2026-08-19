@@ -17,6 +17,7 @@ const VOCAB = {
   scope_kinds: ['path', 'session', 'git_remote', 'project_id'],
   link_kinds: ['blocks', 'relates', 'duplicates', 'caused-by'],
   project_statuses: ['active', 'archived'],
+  item_kinds: ['project', 'bug', 'feature', 'milestone', 'goal', 'epic', 'story', 'task'],
 }
 
 const PROJECT = {
@@ -38,7 +39,7 @@ const PROJECT = {
 const ISSUE = {
   key: 'cond-0039',
   project_id: 'cao-system',
-  kind: 'issue',
+  kind: 'bug',
   title: 'event-mirror lock contention logs full traceback every tick',
   body: 'Independent validation confirmed the mirror stays bounded.',
   status: 'open',
@@ -47,8 +48,14 @@ const ISSUE = {
   reporter: '13e6fe47',
   assignee: null,
   labels: ['deferred'],
+  collaborators: [],
+  branches: [],
+  worktrees: [],
+  pull_requests: [],
   failing_command: 'python3 -B probes.py',
   reproduction_steps: '1. run python3 -B probes.py',
+  expected_outcome: 'The probe completes',
+  actual_outcome: 'The probe logs a traceback',
   evidence: '/Users/colin/runs/report.md',
   resolution: null,
   session_name: null,
@@ -56,6 +63,7 @@ const ISSUE = {
   source_path: null,
   duplicate_of: null,
   origin: 'migration',
+  favorite: false,
   created_at: '2026-07-21T17:01:14Z',
   updated_at: '2026-07-21T17:01:14Z',
   closed_at: null,
@@ -84,6 +92,10 @@ describe('ProjectsPanel', () => {
         component: ['conduct', 'dashboard'],
         assignee: ['terra'],
         reporter: ['13e6fe47', 'dashboard'],
+        collaborator: ['codex:sess-1'],
+        branch: ['fix/cond-0039'],
+        worktree: ['/tmp/cond-0039'],
+        pull_request: ['o/r#39'],
       }
       const options = (values[field] ?? []).map(value => ({ value, total: 1, open: 1 }))
       return { project_id: 'cao-system', field, query: params.get('q') ?? '', matching_total: options.length, options }
@@ -100,6 +112,8 @@ describe('ProjectsPanel', () => {
 
   beforeEach(() => {
     calls.length = 0
+    ;(ISSUE as unknown as { assignee: string | null }).assignee = null
+    ISSUE.collaborators = []
     window.history.replaceState(null, '', '/')
     mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
       calls.push({
@@ -151,7 +165,7 @@ describe('ProjectsPanel', () => {
   it('expands an issue into an editable detail view', async () => {
     render(<ProjectsPanel />)
     fireEvent.click(await screen.findByText(/event-mirror lock contention/))
-    const title = await screen.findByLabelText('Issue title')
+    const title = await screen.findByLabelText('Bug title')
     expect(title).toHaveValue(ISSUE.title)
     expect(await screen.findByLabelText('Failing command')).toHaveValue('python3 -B probes.py')
   })
@@ -171,12 +185,61 @@ describe('ProjectsPanel', () => {
     expect(patch.body).toEqual({ assignee: 'terra', actor: 'dashboard' })
   })
 
-  it('applies a status change immediately rather than waiting for a save', async () => {
+  it('can suppress only the automatic former-assignee collaborator addition', async () => {
+    ;(ISSUE as unknown as { assignee: string | null }).assignee = 'codex:sess-old'
+    render(<ProjectsPanel />)
+    fireEvent.click(await screen.findByText(/event-mirror lock contention/))
+    const assignee = await screen.findByLabelText('Assignee')
+    fireEvent.focus(assignee)
+    fireEvent.click(await screen.findByRole('option', { name: /terra/ }))
+    const retain = screen.getByRole('checkbox', {
+      name: /Keep codex:sess-old as a collaborator/,
+    })
+    expect(retain).toBeChecked()
+    fireEvent.click(retain)
+    fireEvent.click(screen.getByRole('button', { name: /Save 1 change/ }))
+
+    await waitFor(() => expect(calls.some(c => c.method === 'PATCH')).toBe(true))
+    expect(calls.find(c => c.method === 'PATCH')!.body).toEqual({
+      assignee: 'terra',
+      actor: 'dashboard',
+      drop_previous_assignee: true,
+    })
+  })
+
+  it('saves in-progress and its assignee together', async () => {
     render(<ProjectsPanel />)
     fireEvent.click(await screen.findByText(/event-mirror lock contention/))
     fireEvent.change(await screen.findByLabelText('Status'), { target: { value: 'in-progress' } })
+    expect(calls.some(c => c.method === 'PATCH')).toBe(false)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/should have one primary assignee/)
+    const assignee = screen.getByLabelText('Assignee')
+    fireEvent.focus(assignee)
+    fireEvent.click(await screen.findByRole('option', { name: /terra/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Save 2 changes/ }))
     await waitFor(() => expect(calls.some(c => c.method === 'PATCH')).toBe(true))
-    expect(calls.find(c => c.method === 'PATCH')!.body).toMatchObject({ status: 'in-progress' })
+    expect(calls.find(c => c.method === 'PATCH')!.body).toMatchObject({
+      status: 'in-progress',
+      assignee: 'terra',
+    })
+  })
+
+  it('edits collaborators and implementation links with searchable multi-pickers', async () => {
+    render(<ProjectsPanel />)
+    fireEvent.click(await screen.findByText(/event-mirror lock contention/))
+    const collaborators = await screen.findByRole('combobox', { name: 'Collaborators' })
+    fireEvent.focus(collaborators)
+    fireEvent.click(await screen.findByRole('option', { name: /codex:sess-1/ }))
+    const prs = screen.getByRole('combobox', { name: 'Pull requests' })
+    fireEvent.change(prs, { target: { value: 'o/r#40' } })
+    fireEvent.click(await screen.findByRole('option', { name: /Create “o\/r#40”/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Save 2 changes/ }))
+
+    await waitFor(() => expect(calls.some(c => c.method === 'PATCH')).toBe(true))
+    expect(calls.find(c => c.method === 'PATCH')!.body).toMatchObject({
+      collaborators: ['codex:sess-1'],
+      pull_requests: ['o/r#40'],
+    })
   })
 
   it('records who made the change so the audit trail names an actor', async () => {
@@ -187,17 +250,20 @@ describe('ProjectsPanel', () => {
     expect(calls.find(c => c.method === 'PATCH')!.body).toMatchObject({ actor: 'dashboard' })
   })
 
-  it('files a new issue against the selected project', async () => {
+  it('files a new bug against the selected project with an explicit diagnostic override', async () => {
     render(<ProjectsPanel />)
-    fireEvent.click(await screen.findByRole('button', { name: /Log issue/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Log bug/ }))
     fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'dashboard hangs on reconnect' } })
-    fireEvent.click(await screen.findByRole('button', { name: /File issue/ }))
+    expect(screen.getByRole('button', { name: /^File bug$/ })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /File bug with policy override/ }))
     await waitFor(() => expect(calls.some(c => c.url === '/tracker/issues' && c.method === 'POST')).toBe(true))
     const post = calls.find(c => c.url === '/tracker/issues' && c.method === 'POST')!
     expect(post.body).toMatchObject({
       project_id: 'cao-system',
+      kind: 'bug',
       title: 'dashboard hangs on reconnect',
       origin: 'dashboard',
+      force: true,
     })
   })
 
@@ -214,21 +280,29 @@ describe('ProjectsPanel', () => {
 
   it('creates a label through the searchable picker and files reproduction steps', async () => {
     render(<ProjectsPanel />)
-    fireEvent.click(await screen.findByRole('button', { name: /Log issue/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Log bug/ }))
     fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'reconnect fails' } })
     fireEvent.change(screen.getByLabelText('Reproduction steps'), {
       target: { value: '1. suspend\n2. resume' },
     })
+    fireEvent.change(screen.getByLabelText('Expected outcome'), {
+      target: { value: 'The dashboard reconnects' },
+    })
+    fireEvent.change(screen.getByLabelText('Actual outcome'), {
+      target: { value: 'The dashboard stays disconnected' },
+    })
     const labels = screen.getByRole('combobox', { name: 'Labels' })
     fireEvent.change(labels, { target: { value: 'initiative:new-ui' } })
     fireEvent.click(await screen.findByRole('option', { name: /Create “initiative:new-ui”/ }))
-    fireEvent.click(screen.getByRole('button', { name: /File issue/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^File bug$/ }))
 
     await waitFor(() => expect(calls.some(c => c.url === '/tracker/issues' && c.method === 'POST')).toBe(true))
     const post = calls.find(c => c.url === '/tracker/issues' && c.method === 'POST')!
     expect(post.body).toMatchObject({
       labels: ['initiative:new-ui'],
       reproduction_steps: '1. suspend\n2. resume',
+      expected_outcome: 'The dashboard reconnects',
+      actual_outcome: 'The dashboard stays disconnected',
     })
   })
 

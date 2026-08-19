@@ -413,11 +413,86 @@ class TestFirstClassReproduction:
         assert created["reproduction_steps"] == "1. run it"
         updated = tracker.update_issue(created["key"], reproduction_steps="1. run it twice")
         assert updated["reproduction_steps"] == "1. run it twice"
-        cleared = tracker.update_issue(created["key"], reproduction_steps="")
+        with pytest.raises(TrackerError):
+            tracker.update_issue(created["key"], reproduction_steps="")
+        cleared = tracker.update_issue(created["key"], reproduction_steps="", force=True)
         assert cleared["reproduction_steps"] is None
         detail = tracker.get_issue(created["key"])
         events = [e for e in detail["events"] if e["field"] == "reproduction_steps"]
         assert len(events) == 2
+
+
+class TestAssignmentAndWorkContext:
+    def test_reassignment_preserves_the_previous_owner_unless_overridden(self, cao_system):
+        issue = tracker.create_issue(
+            project_id="cao-system",
+            title="handoff",
+            assignee="codex:sess-1",
+            collaborators=["colin"],
+        )
+        handed_off = tracker.update_issue(issue["key"], assignee="claude_code:sess-2")
+        assert handed_off["assignee"] == "claude_code:sess-2"
+        assert handed_off["collaborators"] == ["colin", "codex:sess-1"]
+
+        separate = tracker.create_issue(
+            project_id="cao-system",
+            title="takeover",
+            assignee="codex:sess-3",
+            collaborators=["colin"],
+        )
+        taken_over = tracker.update_issue(
+            separate["key"],
+            assignee="claude_code:sess-4",
+            drop_previous_assignee=True,
+        )
+        assert taken_over["assignee"] == "claude_code:sess-4"
+        assert taken_over["collaborators"] == ["colin"]
+
+    def test_repeatable_context_round_trips_and_is_audited(self, cao_system):
+        created = tracker.create_issue(
+            project_id="cao-system",
+            title="a",
+            collaborators=["codex:sess-1", "claude_code:sess-2"],
+            branches=["fix/a", "review/a"],
+            worktrees=["/tmp/wt-a", "/tmp/wt-review"],
+            pull_requests=["https://github.com/o/r/pull/1", "o/r#2"],
+        )
+        assert created["collaborators"] == ["codex:sess-1", "claude_code:sess-2"]
+        assert created["branches"] == ["fix/a", "review/a"]
+        assert created["worktrees"] == ["/tmp/wt-a", "/tmp/wt-review"]
+        assert created["pull_requests"] == ["https://github.com/o/r/pull/1", "o/r#2"]
+
+        updated = tracker.update_issue(
+            created["key"], collaborators=["codex:sess-1"], branches=[]
+        )
+        assert updated["collaborators"] == ["codex:sess-1"]
+        assert updated["branches"] == []
+        events = tracker.get_issue(created["key"])["events"]
+        assert {e["field"] for e in events if e["kind"] == "field"} >= {
+            "collaborators",
+            "branches",
+        }
+
+    def test_in_progress_requires_an_assignee_unless_explicitly_forced(self, cao_system):
+        with pytest.raises(TrackerError) as exc:
+            tracker.create_issue(project_id="cao-system", title="a", status="in-progress")
+        assert exc.value.code == "invalid"
+
+        forced = tracker.create_issue(
+            project_id="cao-system", title="forced", status="in-progress", force=True
+        )
+        assert forced["assignee"] is None
+
+        issue = tracker.create_issue(project_id="cao-system", title="normal")
+        with pytest.raises(TrackerError):
+            tracker.update_issue(issue["key"], status="in-progress")
+        active = tracker.update_issue(
+            issue["key"], status="in-progress", assignee="colin"
+        )
+        assert (active["status"], active["assignee"]) == ("in-progress", "colin")
+        with pytest.raises(TrackerError):
+            tracker.update_issue(issue["key"], assignee="")
+        assert tracker.update_issue(issue["key"], assignee="", force=True)["assignee"] is None
 
 
 class TestFieldOptions:
@@ -438,6 +513,22 @@ class TestFieldOptions:
         assert components["options"] == [{"value": "dashboard", "total": 2, "open": 1}]
         labels = tracker.field_options("cao-system", field="label", query="initiative")
         assert labels["options"] == [{"value": "initiative:ux", "total": 2, "open": 1}]
+
+    def test_repeatable_work_context_has_searchable_options(self, cao_system):
+        tracker.create_issue(
+            project_id="cao-system",
+            title="a",
+            collaborators=["codex:sess-a"],
+            branches=["fix/searchable-context"],
+            worktrees=["/tmp/context-a"],
+            pull_requests=["o/r#42"],
+        )
+        assert tracker.field_options(
+            "cao-system", field="collaborator", query="sess"
+        )["options"][0]["value"] == "codex:sess-a"
+        assert tracker.field_options(
+            "cao-system", field="pull_request", query="#42"
+        )["options"][0]["value"] == "o/r#42"
 
     def test_unknown_option_field_is_refused(self, cao_system):
         with pytest.raises(TrackerError) as exc:
@@ -834,6 +925,7 @@ class TestClaimLifecycle:
         issue = tracker.create_issue(project_id="cao-system", title="a")
         got = tracker.claim_issue(issue["key"], claimant="terra")
         assert got["assignee"] == "terra"
+        assert got["status"] == "in-progress"
         assert (got["claimed"], got["already_claimed"]) == (True, False)
 
     def test_a_second_worker_gets_a_typed_conflict_naming_the_claimant(self, cao_system):
@@ -878,6 +970,7 @@ class TestClaimLifecycle:
         tracker.unclaim_issue(issue["key"], actor="colin")
         got = tracker.claim_issue(issue["key"], claimant="muse")
         assert (got["assignee"], got["already_claimed"]) == ("muse", False)
+        assert got["status"] == "in-progress"
 
     def test_unclaiming_an_unclaimed_issue_is_idempotent(self, cao_system):
         issue = tracker.create_issue(project_id="cao-system", title="a")
@@ -896,7 +989,9 @@ class TestClaimLifecycle:
         assert events == [
             ("created", None, None, "a", None),
             ("claim", "assignee", None, "terra", "terra"),
+            ("field", "status", "open", "in-progress", "terra"),
             ("unclaim", "assignee", "terra", None, "colin"),
+            ("field", "status", "in-progress", "open", "colin"),
         ]
 
 
@@ -1247,7 +1342,15 @@ class TestConcurrentUpdates:
         assert got["assignee"] == "worker-c"
         assert tracker.get_issue(issue["key"])["assignee"] == "worker-c"
         kinds = [e["kind"] for e in tracker.get_issue(issue["key"])["events"]]
-        assert kinds == ["created", "claim", "unclaim", "claim"]
+        assert kinds == [
+            "created",
+            "claim",
+            "field",
+            "unclaim",
+            "field",
+            "claim",
+            "field",
+        ]
 
 
 class TestLabelFacets:

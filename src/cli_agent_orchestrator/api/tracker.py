@@ -99,6 +99,7 @@ class ProjectUpdateBody(StrictBody):
 
 class IssueCreateBody(StrictBody):
     title: str
+    kind: str = "bug"
     project_id: Optional[str] = None
     body: str = ""
     status: str = "open"
@@ -107,8 +108,14 @@ class IssueCreateBody(StrictBody):
     reporter: Optional[str] = None
     assignee: Optional[str] = None
     labels: List[str] = Field(default_factory=list)
+    collaborators: List[str] = Field(default_factory=list)
+    branches: List[str] = Field(default_factory=list)
+    worktrees: List[str] = Field(default_factory=list)
+    pull_requests: List[str] = Field(default_factory=list)
     failing_command: Optional[str] = None
     reproduction_steps: Optional[str] = None
+    expected_outcome: Optional[str] = None
+    actual_outcome: Optional[str] = None
     evidence: Optional[str] = None
     session_name: Optional[str] = None
     terminal_id: Optional[str] = None
@@ -117,6 +124,8 @@ class IssueCreateBody(StrictBody):
     alias: Optional[str] = None
     key: Optional[str] = None
     origin: str = "api"
+    favorite: bool = False
+    force: bool = False
 
 
 class IssueUpdateBody(StrictBody):
@@ -141,17 +150,26 @@ class IssueUpdateBody(StrictBody):
     reporter: Optional[str] = None
     assignee: Optional[str] = None
     labels: Optional[List[str]] = None
+    collaborators: Optional[List[str]] = None
+    branches: Optional[List[str]] = None
+    worktrees: Optional[List[str]] = None
+    pull_requests: Optional[List[str]] = None
     add_labels: Optional[List[str]] = None
     remove_labels: Optional[List[str]] = None
     clear_labels: Optional[bool] = None
     failing_command: Optional[str] = None
     reproduction_steps: Optional[str] = None
+    expected_outcome: Optional[str] = None
+    actual_outcome: Optional[str] = None
     evidence: Optional[str] = None
     resolution: Optional[str] = None
     duplicate_of: Optional[str] = None
     kind: Optional[str] = None
+    favorite: Optional[bool] = None
     expected_updated_at: Optional[str] = None
     actor: Optional[str] = None
+    force: bool = False
+    drop_previous_assignee: bool = False
 
 
 class FeatureCreateBody(StrictBody):
@@ -164,6 +182,10 @@ class FeatureCreateBody(StrictBody):
     reporter: Optional[str] = None
     assignee: Optional[str] = None
     labels: List[str] = Field(default_factory=list)
+    collaborators: List[str] = Field(default_factory=list)
+    branches: List[str] = Field(default_factory=list)
+    worktrees: List[str] = Field(default_factory=list)
+    pull_requests: List[str] = Field(default_factory=list)
     evidence: Optional[str] = None
     session_name: Optional[str] = None
     terminal_id: Optional[str] = None
@@ -172,6 +194,7 @@ class FeatureCreateBody(StrictBody):
     alias: Optional[str] = None
     key: Optional[str] = None
     origin: str = "api"
+    force: bool = False
 
 
 class FeatureUpdateBody(StrictBody):
@@ -187,6 +210,10 @@ class FeatureUpdateBody(StrictBody):
     reporter: Optional[str] = None
     assignee: Optional[str] = None
     labels: Optional[List[str]] = None
+    collaborators: Optional[List[str]] = None
+    branches: Optional[List[str]] = None
+    worktrees: Optional[List[str]] = None
+    pull_requests: Optional[List[str]] = None
     add_labels: Optional[List[str]] = None
     remove_labels: Optional[List[str]] = None
     clear_labels: Optional[bool] = None
@@ -196,6 +223,8 @@ class FeatureUpdateBody(StrictBody):
     kind: Optional[str] = None
     expected_updated_at: Optional[str] = None
     actor: Optional[str] = None
+    force: bool = False
+    drop_previous_assignee: bool = False
 
 
 class CommentBody(StrictBody):
@@ -232,10 +261,9 @@ async def tracker_vocabulary(_scopes: List[str] = _READ) -> Dict[str, Any]:
     return {
         "statuses": list(tracker.STATUSES),
         "terminal_statuses": sorted(tracker.TERMINAL_STATUSES),
-        "statuses_by_kind": {"issue": list(tracker.STATUSES), "feature": list(tracker.STATUSES)},
+        "statuses_by_kind": {kind: list(tracker.STATUSES) for kind in tracker.ITEM_KINDS},
         "terminal_statuses_by_kind": {
-            "issue": sorted(tracker.TERMINAL_STATUSES),
-            "feature": sorted(tracker.TERMINAL_STATUSES),
+            kind: sorted(tracker.TERMINAL_STATUSES) for kind in tracker.ITEM_KINDS
         },
         "item_kinds": list(tracker.ITEM_KINDS),
         "severities": list(tracker.SEVERITIES),
@@ -368,7 +396,7 @@ async def export_project_markdown(
     The ledger files this replaces become a view produced on demand, not a
     second source of truth somebody has to keep in step.
     """
-    effective_kind = kind if kind is not None else "issue"
+    effective_kind = kind if kind is not None else "bug"
     try:
         text = tracker.render_markdown(project_id, open_only=open_only, kind=effective_kind)
     except tracker.TrackerError as exc:
@@ -420,11 +448,10 @@ async def list_issues(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     order: str = Query("created_desc"),
-    kind: Optional[str] = Query(None, description="issue|feature|all"),
+    kind: Optional[str] = Query(None, description="project|bug|feature|milestone|goal|epic|story|task|all"),
     _scopes: List[str] = _READ,
 ) -> Dict[str, Any]:
-    # Default is issue-only for backward compatibility
-    effective_kind = kind if kind is not None else "issue"
+    effective_kind = kind if kind is not None else "bug"
     try:
         return tracker.list_issues(
             project_id=project_id,
@@ -466,6 +493,7 @@ async def create_issue(
         return tracker.create_issue(
             project_id=body.project_id,
             title=body.title,
+            kind=body.kind,
             body=body.body,
             status=body.status,
             severity=body.severity,
@@ -473,8 +501,14 @@ async def create_issue(
             reporter=body.reporter,
             assignee=body.assignee,
             labels=body.labels,
+            collaborators=body.collaborators,
+            branches=body.branches,
+            worktrees=body.worktrees,
+            pull_requests=body.pull_requests,
             failing_command=body.failing_command,
             reproduction_steps=body.reproduction_steps,
+            expected_outcome=body.expected_outcome,
+            actual_outcome=body.actual_outcome,
             evidence=body.evidence,
             session_name=body.session_name,
             terminal_id=body.terminal_id,
@@ -483,6 +517,9 @@ async def create_issue(
             alias=body.alias,
             key=body.key,
             origin=body.origin,
+            favorite=body.favorite,
+            force=body.force,
+            enforce_bug_details=True,
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
@@ -505,7 +542,9 @@ async def update_issue(
     changes = {
         name: value
         for name, value in body.model_dump().items()
-        if name not in ("actor", "expected_updated_at") and name in body.model_fields_set
+        if name not in (
+            "actor", "expected_updated_at", "force", "drop_previous_assignee"
+        ) and name in body.model_fields_set
     }
     try:
         existing = tracker.get_issue(issue_key)
@@ -523,6 +562,8 @@ async def update_issue(
             issue_key,
             actor=body.actor,
             expected_updated_at=body.expected_updated_at,
+            force=body.force,
+            drop_previous_assignee=body.drop_previous_assignee,
             **changes,
         )
     except tracker.TrackerError as exc:
@@ -670,10 +711,9 @@ def _assert_feature(row: dict) -> None:
 
 
 def _assert_issue(row: dict) -> None:
-    if row.get("kind") != "issue":
-        raise tracker.TrackerError(
-            "not-found", f"no such issue: {row.get('key')} (kind={row.get('kind')})"
-        )
+    # The generic issue surface addresses every planning-item type. The
+    # feature routes remain compatibility aliases with a stricter assertion.
+    return None
 
 
 @router.get("/tracker/features")
@@ -740,6 +780,10 @@ async def create_feature(
             reporter=body.reporter,
             assignee=body.assignee,
             labels=body.labels,
+            collaborators=body.collaborators,
+            branches=body.branches,
+            worktrees=body.worktrees,
+            pull_requests=body.pull_requests,
             evidence=body.evidence,
             session_name=body.session_name,
             terminal_id=body.terminal_id,
@@ -748,6 +792,7 @@ async def create_feature(
             alias=body.alias,
             key=body.key,
             origin=body.origin,
+            force=body.force,
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
@@ -775,12 +820,17 @@ async def update_feature(
         changes = {
             name: value
             for name, value in body.model_dump().items()
-            if name not in ("actor", "expected_updated_at") and name in body.model_fields_set
+            if name not in (
+                "actor", "expected_updated_at", "force", "drop_previous_assignee"
+            )
+            and name in body.model_fields_set
         }
         return tracker.update_issue(
             feature_key,
             actor=body.actor,
             expected_updated_at=body.expected_updated_at,
+            force=body.force,
+            drop_previous_assignee=body.drop_previous_assignee,
             **changes,
         )
     except tracker.TrackerError as exc:

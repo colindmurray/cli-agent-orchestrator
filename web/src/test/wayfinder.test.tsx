@@ -58,7 +58,7 @@ import type { TrackerIssue } from '../api'
 const VOCAB = {
   statuses: ['open', 'triage', 'in-progress', 'blocked', 'resolved', 'closed', 'wontfix', 'duplicate'],
   terminal_statuses: ['closed', 'duplicate', 'wontfix'],
-  item_kinds: ['issue', 'feature'],
+  item_kinds: ['project', 'bug', 'feature', 'milestone', 'goal', 'epic', 'story', 'task'],
   severities: ['P0', 'P1', 'P2', 'P3', 'P4', 'unset'],
   scope_kinds: ['path', 'session', 'git_remote', 'project_id'],
   link_kinds: ['blocks', 'relates', 'duplicates', 'caused-by', 'part-of'],
@@ -74,7 +74,7 @@ const PROJECT = {
   next_issue_number: 10,
   created_at: '2026-08-01T00:00:00Z',
   updated_at: '2026-08-01T00:00:00Z',
-  counts: { total: 5, open: 4, by_kind: { issue: { total: 5, open: 4 }, feature: { total: 0, open: 0 } }, all_total: 5, all_open: 4 },
+  counts: { total: 5, open: 4, by_kind: { bug: { total: 5, open: 4 }, feature: { total: 0, open: 0 } }, all_total: 5, all_open: 4 },
   scopes: [],
 }
 
@@ -83,7 +83,7 @@ function issue(over: Record<string, unknown>): TrackerIssue {
     key: '',
     title: '',
     project_id: 'cao-system',
-    kind: 'issue',
+    kind: 'bug',
     body: '',
     status: 'open',
     severity: 'unset',
@@ -91,8 +91,14 @@ function issue(over: Record<string, unknown>): TrackerIssue {
     reporter: null,
     assignee: null,
     labels: [],
+    collaborators: [],
+    branches: [],
+    worktrees: [],
+    pull_requests: [],
     failing_command: null,
     reproduction_steps: null,
+    expected_outcome: null,
+    actual_outcome: null,
     evidence: null,
     resolution: null,
     session_name: null,
@@ -100,6 +106,7 @@ function issue(over: Record<string, unknown>): TrackerIssue {
     source_path: null,
     duplicate_of: null,
     origin: 'api',
+    favorite: false,
     created_at: '2026-08-10T00:00:00Z',
     updated_at: '2026-08-10T00:00:00Z',
     closed_at: null,
@@ -346,7 +353,7 @@ describe('Wayfinder view', () => {
     await screen.findByTestId('map-children')
     getLastSigma().emit('clickNode', { node: 'cond-0003' })
     const detail = await screen.findByTestId('wayfinder-detail')
-    expect(await within(detail).findByLabelText('Issue title')).toHaveValue('grill the operator')
+    expect(await within(detail).findByLabelText('Bug title')).toHaveValue('grill the operator')
     // The map is still on screen — context is not lost.
     expect(screen.getByTestId('map-view')).toBeInTheDocument()
   })
@@ -357,7 +364,7 @@ describe('Wayfinder view', () => {
     const list = await screen.findByTestId('map-children')
     fireEvent.click(within(list).getByText('migrate the store'))
     const detail = await screen.findByTestId('wayfinder-detail')
-    expect(await within(detail).findByLabelText('Issue title')).toHaveValue('migrate the store')
+    expect(await within(detail).findByLabelText('Bug title')).toHaveValue('migrate the store')
   })
 
   it('a claim conflict surfaces the observed owner from the typed 409', async () => {
@@ -555,7 +562,7 @@ describe('Wayfinder view', () => {
     window.history.forward()
     await waitFor(() => expect(window.location.search).toContain('key=cond-0005'))
     const detail = await screen.findByTestId('wayfinder-detail')
-    expect(await within(detail).findByLabelText('Issue title')).toHaveValue('migrate the store')
+    expect(await within(detail).findByLabelText('Bug title')).toHaveValue('migrate the store')
   })
 
   it('Back/Forward restores label and unlabeled filters', async () => {

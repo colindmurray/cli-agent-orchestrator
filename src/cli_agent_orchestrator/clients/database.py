@@ -385,8 +385,14 @@ class TrackerIssueModel(Base):
     reporter = Column(String, nullable=True)
     assignee = Column(String, nullable=True)
     labels = Column(Text, nullable=False, default="[]", server_default="[]")  # JSON array
+    collaborators = Column(Text, nullable=False, default="[]", server_default="[]")
+    branches = Column(Text, nullable=False, default="[]", server_default="[]")
+    worktrees = Column(Text, nullable=False, default="[]", server_default="[]")
+    pull_requests = Column(Text, nullable=False, default="[]", server_default="[]")
     failing_command = Column(Text, nullable=True)
     reproduction_steps = Column(Text, nullable=True)
+    expected_outcome = Column(Text, nullable=True)
+    actual_outcome = Column(Text, nullable=True)
     evidence = Column(Text, nullable=True)
     resolution = Column(Text, nullable=True)
     # Where it was filed from. Recorded as evidence, never as identity — a
@@ -397,7 +403,8 @@ class TrackerIssueModel(Base):
     duplicate_of = Column(String, nullable=True)
     # "cli" | "api" | "dashboard" | "migration"
     origin = Column(String, nullable=False, default="api", server_default="api")
-    kind = Column(String, nullable=False, default="issue", server_default="issue", index=True)
+    kind = Column(String, nullable=False, default="bug", server_default="bug", index=True)
+    favorite = Column(Boolean, nullable=False, default=False, server_default="0")
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
     closed_at = Column(DateTime(timezone=True), nullable=True)
@@ -2207,16 +2214,19 @@ def _migrate_tracker_kind_column() -> None:
                         "CREATE INDEX IF NOT EXISTS ix_tracker_issues_project_kind_status ON tracker_issues(project_id, kind, status)"
                     )
                 )
-                return
-            # Column missing — add it with default within same transaction
-            conn.execute(
-                sa_text("ALTER TABLE tracker_issues ADD COLUMN kind TEXT NOT NULL DEFAULT 'issue'")
-            )
+            else:
+                # Column missing — add it with the canonical bug default.
+                conn.execute(
+                    sa_text("ALTER TABLE tracker_issues ADD COLUMN kind TEXT NOT NULL DEFAULT 'bug'")
+                )
             conn.execute(
                 sa_text(
                     "CREATE INDEX IF NOT EXISTS ix_tracker_issues_project_kind_status ON tracker_issues(project_id, kind, status)"
                 )
             )
+            # ``issue`` was the historical storage value for bugs. The new
+            # public type system names that meaning directly.
+            conn.execute(sa_text("UPDATE tracker_issues SET kind = 'bug' WHERE kind = 'issue'"))
     except Exception as exc:
         # Concurrent ALTER race: another process added the column between our
         # PRAGMA check and ALTER. SQLite reports "duplicate column name: kind"
@@ -2267,6 +2277,65 @@ def _migrate_tracker_reproduction_steps_column() -> None:
         raise RuntimeError(f"tracker reproduction-steps migration failed: {exc}") from exc
 
 
+def _migrate_tracker_work_context_columns() -> None:
+    """Add repeatable assignment context to existing tracker databases."""
+    from sqlalchemy import text as sa_text
+
+    definitions = {
+        "collaborators": "TEXT NOT NULL DEFAULT '[]'",
+        "branches": "TEXT NOT NULL DEFAULT '[]'",
+        "worktrees": "TEXT NOT NULL DEFAULT '[]'",
+        "pull_requests": "TEXT NOT NULL DEFAULT '[]'",
+    }
+    try:
+        with engine.begin() as conn:
+            info = list(conn.execute(sa_text("PRAGMA table_info(tracker_issues)")))
+            if not info:
+                return
+            cols = {row[1] for row in info}
+            if "key" not in cols or "project_id" not in cols:
+                raise RuntimeError("tracker_issues table is malformed: missing expected columns")
+            for name, definition in definitions.items():
+                if name not in cols:
+                    conn.execute(
+                        sa_text(f"ALTER TABLE tracker_issues ADD COLUMN {name} {definition}")
+                    )
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "duplicate column name" in msg and any(name in msg for name in definitions):
+            return _migrate_tracker_work_context_columns()
+        raise RuntimeError(f"tracker work-context migration failed: {exc}") from exc
+
+
+def _migrate_tracker_planning_columns() -> None:
+    """Add bug outcomes and project-home favorites to existing trackers."""
+    from sqlalchemy import text as sa_text
+
+    definitions = {
+        "expected_outcome": "TEXT NULL",
+        "actual_outcome": "TEXT NULL",
+        "favorite": "BOOLEAN NOT NULL DEFAULT 0",
+    }
+    try:
+        with engine.begin() as conn:
+            info = list(conn.execute(sa_text("PRAGMA table_info(tracker_issues)")))
+            if not info:
+                return
+            cols = {row[1] for row in info}
+            if "key" not in cols or "project_id" not in cols:
+                raise RuntimeError("tracker_issues table is malformed: missing expected columns")
+            for name, definition in definitions.items():
+                if name not in cols:
+                    conn.execute(
+                        sa_text(f"ALTER TABLE tracker_issues ADD COLUMN {name} {definition}")
+                    )
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "duplicate column name" in msg and any(name in msg for name in definitions):
+            return _migrate_tracker_planning_columns()
+        raise RuntimeError(f"tracker planning-field migration failed: {exc}") from exc
+
+
 def ensure_tracker_schema() -> None:
     """Create the issue-tracker tables if they are absent.
 
@@ -2287,6 +2356,8 @@ def ensure_tracker_schema() -> None:
     )
     _migrate_tracker_kind_column()
     _migrate_tracker_reproduction_steps_column()
+    _migrate_tracker_work_context_columns()
+    _migrate_tracker_planning_columns()
 
 
 def _ensure_db_dir() -> None:
@@ -2338,6 +2409,8 @@ def init_db() -> None:
     _restrict_db_file_permissions()
     _migrate_tracker_kind_column()
     _migrate_tracker_reproduction_steps_column()
+    _migrate_tracker_work_context_columns()
+    _migrate_tracker_planning_columns()
     _migrate_terminals_schema()
     inbox_schema_ready = _migrate_callback_recovery_inbox_schema()
     _migrate_callback_recovery_schema(inbox_schema_ready=inbox_schema_ready)

@@ -156,6 +156,51 @@ class TestSchemaMigration:
             ).scalar_one()
         assert value is None
 
+    def test_legacy_issue_kind_is_migrated_to_bug(self, tmp_path, monkeypatch):
+        engine = create_engine(f"sqlite:///{tmp_path}/legacy-kind.db")
+        with engine.begin() as conn:
+            conn.execute(
+                sa_text(
+                    "CREATE TABLE tracker_issues ("
+                    "key TEXT PRIMARY KEY, project_id TEXT, title TEXT, status TEXT, "
+                    "kind TEXT NOT NULL DEFAULT 'issue')"
+                )
+            )
+            conn.execute(
+                sa_text(
+                    "INSERT INTO tracker_issues (key, project_id, title, status) "
+                    "VALUES ('cond-0001', 'cao-system', 'old issue', 'open')"
+                )
+            )
+        import cli_agent_orchestrator.clients.database as dbmod
+
+        monkeypatch.setattr(dbmod, "engine", engine)
+        dbmod._migrate_tracker_kind_column()
+        dbmod._migrate_tracker_kind_column()
+        with engine.connect() as conn:
+            kind = conn.execute(
+                sa_text("SELECT kind FROM tracker_issues WHERE key='cond-0001'")
+            ).scalar_one()
+        assert kind == "bug"
+
+    def test_legacy_tracker_gains_planning_fields(self, tmp_path, monkeypatch):
+        engine = create_engine(f"sqlite:///{tmp_path}/legacy-planning.db")
+        with engine.begin() as conn:
+            conn.execute(
+                sa_text(
+                    "CREATE TABLE tracker_issues ("
+                    "key TEXT PRIMARY KEY, project_id TEXT, title TEXT, status TEXT)"
+                )
+            )
+        import cli_agent_orchestrator.clients.database as dbmod
+
+        monkeypatch.setattr(dbmod, "engine", engine)
+        dbmod._migrate_tracker_planning_columns()
+        dbmod._migrate_tracker_planning_columns()
+        with engine.connect() as conn:
+            cols = {row[1] for row in conn.execute(sa_text("PRAGMA table_info(tracker_issues)"))}
+        assert {"expected_outcome", "actual_outcome", "favorite"} <= cols
+
 
 class TestFeatureKindGuards:
     def test_create_feature_sets_kind_and_validates(self, cao_system):
@@ -184,7 +229,7 @@ class TestFeatureKindGuards:
         stats = tracker.stats(project_id="cao-system", kind="all")
         # stats may be aggregated via get_stats or by_kind depending on implementation
         if "by_kind" in stats:
-            assert stats["by_kind"]["issue"]["total"] == 1
+            assert stats["by_kind"]["bug"]["total"] == 1
             assert stats["by_kind"]["feature"]["total"] == 1
         else:
             # fallback: check all_total
@@ -192,12 +237,13 @@ class TestFeatureKindGuards:
 
     def test_patch_kind_is_mutable_with_audit(self, cao_system):
         row = tracker.create_feature(project_id="cao-system", title="f1")
-        # kind is now mutable via PATCH — switching feature -> issue succeeds and is audited
-        updated = tracker.update_issue(row["key"], **{"kind": "issue"}, actor="alice")
-        assert updated["kind"] == "issue"
+        # Switching feature -> bug needs either complete diagnostics or an
+        # explicit policy override. This fixture deliberately takes the latter.
+        updated = tracker.update_issue(row["key"], kind="bug", actor="alice", force=True)
+        assert updated["kind"] == "bug"
         detail = tracker.get_issue(row["key"])
         assert any(e.get("field") == "kind" for e in detail.get("events", []))
-        # switching back issue -> feature also succeeds; stale failing_command is cleared if present
+        # switching back bug -> feature also succeeds; stale bug fields are cleared
         issue_row = tracker.create_issue(
             project_id="cao-system", title="b1", failing_command="make test"
         )
@@ -252,11 +298,14 @@ class TestApiKindPatch:
         resp = client.patch(f"/tracker/issues/{issue['key']}", json={"kind": "feature"})
         assert resp.status_code == 200, resp.text
         assert resp.json()["kind"] == "feature"
-        # switching via the feature endpoint back to issue
+        # switching via the feature endpoint back to bug with an explicit
+        # incomplete-diagnostics exception
         feat = resp.json()
-        resp2 = client.patch(f"/tracker/features/{feat['key']}", json={"kind": "issue"})
+        resp2 = client.patch(
+            f"/tracker/features/{feat['key']}", json={"kind": "bug", "force": True}
+        )
         assert resp2.status_code == 200, resp2.text
-        assert resp2.json()["kind"] == "issue"
+        assert resp2.json()["kind"] == "bug"
 
     def test_invalid_kind_is_422(self, cao_system):
         from test.api.conftest import TestClientWithHost
@@ -283,10 +332,10 @@ class TestApiKindPatch:
         for payload in [{"kind": None}, {"kind": ""}, {"kind": "  "}]:
             resp = client.patch(f"/tracker/issues/{issue['key']}", json=payload)
             assert resp.status_code == 200, resp.text
-            assert resp.json()["kind"] == "issue"
+            assert resp.json()["kind"] == "bug"
         # service-level as well
-        assert tracker.update_issue(issue["key"], kind=None)["kind"] == "issue"
-        assert tracker.update_issue(issue["key"], kind="")["kind"] == "issue"
+        assert tracker.update_issue(issue["key"], kind=None)["kind"] == "bug"
+        assert tracker.update_issue(issue["key"], kind="")["kind"] == "bug"
 
 
 class TestDuplicateAndLinkInvariants:
@@ -323,7 +372,7 @@ class TestStatsSingleSnapshot:
         # list_projects should be consistent
         projects = tracker.list_projects()
         assert projects[0]["counts"]["all_total"] == 8
-        assert projects[0]["counts"]["by_kind"]["issue"]["total"] == 5
+        assert projects[0]["counts"]["by_kind"]["bug"]["total"] == 5
         assert projects[0]["counts"]["by_kind"]["feature"]["total"] == 3
 
 

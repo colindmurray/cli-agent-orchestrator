@@ -44,7 +44,10 @@ def project(client, tmp_path):
 
 
 def _issue(client, **overrides):
-    payload = {"project_id": "cao-system", "title": "a defect"}
+    # Most API tests exercise behavior unrelated to filing policy. Explicitly
+    # record that their tiny fixture is an incomplete bug so each test does not
+    # obscure its subject with the three diagnostic fields.
+    payload = {"project_id": "cao-system", "title": "a defect", "force": True}
     payload.update(overrides)
     response = client.post("/tracker/issues", json=payload)
     assert response.status_code == 201, response.text
@@ -132,6 +135,69 @@ class TestScopeRoutes:
 
 
 class TestIssueRoutes:
+    def test_bug_filing_details_are_encouraged_with_an_explicit_override(self, client, project):
+        refused = client.post(
+            "/tracker/issues",
+            json={"project_id": "cao-system", "title": "underspecified bug"},
+        )
+        assert refused.status_code == 400
+        assert "reproduction_steps" in refused.json()["detail"]
+
+        complete = client.post(
+            "/tracker/issues",
+            json={
+                "project_id": "cao-system",
+                "title": "complete bug",
+                "reproduction_steps": "1. Start the server\n2. Reconnect",
+                "expected_outcome": "The dashboard reconnects",
+                "actual_outcome": "The dashboard remains disconnected",
+                "favorite": True,
+            },
+        )
+        assert complete.status_code == 201, complete.text
+        assert complete.json()["kind"] == "bug"
+        assert complete.json()["favorite"] is True
+
+        forced = client.post(
+            "/tracker/issues",
+            json={
+                "project_id": "cao-system",
+                "title": "explicit exception",
+                "force": True,
+            },
+        )
+        assert forced.status_code == 201
+
+    def test_public_item_type_vocabulary_includes_project_planning_levels(self, client):
+        body = client.get("/tracker/vocabulary").json()
+        assert body["item_kinds"] == [
+            "project",
+            "bug",
+            "feature",
+            "milestone",
+            "goal",
+            "epic",
+            "story",
+            "task",
+        ]
+
+    def test_non_bug_types_reject_bug_only_diagnostics(self, client, project):
+        created = client.post(
+            "/tracker/issues",
+            json={"project_id": "cao-system", "title": "release goal", "kind": "goal"},
+        )
+        assert created.status_code == 201, created.text
+        refused = client.post(
+            "/tracker/issues",
+            json={
+                "project_id": "cao-system",
+                "title": "not a bug",
+                "kind": "project",
+                "reproduction_steps": "this does not apply",
+            },
+        )
+        assert refused.status_code == 400
+
     def test_filing_by_cwd_resolves_the_project(self, client, project):
         nested = project["repo"] / "conduct"
         nested.mkdir()
@@ -197,6 +263,72 @@ class TestIssueRoutes:
         )
         assert response.status_code == 200
         assert response.json()["reproduction_steps"] == "1. run twice"
+
+    def test_work_context_round_trips_through_post_and_patch(self, client, project):
+        issue = _issue(
+            client,
+            collaborators=["codex:sess-1"],
+            branches=["fix/a"],
+            worktrees=["/tmp/wt-a"],
+            pull_requests=["o/r#1"],
+        )
+        assert issue["collaborators"] == ["codex:sess-1"]
+        response = client.patch(
+            f"/tracker/issues/{issue['key']}",
+            json={"collaborators": ["claude_code:sess-2"], "pull_requests": ["o/r#1", "o/r#2"]},
+        )
+        assert response.status_code == 200
+        assert response.json()["collaborators"] == ["claude_code:sess-2"]
+        assert response.json()["pull_requests"] == ["o/r#1", "o/r#2"]
+
+    def test_reassignment_retains_the_former_owner_with_a_narrow_override(self, client, project):
+        issue = _issue(client, assignee="codex:sess-1", collaborators=["colin"])
+        response = client.patch(
+            f"/tracker/issues/{issue['key']}",
+            json={"assignee": "claude_code:sess-2"},
+        )
+        assert response.status_code == 200
+        assert response.json()["collaborators"] == ["colin", "codex:sess-1"]
+
+        issue = _issue(client, assignee="codex:sess-3", collaborators=["colin"])
+        response = client.patch(
+            f"/tracker/issues/{issue['key']}",
+            json={
+                "assignee": "claude_code:sess-4",
+                "drop_previous_assignee": True,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["collaborators"] == ["colin"]
+
+    def test_in_progress_assignment_policy_has_an_explicit_override(self, client, project):
+        refused = client.post(
+            "/tracker/issues",
+            json={"project_id": "cao-system", "title": "active", "status": "in-progress"},
+        )
+        assert refused.status_code == 400
+        forced = client.post(
+            "/tracker/issues",
+            json={
+                "project_id": "cao-system",
+                "title": "exception",
+                "status": "in-progress",
+                "force": True,
+            },
+        )
+        assert forced.status_code == 201
+        issue = _issue(client)
+        active = client.patch(
+            f"/tracker/issues/{issue['key']}",
+            json={"status": "in-progress", "assignee": "colin"},
+        )
+        assert active.status_code == 200
+        clear = client.patch(f"/tracker/issues/{issue['key']}", json={"assignee": ""})
+        assert clear.status_code == 400
+        override = client.patch(
+            f"/tracker/issues/{issue['key']}", json={"assignee": "", "force": True}
+        )
+        assert override.status_code == 200
 
     def test_project_field_options_are_searchable_and_bounded(self, client, project):
         _issue(client, component="dashboard", labels=["initiative:ux"])
@@ -516,7 +648,7 @@ class TestTriageDiscoveryRoutes:
             "/tracker/issues", params={"unlabeled": True, "kind": "feature"}
         ).json()
         assert [i["title"] for i in only_features["issues"]] == ["bare feature"]
-        # The default stays issue-only.
+        # The default stays bug-only.
         default = client.get("/tracker/issues").json()
         assert [i["title"] for i in default["issues"]] == ["bare issue"]
 

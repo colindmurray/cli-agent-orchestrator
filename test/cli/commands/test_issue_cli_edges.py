@@ -35,7 +35,23 @@ def runner():
 
 
 def _ok(runner, group, *args):
-    result = runner.invoke(group, list(args))
+    argv = list(args)
+    # Edge fixtures are deliberately sparse because their assertions concern
+    # other commands. Make the incomplete-bug policy exception visible.
+    if group is issue_cli.issue and argv[:1] == ["file"] and "--force" not in argv:
+        try:
+            kind = argv[argv.index("--kind") + 1]
+        except ValueError:
+            kind = "bug"
+        if kind == "bug":
+            required = (
+                ("--reproduction", "--reproduction-file"),
+                ("--expected-outcome",),
+                ("--actual-outcome",),
+            )
+            if not all(any(option in argv for option in alternatives) for alternatives in required):
+                argv.append("--force")
+    result = runner.invoke(group, argv)
     assert result.exit_code == 0, result.output + str(result.exception)
     return result.output
 

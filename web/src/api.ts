@@ -943,7 +943,7 @@ export interface TrackerLink {
 export interface TrackerIssue {
   key: string
   project_id: string
-  kind: 'issue' | 'feature'
+  kind: 'project' | 'bug' | 'feature' | 'milestone' | 'goal' | 'epic' | 'story' | 'task' | 'issue'
   title: string
   body: string
   status: string
@@ -952,8 +952,14 @@ export interface TrackerIssue {
   reporter: string | null
   assignee: string | null
   labels: string[]
+  collaborators: string[]
+  branches: string[]
+  worktrees: string[]
+  pull_requests: string[]
   failing_command: string | null
   reproduction_steps: string | null
+  expected_outcome: string | null
+  actual_outcome: string | null
   evidence: string | null
   resolution: string | null
   session_name: string | null
@@ -961,6 +967,7 @@ export interface TrackerIssue {
   source_path: string | null
   duplicate_of: string | null
   origin: string
+  favorite: boolean
   created_at: string | null
   updated_at: string | null
   closed_at: string | null
@@ -981,7 +988,7 @@ export interface TrackerIssuePage {
 
 export interface TrackerIssueFilters {
   projectId?: string
-  kind?: 'issue' | 'feature' | 'all'
+  kind?: 'project' | 'bug' | 'feature' | 'milestone' | 'goal' | 'epic' | 'story' | 'task' | 'issue' | 'all'
   status?: string[]
   severity?: string[]
   component?: string
@@ -1009,7 +1016,15 @@ export interface TrackerLabelFacets {
   unlabeled_open: number
 }
 
-export type TrackerOptionField = 'label' | 'component' | 'assignee' | 'reporter'
+export type TrackerOptionField =
+  | 'label'
+  | 'component'
+  | 'assignee'
+  | 'reporter'
+  | 'collaborator'
+  | 'branch'
+  | 'worktree'
+  | 'pull_request'
 
 export interface TrackerFieldOption {
   value: string

@@ -11,7 +11,7 @@ import { SearchableMultiSelect, SearchableOption, SearchableSelect } from './Sea
 import {
   FolderGit2, Plus, Search, Trash2, X, Loader2, Archive, ChevronRight, MessageSquare,
   History, Link2, Save, FileDown, CircleDot, CheckCircle2, Lightbulb, Compass, List,
-  SlidersHorizontal, ChevronDown,
+  SlidersHorizontal, ChevronDown, Star,
 } from 'lucide-react'
 
 /**
@@ -49,7 +49,14 @@ const STATUS_CLASS: Record<string, string> = {
 
 const KIND_CLASS: Record<string, string> = {
   issue: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+  bug: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
   feature: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
+  project: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+  milestone: 'bg-orange-500/15 text-orange-300 border-orange-500/30',
+  goal: 'bg-teal-500/15 text-teal-300 border-teal-500/30',
+  epic: 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30',
+  story: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
+  task: 'bg-gray-500/15 text-gray-300 border-gray-500/30',
 }
 
 const PAGE_SIZE = 50
@@ -74,13 +81,24 @@ function Pill({ text, className }: { text: string; className: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Kind presentation descriptor — the single place that decides how the two
-// kinds differ in copy and which fields are shown. Every component reads it
-// rather than branching on string literals inline, so the 600-line JSX is not
-// duplicated for the second kind.
+// Kind presentation descriptor — one vocabulary for bugs and planning items.
+// Relationships stay permissive: these types describe intent, not a mandatory
+// hierarchy.
 
-type ItemKind = 'issue' | 'feature'
-type TabKind = 'issue' | 'feature' | 'all'
+const ITEM_KINDS = ['project', 'bug', 'feature', 'milestone', 'goal', 'epic', 'story', 'task'] as const
+type ItemKind = typeof ITEM_KINDS[number]
+type TabKind = ItemKind | 'all'
+
+const KIND_LABEL: Record<ItemKind, string> = {
+  project: 'Project',
+  bug: 'Bug',
+  feature: 'Feature',
+  milestone: 'Milestone',
+  goal: 'Goal',
+  epic: 'Epic',
+  story: 'Story',
+  task: 'Task',
+}
 
 interface KindPresentation {
   kind: ItemKind
@@ -97,12 +115,38 @@ interface KindPresentation {
   closingOptions: Array<{ uiLabel: string; status: string; needsDuplicateOf?: boolean }>
 }
 
-const KIND_PRESENTATION: Record<ItemKind, KindPresentation> = {
-  issue: {
-    kind: 'issue',
-    createButtonLabel: 'Log issue',
-    modalTitle: (name: string) => `Log an issue against ${name}`,
-    createActionLabel: 'File issue',
+function planningPresentation(kind: ItemKind): KindPresentation {
+  const label = KIND_LABEL[kind]
+  return {
+    kind,
+    createButtonLabel: `Add ${label.toLowerCase()}`,
+    modalTitle: (name: string) => `Add a ${label.toLowerCase()} to ${name}`,
+    createActionLabel: `Create ${label.toLowerCase()}`,
+    severityLabel: kind === 'bug' ? 'Severity' : 'Priority',
+    reporterLabel: kind === 'feature' ? 'Requester' : 'Reporter',
+    assigneeLabel: kind === 'feature' ? 'Owner' : 'Assignee',
+    resolutionLabel: kind === 'feature' ? 'Outcome' : 'Resolution',
+    bodyLabel: kind === 'feature' ? 'Proposal' : 'Description',
+    bodyStarter: kind === 'feature' ? FEATURE_BODY_STARTER : '',
+    showFailingCommandInCreate: kind === 'bug',
+    closingOptions: kind === 'feature' ? [
+      { uiLabel: 'Shipped', status: 'closed' },
+      { uiLabel: 'Declined', status: 'wontfix' },
+      { uiLabel: 'Withdrawn', status: 'wontfix' },
+      { uiLabel: 'Duplicate', status: 'duplicate', needsDuplicateOf: true },
+    ] : [],
+  }
+}
+
+const KIND_PRESENTATION: Record<ItemKind, KindPresentation> = Object.fromEntries(
+  ITEM_KINDS.map(kind => [kind, planningPresentation(kind)]),
+) as Record<ItemKind, KindPresentation>
+
+KIND_PRESENTATION.bug = {
+    kind: 'bug',
+    createButtonLabel: 'Log bug',
+    modalTitle: (name: string) => `Log a bug against ${name}`,
+    createActionLabel: 'File bug',
     severityLabel: 'Severity',
     reporterLabel: 'Reporter',
     assigneeLabel: 'Assignee',
@@ -111,30 +155,11 @@ const KIND_PRESENTATION: Record<ItemKind, KindPresentation> = {
     bodyStarter: '',
     showFailingCommandInCreate: true,
     closingOptions: [],
-  },
-  feature: {
-    kind: 'feature',
-    createButtonLabel: 'Request feature',
-    modalTitle: (name: string) => `Request a feature for ${name}`,
-    createActionLabel: 'Request feature',
-    severityLabel: 'Priority',
-    reporterLabel: 'Requester',
-    assigneeLabel: 'Owner',
-    resolutionLabel: 'Outcome',
-    bodyLabel: 'Proposal',
-    bodyStarter: FEATURE_BODY_STARTER,
-    showFailingCommandInCreate: false,
-    closingOptions: [
-      { uiLabel: 'Shipped', status: 'closed' },
-      { uiLabel: 'Declined', status: 'wontfix' },
-      { uiLabel: 'Withdrawn', status: 'wontfix' },
-      { uiLabel: 'Duplicate', status: 'duplicate', needsDuplicateOf: true },
-    ],
-  },
 }
 
 function presentationFor(kind: string | undefined): KindPresentation {
-  return KIND_PRESENTATION[(kind as ItemKind) === 'feature' ? 'feature' : 'issue']
+  const canonical = kind === 'issue' ? 'bug' : kind
+  return KIND_PRESENTATION[ITEM_KINDS.includes(canonical as ItemKind) ? canonical as ItemKind : 'bug']
 }
 
 // ---------------------------------------------------------------------------
@@ -185,12 +210,12 @@ export function ProjectsPanel() {
   const [issuesLoading, setIssuesLoading] = useState(false)
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
 
-  const [kind, setKind] = useState<TabKind>('issue')
-  const [filtersByKind, setFiltersByKind] = useState<Record<TabKind, TabFilters>>({
-    issue: defaultTabFilters(),
-    feature: defaultTabFilters(),
-    all: defaultTabFilters(),
-  })
+  const [kind, setKind] = useState<TabKind>('bug')
+  const [filtersByKind, setFiltersByKind] = useState<Record<TabKind, TabFilters>>(
+    () => Object.fromEntries(
+      [...ITEM_KINDS, 'all'].map(itemKind => [itemKind, defaultTabFilters()]),
+    ) as Record<TabKind, TabFilters>,
+  )
   // List ⇄ Wayfinder view and the open map.
   const [view, setView] = useState<'list' | 'wayfinder'>('list')
   const [mapKey, setMapKey] = useState<string | null>(null)
@@ -223,8 +248,8 @@ export function ProjectsPanel() {
       const urlSeverities = params.getAll('severity')
       const urlUnlabeled = params.get('unlabeled') === '1'
       const tab: TabKind =
-        urlKind && (['issue', 'feature', 'all'] as TabKind[]).includes(urlKind) ? urlKind : 'issue'
-      if (urlKind && (['issue', 'feature', 'all'] as TabKind[]).includes(urlKind)) {
+        urlKind && ([...ITEM_KINDS, 'all'] as TabKind[]).includes(urlKind) ? urlKind : 'bug'
+      if (urlKind && ([...ITEM_KINDS, 'all'] as TabKind[]).includes(urlKind)) {
         setKind(urlKind)
       }
       if (urlKey) setSelectedKey(urlKey)
@@ -307,14 +332,7 @@ export function ProjectsPanel() {
       order: 'severity',
     }
     try {
-      let result
-      if (kind === 'feature') {
-        result = await api.listTrackerFeatures(shared)
-      } else if (kind === 'all') {
-        result = await api.listTrackerIssues({ ...shared, kind: 'all' })
-      } else {
-        result = await api.listTrackerIssues(shared)
-      }
+      const result = await api.listTrackerIssues({ ...shared, kind })
       setPage(result)
     } catch (err) {
       showSnackbar({ type: 'error', message: `Could not load issues: ${errorText(err)}` })
@@ -340,7 +358,7 @@ export function ProjectsPanel() {
       const params = new URLSearchParams(window.location.search)
       if (activeId) params.set('project', activeId)
       else params.delete('project')
-      if (kind !== 'issue') params.set('kind', kind)
+      if (kind !== 'bug') params.set('kind', kind)
       else params.delete('kind')
       if (selectedKey) params.set('key', selectedKey)
       else params.delete('key')
@@ -407,7 +425,7 @@ export function ProjectsPanel() {
         const urlSeverities = params.getAll('severity')
         const urlUnlabeled = params.get('unlabeled') === '1'
         const tab: TabKind =
-          urlKind && (['issue', 'feature', 'all'] as TabKind[]).includes(urlKind) ? urlKind : 'issue'
+          urlKind && ([...ITEM_KINDS, 'all'] as TabKind[]).includes(urlKind) ? urlKind : 'bug'
         setActiveId(urlProject)
         setKind(tab)
         setSelectedKey(urlKey)
@@ -440,11 +458,12 @@ export function ProjectsPanel() {
   const handleSelectProject = useCallback((id: string) => {
     setActiveId(id)
     setSelectedKey(null)
-    setFiltersByKind(prev => ({
-      issue: { ...prev.issue, offset: 0 },
-      feature: { ...prev.feature, offset: 0 },
-      all: { ...prev.all, offset: 0 },
-    }))
+    setFiltersByKind(prev => Object.fromEntries(
+      Object.entries(prev).map(([itemKind, filters]) => [
+        itemKind,
+        { ...filters, offset: 0 },
+      ]),
+    ) as Record<TabKind, TabFilters>)
   }, [])
 
   const handleSelectKind = useCallback((k: TabKind) => {
@@ -510,7 +529,7 @@ export function ProjectsPanel() {
     return <div className="text-gray-500 text-sm py-12 text-center">Loading projects…</div>
   }
 
-  const headerPresentation = presentationFor(kind === 'all' ? 'issue' : kind)
+  const headerPresentation = presentationFor(kind === 'all' ? 'bug' : kind)
 
   return (
     <div className="flex flex-col lg:flex-row gap-6 items-start">
@@ -549,7 +568,7 @@ export function ProjectsPanel() {
               <div className="text-[11px] text-gray-500 mt-0.5 pl-6">
                 {hasKindCounts ? (
                   <>
-                    <span title="Issues open">I {byKind!.issue?.open ?? 0}</span>
+                    <span title="Bugs open">B {byKind!.bug?.open ?? 0}</span>
                     <span className="mx-1">·</span>
                     <span title="Features open">F {byKind!.feature?.open ?? 0}</span>
                     <span className="mx-1 text-gray-600">/</span>
@@ -626,8 +645,8 @@ export function ProjectsPanel() {
                   <input
                     value={currentFilters.query}
                     onChange={e => updateCurrentFilters({ query: e.target.value, offset: 0 })}
-                    placeholder={kind === 'feature' ? 'Search features' : kind === 'all' ? 'Search issues and features' : 'Search title, body, key or failing command'}
-                    aria-label={kind === 'feature' ? 'Search features' : kind === 'all' ? 'Search all' : 'Search issues'}
+                    placeholder={kind === 'all' ? 'Search all project work' : `Search ${KIND_LABEL[kind].toLowerCase()}s`}
+                    aria-label={kind === 'all' ? 'Search all' : `Search ${KIND_LABEL[kind]}s`}
                     className="w-full pl-9 pr-3 py-2 rounded-lg bg-gray-900 border border-gray-800 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-emerald-600/50"
                   />
                 </div>
@@ -639,19 +658,17 @@ export function ProjectsPanel() {
                   onClick={() => setShowNewIssue(true)}
                   className="flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors"
                 >
-                  <Plus size={15} /> {kind === 'feature' ? 'Request feature' : 'Log issue'}
+                  <Plus size={15} /> {headerPresentation.createButtonLabel}
                 </button>
               </div>
 
               <div className="flex flex-wrap gap-1.5 items-center">
                 <span className="text-[11px] font-medium text-gray-500 mr-1">Type:</span>
-                {(['all','issue','feature'] as const).map(k => {
-                  const label = k === 'all' ? 'Both' : k === 'issue' ? `Bugs` : `Features`
+                {(['all', ...(vocab?.item_kinds ?? ITEM_KINDS)] as TabKind[]).map(k => {
+                  const label = k === 'all' ? 'All' : `${KIND_LABEL[k]}s`
                   const count = k === 'all'
-                    ? (project.counts?.all_open ?? ((project.counts?.by_kind?.issue?.open ?? 0)+(project.counts?.by_kind?.feature?.open ?? 0)))
-                    : k === 'issue'
-                      ? (project.counts?.by_kind?.issue?.open ?? project.counts?.open ?? 0)
-                      : (project.counts?.by_kind?.feature?.open ?? 0)
+                    ? (project.counts?.all_open ?? project.counts?.open ?? 0)
+                    : (project.counts?.by_kind?.[k]?.open ?? 0)
                   const active = kind === k
                   return (
                     <button
@@ -665,7 +682,7 @@ export function ProjectsPanel() {
                           : 'border-gray-800 text-gray-500 hover:text-gray-300 hover:border-gray-700'
                       }`}
                     >
-                      {k === 'issue' && <CircleDot size={11} />}
+                      {k === 'bug' && <CircleDot size={11} />}
                       {k === 'feature' && <Lightbulb size={11} />}
                       {label} <span className={`ml-1 text-[10px] ${active ? 'text-emerald-200' : 'text-gray-600'}`}>{count}</span>
                     </button>
@@ -821,7 +838,7 @@ export function ProjectsPanel() {
                     <code className="text-xs text-gray-500 w-24 shrink-0">{issue.key}</code>
                     <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium border ${KIND_CLASS[issue.kind] ?? (issue.kind === 'feature' ? 'bg-violet-500/15 text-violet-300 border-violet-500/30' : 'bg-sky-500/15 text-sky-300 border-sky-500/30')}`}>
                       {issue.kind === 'feature' ? <Lightbulb size={10} /> : <CircleDot size={10} />}
-                      {issue.kind === 'feature' ? 'feature' : 'bug'}
+                      {KIND_LABEL[presentationFor(issue.kind).kind].toLowerCase()}
                     </span>
                     <Pill text={issue.severity} className={SEVERITY_CLASS[issue.severity] ?? SEVERITY_CLASS.unset} />
                     <Pill text={issue.status} className={STATUS_CLASS[issue.status] ?? 'bg-gray-700/40 text-gray-300'} />
@@ -924,7 +941,7 @@ export function ProjectsPanel() {
         <NewItemModal
           project={project}
           vocab={vocab}
-          kind={kind === 'feature' ? 'feature' : 'issue'}
+          kind={kind === 'all' ? 'bug' : kind}
           onClose={() => setShowNewIssue(false)}
           onCreated={async key => { setShowNewIssue(false); setSelectedKey(key); await refreshAfterIssueChange() }}
         />
@@ -1023,7 +1040,7 @@ function ProjectHeader({
               <p className="text-xs text-gray-500 mt-0.5">
                 <code>{project.id}</code> · keys <code>{project.issue_prefix}-NNNN</code> ·{' '}
                 {byKind ? (
-                  <>I {byKind.issue?.open ?? 0}/{byKind.issue?.total ?? 0} · F {byKind.feature?.open ?? 0}/{byKind.feature?.total ?? 0} · {project.counts?.open ?? 0} open of {project.counts?.total ?? 0}</>
+                  <>B {byKind.bug?.open ?? 0}/{byKind.bug?.total ?? 0} · F {byKind.feature?.open ?? 0}/{byKind.feature?.total ?? 0} · {project.counts?.open ?? 0} open of {project.counts?.total ?? 0}</>
                 ) : (
                   <>{project.counts?.open ?? 0} open of {project.counts?.total ?? 0}</>
                 )}
@@ -1032,10 +1049,10 @@ function ProjectHeader({
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
               <a
-                href={`/tracker/projects/${encodeURIComponent(project.id)}/${kind === 'feature' ? 'features/export' : kind === 'all' ? 'export?kind=all' : 'export'}`}
+                href={`/tracker/projects/${encodeURIComponent(project.id)}/export?kind=${encodeURIComponent(kind)}`}
                 target="_blank"
                 rel="noreferrer"
-                title={kind === 'feature' ? "Render the feature log as markdown" : kind === 'all' ? "Render all items as markdown" : "Render the issue log as markdown"}
+                title={kind === 'all' ? "Render all items as markdown" : `Render ${KIND_LABEL[kind].toLowerCase()} items as markdown`}
                 className="p-2 rounded hover:bg-gray-800 text-gray-400 hover:text-gray-200"
               >
                 <FileDown size={15} />
@@ -1160,6 +1177,11 @@ function ItemDetail({
   const [issue, setIssue] = useState<TrackerIssue | null>(null)
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [labelValues, setLabelValues] = useState<string[]>([])
+  const [collaboratorValues, setCollaboratorValues] = useState<string[]>([])
+  const [branchValues, setBranchValues] = useState<string[]>([])
+  const [worktreeValues, setWorktreeValues] = useState<string[]>([])
+  const [pullRequestValues, setPullRequestValues] = useState<string[]>([])
+  const [retainPreviousAssignee, setRetainPreviousAssignee] = useState(true)
   const [comment, setComment] = useState('')
   const [showHistory, setShowHistory] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -1173,8 +1195,12 @@ function ItemDetail({
   // version the server reported. The draft is preserved while this is shown.
   const [casConflict, setCasConflict] = useState<string | null>(null)
 
-  const presentation = useMemo(() => presentationFor(issue?.kind ?? initialKind), [issue?.kind, initialKind])
+  const presentation = useMemo(
+    () => presentationFor(draft.kind ?? issue?.kind ?? initialKind),
+    [draft.kind, issue?.kind, initialKind],
+  )
   const isFeature = presentation.kind === 'feature'
+  const isBug = presentation.kind === 'bug'
 
   const load = useCallback(async (opts?: { preserveDraft?: boolean }) => {
     try {
@@ -1183,17 +1209,26 @@ function ItemDetail({
       setIssue(row)
       if (!opts?.preserveDraft) {
         setDraft({
+          kind: row.kind,
           title: row.title,
           body: row.body,
+          status: row.status,
           component: row.component ?? '',
           assignee: row.assignee ?? '',
           reporter: row.reporter ?? '',
           failing_command: row.failing_command ?? '',
           reproduction_steps: row.reproduction_steps ?? '',
+          expected_outcome: row.expected_outcome ?? '',
+          actual_outcome: row.actual_outcome ?? '',
           evidence: row.evidence ?? '',
           resolution: row.resolution ?? '',
         })
         setLabelValues(row.labels)
+        setCollaboratorValues(row.collaborators ?? [])
+        setBranchValues(row.branches ?? [])
+        setWorktreeValues(row.worktrees ?? [])
+        setPullRequestValues(row.pull_requests ?? [])
+        setRetainPreviousAssignee(true)
         setDuplicateOf(row.duplicate_of ?? '')
         setCasConflict(null)
       }
@@ -1217,8 +1252,18 @@ function ItemDetail({
     const removed = base.labels.filter(l => !labelValues.includes(l))
     if (added.length) changes.add_labels = added
     if (removed.length) changes.remove_labels = removed
+    const repeatable: Array<[keyof TrackerIssue, string[]]> = [
+      ['collaborators', collaboratorValues],
+      ['branches', branchValues],
+      ['worktrees', worktreeValues],
+      ['pull_requests', pullRequestValues],
+    ]
+    for (const [field, values] of repeatable) {
+      const current = base[field] as string[]
+      if (JSON.stringify(current ?? []) !== JSON.stringify(values)) changes[field] = values
+    }
     return changes
-  }, [draft, labelValues])
+  }, [draft, labelValues, collaboratorValues, branchValues, worktreeValues, pullRequestValues])
 
   const dirty = useMemo(() => (issue ? computeChanges(issue) : {}), [issue, computeChanges])
 
@@ -1232,6 +1277,14 @@ function ItemDetail({
     try {
       const changes = opts?.changesOverride ?? dirty
       const body: Record<string, unknown> = { ...changes, ...extra, actor: 'dashboard' }
+      if (
+        issue?.assignee
+        && typeof changes.assignee === 'string'
+        && changes.assignee !== issue.assignee
+        && !retainPreviousAssignee
+      ) {
+        body.drop_previous_assignee = true
+      }
       if (extra?.status === 'duplicate' && !duplicateOf.trim()) {
         showSnackbar({ type: 'error', message: 'Duplicate requires a canonical issue' })
         setSaving(false)
@@ -1248,8 +1301,7 @@ function ItemDetail({
             ? issue?.updated_at ?? null
             : null
       if (expected) body.expected_updated_at = expected
-      const updater = isFeature ? api.updateTrackerFeature : api.updateTrackerIssue
-      await updater(issueKey, body)
+      await api.updateTrackerIssue(issueKey, body)
       setCasConflict(null)
       await load()
       await onChanged()
@@ -1327,8 +1379,7 @@ function ItemDetail({
   const postComment = async () => {
     if (!comment.trim()) return
     try {
-      const poster = isFeature ? api.addTrackerFeatureComment : api.addTrackerComment
-      await poster(issueKey, { body: comment, author: 'dashboard' })
+      await api.addTrackerComment(issueKey, { body: comment, author: 'dashboard' })
       setComment('')
       await load()
       await onChanged()
@@ -1340,8 +1391,7 @@ function ItemDetail({
   const addLink = async () => {
     if (!linkTo.trim()) return
     try {
-      const poster = isFeature ? api.addTrackerFeatureLink : api.addTrackerLink
-      await poster(issueKey, { to_key: linkTo.trim(), kind: linkKind })
+      await api.addTrackerLink(issueKey, { to_key: linkTo.trim(), kind: linkKind })
       setLinkTo('')
       await load()
       await onChanged()
@@ -1367,6 +1417,10 @@ function ItemDetail({
   const loadComponents = useCallback((query: string) => loadFieldOptions('component', query), [loadFieldOptions])
   const loadAssignees = useCallback((query: string) => loadFieldOptions('assignee', query), [loadFieldOptions])
   const loadReporters = useCallback((query: string) => loadFieldOptions('reporter', query), [loadFieldOptions])
+  const loadCollaborators = useCallback((query: string) => loadFieldOptions('collaborator', query), [loadFieldOptions])
+  const loadBranches = useCallback((query: string) => loadFieldOptions('branch', query), [loadFieldOptions])
+  const loadWorktrees = useCallback((query: string) => loadFieldOptions('worktree', query), [loadFieldOptions])
+  const loadPullRequests = useCallback((query: string) => loadFieldOptions('pull_request', query), [loadFieldOptions])
   const loadIssueOptions = useCallback(async (query: string): Promise<SearchableOption[]> => {
     if (!issue?.project_id) return []
     const result = await api.listTrackerIssues({
@@ -1387,11 +1441,7 @@ function ItemDetail({
 
   const removeLink = async (linkId: number) => {
     try {
-      if (isFeature) {
-        await api.removeTrackerFeatureLink(issueKey, linkId)
-      } else {
-        await api.removeTrackerLink(issueKey, linkId)
-      }
+      await api.removeTrackerLink(issueKey, linkId)
       await load()
       await onChanged()
     } catch (err) {
@@ -1402,8 +1452,7 @@ function ItemDetail({
   const handleDelete = async () => {
     setPendingDelete(false)
     try {
-      const deleter = isFeature ? api.deleteTrackerFeature : api.deleteTrackerIssue
-      await deleter(issueKey)
+      await api.deleteTrackerIssue(issueKey)
       showSnackbar({ type: 'success', message: `${issueKey} deleted` })
       onDeleted()
     } catch (err) {
@@ -1415,18 +1464,28 @@ function ItemDetail({
     return <div className="px-10 py-4 text-xs text-gray-600">Loading {issueKey}…</div>
   }
 
-  const statusesForKind = presentation.kind === 'feature' && vocab.statuses_by_kind?.feature
-    ? vocab.statuses_by_kind.feature
-    : presentation.kind === 'issue' && vocab.statuses_by_kind?.issue
-      ? vocab.statuses_by_kind.issue
-      : vocab.statuses
+  const statusesForKind = vocab.statuses_by_kind?.[presentation.kind] ?? vocab.statuses
   const terminalStatuses = vocab.terminal_statuses_by_kind?.[presentation.kind] ?? vocab.terminal_statuses
   const isTerminal = terminalStatuses.includes(issue.status)
+  const activeWithoutAssignee =
+    (draft.status ?? issue.status) === 'in-progress' && !(draft.assignee ?? '').trim()
+  const bugDetailsIncomplete = isBug && [
+    draft.reproduction_steps,
+    draft.expected_outcome,
+    draft.actual_outcome,
+  ].some(value => !value?.trim())
+  const bugDetailPolicyApplies = bugDetailsIncomplete && (
+    issue.kind !== 'bug'
+    || ['reproduction_steps', 'expected_outcome', 'actual_outcome'].some(field => field in dirty)
+  )
+  const isReassignment = Boolean(
+    issue.assignee && (draft.assignee ?? '') !== issue.assignee,
+  )
 
   // Free-form evidence fields stay text inputs; reusable vocabulary fields use
   // searchable, creatable pickers below.
   const editableFields: Array<{ field: keyof TrackerIssue; label: string; mono?: boolean; hideWhenEmpty?: boolean }> = [
-    { field: 'failing_command' as keyof TrackerIssue, label: 'Failing command', mono: true, hideWhenEmpty: isFeature },
+    { field: 'failing_command' as keyof TrackerIssue, label: 'Failing command', mono: true, hideWhenEmpty: !isBug },
     { field: 'evidence' as keyof TrackerIssue, label: 'Evidence', mono: true },
   ].filter(f => !(f.hideWhenEmpty && !draft[f.field as string] && !issue[f.field]))
 
@@ -1435,33 +1494,62 @@ function ItemDetail({
       <input
         value={draft.title ?? ''}
         onChange={e => setDraft({ ...draft, title: e.target.value })}
-        aria-label={isFeature ? 'Feature title' : 'Issue title'}
+        aria-label={`${KIND_LABEL[presentation.kind]} title`}
         className="w-full px-3 py-2 rounded bg-gray-900 border border-gray-800 text-sm text-gray-100 focus:outline-none focus:border-emerald-600/50"
       />
 
       <div className="flex flex-wrap items-center gap-2">
         <select
-          value={issue.kind}
-          onChange={e => patch({ kind: e.target.value })}
+          value={draft.kind ?? issue.kind}
+          onChange={e => setDraft({ ...draft, kind: e.target.value })}
           aria-label="Type"
-          title="Change type — bug or feature request"
-          className={`px-2 py-1.5 rounded border text-xs font-medium ${issue.kind === 'feature' ? 'bg-violet-500/15 text-violet-300 border-violet-500/30' : 'bg-sky-500/15 text-sky-300 border-sky-500/30'}`}
+          title="Change item type"
+          className={`px-2 py-1.5 rounded border text-xs font-medium ${KIND_CLASS[presentation.kind]}`}
         >
-          {(vocab.item_kinds ?? ['issue', 'feature']).map(k => (
-            <option key={k} value={k}>{k === 'feature' ? 'Feature' : 'Bug'}</option>
+          {(vocab.item_kinds ?? ITEM_KINDS).map(k => (
+            <option key={k} value={k}>{KIND_LABEL[presentationFor(k).kind]}</option>
           ))}
         </select>
+        <button
+          type="button"
+          onClick={() => patch({ favorite: !issue.favorite })}
+          aria-label={issue.favorite ? 'Remove from project Home' : 'Favorite on project Home'}
+          title={issue.favorite ? 'Remove from project Home' : 'Favorite on project Home'}
+          className={`rounded border p-1.5 ${issue.favorite ? 'border-amber-500/50 bg-amber-500/10 text-amber-300' : 'border-gray-800 text-gray-500 hover:text-amber-300'}`}
+        >
+          <Star size={13} fill={issue.favorite ? 'currentColor' : 'none'} />
+        </button>
         <select
-          value={issue.status}
+          value={draft.status ?? issue.status}
           onChange={e => {
             if (e.target.value === 'duplicate') setClosingChoice('duplicate')
-            else patch({ status: e.target.value })
+            else setDraft({ ...draft, status: e.target.value })
           }}
           aria-label="Status"
           className="px-2 py-1.5 rounded bg-gray-900 border border-gray-800 text-xs text-gray-200"
         >
           {statusesForKind.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
+        <div className="min-w-[220px] max-w-sm flex-1 sm:flex-none">
+          <SearchableSelect
+            value={draft.assignee ?? ''}
+            onChange={assignee => setDraft({ ...draft, assignee })}
+            loadOptions={loadAssignees}
+            placeholder={`Search or create ${presentation.assigneeLabel.toLowerCase()}`}
+            ariaLabel={presentation.assigneeLabel}
+            allowCreate
+          />
+          {isReassignment && (
+            <label className="mt-1 flex items-center gap-1.5 text-[11px] text-gray-500">
+              <input
+                type="checkbox"
+                checked={retainPreviousAssignee}
+                onChange={event => setRetainPreviousAssignee(event.target.checked)}
+              />
+              Keep {issue.assignee} as a collaborator
+            </label>
+          )}
+        </div>
         <select
           value={issue.severity}
           onChange={e => patch({ severity: e.target.value })}
@@ -1619,18 +1707,6 @@ function ItemDetail({
             className="mt-1"
           />
         </label>
-        <label className="block">
-          <span className="text-[11px] uppercase tracking-wide text-gray-600">{presentation.assigneeLabel}</span>
-          <SearchableSelect
-            value={draft.assignee ?? ''}
-            onChange={assignee => setDraft({ ...draft, assignee })}
-            loadOptions={loadAssignees}
-            placeholder={`Search or create ${presentation.assigneeLabel.toLowerCase()}`}
-            ariaLabel={presentation.assigneeLabel}
-            allowCreate
-            className="mt-1"
-          />
-        </label>
         <label className="block col-span-2">
           <span className="text-[11px] uppercase tracking-wide text-gray-600">{presentation.reporterLabel}</span>
           <SearchableSelect
@@ -1639,6 +1715,54 @@ function ItemDetail({
             loadOptions={loadReporters}
             placeholder={`Search or create ${presentation.reporterLabel.toLowerCase()}`}
             ariaLabel={presentation.reporterLabel}
+            allowCreate
+            className="mt-1"
+          />
+        </label>
+        <label className="block col-span-2">
+          <span className="text-[11px] uppercase tracking-wide text-gray-600">Collaborators</span>
+          <SearchableMultiSelect
+            values={collaboratorValues}
+            onChange={setCollaboratorValues}
+            loadOptions={loadCollaborators}
+            placeholder="Search or add collaborators"
+            ariaLabel="Collaborators"
+            allowCreate
+            className="mt-1"
+          />
+        </label>
+        <label className="block col-span-2">
+          <span className="text-[11px] uppercase tracking-wide text-gray-600">Branches</span>
+          <SearchableMultiSelect
+            values={branchValues}
+            onChange={setBranchValues}
+            loadOptions={loadBranches}
+            placeholder="Search or add implementation branches"
+            ariaLabel="Branches"
+            allowCreate
+            className="mt-1"
+          />
+        </label>
+        <label className="block col-span-2">
+          <span className="text-[11px] uppercase tracking-wide text-gray-600">Worktrees</span>
+          <SearchableMultiSelect
+            values={worktreeValues}
+            onChange={setWorktreeValues}
+            loadOptions={loadWorktrees}
+            placeholder="Search or add worktree paths"
+            ariaLabel="Worktrees"
+            allowCreate
+            className="mt-1"
+          />
+        </label>
+        <label className="block col-span-2">
+          <span className="text-[11px] uppercase tracking-wide text-gray-600">Pull requests</span>
+          <SearchableMultiSelect
+            values={pullRequestValues}
+            onChange={setPullRequestValues}
+            loadOptions={loadPullRequests}
+            placeholder="Search or add PR URLs / references"
+            ariaLabel="Pull requests"
             allowCreate
             className="mt-1"
           />
@@ -1666,18 +1790,42 @@ function ItemDetail({
             className="mt-1"
           />
         </label>
-        {!isFeature && (
-          <label className="block col-span-2">
-            <span className="text-[11px] uppercase tracking-wide text-gray-600">Reproduction steps</span>
-            <textarea
-              value={draft.reproduction_steps ?? ''}
-              onChange={e => setDraft({ ...draft, reproduction_steps: e.target.value })}
-              rows={4}
-              aria-label="Reproduction steps"
-              placeholder="Numbered steps, required setup, and the observed result"
-              className="mt-1 w-full rounded bg-gray-900 border border-gray-800 px-3 py-2 text-xs text-gray-200 font-mono leading-relaxed focus:outline-none focus:border-emerald-600/50"
-            />
-          </label>
+        {isBug && (
+          <>
+            <label className="block col-span-2">
+              <span className="text-[11px] uppercase tracking-wide text-gray-600">Reproduction steps</span>
+              <textarea
+                value={draft.reproduction_steps ?? ''}
+                onChange={e => setDraft({ ...draft, reproduction_steps: e.target.value })}
+                rows={4}
+                aria-label="Reproduction steps"
+                placeholder="Setup, exact numbered actions, and the point where behavior diverges"
+                className="mt-1 w-full rounded bg-gray-900 border border-gray-800 px-3 py-2 text-xs text-gray-200 font-mono leading-relaxed focus:outline-none focus:border-emerald-600/50"
+              />
+            </label>
+            <label className="block">
+              <span className="text-[11px] uppercase tracking-wide text-gray-600">Expected outcome</span>
+              <textarea
+                value={draft.expected_outcome ?? ''}
+                onChange={e => setDraft({ ...draft, expected_outcome: e.target.value })}
+                rows={3}
+                aria-label="Expected outcome"
+                placeholder="What should happen"
+                className="mt-1 w-full rounded bg-gray-900 border border-gray-800 px-3 py-2 text-xs text-gray-200 leading-relaxed focus:outline-none focus:border-emerald-600/50"
+              />
+            </label>
+            <label className="block">
+              <span className="text-[11px] uppercase tracking-wide text-gray-600">Actual outcome</span>
+              <textarea
+                value={draft.actual_outcome ?? ''}
+                onChange={e => setDraft({ ...draft, actual_outcome: e.target.value })}
+                rows={3}
+                aria-label="Actual outcome"
+                placeholder="What happens instead"
+                className="mt-1 w-full rounded bg-gray-900 border border-gray-800 px-3 py-2 text-xs text-gray-200 leading-relaxed focus:outline-none focus:border-emerald-600/50"
+              />
+            </label>
+          </>
         )}
         <label className="block col-span-2">
           <span className="text-[11px] uppercase tracking-wide text-gray-600">{presentation.resolutionLabel}</span>
@@ -1700,18 +1848,39 @@ function ItemDetail({
       </div>
 
       {hasChanges && (
-        <div className="flex items-center gap-2">
+        <div className="space-y-2">
+          {activeWithoutAssignee && (
+            <div role="alert" className="rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+              In-progress work should have one primary assignee. Choose an assignee above, or save an explicit exception.
+            </div>
+          )}
+          {bugDetailPolicyApplies && (
+            <div role="alert" className="rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+              Bugs should include reproduction steps, expected outcome, and actual outcome. Complete the fields above, or save an explicit exception.
+            </div>
+          )}
+          <div className="flex items-center gap-2">
           <button
             onClick={() => patch()}
-            disabled={saving}
+            disabled={saving || activeWithoutAssignee || bugDetailPolicyApplies}
             className="flex items-center gap-2 px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs disabled:opacity-50"
           >
             {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
             Save {Object.keys(dirty).length} change{Object.keys(dirty).length === 1 ? '' : 's'}
           </button>
+          {(activeWithoutAssignee || bugDetailPolicyApplies) && (
+            <button
+              onClick={() => patch({ force: true })}
+              disabled={saving}
+              className="rounded border border-amber-600/60 px-3 py-1.5 text-xs text-amber-200 hover:bg-amber-500/10 disabled:opacity-50"
+            >
+              Save with override
+            </button>
+          )}
           <button onClick={() => load()} className="px-3 py-1.5 rounded border border-gray-800 text-xs text-gray-400">
             Discard
           </button>
+          </div>
         </div>
       )}
 
@@ -1954,12 +2123,19 @@ function NewItemModal({
   const [severity, setSeverity] = useState('unset')
   const [status, setStatus] = useState('open')
   const [component, setComponent] = useState('')
-  const [requester, setRequester] = useState(kind === 'issue' ? 'dashboard' : '')
+  const [requester, setRequester] = useState('dashboard')
   const [owner, setOwner] = useState('')
   const [labels, setLabels] = useState<string[]>([])
+  const [collaborators, setCollaborators] = useState<string[]>([])
+  const [branches, setBranches] = useState<string[]>([])
+  const [worktrees, setWorktrees] = useState<string[]>([])
+  const [pullRequests, setPullRequests] = useState<string[]>([])
   const [evidence, setEvidence] = useState('')
   const [failingCommand, setFailingCommand] = useState('')
   const [reproductionSteps, setReproductionSteps] = useState('')
+  const [expectedOutcome, setExpectedOutcome] = useState('')
+  const [actualOutcome, setActualOutcome] = useState('')
+  const [favorite, setFavorite] = useState(false)
   const [busy, setBusy] = useState(false)
 
   // Reset body when kind switches (modal is remounted via key, but guard anyway)
@@ -1967,11 +2143,12 @@ function NewItemModal({
     setBody(presentation.bodyStarter)
   }, [presentation.bodyStarter])
 
-  const create = async () => {
+  const create = async (force = false) => {
     setBusy(true)
     try {
       const base: Record<string, unknown> = {
         project_id: project.id,
+        kind,
         title,
         body,
         severity,
@@ -1979,20 +2156,23 @@ function NewItemModal({
         component: component.trim() || undefined,
         evidence: evidence.trim() || undefined,
         labels,
+        collaborators,
+        branches,
+        worktrees,
+        pull_requests: pullRequests,
+        reporter: requester.trim() || 'dashboard',
+        assignee: owner.trim() || undefined,
+        favorite,
+        origin: 'dashboard',
+        force,
       }
-      if (kind === 'feature') {
-        base.reporter = requester.trim() || undefined
-        base.assignee = owner.trim() || undefined
-        // feature creation must not send failing_command
-      } else {
+      if (kind === 'bug') {
         base.failing_command = failingCommand.trim() || undefined
         base.reproduction_steps = reproductionSteps.trim() || undefined
-        base.evidence = evidence.trim() || undefined
-        base.reporter = requester.trim() || 'dashboard'
-        base.assignee = owner.trim() || undefined
+        base.expected_outcome = expectedOutcome.trim() || undefined
+        base.actual_outcome = actualOutcome.trim() || undefined
       }
-      const creator = kind === 'feature' ? api.createTrackerFeature : api.createTrackerIssue
-      const created = await creator(base)
+      const created = await api.createTrackerIssue(base)
       showSnackbar({ type: 'success', message: `Filed ${created.key}` })
       onCreated(created.key)
     } catch (err) {
@@ -2002,11 +2182,13 @@ function NewItemModal({
     }
   }
 
-  const statusOptions = kind === 'feature' && vocab.statuses_by_kind?.feature
-    ? vocab.statuses_by_kind.feature
-    : kind === 'issue' && vocab.statuses_by_kind?.issue
-      ? vocab.statuses_by_kind.issue
-      : vocab.statuses
+  const statusOptions = vocab.statuses_by_kind?.[kind] ?? vocab.statuses
+  const activeWithoutOwner = status === 'in-progress' && !owner.trim()
+  const bugDetailsIncomplete = kind === 'bug' && [
+    reproductionSteps,
+    expectedOutcome,
+    actualOutcome,
+  ].some(value => !value.trim())
 
   const loadFieldOptions = useCallback(async (
     field: TrackerOptionField,
@@ -2023,6 +2205,10 @@ function NewItemModal({
   const loadComponents = useCallback((query: string) => loadFieldOptions('component', query), [loadFieldOptions])
   const loadAssignees = useCallback((query: string) => loadFieldOptions('assignee', query), [loadFieldOptions])
   const loadReporters = useCallback((query: string) => loadFieldOptions('reporter', query), [loadFieldOptions])
+  const loadCollaborators = useCallback((query: string) => loadFieldOptions('collaborator', query), [loadFieldOptions])
+  const loadBranches = useCallback((query: string) => loadFieldOptions('branch', query), [loadFieldOptions])
+  const loadWorktrees = useCallback((query: string) => loadFieldOptions('worktree', query), [loadFieldOptions])
+  const loadPullRequests = useCallback((query: string) => loadFieldOptions('pull_request', query), [loadFieldOptions])
 
   return (
     <Modal title={presentation.modalTitle(project.name)} onClose={onClose}>
@@ -2064,35 +2250,20 @@ function NewItemModal({
             className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-xs text-gray-200 font-mono" />
         </label>
       </div>
-      {kind === 'feature' ? (
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className="text-[11px] uppercase tracking-wide text-gray-500">{presentation.reporterLabel}</span>
+          <SearchableSelect value={requester} onChange={setRequester} loadOptions={loadReporters}
+            placeholder={`Search or create ${presentation.reporterLabel.toLowerCase()}`} ariaLabel={presentation.reporterLabel} allowCreate className="mt-1" />
+        </label>
+        <label className="block">
+          <span className="text-[11px] uppercase tracking-wide text-gray-500">{presentation.assigneeLabel}</span>
+          <SearchableSelect value={owner} onChange={setOwner} loadOptions={loadAssignees}
+            placeholder={`Search or create ${presentation.assigneeLabel.toLowerCase()}`} ariaLabel={presentation.assigneeLabel} allowCreate className="mt-1" />
+        </label>
+      </div>
+      {kind === 'bug' && (
         <>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block">
-              <span className="text-[11px] uppercase tracking-wide text-gray-500">Requester</span>
-              <SearchableSelect value={requester} onChange={setRequester} loadOptions={loadReporters}
-                placeholder="Search or create a requester" ariaLabel="Requester" allowCreate className="mt-1" />
-            </label>
-            <label className="block">
-              <span className="text-[11px] uppercase tracking-wide text-gray-500">Owner</span>
-              <SearchableSelect value={owner} onChange={setOwner} loadOptions={loadAssignees}
-                placeholder="Search or create an owner" ariaLabel="Owner" allowCreate className="mt-1" />
-            </label>
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block">
-              <span className="text-[11px] uppercase tracking-wide text-gray-500">Reporter</span>
-              <SearchableSelect value={requester} onChange={setRequester} loadOptions={loadReporters}
-                placeholder="Search or create a reporter" ariaLabel="Reporter" allowCreate className="mt-1" />
-            </label>
-            <label className="block">
-              <span className="text-[11px] uppercase tracking-wide text-gray-500">Assignee</span>
-              <SearchableSelect value={owner} onChange={setOwner} loadOptions={loadAssignees}
-                placeholder="Search or create an assignee" ariaLabel="Assignee" allowCreate className="mt-1" />
-            </label>
-          </div>
           <label className="block">
             <span className="text-[11px] uppercase tracking-wide text-gray-500">Failing command</span>
             <input value={failingCommand} onChange={e => setFailingCommand(e.target.value)} aria-label="Failing command"
@@ -2104,6 +2275,20 @@ function NewItemModal({
               aria-label="Reproduction steps" placeholder="Numbered steps, required setup, and the observed result"
               className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-xs text-gray-200 font-mono" />
           </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-[11px] uppercase tracking-wide text-gray-500">Expected outcome</span>
+              <textarea value={expectedOutcome} onChange={e => setExpectedOutcome(e.target.value)} rows={3}
+                aria-label="Expected outcome" placeholder="What should happen"
+                className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-xs text-gray-200" />
+            </label>
+            <label className="block">
+              <span className="text-[11px] uppercase tracking-wide text-gray-500">Actual outcome</span>
+              <textarea value={actualOutcome} onChange={e => setActualOutcome(e.target.value)} rows={3}
+                aria-label="Actual outcome" placeholder="What happens instead"
+                className="mt-1 w-full px-3 py-2 rounded bg-gray-950 border border-gray-800 text-xs text-gray-200" />
+            </label>
+          </div>
         </>
       )}
       <label className="block">
@@ -2111,10 +2296,52 @@ function NewItemModal({
         <SearchableMultiSelect values={labels} onChange={setLabels} loadOptions={loadLabels}
           placeholder="Search or create labels" ariaLabel="Labels" allowCreate className="mt-1" />
       </label>
-      <button onClick={create} disabled={busy || !title.trim()}
+      <label className="flex items-center gap-2 text-xs text-gray-400">
+        <input type="checkbox" checked={favorite} onChange={e => setFavorite(e.target.checked)} />
+        Show this item on the project Home dashboard
+      </label>
+      <label className="block">
+        <span className="text-[11px] uppercase tracking-wide text-gray-500">Collaborators</span>
+        <SearchableMultiSelect values={collaborators} onChange={setCollaborators} loadOptions={loadCollaborators}
+          placeholder="Search or add collaborators" ariaLabel="Collaborators" allowCreate className="mt-1" />
+      </label>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className="text-[11px] uppercase tracking-wide text-gray-500">Branches</span>
+          <SearchableMultiSelect values={branches} onChange={setBranches} loadOptions={loadBranches}
+            placeholder="Search or add branches" ariaLabel="Branches" allowCreate className="mt-1" />
+        </label>
+        <label className="block">
+          <span className="text-[11px] uppercase tracking-wide text-gray-500">Worktrees</span>
+          <SearchableMultiSelect values={worktrees} onChange={setWorktrees} loadOptions={loadWorktrees}
+            placeholder="Search or add worktrees" ariaLabel="Worktrees" allowCreate className="mt-1" />
+        </label>
+      </div>
+      <label className="block">
+        <span className="text-[11px] uppercase tracking-wide text-gray-500">Pull requests</span>
+        <SearchableMultiSelect values={pullRequests} onChange={setPullRequests} loadOptions={loadPullRequests}
+          placeholder="Search or add PR URLs / references" ariaLabel="Pull requests" allowCreate className="mt-1" />
+      </label>
+      {activeWithoutOwner && (
+        <div role="alert" className="rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          In-progress work should have one primary {presentation.assigneeLabel.toLowerCase()}.
+        </div>
+      )}
+      {bugDetailsIncomplete && (
+        <div role="alert" className="rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          Bugs should include reproduction steps, expected outcome, and actual outcome. Complete those fields, or file an explicit exception.
+        </div>
+      )}
+      <button onClick={() => create()} disabled={busy || !title.trim() || activeWithoutOwner || bugDetailsIncomplete}
         className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm disabled:opacity-50">
         {busy && <Loader2 size={14} className="animate-spin" />} {presentation.createActionLabel}
       </button>
+      {(activeWithoutOwner || bugDetailsIncomplete) && (
+        <button onClick={() => create(true)} disabled={busy || !title.trim()}
+          className="w-full rounded border border-amber-600/60 px-3 py-2 text-sm text-amber-200 hover:bg-amber-500/10 disabled:opacity-50">
+          {presentation.createActionLabel} with policy override
+        </button>
+      )}
     </Modal>
   )
 }

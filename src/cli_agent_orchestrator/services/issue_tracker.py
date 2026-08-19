@@ -51,7 +51,16 @@ from cli_agent_orchestrator.clients.database import (
 
 logger = logging.getLogger(__name__)
 
-ITEM_KINDS: Tuple[str, ...] = ("issue", "feature")
+ITEM_KINDS: Tuple[str, ...] = (
+    "project",
+    "bug",
+    "feature",
+    "milestone",
+    "goal",
+    "epic",
+    "story",
+    "task",
+)
 
 # Workflow vocabulary. `open` and `closed` are the load-bearing ends; the
 # middle states exist so a long-running project can distinguish "nobody has
@@ -100,13 +109,20 @@ _EDITABLE_FIELDS: Tuple[str, ...] = (
     "component",
     "assignee",
     "reporter",
+    "collaborators",
+    "branches",
+    "worktrees",
+    "pull_requests",
     "failing_command",
     "reproduction_steps",
+    "expected_outcome",
+    "actual_outcome",
     "evidence",
     "resolution",
     "duplicate_of",
     "labels",
     "kind",
+    "favorite",
     # Atomic label deltas (cond-0394). One strategy per update: `labels`
     # replaces the whole set, `clear_labels` replaces it with nothing, and
     # add/remove apply a delta — the three never combine.
@@ -119,6 +135,8 @@ MAX_TITLE = 300
 MAX_BODY = 200_000
 MAX_LABELS = 32
 MAX_LABEL_LEN = 64
+MAX_CONTEXT_VALUES = 64
+MAX_CONTEXT_VALUE_LEN = 4096
 
 
 class TrackerError(Exception):
@@ -197,6 +215,43 @@ def _parse_labels(raw: Optional[str]) -> List[str]:
     if not isinstance(parsed, list):
         return []
     return [str(item) for item in parsed if isinstance(item, (str, int, float))]
+
+
+def _parse_string_list(raw: Optional[str]) -> List[str]:
+    """Read a stored JSON string list, tolerating historical malformed data."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, str) and item.strip()]
+
+
+def normalise_string_list(values: Optional[Iterable[Any]], *, field: str) -> List[str]:
+    """Trim, de-duplicate, and bound an open-ended repeatable issue field."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    out: List[str] = []
+    seen = set()
+    for item in values:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        if len(text) > MAX_CONTEXT_VALUE_LEN:
+            raise TrackerError(
+                "invalid",
+                f"{field} value too long (max {MAX_CONTEXT_VALUE_LEN} characters)",
+            )
+        seen.add(text)
+        out.append(text)
+        if len(out) > MAX_CONTEXT_VALUES:
+            raise TrackerError("invalid", f"too many {field} values (max {MAX_CONTEXT_VALUES})")
+    return out
 
 
 def normalise_labels(labels: Optional[Iterable[Any]]) -> List[str]:
@@ -495,7 +550,7 @@ def list_projects(*, include_archived: bool = False) -> List[Dict[str, Any]]:
         by_kind_open: Dict[str, Dict[str, int]] = {k: {} for k in ITEM_KINDS}
         for iss in all_issues:
             pid = iss.project_id
-            kind = getattr(iss, "kind", "issue")
+            kind = getattr(iss, "kind", "bug")
             is_open = iss.status not in TERMINAL_STATUSES
             # all
             all_tallies[pid] = all_tallies.get(pid, 0) + 1
@@ -506,7 +561,7 @@ def list_projects(*, include_archived: bool = False) -> List[Dict[str, Any]]:
             if is_open:
                 by_kind_open[kind][pid] = by_kind_open[kind].get(pid, 0) + 1
             # legacy issue-only
-            if kind == "issue":
+            if kind == "bug":
                 tallies[pid] = tallies.get(pid, 0) + 1
                 if is_open:
                     open_tallies[pid] = open_tallies.get(pid, 0) + 1
@@ -548,9 +603,9 @@ def get_project(project_id: str) -> Dict[str, Any]:
         all_by_status: Dict[str, int] = {}
         by_kind: Dict[str, Any] = {k: {"total": 0, "open": 0, "by_status": {}} for k in ITEM_KINDS}
         for iss in all_issues:
-            kind = getattr(iss, "kind", "issue")
+            kind = getattr(iss, "kind", "bug")
             all_by_status[iss.status] = all_by_status.get(iss.status, 0) + 1
-            if kind == "issue":
+            if kind == "bug":
                 by_status[iss.status] = by_status.get(iss.status, 0) + 1
             # per-kind
             sub = by_kind[kind]
@@ -872,7 +927,7 @@ def _issue_row(row: TrackerIssueModel) -> Dict[str, Any]:
     return {
         "key": row.key,
         "project_id": row.project_id,
-        "kind": getattr(row, "kind", "issue") or "issue",
+        "kind": getattr(row, "kind", "bug") or "bug",
         "title": row.title,
         "body": row.body or "",
         "status": row.status,
@@ -881,8 +936,14 @@ def _issue_row(row: TrackerIssueModel) -> Dict[str, Any]:
         "reporter": row.reporter,
         "assignee": row.assignee,
         "labels": _parse_labels(row.labels),
+        "collaborators": _parse_string_list(row.collaborators),
+        "branches": _parse_string_list(row.branches),
+        "worktrees": _parse_string_list(row.worktrees),
+        "pull_requests": _parse_string_list(row.pull_requests),
         "failing_command": row.failing_command,
         "reproduction_steps": row.reproduction_steps,
+        "expected_outcome": row.expected_outcome,
+        "actual_outcome": row.actual_outcome,
         "evidence": row.evidence,
         "resolution": row.resolution,
         "session_name": row.session_name,
@@ -890,6 +951,7 @@ def _issue_row(row: TrackerIssueModel) -> Dict[str, Any]:
         "source_path": row.source_path,
         "duplicate_of": row.duplicate_of,
         "origin": row.origin,
+        "favorite": bool(getattr(row, "favorite", False)),
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
         "closed_at": _iso(row.closed_at),
@@ -931,8 +993,14 @@ def create_issue(
     reporter: Optional[str] = None,
     assignee: Optional[str] = None,
     labels: Optional[Iterable[Any]] = None,
+    collaborators: Optional[Iterable[Any]] = None,
+    branches: Optional[Iterable[Any]] = None,
+    worktrees: Optional[Iterable[Any]] = None,
+    pull_requests: Optional[Iterable[Any]] = None,
     failing_command: Optional[str] = None,
     reproduction_steps: Optional[str] = None,
+    expected_outcome: Optional[str] = None,
+    actual_outcome: Optional[str] = None,
     evidence: Optional[str] = None,
     session_name: Optional[str] = None,
     terminal_id: Optional[str] = None,
@@ -942,7 +1010,10 @@ def create_issue(
     created_at: Optional[datetime] = None,
     cwd: Optional[str] = None,
     alias: Optional[str] = None,
-    kind: str = "issue",
+    kind: str = "bug",
+    favorite: bool = False,
+    force: bool = False,
+    enforce_bug_details: bool = False,
 ) -> Dict[str, Any]:
     """File an issue.
 
@@ -968,9 +1039,26 @@ def create_issue(
             "invalid",
             "duplicate status requires duplicate_of canonical key (set via update after creation)",
         )
-    if kind == "feature" and failing_command:
-        raise TrackerError("invalid", "failing_command is not allowed for feature requests")
+    bug_details = {
+        "reproduction_steps": reproduction_steps,
+        "expected_outcome": expected_outcome,
+        "actual_outcome": actual_outcome,
+    }
+    for field, value in bug_details.items():
+        if value is not None and len(str(value)) > MAX_BODY:
+            raise TrackerError("invalid", f"{field} too long (max {MAX_BODY} chars)")
     label_list = normalise_labels(labels)
+    collaborator_list = normalise_string_list(collaborators, field="collaborators")
+    branch_list = normalise_string_list(branches, field="branches")
+    worktree_list = normalise_string_list(worktrees, field="worktrees")
+    pull_request_list = normalise_string_list(pull_requests, field="pull_requests")
+    assignee = str(assignee or "").strip() or None
+    if status == "in-progress" and assignee is None and not force:
+        raise TrackerError(
+            "invalid",
+            "in-progress issues require an assignee; assign an owner or pass force=true "
+            "to record an explicit exception",
+        )
 
     resolution = resolve_project(
         project=project_id, session=session_name, alias=alias, cwd=cwd or source_path
@@ -980,6 +1068,25 @@ def create_issue(
             "unresolved",
             "cannot resolve a project for this issue: pass an explicit project, "
             "or register a path/session/git_remote scope for this filing site",
+        )
+
+    # Filing policy is evaluated only after the destination is known. A caller
+    # filing from an unregistered site needs the actionable scope error first;
+    # supplying diagnostics cannot make an unresolved write legal.
+    if kind == "bug":
+        missing = [name for name, value in bug_details.items() if not str(value or "").strip()]
+        if missing and enforce_bug_details and not force:
+            raise TrackerError(
+                "invalid",
+                "bug filings should include reproduction_steps, expected_outcome, and "
+                f"actual_outcome; missing {', '.join(missing)} (pass force=true to record "
+                "an explicit exception)",
+            )
+    elif failing_command or any(str(value or "").strip() for value in bug_details.values()):
+        raise TrackerError(
+            "invalid",
+            "failing_command, reproduction_steps, expected_outcome, and actual_outcome "
+            "are supported only for bugs",
         )
 
     if key is not None:
@@ -1013,15 +1120,22 @@ def create_issue(
             severity=severity,
             component=(component or None),
             reporter=(reporter or None),
-            assignee=(assignee or None),
+            assignee=assignee,
             labels=json.dumps(label_list),
+            collaborators=json.dumps(collaborator_list),
+            branches=json.dumps(branch_list),
+            worktrees=json.dumps(worktree_list),
+            pull_requests=json.dumps(pull_request_list),
             failing_command=(failing_command or None),
             reproduction_steps=(reproduction_steps or None),
+            expected_outcome=(expected_outcome or None),
+            actual_outcome=(actual_outcome or None),
             evidence=(evidence or None),
             session_name=(session_name or None),
             terminal_id=(terminal_id or None),
             source_path=(source_path or None),
             origin=str(origin or "api"),
+            favorite=bool(favorite),
             created_at=stamp,
             updated_at=stamp,
             closed_at=stamp if status in TERMINAL_STATUSES else None,
@@ -1056,6 +1170,10 @@ def create_feature(
     reporter: Optional[str] = None,
     assignee: Optional[str] = None,
     labels: Optional[Iterable[Any]] = None,
+    collaborators: Optional[Iterable[Any]] = None,
+    branches: Optional[Iterable[Any]] = None,
+    worktrees: Optional[Iterable[Any]] = None,
+    pull_requests: Optional[Iterable[Any]] = None,
     failing_command: Optional[str] = None,
     evidence: Optional[str] = None,
     session_name: Optional[str] = None,
@@ -1066,6 +1184,7 @@ def create_feature(
     created_at: Optional[datetime] = None,
     cwd: Optional[str] = None,
     alias: Optional[str] = None,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Create a feature request (thin wrapper over create_issue with kind=feature)."""
     if failing_command:
@@ -1080,6 +1199,10 @@ def create_feature(
         reporter=reporter,
         assignee=assignee,
         labels=labels,
+        collaborators=collaborators,
+        branches=branches,
+        worktrees=worktrees,
+        pull_requests=pull_requests,
         failing_command=None,
         evidence=evidence,
         session_name=session_name,
@@ -1091,6 +1214,7 @@ def create_feature(
         cwd=cwd,
         alias=alias,
         kind="feature",
+        force=force,
     )
 
 
@@ -1154,7 +1278,7 @@ def list_issues(
     limit: int = 100,
     offset: int = 0,
     order: str = "created_desc",
-    kind: Optional[str] = "issue",
+    kind: Optional[str] = "bug",
 ) -> Dict[str, Any]:
     """List issues with filters, returning rows plus the unpaged total.
 
@@ -1215,6 +1339,8 @@ def list_issues(
                 | TrackerIssueModel.key.ilike(needle)
                 | TrackerIssueModel.failing_command.ilike(needle)
                 | TrackerIssueModel.reproduction_steps.ilike(needle)
+                | TrackerIssueModel.expected_outcome.ilike(needle)
+                | TrackerIssueModel.actual_outcome.ilike(needle)
                 | TrackerIssueModel.evidence.ilike(needle)
             )
 
@@ -1288,6 +1414,8 @@ def update_issue(
     *,
     actor: Optional[str] = None,
     expected_updated_at: Optional[str] = None,
+    force: bool = False,
+    drop_previous_assignee: bool = False,
     **changes: Any,
 ) -> Dict[str, Any]:
     """Apply field changes, recording one audit event per field that moved.
@@ -1331,6 +1459,8 @@ def update_issue(
                     key,
                     actor=actor,
                     expected_updated_at=expected_updated_at,
+                    force=force,
+                    drop_previous_assignee=drop_previous_assignee,
                     changes=dict(changes),
                 )
         except _UpdateRaceLost:
@@ -1374,6 +1504,8 @@ def _apply_issue_update(
     *,
     actor: Optional[str],
     expected_updated_at: Optional[str],
+    force: bool,
+    drop_previous_assignee: bool,
     changes: Dict[str, Any],
 ) -> Dict[str, Any]:
     """One attempt of ``update_issue``: read, validate, guarded write, events.
@@ -1395,6 +1527,24 @@ def _apply_issue_update(
                 details={"current_updated_at": _iso(row.updated_at)},
             )
 
+    target_status = row.status
+    if "status" in changes and changes["status"] is not None:
+        target_status = _validate_choice(changes["status"], STATUSES, "status")
+    target_assignee = row.assignee
+    if "assignee" in changes and changes["assignee"] is not None:
+        target_assignee = str(changes["assignee"]).strip() or None
+    if (
+        not force
+        and target_status == "in-progress"
+        and target_assignee is None
+        and ("status" in changes or "assignee" in changes)
+    ):
+        raise TrackerError(
+            "invalid",
+            "in-progress issues require an assignee; assign an owner in the same edit "
+            "or pass force=true to record an explicit exception",
+        )
+
     now = _utcnow()
     events: List[TrackerEventModel] = []
     assignments: Dict[str, Any] = {}
@@ -1413,6 +1563,26 @@ def _apply_issue_update(
             )
         )
 
+    # A reassignment is a handoff by default. Preserve the former owner in the
+    # collaborator paper trail whether or not the caller also replaces the
+    # collaborator list. The explicit override suppresses only this addition;
+    # it never clears collaborators already present.
+    if (
+        "assignee" in changes
+        and changes["assignee"] is not None
+        and row.assignee
+        and target_assignee != row.assignee
+        and not drop_previous_assignee
+    ):
+        collaborators = (
+            normalise_string_list(changes["collaborators"], field="collaborators")
+            if changes.get("collaborators") is not None
+            else _parse_string_list(row.collaborators)
+        )
+        if row.assignee not in collaborators:
+            collaborators.append(row.assignee)
+        changes["collaborators"] = collaborators
+
     # Duplicate status requires canonical key (P1)
     if (
         changes.get("status") == "duplicate"
@@ -1426,25 +1596,59 @@ def _apply_issue_update(
         # Remove null/empty kind from changes so loop skips it
         del changes["kind"]
     target_kind = (
-        _validate_kind(changes["kind"]) if "kind" in changes else getattr(row, "kind", "issue")
+        _validate_kind(changes["kind"]) if "kind" in changes else getattr(row, "kind", "bug")
     )
-    if (
-        target_kind == "feature"
-        and "failing_command" in changes
-        and changes["failing_command"]
-        and str(changes["failing_command"]).strip()
-    ):
-        raise TrackerError("invalid", "failing_command is not allowed for feature requests")
-    # If switching to feature and existing failing_command would be retained, clear it
-    # Also handles explicit null (m1) where loop would skip; empty string is handled by loop
-    if (
-        target_kind == "feature"
-        and getattr(row, "failing_command", None)
-        and "kind" in changes
-        and ("failing_command" not in changes or changes.get("failing_command") is None)
-    ):
-        # Auto-clear stale failing_command when becoming a feature
-        _record("failing_command", row.failing_command, None)
+    bug_only_fields = (
+        "failing_command",
+        "reproduction_steps",
+        "expected_outcome",
+        "actual_outcome",
+    )
+    if target_kind != "bug":
+        supplied = [
+            field
+            for field in bug_only_fields
+            if field in changes and str(changes.get(field) or "").strip()
+        ]
+        if supplied:
+            raise TrackerError(
+                "invalid",
+                f"{', '.join(supplied)} are supported only for bugs",
+            )
+        # A type conversion has a complete exit: diagnostic fields that no
+        # longer apply are cleared in the same transition.
+        if "kind" in changes:
+            for field in bug_only_fields:
+                old = getattr(row, field, None)
+                if old:
+                    _record(field, old, None)
+                changes.pop(field, None)
+    else:
+        required_bug_fields = (
+            "reproduction_steps",
+            "expected_outcome",
+            "actual_outcome",
+        )
+        validates_bug_details = (
+            ("kind" in changes and getattr(row, "kind", "bug") != "bug")
+            or any(
+                field in changes and not str(changes.get(field) or "").strip()
+                for field in required_bug_fields
+            )
+        )
+        if validates_bug_details and not force:
+            missing = []
+            for field in required_bug_fields:
+                value = changes.get(field, getattr(row, field, None))
+                if not str(value or "").strip():
+                    missing.append(field)
+            if missing:
+                raise TrackerError(
+                    "invalid",
+                    "bugs should include reproduction_steps, expected_outcome, and "
+                    f"actual_outcome; missing {', '.join(missing)} (pass force=true "
+                    "to record an explicit exception)",
+                )
 
     # Atomic label deltas. The merged set is computed from the row read inside
     # this transaction — and if that read proves stale at write time, the
@@ -1518,13 +1722,19 @@ def _as_text(value: Any) -> Optional[str]:
 def _coerce_field(row: TrackerIssueModel, field: str, raw: Any, *, db: Any) -> Tuple[Any, Any]:
     """Validate one field change and return ``(old, new)`` in stored form."""
     if field == "kind":
-        return getattr(row, "kind", "issue"), _validate_kind(raw)
+        return getattr(row, "kind", "bug"), _validate_kind(raw)
     if field == "status":
         return row.status, _validate_choice(raw, STATUSES, "status")
     if field == "severity":
         return row.severity, _validate_choice(raw, SEVERITIES, "severity")
+    if field == "favorite":
+        if not isinstance(raw, bool):
+            raise TrackerError("invalid", "favorite must be a boolean")
+        return bool(getattr(row, "favorite", False)), raw
     if field == "labels":
         return row.labels, json.dumps(normalise_labels(raw))
+    if field in {"collaborators", "branches", "worktrees", "pull_requests"}:
+        return getattr(row, field), json.dumps(normalise_string_list(raw, field=field))
     if field == "title":
         text = str(raw).strip()
         if not text:
@@ -1537,6 +1747,11 @@ def _coerce_field(row: TrackerIssueModel, field: str, raw: Any, *, db: Any) -> T
         if len(text) > MAX_BODY:
             raise TrackerError("invalid", f"body too long (max {MAX_BODY} chars)")
         return row.body, text
+    if field in {"reproduction_steps", "expected_outcome", "actual_outcome"}:
+        text = str(raw)
+        if len(text) > MAX_BODY:
+            raise TrackerError("invalid", f"{field} too long (max {MAX_BODY} chars)")
+        return getattr(row, field), (text if text.strip() else None)
     if field == "duplicate_of":
         text = str(raw).strip().lower()
         if not text:
@@ -1893,7 +2108,16 @@ def field_options(
     a JSON array; the other fields are scalar columns, but the response shape
     is identical for every picker.
     """
-    allowed = {"label", "component", "assignee", "reporter"}
+    allowed = {
+        "label",
+        "component",
+        "assignee",
+        "reporter",
+        "collaborator",
+        "branch",
+        "worktree",
+        "pull_request",
+    }
     if field not in allowed:
         raise TrackerError(
             "invalid",
@@ -1909,7 +2133,18 @@ def field_options(
 
     counts: Dict[str, Dict[str, int]] = {}
     for row in rows:
-        values = _parse_labels(row.labels) if field == "label" else [getattr(row, field)]
+        if field == "label":
+            values = _parse_labels(row.labels)
+        elif field in {"collaborator", "branch", "worktree", "pull_request"}:
+            column = {
+                "collaborator": "collaborators",
+                "branch": "branches",
+                "worktree": "worktrees",
+                "pull_request": "pull_requests",
+            }[field]
+            values = _parse_string_list(getattr(row, column))
+        else:
+            values = [getattr(row, field)]
         for raw in values:
             value = str(raw or "").strip()
             if not value or (needle and needle not in value.casefold()):
@@ -1981,74 +2216,141 @@ def label_facets(project_id: str) -> Dict[str, Any]:
 
 
 def claim_issue(issue_key: str, *, claimant: str) -> Dict[str, Any]:
-    """Claim an open issue for a worker by assigning it, atomically.
+    """Claim an issue and begin active work in one guarded transition.
 
-    The claim is one conditional UPDATE — SQLite serialises writers, so two
-    cooperative workers cannot both win the same open issue. A retry by the
-    current claimant is idempotent; a different claimant gets a conflict that
-    reports the observed owner, and ``unclaim_issue`` is the ordinary exit that
-    makes a later claim succeed. Terminal issues refuse: claiming work that is
-    already closed is a stale observation, and the refusal says which status
-    was seen.
+    ``open`` and ``triage`` work is promoted to ``in-progress`` as it is
+    assigned. More specific nonterminal states such as ``blocked`` are
+    preserved. A retry by the current claimant is idempotent, and also repairs
+    an old open claim by promoting it. A different claimant gets a conflict
+    naming the owner that was actually observed.
     """
     key = str(issue_key or "").strip().lower()
     who = str(claimant or "").strip()
     if not who:
         raise TrackerError("invalid", "claimant must not be empty")
-    with SessionLocal() as db:
-        now = _utcnow()
-        claimed = (
-            db.query(TrackerIssueModel)
-            .filter(
-                TrackerIssueModel.key == key,
-                TrackerIssueModel.assignee.is_(None),
-                TrackerIssueModel.status.notin_(tuple(TERMINAL_STATUSES)),
-            )
-            .update(
-                {TrackerIssueModel.assignee: who, TrackerIssueModel.updated_at: now},
-                synchronize_session=False,
-            )
-        )
-        if claimed:
-            db.add(
-                TrackerEventModel(
-                    issue_key=key,
-                    actor=who,
-                    kind="claim",
-                    field="assignee",
-                    old_value=None,
-                    new_value=who,
-                    created_at=now,
+    attempts = 8
+    for attempt in range(attempts):
+        try:
+            with SessionLocal() as db:
+                row = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
+                if row is None:
+                    raise TrackerError("not-found", f"no such issue: {key}")
+                observed_status = row.status
+                if row.assignee == who:
+                    if observed_status in {"open", "triage"}:
+                        now = _utcnow()
+                        promoted = (
+                            db.query(TrackerIssueModel)
+                            .filter(
+                                TrackerIssueModel.key == key,
+                                TrackerIssueModel.assignee == who,
+                                TrackerIssueModel.status == observed_status,
+                            )
+                            .update(
+                                {
+                                    TrackerIssueModel.status: "in-progress",
+                                    TrackerIssueModel.updated_at: now,
+                                },
+                                synchronize_session=False,
+                            )
+                        )
+                        if promoted != 1:
+                            db.rollback()
+                            raise _UpdateRaceLost()
+                        db.add(
+                            TrackerEventModel(
+                                issue_key=key,
+                                actor=who,
+                                kind="field",
+                                field="status",
+                                old_value=observed_status,
+                                new_value="in-progress",
+                                created_at=now,
+                            )
+                        )
+                        db.commit()
+                        row = _require_issue(db, key)
+                    payload = _issue_row(row)
+                    payload["claimed"] = True
+                    payload["already_claimed"] = True
+                    return payload
+                if row.assignee:
+                    raise TrackerError(
+                        "conflict",
+                        f"{key} is already claimed by {row.assignee}",
+                        details={"observed_assignee": row.assignee},
+                    )
+                if observed_status in TERMINAL_STATUSES:
+                    raise TrackerError(
+                        "conflict",
+                        f"{key} is {observed_status}; terminal issues cannot be claimed",
+                        details={"observed_status": observed_status},
+                    )
+
+                now = _utcnow()
+                next_status = (
+                    "in-progress" if observed_status in {"open", "triage"} else observed_status
                 )
-            )
-            db.commit()
-            row = _require_issue(db, key)
-            payload = _issue_row(row)
-            payload["claimed"] = True
-            payload["already_claimed"] = False
-            return payload
-        # The conditional write matched nothing. Re-read the record and state
-        # what was actually observed — "claimed by someone" and "already
-        # closed" are different answers with different exits.
-        row = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
-        if row is None:
-            raise TrackerError("not-found", f"no such issue: {key}")
-        if row.assignee == who:
-            payload = _issue_row(row)
-            payload["claimed"] = True
-            payload["already_claimed"] = True
-            return payload
-        if row.assignee:
-            raise TrackerError(
-                "conflict",
-                f"{key} is already claimed by {row.assignee}",
-                details={"observed_assignee": row.assignee},
-            )
-        raise TrackerError(
-            "conflict",
-            f"{key} is {row.status}; terminal issues cannot be claimed",
-            details={"observed_status": row.status},
-        )
+                claimed = (
+                    db.query(TrackerIssueModel)
+                    .filter(
+                        TrackerIssueModel.key == key,
+                        TrackerIssueModel.assignee.is_(None),
+                        TrackerIssueModel.status == observed_status,
+                    )
+                    .update(
+                        {
+                            TrackerIssueModel.assignee: who,
+                            TrackerIssueModel.status: next_status,
+                            TrackerIssueModel.updated_at: now,
+                        },
+                        synchronize_session=False,
+                    )
+                )
+                if claimed != 1:
+                    db.rollback()
+                    raise _UpdateRaceLost()
+                db.add(
+                    TrackerEventModel(
+                        issue_key=key,
+                        actor=who,
+                        kind="claim",
+                        field="assignee",
+                        old_value=None,
+                        new_value=who,
+                        created_at=now,
+                    )
+                )
+                if next_status != observed_status:
+                    db.add(
+                        TrackerEventModel(
+                            issue_key=key,
+                            actor=who,
+                            kind="field",
+                            field="status",
+                            old_value=observed_status,
+                            new_value=next_status,
+                            created_at=now,
+                        )
+                    )
+                db.commit()
+                row = _require_issue(db, key)
+                payload = _issue_row(row)
+                payload["claimed"] = True
+                payload["already_claimed"] = False
+                return payload
+        except _UpdateRaceLost:
+            time.sleep(0.005 * (attempt + 1))
+        except OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            time.sleep(0.005 * (attempt + 1))
+    raise TrackerError(
+        "conflict",
+        f"{key} is being updated concurrently and the claim could not be "
+        f"applied after {attempts} attempts; retry it",
+    )
 
 
 def unclaim_issue(issue_key: str, *, actor: Optional[str] = None) -> Dict[str, Any]:
@@ -2056,7 +2358,9 @@ def unclaim_issue(issue_key: str, *, actor: Optional[str] = None) -> Dict[str, A
 
     Any actor may release: a supervisor cleaning up after a dead worker must
     not be blocked by the claim it is clearing. Idempotent — unclaiming an
-    unclaimed issue succeeds without writing an event.
+    unclaimed issue succeeds without writing an event. Releasing active work
+    also returns ``in-progress`` to ``open`` in the same guarded write, so the
+    tracker does not manufacture an active but ownerless issue.
 
     The release is one conditional UPDATE guarded on the assignee this call
     actually observed, pinned for the whole request. Two concurrent releasers
@@ -2090,14 +2394,21 @@ def unclaim_issue(issue_key: str, *, actor: Optional[str] = None) -> Dict[str, A
                     payload["was_claimed"] = False
                     return payload
                 now = _utcnow()
+                observed_status = row.status
+                next_status = "open" if observed_status == "in-progress" else observed_status
                 released = (
                     db.query(TrackerIssueModel)
                     .filter(
                         TrackerIssueModel.key == key,
                         TrackerIssueModel.assignee == observed,
+                        TrackerIssueModel.status == observed_status,
                     )
                     .update(
-                        {TrackerIssueModel.assignee: None, TrackerIssueModel.updated_at: now},
+                        {
+                            TrackerIssueModel.assignee: None,
+                            TrackerIssueModel.status: next_status,
+                            TrackerIssueModel.updated_at: now,
+                        },
                         synchronize_session=False,
                     )
                 )
@@ -2115,6 +2426,18 @@ def unclaim_issue(issue_key: str, *, actor: Optional[str] = None) -> Dict[str, A
                         created_at=now,
                     )
                 )
+                if next_status != observed_status:
+                    db.add(
+                        TrackerEventModel(
+                            issue_key=key,
+                            actor=actor,
+                            kind="field",
+                            field="status",
+                            old_value=observed_status,
+                            new_value=next_status,
+                            created_at=now,
+                        )
+                    )
                 db.commit()
                 db.refresh(row)
                 payload = _issue_row(row)
@@ -2137,10 +2460,10 @@ def unclaim_issue(issue_key: str, *, actor: Optional[str] = None) -> Dict[str, A
     )
 
 
-def stats(project_id: Optional[str] = None, *, kind: Optional[str] = "issue") -> Dict[str, Any]:
+def stats(project_id: Optional[str] = None, *, kind: Optional[str] = "bug") -> Dict[str, Any]:
     """Aggregate counts for a project (or the whole install).
 
-    Default ``kind="issue"`` preserves legacy issue-only counts.
+    Default ``kind="bug"`` returns bug-only counts.
     ``kind=None`` or ``kind="all"`` aggregates across all kinds and also returns ``by_kind``.
     """
     with SessionLocal() as db:
@@ -2181,7 +2504,7 @@ def stats(project_id: Optional[str] = None, *, kind: Optional[str] = "issue") ->
             all_rows = base.all()
         by_kind: Dict[str, Dict[str, Any]] = {}
         for k in ITEM_KINDS:
-            subset = [r for r in all_rows if getattr(r, "kind", "issue") == k]
+            subset = [r for r in all_rows if getattr(r, "kind", "bug") == k]
             by_status_k: Dict[str, int] = {}
             by_sev_k: Dict[str, int] = {}
             for r in subset:
@@ -2200,7 +2523,7 @@ def stats(project_id: Optional[str] = None, *, kind: Optional[str] = "issue") ->
 
 
 def render_markdown(
-    project_id: str, *, open_only: bool = True, kind: Optional[str] = "issue"
+    project_id: str, *, open_only: bool = True, kind: Optional[str] = "bug"
 ) -> str:
     """Render an issue log as markdown.
 
@@ -2239,11 +2562,11 @@ def render_markdown(
     ]
     for issue in issues:
         severity = f"[{issue['severity']}] " if issue["severity"] != "unset" else ""
-        kind_prefix = f"[{issue.get('kind', 'issue')}] " if kind is None or kind == "all" else ""
+        kind_prefix = f"[{issue.get('kind', 'bug')}] " if kind is None or kind == "all" else ""
         lines.append(f"## {issue['key']} — {kind_prefix}{severity}{issue['title']}")
         lines.append("")
         if kind is None or kind == "all":
-            lines.append(f"- **kind:** {issue.get('kind', 'issue')}")
+            lines.append(f"- **kind:** {issue.get('kind', 'bug')}")
         lines.append(f"- **filed:** {issue['created_at']}")
         lines.append(f"- **reporter:** {issue['reporter'] or 'unknown'}")
         lines.append(f"- **status:** {issue['status']}")
@@ -2251,6 +2574,14 @@ def render_markdown(
             lines.append(f"- **component:** {issue['component']}")
         if issue["assignee"]:
             lines.append(f"- **assignee:** {issue['assignee']}")
+        if issue["collaborators"]:
+            lines.append(f"- **collaborators:** {', '.join(issue['collaborators'])}")
+        if issue["branches"]:
+            lines.append(f"- **branches:** {', '.join(issue['branches'])}")
+        if issue["worktrees"]:
+            lines.append(f"- **worktrees:** {', '.join(issue['worktrees'])}")
+        if issue["pull_requests"]:
+            lines.append(f"- **pull requests:** {', '.join(issue['pull_requests'])}")
         if issue["labels"]:
             lines.append(f"- **labels:** {', '.join(issue['labels'])}")
         if issue["failing_command"]:
@@ -2259,6 +2590,16 @@ def render_markdown(
             lines.append("- **reproduction steps:**")
             lines.append("")
             lines.append(issue["reproduction_steps"].rstrip())
+        if issue["expected_outcome"]:
+            lines.append("- **expected outcome:**")
+            lines.append("")
+            lines.append(issue["expected_outcome"].rstrip())
+        if issue["actual_outcome"]:
+            lines.append("- **actual outcome:**")
+            lines.append("")
+            lines.append(issue["actual_outcome"].rstrip())
+        if issue.get("favorite"):
+            lines.append("- **project Home:** favorite")
         if issue["evidence"]:
             lines.append(f"- **evidence:** {issue['evidence']}")
         if issue["resolution"]:

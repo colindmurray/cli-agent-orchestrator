@@ -46,7 +46,25 @@ def runner():
 
 
 def run(runner, group, *args):
-    result = runner.invoke(group, list(args))
+    argv = list(args)
+    # Most historical tests intentionally use terse bug fixtures because the
+    # behavior under test is unrelated to filing hygiene. Record that policy
+    # departure explicitly; the dedicated filing-policy test below invokes the
+    # command directly so this helper cannot mask a regression.
+    if group is issue_cli.issue and argv[:1] == ["file"] and "--force" not in argv:
+        try:
+            kind = argv[argv.index("--kind") + 1]
+        except ValueError:
+            kind = "bug"
+        if kind == "bug":
+            required = (
+                ("--reproduction", "--reproduction-file"),
+                ("--expected-outcome",),
+                ("--actual-outcome",),
+            )
+            if not all(any(option in argv for option in alternatives) for alternatives in required):
+                argv.append("--force")
+    result = runner.invoke(group, argv)
     assert result.exit_code == 0, result.output + str(result.exception)
     return result.output
 
@@ -144,6 +162,38 @@ class TestIssueCommands:
         )
         assert result.exit_code == 1
         assert "[unresolved]" in result.output
+
+    def test_bug_filing_requires_diagnostics_unless_explicitly_overridden(self, runner):
+        refused = runner.invoke(
+            issue_cli.issue,
+            ["file", "--title", "underspecified", "--project", "cao-system"],
+        )
+        assert refused.exit_code == 1
+        assert "reproduction_steps" in refused.output
+
+        complete = runner.invoke(
+            issue_cli.issue,
+            [
+                "file",
+                "--title",
+                "complete",
+                "--project",
+                "cao-system",
+                "--reproduction",
+                "1. start the server",
+                "--expected-outcome",
+                "the server starts",
+                "--actual-outcome",
+                "the process exits",
+            ],
+        )
+        assert complete.exit_code == 0, complete.output + str(complete.exception)
+
+        forced = runner.invoke(
+            issue_cli.issue,
+            ["file", "--title", "explicit exception", "--project", "cao-system", "--force"],
+        )
+        assert forced.exit_code == 0, forced.output + str(forced.exception)
 
     def test_the_full_lifecycle(self, runner):
         run(
@@ -550,7 +600,7 @@ class TestListDiscoveryFlags:
         )
         assert [i["title"] for i in payload["issues"]] == ["bare"]
 
-    def test_kind_selects_issue_feature_or_all_with_issue_the_default(self, runner):
+    def test_kind_selects_bug_feature_or_all_with_bug_the_default(self, runner):
         run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
         run(
             runner,
