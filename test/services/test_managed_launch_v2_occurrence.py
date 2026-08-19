@@ -333,6 +333,8 @@ def test_http_api_v2_reservations_surface_task_occurrence_id(
     data2 = res2.json()
     assert data2["task_occurrence_id"] is None
 
-    get_res2 = client.get(f"/managed-launch/v2/reservations/{payload_without_occ['reservation_id']}")
+    get_res2 = client.get(
+        f"/managed-launch/v2/reservations/{payload_without_occ['reservation_id']}"
+    )
     assert get_res2.status_code == 200
     assert get_res2.json()["task_occurrence_id"] is None
