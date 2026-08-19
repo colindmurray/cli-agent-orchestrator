@@ -12,6 +12,22 @@ import { Bot, Home, Clock, Settings, Brain, FolderGit2, CheckCircle, XCircle, In
 
 type TabKey = 'home' | 'agents' | 'flows' | 'settings' | 'memory' | 'projects'
 
+// Tracker deep links — ?project=…&view=wayfinder&map=… etc. — are owned by
+// the Projects tab, but the tab itself is not in the URL. Derive the landing
+// tab from the query so a hard refresh or a copied link opens Projects
+// instead of stranding the restored tracker state under Home; bare / stays
+// Home. These param names are exactly the set ProjectsPanel reads and writes.
+const TRACKER_PARAMS = ['project', 'kind', 'key', 'view', 'map', 'label', 'unlabeled']
+
+function tabForLocation(): TabKey {
+  try {
+    const params = new URLSearchParams(window.location.search)
+    return TRACKER_PARAMS.some(p => params.has(p)) ? 'projects' : 'home'
+  } catch {
+    return 'home' // non-browser test env
+  }
+}
+
 // Appended, never inserted: Alt+N numbering is muscle memory, and inserting a
 // tab in the middle silently repoints every existing shortcut. Memory is
 // conditional, so Projects sits after it and takes the next free number.
@@ -56,7 +72,7 @@ function Snackbar() {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<TabKey>('home')
+  const [tab, setTab] = useState<TabKey>(tabForLocation)
   // Default false (fail-closed): a dead backend hides the tab rather than showing a broken panel
   const [memoryEnabled, setMemoryEnabled] = useState(false)
   const { sessions, connected, fetchSessions } = useStore()
@@ -70,6 +86,16 @@ export default function App() {
       .catch(() => {})
     const interval = setInterval(fetchSessions, 10000)
     return () => clearInterval(interval)
+  }, [])
+
+  // Back/Forward restoration: the history entries ProjectsPanel and
+  // DashboardHome push carry no tab, so re-derive it from the popped URL —
+  // tracker query state lands on Projects, anything else (bare / included)
+  // on Home.
+  useEffect(() => {
+    const handler = () => setTab(tabForLocation())
+    window.addEventListener('popstate', handler)
+    return () => window.removeEventListener('popstate', handler)
   }, [])
 
   // Keyboard shortcuts: Alt+1-N over the visible tabs
