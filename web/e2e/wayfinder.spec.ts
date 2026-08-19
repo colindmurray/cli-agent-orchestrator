@@ -14,9 +14,9 @@ const SHOTS = "e2e/__screenshots__/wayfinder";
 const VOCAB = {
   statuses: ["open", "triage", "in-progress", "blocked", "resolved", "closed", "wontfix", "duplicate"],
   terminal_statuses: ["closed", "duplicate", "wontfix"],
-  statuses_by_kind: { issue: ["open", "triage", "in-progress", "blocked", "resolved", "closed", "wontfix", "duplicate"], feature: ["open", "triage", "in-progress", "blocked", "resolved", "closed", "wontfix", "duplicate"] },
-  terminal_statuses_by_kind: { issue: ["closed", "duplicate", "wontfix"], feature: ["closed", "duplicate", "wontfix"] },
-  item_kinds: ["issue", "feature"],
+  statuses_by_kind: { bug: ["open", "triage", "in-progress", "blocked", "resolved", "closed", "wontfix", "duplicate"], feature: ["open", "triage", "in-progress", "blocked", "resolved", "closed", "wontfix", "duplicate"] },
+  terminal_statuses_by_kind: { bug: ["closed", "duplicate", "wontfix"], feature: ["closed", "duplicate", "wontfix"] },
+  item_kinds: ["project", "bug", "feature", "milestone", "goal", "epic", "story", "task"],
   severities: ["P0", "P1", "P2", "P3", "P4", "unset"],
   scope_kinds: ["path", "session", "git_remote", "project_id"],
   link_kinds: ["blocks", "relates", "duplicates", "caused-by", "part-of"],
@@ -28,7 +28,7 @@ function issue(over: Record<string, unknown>) {
     key: "",
     title: "",
     project_id: "cao-system",
-    kind: "issue",
+    kind: "bug",
     body: "",
     status: "open",
     severity: "unset",
@@ -36,8 +36,14 @@ function issue(over: Record<string, unknown>) {
     reporter: null,
     assignee: null,
     labels: [],
+    collaborators: [],
+    branches: [],
+    worktrees: [],
+    pull_requests: [],
     failing_command: null,
     reproduction_steps: null,
+    expected_outcome: null,
+    actual_outcome: null,
     evidence: null,
     resolution: null,
     session_name: null,
@@ -45,6 +51,7 @@ function issue(over: Record<string, unknown>) {
     source_path: null,
     duplicate_of: null,
     origin: "api",
+    favorite: false,
     created_at: "2026-08-10T00:00:00Z",
     updated_at: "2026-08-10T00:00:00Z",
     closed_at: null,
@@ -121,7 +128,7 @@ const PROJECT = {
     total: 5,
     open: 4,
     by_status: { open: 4, closed: 1 },
-    by_kind: { issue: { total: 5, open: 4 }, feature: { total: 0, open: 0 } },
+    by_kind: { bug: { total: 5, open: 4 }, feature: { total: 0, open: 0 } },
     all_total: 5,
     all_open: 4,
   },
@@ -150,6 +157,16 @@ async function stubTracker(page: Page, options?: TrackerStubOptions) {
 
     if (path === "/tracker/vocabulary") return json(VOCAB);
     if (path === "/tracker/projects" && method === "GET") return json([PROJECT]);
+    if (path === `/tracker/projects/${PROJECT.id}/dashboard`) {
+      return json({
+        project_id: PROJECT.id,
+        issues: { open: 4, in_progress: 0, favorites: [], urgent: [], recent: [] },
+        sessions: { total: 0, active: 0, historical: 0, recent: [] },
+      });
+    }
+    if (path === `/tracker/projects/${PROJECT.id}/sessions`) {
+      return json({ project_id: PROJECT.id, total: 0, active: 0, historical: 0, sessions: [] });
+    }
     if (path === `/tracker/projects/${PROJECT.id}/labels`) return json(FACETS);
     if (path === `/tracker/projects/${PROJECT.id}/options`) {
       const field = url.searchParams.get("field") ?? "label";
@@ -223,6 +240,7 @@ async function gotoWayfinderTab(page: Page) {
   await page.goto("/");
   await page.getByRole("tab", { name: "Projects" }).click();
   await page.getByText("CAO System").first().waitFor();
+  await page.getByRole("tab", { name: /Issues/ }).click();
   const tab = page.getByRole("tab", { name: "Wayfinder" });
   await tab.evaluate((el) => el.scrollIntoView({ block: "center" }));
   await tab.click();
@@ -273,6 +291,7 @@ test("advanced label search drives the list without rendering the whole vocabula
   await page.goto("/");
   await page.getByRole("tab", { name: "Projects" }).click();
   await page.getByText("CAO System").first().waitFor();
+  await page.getByRole("tab", { name: /Issues/ }).click();
   await expect(page.getByTestId("label-filter-bar")).toHaveCount(0);
   const advanced = page.getByRole("button", { name: /Advanced filters/ });
   await advanced.scrollIntoViewIfNeeded();
@@ -367,7 +386,7 @@ test("keyboard and axe basics on the map view", async ({ page }) => {
   await row.focus();
   await page.keyboard.press("Enter");
   const detail = page.getByTestId("wayfinder-detail");
-  await expect(detail.getByLabel("Issue title")).toHaveValue("migrate the store");
+  await expect(detail.getByLabel("Bug title")).toHaveValue("migrate the store");
   const scan = await new AxeBuilder({ page }).include('[data-testid="map-view"]').analyze();
   expect(scan.violations.filter((v) => v.impact === "serious" || v.impact === "critical")).toEqual([]);
 });
