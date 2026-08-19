@@ -1429,8 +1429,9 @@ class TaskOccurrenceHandoffModel(Base):
     from_generation = Column(Text, nullable=True)
     # The donor's occurrence revision at the instant the packet digest was
     # taken. A transfer compares it: if the donor moved while held, the packet
-    # describes a round the recipient is not actually inheriting.
-    donor_revision = Column(Integer, nullable=False)
+    # describes a round the recipient is not actually inheriting. NULL means
+    # the handoff was begun by a build that did not pin the donor revision.
+    donor_revision = Column(Integer, nullable=True)
     # The catch-up packet is bytes the conductor owns; this is only its digest
     # and the derived control id that makes its delivery exactly-once.
     packet_digest = Column(Text, nullable=False)
@@ -2955,7 +2956,7 @@ def _sqlite_add_column_spec(column: Any) -> Optional[str]:
 
 
 def _reconcile_columns_from_model(conn: Any, model: Any) -> None:
-    """Add every column ``model`` declares that its existing table lacks.
+    """Bring the store's table to a shape the model can read and write.
 
     ``CREATE TABLE IF NOT EXISTS`` is a silent no-op against a table that
     already exists: it compares no shapes and raises nothing.  A store created
@@ -2977,25 +2978,179 @@ def _reconcile_columns_from_model(conn: Any, model: Any) -> None:
     at build time.  The store is then left a column short, and every managed
     write on it is refused as handoff-hold-undecidable until the table is
     rebuilt — degraded and loud, not silently "successful".
+
+    Two ways the shape can be unrepairable by ``ALTER``:
+
+    * the model declares a column the store lacks and SQLite cannot ``ADD`` it
+      (NOT NULL with no default, primary key or unique);
+    * the store carries a NOT NULL, no-default column the model does not
+      declare, so every INSERT the current code attempts fails.
+
+    When either holds, the table is rebuilt.  The new table is the model's own
+    shape (rendered from the model so it is identical to ``create_all``), plus
+    every store-only column carried over verbatim, except that a NOT NULL with
+    no default is relaxed to nullable.  No column is dropped, no row is
+    dropped, no value is invented.  A store-only column that already has a
+    default is carried unchanged.
+
+    The rebuild is atomic: an explicit exclusive transaction
+    (``isolation_level = None``, ``BEGIN IMMEDIATE`` … ``COMMIT``, ``ROLLBACK``
+    on any exception, restoring the prior ``isolation_level``) so interruption
+    leaves the original table and rows intact.  Rows are copied with
+    ``INSERT INTO <new> (<common>) SELECT <common> FROM <old>``, the old table
+    is dropped and the new is renamed, indexes from ``sqlite_master`` are
+    re-created, and the row count is verified inside the same transaction.
+
+    If a rebuild still cannot produce a legal row — a missing NOT NULL,
+    no-default column on a table that does have rows — the typed refusal is
+    kept and the message states what was observed: the row count counted, the
+    columns involved, and why no value can be supplied.
     """
+
     table = model.__tablename__
-    present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    table_info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    present = {row[1] for row in table_info}
     if not present:
         return
+    model_cols = {col.name: col for col in model.__table__.columns}
     specs = {
-        column.name: _sqlite_add_column_spec(column)
-        for column in model.__table__.columns
-        if column.name not in present
+        name: _sqlite_add_column_spec(col)
+        for name, col in model_cols.items()
+        if name not in present
     }
     blocked = sorted(name for name, spec in specs.items() if spec is None)
+
+    # Store-only columns: present but not in model.
+    store_only_names = present - set(model_cols.keys())
+    info_by_name = {row[1]: row for row in table_info}
+    store_only_unaddable: list[str] = []
+    for name in store_only_names:
+        row = info_by_name[name]
+        notnull = row[3]
+        dflt = row[4]
+        pk = row[5]
+        # A store-only NOT NULL column with no default would make every current
+        # INSERT fail (the model never writes it). It must be relaxed to nullable
+        # on rebuild. Primary-key columns are already constrained by being PK.
+        if notnull and dflt is None and not pk:
+            store_only_unaddable.append(name)
+    store_only_unaddable = sorted(store_only_unaddable)
+
+    needs_rebuild = bool(blocked or store_only_unaddable)
+    if not needs_rebuild:
+        for _name, spec in specs.items():
+            # spec is not None here
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {spec}")  # type: ignore[arg-type]
+        return
+
+    # Rebuild: non-lossy by construction (model shape + every store-only column
+    # carried, NOT NULL no-default relaxed to nullable) and atomic (one exclusive
+    # transaction). The row count and the blocked-column refusal are evaluated
+    # inside the exclusive transaction so they are taken under the same lock
+    # that the copy and verification run under.
+    reason_parts: list[str] = []
     if blocked:
-        raise RuntimeError(
-            f"{table} on this store is missing {blocked}, which SQLite cannot "
-            "ADD COLUMN to a populated table. Make the column nullable, give it "
-            "a server_default, or rebuild the table explicitly."
-        )
-    for name, spec in specs.items():
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {spec}")
+        reason_parts.append(f"missing model columns {blocked}")
+    if store_only_unaddable:
+        reason_parts.append(f"store-only NOT NULL columns without default {store_only_unaddable}")
+    reason = "; ".join(reason_parts) if reason_parts else "shape mismatch"
+
+    new_table = f"{table}__cao_rebuild"
+    old_isolation = conn.isolation_level
+    # Use explicit transaction so DDL is transactional.
+    conn.isolation_level = None  # type: ignore[assignment]
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Row count taken under the exclusive lock so the blocked-column
+            # decision and the copy verification use the same observed count.
+            row_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+            if blocked and row_count > 0:
+                # No value can be supplied for the missing NOT NULL columns on existing rows.
+                raise RuntimeError(
+                    f"{table} on this store has {row_count} rows and is missing {blocked}, "
+                    "which SQLite cannot ADD COLUMN — NOT NULL with no default requires a "
+                    "value for existing rows that cannot be invented. Make the column "
+                    "nullable, give it a server_default, or rebuild the table explicitly. "
+                    f"Row count observed: {row_count}"
+                )
+
+            # Capture this table's indexes before the drop (sqlite_master sql is not NULL for created indexes).
+            indexes = conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+                (table,),
+            ).fetchall()
+
+            conn.execute(f"DROP TABLE IF EXISTS {new_table}")
+
+            # Model columns rendered via SQLAlchemy so the shape is identical to create_all.
+            model_specs = [
+                str(CreateColumn(col).compile(dialect=_SQLITE_DDL_DIALECT)).strip()
+                for col in model.__table__.columns
+            ]
+
+            # Store-only columns carried verbatim, except NOT NULL no-default relaxed to nullable.
+            store_specs: list[str] = []
+            for name in sorted(store_only_names):
+                row = info_by_name[name]
+                col_type = row[2]
+                notnull = row[3]
+                dflt = row[4]
+                pk = row[5]
+                if notnull and dflt is None and not pk:
+                    notnull_str = ""
+                else:
+                    notnull_str = " NOT NULL" if notnull else ""
+                dflt_str = f" DEFAULT {dflt}" if dflt is not None else ""
+                pk_str = " PRIMARY KEY" if pk else ""
+                store_specs.append(f"{name} {col_type}{notnull_str}{dflt_str}{pk_str}")
+
+            all_specs = model_specs + store_specs
+            # Primary key constraint: CreateColumn does not emit it for a PK column
+            # (SQLAlchemy declares it as a table-level PRIMARY KEY), so add it
+            # explicitly to match create_all.
+            pk_names = [col.name for col in model.__table__.primary_key.columns]
+            if pk_names:
+                all_specs.append(f"PRIMARY KEY ({', '.join(pk_names)})")
+            conn.execute(f"CREATE TABLE {new_table} ({', '.join(all_specs)})")
+
+            # Copy every common column (i.e. every column the old table had).
+            # Ordered by cid to keep byte-identity for the repro.
+            common_ordered = [row[1] for row in sorted(table_info, key=lambda r: r[0])]
+            if common_ordered:
+                cols_csv = ", ".join(common_ordered)
+                conn.execute(f"INSERT INTO {new_table} ({cols_csv}) SELECT {cols_csv} FROM {table}")
+
+            new_count = conn.execute(f"SELECT COUNT(*) FROM {new_table}").fetchone()[0]
+            if new_count != row_count:
+                raise RuntimeError(
+                    f"{table} rebuild row count mismatch: expected {row_count}, got {new_count}"
+                )
+
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {new_table} RENAME TO {table}")
+
+            for _idx_name, idx_sql in indexes:
+                # idx_sql already names `table`; it was dropped with the old table, so re-create it.
+                conn.execute(idx_sql)
+
+            conn.execute("COMMIT")
+            logger.info(
+                "rebuilt %s (%s rows) — %s; carried store-only columns %s",
+                table,
+                row_count,
+                reason,
+                sorted(store_only_names),
+            )
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+    finally:
+        conn.isolation_level = old_isolation  # type: ignore[assignment]
 
 
 def _migrate_operation_journal() -> None:
@@ -3359,7 +3514,7 @@ _TASK_OCCURRENCE_HANDOFFS_DDL = (
     "from_incarnation_id TEXT NOT NULL, "
     "from_terminal_id TEXT NOT NULL, "
     "from_generation TEXT, "
-    "donor_revision INTEGER NOT NULL, "
+    "donor_revision INTEGER, "
     "packet_digest TEXT NOT NULL, "
     "packet_control_id TEXT NOT NULL, "
     "quiescence_json TEXT NOT NULL, "
