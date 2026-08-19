@@ -26,6 +26,7 @@ from cli_agent_orchestrator.models.managed_launch_v2 import (
     ManagedLaunchV2BindRequest,
     ManagedLaunchV2ReserveRequest,
 )
+from cli_agent_orchestrator.services import codex_native_bootstrap
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
 from cli_agent_orchestrator.services import stable_agent_roster as roster
 from cli_agent_orchestrator.services.managed_launch import ManagedLaunchConflict
@@ -122,6 +123,15 @@ def _ready_bridge_state(record, monkeypatch):
         "provider_receipt_kind": "codex-thread-start",
         "provider_transcript_sha256": "a" * 64,
         "provider_version": "0.146.0",
+        # Codex bind requires runtime proof that a fresh process resumed this
+        # exact thread; the bootstrap puts it on every real receipt.
+        "native_resume_adoption": {
+            "schema": codex_native_bootstrap.RESUME_ADOPTION_SCHEMA,
+            "method": "thread/resume",
+            "adopted_session_id": session_id,
+            "adopted_in_fresh_process": True,
+            "sent_no_turn": True,
+        },
         "model_input_ready": True,
         "reservation_id": record["reservation_id"],
         "terminal_id": record["terminal_id"],
