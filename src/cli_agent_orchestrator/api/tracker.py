@@ -26,6 +26,7 @@ from cli_agent_orchestrator.security.auth import (
     require_any_scope,
 )
 from cli_agent_orchestrator.services import issue_tracker as tracker
+from cli_agent_orchestrator.services import project_dashboard
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +330,59 @@ async def get_project(project_id: str, _scopes: List[str] = _READ) -> Dict[str, 
         raise _http(exc) from exc
 
 
+@router.get("/tracker/projects/{project_id}/dashboard")
+async def project_home_dashboard(
+    project_id: str,
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    try:
+        return project_dashboard.project_home(project_id)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/tracker/projects/{project_id}/sessions")
+async def project_sessions(
+    project_id: str,
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    try:
+        return project_dashboard.project_sessions(project_id)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/tracker/projects/{project_id}/sessions/{session_name}")
+async def project_session_detail(
+    project_id: str,
+    session_name: str,
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    try:
+        return project_dashboard.project_session(project_id, session_name)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/tracker/projects/{project_id}/sessions/{session_name}/terminals/{terminal_id}/log")
+async def project_terminal_log(
+    project_id: str,
+    session_name: str,
+    terminal_id: str,
+    mode: str = Query("last", pattern="^(last|full)$"),
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    try:
+        return project_dashboard.terminal_log(
+            project_id,
+            session_name,
+            terminal_id,
+            mode=mode,
+        )
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
 @router.patch("/tracker/projects/{project_id}")
 async def update_project(
     project_id: str,
@@ -448,7 +502,9 @@ async def list_issues(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     order: str = Query("created_desc"),
-    kind: Optional[str] = Query(None, description="project|bug|feature|milestone|goal|epic|story|task|all"),
+    kind: Optional[str] = Query(
+        None, description="project|bug|feature|milestone|goal|epic|story|task|all"
+    ),
     _scopes: List[str] = _READ,
 ) -> Dict[str, Any]:
     effective_kind = kind if kind is not None else "bug"
@@ -542,9 +598,8 @@ async def update_issue(
     changes = {
         name: value
         for name, value in body.model_dump().items()
-        if name not in (
-            "actor", "expected_updated_at", "force", "drop_previous_assignee"
-        ) and name in body.model_fields_set
+        if name not in ("actor", "expected_updated_at", "force", "drop_previous_assignee")
+        and name in body.model_fields_set
     }
     try:
         existing = tracker.get_issue(issue_key)
@@ -820,9 +875,7 @@ async def update_feature(
         changes = {
             name: value
             for name, value in body.model_dump().items()
-            if name not in (
-                "actor", "expected_updated_at", "force", "drop_previous_assignee"
-            )
+            if name not in ("actor", "expected_updated_at", "force", "drop_previous_assignee")
             and name in body.model_fields_set
         }
         return tracker.update_issue(

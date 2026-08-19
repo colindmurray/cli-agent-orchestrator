@@ -916,6 +916,86 @@ export interface TrackerProject {
   scopes?: TrackerScope[]
 }
 
+export interface TrackerIssueBrief {
+  key: string
+  kind: string
+  title: string
+  status: string
+  severity: string
+  assignee: string | null
+  favorite: boolean
+  session_name: string | null
+  terminal_id: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface TrackerProjectSessionSummary {
+  name: string
+  status: string
+  live: boolean
+  associated_by: string[]
+  worker_count: number
+  active_workers: number
+  providers: string[]
+  workdirs: string[]
+  issue_count: number
+  artifact_count: number
+  first_seen: string | null
+  last_seen: string | null
+}
+
+export interface TrackerProjectSessionTerminal {
+  terminal_id: string
+  session_name: string
+  name: string | null
+  provider: string | null
+  agent_profile: string | null
+  caller_id: string | null
+  generation: string | null
+  native_session_id: string | null
+  protocol_vintage: string | null
+  lifecycle_state: string | null
+  status: string | null
+  last_active: string | null
+  working_directory?: string | null
+  pane_id?: string | null
+  wedged?: boolean
+  issue_keys: string[]
+  snapshot_available: boolean
+  log_available: boolean
+}
+
+export interface TrackerProjectSessionDetail extends TrackerProjectSessionSummary {
+  terminals: TrackerProjectSessionTerminal[]
+  issues: TrackerIssueBrief[]
+}
+
+export interface TrackerProjectSessions {
+  project_id: string
+  total: number
+  active: number
+  historical: number
+  sessions: TrackerProjectSessionSummary[]
+}
+
+export interface TrackerProjectHome {
+  project_id: string
+  issues: {
+    open: number
+    in_progress: number
+    favorites: TrackerIssueBrief[]
+    urgent: TrackerIssueBrief[]
+    recent: TrackerIssueBrief[]
+  }
+  sessions: {
+    total: number
+    active: number
+    historical: number
+    recent: TrackerProjectSessionSummary[]
+  }
+}
+
 export interface TrackerComment {
   id: number
   author: string | null
@@ -1554,6 +1634,23 @@ export const api = {
     fetchJSON<TrackerProject[]>(`/tracker/projects${includeArchived ? '?include_archived=true' : ''}`),
   getTrackerProject: (id: string) =>
     fetchJSON<TrackerProject>(`/tracker/projects/${encodeURIComponent(id)}`),
+  getTrackerProjectHome: (id: string) =>
+    fetchJSON<TrackerProjectHome>(`/tracker/projects/${encodeURIComponent(id)}/dashboard`),
+  getTrackerProjectSessions: (id: string) =>
+    fetchJSON<TrackerProjectSessions>(`/tracker/projects/${encodeURIComponent(id)}/sessions`),
+  getTrackerProjectSession: (id: string, sessionName: string) =>
+    fetchJSON<{ project_id: string; session: TrackerProjectSessionDetail }>(
+      `/tracker/projects/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionName)}`,
+    ),
+  getTrackerProjectTerminalLog: (
+    id: string,
+    sessionName: string,
+    terminalId: string,
+    mode: 'last' | 'full' = 'last',
+  ) => fetchJSON<{ output: string; mode: string; truncated: boolean; source: string }>(
+    `/tracker/projects/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionName)}` +
+    `/terminals/${encodeURIComponent(terminalId)}/log?mode=${mode}`,
+  ),
   createTrackerProject: (body: {
     name: string
     id?: string

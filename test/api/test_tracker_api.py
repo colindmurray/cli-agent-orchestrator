@@ -6,19 +6,24 @@ from a service refusal to an HTTP status a client can branch on, and PATCH
 semantics where "field absent" and "field sent empty" mean different things.
 """
 
+import json
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from cli_agent_orchestrator.clients.database import Base
+from cli_agent_orchestrator.clients.database import Base, TerminalModel
 from cli_agent_orchestrator.services import issue_tracker as tracker
+from cli_agent_orchestrator.services import project_dashboard
 
 
 @pytest.fixture(autouse=True)
 def db(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path}/tracker-api.db")
     Base.metadata.create_all(bind=engine)
-    monkeypatch.setattr(tracker, "SessionLocal", sessionmaker(bind=engine))
+    sessions = sessionmaker(bind=engine)
+    monkeypatch.setattr(tracker, "SessionLocal", sessions)
+    monkeypatch.setattr(project_dashboard, "SessionLocal", sessions)
     yield
     engine.dispose()
 
@@ -85,6 +90,85 @@ class TestProjectRoutes:
         _issue(client)
         assert client.delete("/tracker/projects/cao-system").status_code == 409
         assert client.delete("/tracker/projects/cao-system?force=true").status_code == 200
+
+
+class TestProjectDashboardRoutes:
+    def test_home_highlights_favorites_priority_and_session_counts(
+        self, client, project, monkeypatch
+    ):
+        monkeypatch.setattr(
+            project_dashboard,
+            "get_backend",
+            lambda: type("Backend", (), {"list_sessions": lambda self: []})(),
+        )
+        favorite = _issue(client, title="release project", kind="project", favorite=True)
+        urgent = _issue(client, title="critical bug", severity="P0")
+
+        body = client.get("/tracker/projects/cao-system/dashboard").json()
+        assert body["issues"]["favorites"][0]["key"] == favorite["key"]
+        assert body["issues"]["urgent"][0]["key"] == urgent["key"]
+        assert body["sessions"]["total"] == 1
+        assert body["sessions"]["active"] == 0
+        assert body["sessions"]["historical"] == 1
+        assert body["sessions"]["recent"][0]["name"] == "cao-p1-closure"
+
+    def test_sessions_join_worker_history_and_archived_logs(
+        self, client, project, monkeypatch, tmp_path
+    ):
+        log_dir = tmp_path / "terminal-logs"
+        log_dir.mkdir()
+        monkeypatch.setattr(project_dashboard, "TERMINAL_LOG_DIR", log_dir)
+        monkeypatch.setattr(
+            project_dashboard,
+            "get_backend",
+            lambda: type("Backend", (), {"list_sessions": lambda self: []})(),
+        )
+        with project_dashboard.SessionLocal() as db:
+            db.add(
+                TerminalModel(
+                    id="deadbeef",
+                    tmux_session="cao-p1-closure",
+                    tmux_window="worker",
+                    provider="codex",
+                    agent_profile="reviewer",
+                    caller_id="feedface",
+                    native_session_id="native-1",
+                )
+            )
+            db.commit()
+        (log_dir / "deadbeef.snapshot.json").write_text(
+            json.dumps(
+                {
+                    "terminal_id": "deadbeef",
+                    "session_name": "cao-p1-closure",
+                    "window_name": "worker",
+                    "provider": "codex",
+                    "agent_profile": "reviewer",
+                    "caller_id": "feedface",
+                    "working_directory": str(project["repo"]),
+                }
+            ),
+            encoding="utf-8",
+        )
+        (log_dir / "deadbeef.scrollback").write_text("line one\nline two\n", encoding="utf-8")
+
+        listed = client.get("/tracker/projects/cao-system/sessions").json()
+        assert listed["total"] == 1
+        assert listed["sessions"][0]["worker_count"] == 1
+        assert listed["sessions"][0]["artifact_count"] == 2
+
+        detail = client.get("/tracker/projects/cao-system/sessions/cao-p1-closure").json()
+        worker = detail["session"]["terminals"][0]
+        assert worker["terminal_id"] == "deadbeef"
+        assert worker["native_session_id"] == "native-1"
+        assert worker["caller_id"] == "feedface"
+        assert worker["log_available"] is True
+
+        log = client.get(
+            "/tracker/projects/cao-system/sessions/cao-p1-closure/" "terminals/deadbeef/log"
+        ).json()
+        assert log["output"] == "line one\nline two"
+        assert log["source"] == "archived-scrollback"
 
 
 class TestResolveRouting:

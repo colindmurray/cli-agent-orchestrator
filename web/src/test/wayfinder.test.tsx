@@ -180,6 +180,16 @@ describe('Wayfinder view', () => {
   function respond(url: string, method: string): unknown {
     const path = url.split('?')[0]
     if (path === '/tracker/vocabulary') return VOCAB
+    if (path === '/tracker/projects/cao-system/dashboard') {
+      return {
+        project_id: 'cao-system',
+        issues: { open: 4, in_progress: 0, favorites: [], urgent: [], recent: [] },
+        sessions: { total: 0, active: 0, historical: 0, recent: [] },
+      }
+    }
+    if (path === '/tracker/projects/cao-system/sessions') {
+      return { project_id: 'cao-system', total: 0, active: 0, historical: 0, sessions: [] }
+    }
     if (path === '/tracker/projects/cao-system/labels') return FACETS
     if (path === '/tracker/projects/cao-system/options') {
       const params = new URLSearchParams(url.split('?')[1] ?? '')
@@ -241,14 +251,19 @@ describe('Wayfinder view', () => {
 
   afterEach(() => vi.restoreAllMocks())
 
+  async function openIssues() {
+    fireEvent.click(await screen.findByRole('tab', { name: /Issues/ }))
+  }
+
   async function openWayfinder() {
     render(<ProjectsPanel />)
-    await screen.findByText('CAO System')
+    await openIssues()
     fireEvent.click(await screen.findByRole('tab', { name: 'Wayfinder' }))
   }
 
   it('switches between List and Wayfinder views and persists it in the URL', async () => {
     render(<ProjectsPanel />)
+    await openIssues()
     expect(await screen.findByText('cond-0001')).toBeInTheDocument()  // list view rows
     fireEvent.click(await screen.findByRole('tab', { name: 'Wayfinder' }))
     expect(await screen.findByRole('listbox', { name: 'Wayfinder maps' })).toBeInTheDocument()
@@ -259,7 +274,7 @@ describe('Wayfinder view', () => {
 
   it('discovers labels with counts and filters by exact label', async () => {
     render(<ProjectsPanel />)
-    await screen.findByText('CAO System')
+    await openIssues()
     expect(screen.queryByText('effort:deploy')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
     fireEvent.focus(screen.getByRole('combobox', { name: 'Filter labels' }))
@@ -271,7 +286,7 @@ describe('Wayfinder view', () => {
 
   it('offers the unlabeled bucket with its count', async () => {
     render(<ProjectsPanel />)
-    await screen.findByText('CAO System')
+    await openIssues()
     fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
     fireEvent.click(screen.getByLabelText('Only items without labels'))
     await waitFor(() => expect(calls.some(c => c.url.includes('unlabeled=true'))).toBe(true))
@@ -513,7 +528,8 @@ describe('Wayfinder view', () => {
     await waitFor(() => expect(window.location.search).toContain('project=cao-system'))
     const depth = window.history.length
 
-    // list → wayfinder → map → ticket detail: one history entry each.
+    // home → issues → wayfinder → map → ticket detail: one history entry each.
+    await openIssues()
     fireEvent.click(await screen.findByRole('tab', { name: 'Wayfinder' }))
     await waitFor(() => expect(window.location.search).toContain('view=wayfinder'))
     fireEvent.click(await screen.findByRole('option', { name: /Find the deploy path/ }))
@@ -522,13 +538,13 @@ describe('Wayfinder view', () => {
     fireEvent.click(within(children).getByText('migrate the store'))
     await waitFor(() => expect(window.location.search).toContain('key=cond-0005'))
     expect(await screen.findByTestId('wayfinder-detail')).toBeInTheDocument()
-    expect(window.history.length).toBe(depth + 3)
+    expect(window.history.length).toBe(depth + 4)
 
     // Back: each step restores exactly the earlier state; the entry count
     // never grows (a duplicate push here is the regression this pins).
     window.history.back()
     await waitFor(() => expect(window.location.search).not.toContain('key='))
-    expect(window.history.length).toBe(depth + 3)
+    expect(window.history.length).toBe(depth + 4)
     await waitFor(() => expect(screen.queryByTestId('wayfinder-detail')).not.toBeInTheDocument())
     expect(screen.getByTestId('map-view')).toBeInTheDocument()
 
@@ -542,17 +558,25 @@ describe('Wayfinder view', () => {
     expect(screen.queryByRole('listbox', { name: 'Wayfinder maps' })).not.toBeInTheDocument()
     expect(await screen.findByText('research providers')).toBeInTheDocument()
 
+    // Back once more returns to the project Home before leaving the project.
+    window.history.back()
+    await waitFor(() => expect(window.location.search).not.toContain('section=issues'))
+    expect(await screen.findByTestId('project-home')).toBeInTheDocument()
+
     // The bare entry the session started from: every param clears, project
     // included — restoring it must not push a normalized duplicate either.
     window.history.back()
     await waitFor(() => expect(window.location.search).toBe(''))
-    expect(window.history.length).toBe(depth + 3)
+    expect(window.history.length).toBe(depth + 4)
     expect(await screen.findByText(/Select a project/)).toBeInTheDocument()
 
     // Forward: the whole chain replays — a duplicate push would have
     // truncated it.
     window.history.forward()
     await waitFor(() => expect(window.location.search).toContain('project=cao-system'))
+    expect(await screen.findByTestId('project-home')).toBeInTheDocument()
+    window.history.forward()
+    await waitFor(() => expect(window.location.search).toContain('section=issues'))
     expect(await screen.findByText('research providers')).toBeInTheDocument()
     window.history.forward()
     await waitFor(() => expect(window.location.search).toContain('view=wayfinder'))
@@ -571,6 +595,7 @@ describe('Wayfinder view', () => {
     await waitFor(() => expect(window.location.search).toContain('project=cao-system'))
     const depth = window.history.length
 
+    await openIssues()
     fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
     fireEvent.focus(screen.getByRole('combobox', { name: 'Filter labels' }))
     fireEvent.click(await screen.findByRole('option', { name: /effort:deploy/ }))
@@ -578,7 +603,7 @@ describe('Wayfinder view', () => {
     fireEvent.click(screen.getByLabelText('Only items without labels'))
     await waitFor(() => expect(window.location.search).toContain('unlabeled=1'))
     expect(window.location.search).not.toContain('label=')
-    expect(window.history.length).toBe(depth + 2)
+    expect(window.history.length).toBe(depth + 3)
 
     // Back to the label entry: unlabeled clears, the label filter returns,
     // and the list re-queries with it.
@@ -587,7 +612,7 @@ describe('Wayfinder view', () => {
     window.history.back()
     await waitFor(() => expect(window.location.search).toContain('label=effort%3Adeploy'))
     expect(window.location.search).not.toContain('unlabeled=')
-    expect(window.history.length).toBe(depth + 2)
+    expect(window.history.length).toBe(depth + 3)
     await waitFor(() => expect(labeledCalls()).toBeGreaterThan(before))
 
     // Back to the unfiltered entry, then forward through both again.

@@ -89,14 +89,16 @@ class TestFeatureRoutes:
 class TestFeatureKindGuards:
     def test_get_feature_on_an_issue_is_404(self, client, project):
         issue = client.post(
-            "/tracker/issues", json={"project_id": "cao-system", "title": "a defect"}
+            "/tracker/issues",
+            json={"project_id": "cao-system", "title": "a defect", "force": True},
         ).json()
         response = client.get(f"/tracker/features/{issue['key']}")
         assert response.status_code == 404
 
     def test_delete_feature_on_an_issue_is_404(self, client, project):
         issue = client.post(
-            "/tracker/issues", json={"project_id": "cao-system", "title": "a defect"}
+            "/tracker/issues",
+            json={"project_id": "cao-system", "title": "a defect", "force": True},
         ).json()
         response = client.delete(f"/tracker/features/{issue['key']}")
         assert response.status_code == 404

@@ -36,6 +36,15 @@ const PROJECT = {
   ],
 }
 
+const OTHER_PROJECT = {
+  ...PROJECT,
+  id: 'aegix',
+  name: 'Aegix',
+  issue_prefix: 'aeg',
+  counts: { total: 0, open: 0, by_status: {} },
+  scopes: [],
+}
+
 const ISSUE = {
   key: 'cond-0039',
   project_id: 'cao-system',
@@ -78,12 +87,81 @@ const RELATED_ISSUE = {
   title: 'restart the dashboard after reconnect',
 }
 
+const SESSION = {
+  name: 'cao-p1-closure',
+  status: 'historical',
+  live: false,
+  associated_by: ['session scope'],
+  worker_count: 1,
+  active_workers: 0,
+  providers: ['codex'],
+  workdirs: ['/Users/colin/Projects/cao-conductor'],
+  issue_count: 1,
+  artifact_count: 2,
+  first_seen: '2026-07-20T00:00:00Z',
+  last_seen: '2026-08-07T00:00:00Z',
+}
+
+const HOME_DASHBOARD = {
+  project_id: 'cao-system',
+  issues: {
+    open: 80,
+    in_progress: 3,
+    favorites: [],
+    urgent: [],
+    recent: [ISSUE],
+  },
+  sessions: { total: 1, active: 0, historical: 1, recent: [SESSION] },
+}
+
+const SESSION_DASHBOARD = {
+  project_id: 'cao-system',
+  total: 1,
+  active: 0,
+  historical: 1,
+  sessions: [SESSION],
+}
+
+const SESSION_DETAIL = {
+  ...SESSION,
+  terminals: [{
+    terminal_id: 'deadbeef', session_name: SESSION.name, name: 'worker', provider: 'codex',
+    agent_profile: 'reviewer', caller_id: 'feedface', generation: 'gen-1',
+    native_session_id: 'native-1', protocol_vintage: 'v2', lifecycle_state: 'historical',
+    status: 'historical', last_active: SESSION.last_seen, working_directory: SESSION.workdirs[0],
+    issue_keys: [ISSUE.key], snapshot_available: true, log_available: true,
+  }],
+  issues: [ISSUE],
+}
+
 describe('ProjectsPanel', () => {
   const mockFetch = vi.fn()
   const calls: Array<{ url: string; method: string; body: unknown }> = []
 
+  async function openIssues(): Promise<void> {
+    fireEvent.click(await screen.findByRole('tab', { name: /Issues/ }))
+  }
+
   function respond(url: string): unknown {
     if (url.startsWith('/tracker/vocabulary')) return VOCAB
+    if (url === '/tracker/projects/cao-system/dashboard') return HOME_DASHBOARD
+    if (url === '/tracker/projects/cao-system/sessions') return SESSION_DASHBOARD
+    if (url === '/tracker/projects/aegix/dashboard') {
+      return {
+        project_id: 'aegix',
+        issues: { open: 0, in_progress: 0, favorites: [], urgent: [], recent: [] },
+        sessions: { total: 0, active: 0, historical: 0, recent: [] },
+      }
+    }
+    if (url === '/tracker/projects/aegix/sessions') {
+      return { project_id: 'aegix', total: 0, active: 0, historical: 0, sessions: [] }
+    }
+    if (url === '/tracker/projects/cao-system/sessions/cao-p1-closure') {
+      return { project_id: 'cao-system', session: SESSION_DETAIL }
+    }
+    if (url.includes('/terminals/deadbeef/log')) {
+      return { output: 'archived output', mode: 'last', truncated: false, source: 'archived-scrollback' }
+    }
     if (url.startsWith('/tracker/projects/cao-system/options')) {
       const params = new URLSearchParams(url.split('?')[1] ?? '')
       const field = params.get('field') ?? 'label'
@@ -101,7 +179,8 @@ describe('ProjectsPanel', () => {
       return { project_id: 'cao-system', field, query: params.get('q') ?? '', matching_total: options.length, options }
     }
     if (url.startsWith('/tracker/projects/cao-system')) return PROJECT
-    if (url.startsWith('/tracker/projects')) return [PROJECT]
+    if (url === '/tracker/projects/aegix') return OTHER_PROJECT
+    if (url.startsWith('/tracker/projects')) return [PROJECT, OTHER_PROJECT]
     if (url.startsWith('/tracker/issues/cond-0039')) return ISSUE
     if (url.startsWith('/tracker/issues')) {
       const rows = url.includes('q=') ? [ISSUE, RELATED_ISSUE] : [ISSUE]
@@ -139,11 +218,36 @@ describe('ProjectsPanel', () => {
     expect(await screen.findByText('80 open / 208')).toBeInTheDocument()
   })
 
+  it('opens on a project home that summarizes work and session trajectory', async () => {
+    render(<ProjectsPanel />)
+    expect(await screen.findByTestId('project-home')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Home' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('Open work')).toBeInTheDocument()
+    expect(screen.getByText('Session trajectory')).toBeInTheDocument()
+  })
+
+  it('returns to Home whenever the operator switches projects', async () => {
+    render(<ProjectsPanel />)
+    await openIssues()
+    fireEvent.click(await screen.findByRole('button', { name: /Aegix/ }))
+    expect(await screen.findByTestId('project-home')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Home' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('inspects project session workers and their archived output', async () => {
+    render(<ProjectsPanel />)
+    fireEvent.click(await screen.findByRole('tab', { name: /Sessions/ }))
+    fireEvent.click(await screen.findByText('cao-p1-closure'))
+    expect(await screen.findByText('deadbeef')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Logs' }))
+    expect(await screen.findByText('archived output')).toBeInTheDocument()
+  })
+
   it('offers the severities the server declares, not a hard-coded set', async () => {
     // P0 arrived only because the real ledger turned out to use it. A
     // dropdown built from a local constant would have silently omitted it.
     render(<ProjectsPanel />)
-    await screen.findByText('CAO System')
+    await openIssues()
     fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
     const filters = await screen.findAllByRole('button', { name: 'P0' })
     expect(filters.length).toBeGreaterThan(0)
@@ -153,7 +257,7 @@ describe('ProjectsPanel', () => {
     render(<ProjectsPanel />)
     fireEvent.click(await screen.findByText(/2 scopes/))
     expect(await screen.findByText('/Users/colin/Projects/cao-conductor')).toBeInTheDocument()
-    expect(await screen.findByText('cao-p1-closure')).toBeInTheDocument()
+    expect((await screen.findAllByText('cao-p1-closure')).length).toBeGreaterThan(0)
   })
 
   it('renders an issue row with its key, severity and status', async () => {
@@ -252,6 +356,7 @@ describe('ProjectsPanel', () => {
 
   it('files a new bug against the selected project with an explicit diagnostic override', async () => {
     render(<ProjectsPanel />)
+    await openIssues()
     fireEvent.click(await screen.findByRole('button', { name: /Log bug/ }))
     fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'dashboard hangs on reconnect' } })
     expect(screen.getByRole('button', { name: /^File bug$/ })).toBeDisabled()
@@ -269,7 +374,7 @@ describe('ProjectsPanel', () => {
 
   it('keeps unbounded filters collapsed and loads suggestions only on demand', async () => {
     render(<ProjectsPanel />)
-    await screen.findByText('cond-0039')
+    await openIssues()
     expect(screen.queryByTestId('advanced-filters')).not.toBeInTheDocument()
     expect(calls.some(call => call.url.includes('/options'))).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
@@ -280,6 +385,7 @@ describe('ProjectsPanel', () => {
 
   it('creates a label through the searchable picker and files reproduction steps', async () => {
     render(<ProjectsPanel />)
+    await openIssues()
     fireEvent.click(await screen.findByRole('button', { name: /Log bug/ }))
     fireEvent.change(await screen.findByLabelText('Title'), { target: { value: 'reconnect fails' } })
     fireEvent.change(screen.getByLabelText('Reproduction steps'), {
@@ -328,7 +434,7 @@ describe('ProjectsPanel', () => {
     // The server reads repeated params as an OR; a comma list would be one
     // unknown status and 400.
     render(<ProjectsPanel />)
-    await screen.findByText('cond-0039')
+    await openIssues()
     fireEvent.click(screen.getByRole('button', { name: /Advanced filters/ }))
     fireEvent.click(await screen.findByRole('button', { name: 'blocked' }))
     await waitFor(() => expect(calls.some(c => c.url.includes('status=blocked'))).toBe(true))

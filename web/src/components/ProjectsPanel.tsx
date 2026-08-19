@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   api, ApiError, errorText, conflictDetail, TrackerProject, TrackerIssue, TrackerIssuePage,
-  TrackerVocabulary, TrackerScope, TrackerOptionField,
+  TrackerVocabulary, TrackerScope, TrackerOptionField, TrackerIssueBrief, TrackerProjectHome,
+  TrackerProjectSessions, TrackerProjectSessionDetail, TrackerProjectSessionSummary,
 } from '../api'
 import { linkPhrase } from '../lib/issueMap'
 import { useStore } from '../store'
@@ -11,7 +12,8 @@ import { SearchableMultiSelect, SearchableOption, SearchableSelect } from './Sea
 import {
   FolderGit2, Plus, Search, Trash2, X, Loader2, Archive, ChevronRight, MessageSquare,
   History, Link2, Save, FileDown, CircleDot, CheckCircle2, Lightbulb, Compass, List,
-  SlidersHorizontal, ChevronDown, Star,
+  SlidersHorizontal, ChevronDown, Star, Home, Activity, Users, GitBranch, TerminalSquare,
+  ExternalLink, Clock3, Box,
 } from 'lucide-react'
 
 /**
@@ -88,6 +90,7 @@ function Pill({ text, className }: { text: string; className: string }) {
 const ITEM_KINDS = ['project', 'bug', 'feature', 'milestone', 'goal', 'epic', 'story', 'task'] as const
 type ItemKind = typeof ITEM_KINDS[number]
 type TabKind = ItemKind | 'all'
+type ProjectTab = 'home' | 'issues' | 'sessions'
 
 const KIND_LABEL: Record<ItemKind, string> = {
   project: 'Project',
@@ -209,6 +212,10 @@ export function ProjectsPanel() {
   const [page, setPage] = useState<TrackerIssuePage | null>(null)
   const [issuesLoading, setIssuesLoading] = useState(false)
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [projectTab, setProjectTab] = useState<ProjectTab>('home')
+  const [homeDashboard, setHomeDashboard] = useState<TrackerProjectHome | null>(null)
+  const [sessionDashboard, setSessionDashboard] = useState<TrackerProjectSessions | null>(null)
+  const [dashboardLoading, setDashboardLoading] = useState(false)
 
   const [kind, setKind] = useState<TabKind>('bug')
   const [filtersByKind, setFiltersByKind] = useState<Record<TabKind, TabFilters>>(
@@ -241,6 +248,7 @@ export function ProjectsPanel() {
       const urlProject = params.get('project')
       const urlKind = params.get('kind') as TabKind | null
       const urlKey = params.get('key')
+      const urlSection = params.get('section') as ProjectTab | null
       const urlView = params.get('view')
       const urlMap = params.get('map')
       const urlLabels = params.getAll('label')
@@ -253,6 +261,8 @@ export function ProjectsPanel() {
         setKind(urlKind)
       }
       if (urlKey) setSelectedKey(urlKey)
+      if (urlKey || urlView === 'wayfinder') setProjectTab('issues')
+      else if (urlSection && ['home', 'issues', 'sessions'].includes(urlSection)) setProjectTab(urlSection)
       if (urlView === 'wayfinder') setView('wayfinder')
       if (urlMap) setMapKey(urlMap)
       setFiltersByKind(prev => ({
@@ -312,6 +322,32 @@ export function ProjectsPanel() {
     api.getTrackerProject(activeId).then(setProject).catch(() => setProject(null))
   }, [activeId])
 
+  const loadProjectDashboards = useCallback(async () => {
+    if (!activeId) {
+      setHomeDashboard(null)
+      setSessionDashboard(null)
+      return
+    }
+    setDashboardLoading(true)
+    try {
+      const [home, sessions] = await Promise.all([
+        api.getTrackerProjectHome(activeId),
+        api.getTrackerProjectSessions(activeId),
+      ])
+      if (!home?.issues || !home?.sessions || !Array.isArray(sessions?.sessions)) {
+        throw new Error('project dashboard response is incomplete')
+      }
+      setHomeDashboard(home)
+      setSessionDashboard(sessions)
+    } catch (err) {
+      showSnackbar({ type: 'error', message: `Could not load project activity: ${errorText(err)}` })
+    } finally {
+      setDashboardLoading(false)
+    }
+  }, [activeId, showSnackbar])
+
+  useEffect(() => { loadProjectDashboards() }, [loadProjectDashboards])
+
   const loadIssues = useCallback(async () => {
     if (!activeId) { setPage(null); return }
     setIssuesLoading(true)
@@ -358,6 +394,8 @@ export function ProjectsPanel() {
       const params = new URLSearchParams(window.location.search)
       if (activeId) params.set('project', activeId)
       else params.delete('project')
+      if (projectTab !== 'home') params.set('section', projectTab)
+      else params.delete('section')
       if (kind !== 'bug') params.set('kind', kind)
       else params.delete('kind')
       if (selectedKey) params.set('key', selectedKey)
@@ -392,7 +430,7 @@ export function ProjectsPanel() {
       if (newUrl === window.location.pathname + window.location.search) return
       window.history.pushState(null, '', newUrl)
     } catch { /* test env */ }
-  }, [activeId, kind, selectedKey, view, mapKey, currentFilters])
+  }, [activeId, projectTab, kind, selectedKey, view, mapKey, currentFilters])
 
   // Cleanup stale key on unmount so next test starts collapsed
   useEffect(() => {
@@ -418,6 +456,7 @@ export function ProjectsPanel() {
         const urlProject = params.get('project')
         const urlKind = params.get('kind') as TabKind | null
         const urlKey = params.get('key')
+        const urlSection = params.get('section') as ProjectTab | null
         const urlView = params.get('view')
         const urlMap = params.get('map')
         const urlLabels = params.getAll('label')
@@ -429,6 +468,8 @@ export function ProjectsPanel() {
         setActiveId(urlProject)
         setKind(tab)
         setSelectedKey(urlKey)
+        if (urlKey || urlView === 'wayfinder') setProjectTab('issues')
+        else setProjectTab(urlSection && ['home', 'issues', 'sessions'].includes(urlSection) ? urlSection : 'home')
         setView(urlView === 'wayfinder' ? 'wayfinder' : 'list')
         setMapKey(urlMap)
         setFiltersByKind(prev => ({
@@ -457,6 +498,7 @@ export function ProjectsPanel() {
   // Project change should reset all offsets.
   const handleSelectProject = useCallback((id: string) => {
     setActiveId(id)
+    setProjectTab('home')
     setSelectedKey(null)
     setFiltersByKind(prev => Object.fromEntries(
       Object.entries(prev).map(([itemKind, filters]) => [
@@ -477,8 +519,9 @@ export function ProjectsPanel() {
     await loadIssues()
     if (activeId) api.getTrackerProject(activeId).then(setProject).catch(() => {})
     api.listTrackerProjects(true).then(setProjects).catch(() => {})
+    loadProjectDashboards()
     setTrackerVersion(v => v + 1)
-  }, [loadIssues, activeId])
+  }, [loadIssues, activeId, loadProjectDashboards])
 
   const updateStatusFilter = useCallback((value: string) => {
     const list = currentFilters.statusFilter
@@ -612,6 +655,57 @@ export function ProjectsPanel() {
               />
             )}
 
+            <div className="mt-4 flex items-center gap-1 rounded-lg border border-gray-800 bg-gray-950/40 p-1" role="tablist" aria-label="Project section">
+              {([
+                { key: 'home', label: 'Home', icon: <Home size={14} /> },
+                { key: 'issues', label: 'Issues', icon: <CircleDot size={14} /> },
+                { key: 'sessions', label: 'Sessions', icon: <Activity size={14} /> },
+              ] as const).map(tab => (
+                <button
+                  key={tab.key}
+                  role="tab"
+                  aria-selected={projectTab === tab.key}
+                  onClick={() => {
+                    setProjectTab(tab.key)
+                    if (tab.key !== 'issues') setSelectedKey(null)
+                  }}
+                  className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-xs font-medium transition-colors ${
+                    projectTab === tab.key
+                      ? 'bg-gray-800 text-white shadow-sm'
+                      : 'text-gray-500 hover:bg-gray-900 hover:text-gray-300'
+                  }`}
+                >
+                  {tab.icon} {tab.label}
+                  {tab.key === 'issues' && (
+                    <span className="text-[10px] text-gray-500">{project.counts?.all_open ?? project.counts?.open ?? 0}</span>
+                  )}
+                  {tab.key === 'sessions' && sessionDashboard && (
+                    <span className="text-[10px] text-gray-500">{sessionDashboard.total}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+
+            {projectTab === 'home' && (
+              <ProjectHomePanel
+                dashboard={homeDashboard}
+                loading={dashboardLoading}
+                onOpenIssue={key => { setSelectedKey(key); setProjectTab('issues') }}
+                onOpenSessions={() => setProjectTab('sessions')}
+              />
+            )}
+
+            {projectTab === 'sessions' && activeId && (
+              <ProjectSessionsPanel
+                projectId={activeId}
+                data={sessionDashboard}
+                loading={dashboardLoading}
+                onOpenIssue={key => { setSelectedKey(key); setProjectTab('issues') }}
+              />
+            )}
+
+            {projectTab === 'issues' && (
+            <>
             {/* View switch — Wayfinder maps are first-class, not an easter egg
                 in the flat list. */}
             <div className="mt-4 flex gap-1.5" role="tablist" aria-label="Tracker view">
@@ -925,6 +1019,8 @@ export function ProjectsPanel() {
                 />
               </div>
             )}
+            </>
+            )}
           </>
         )}
       </section>
@@ -968,6 +1064,291 @@ export function ProjectsPanel() {
           }
         }}
       />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+
+function ProjectHomePanel({
+  dashboard, loading, onOpenIssue, onOpenSessions,
+}: {
+  dashboard: TrackerProjectHome | null
+  loading: boolean
+  onOpenIssue: (key: string) => void
+  onOpenSessions: () => void
+}) {
+  if (loading && !dashboard) {
+    return <div className="flex items-center justify-center gap-2 py-16 text-sm text-gray-500"><Loader2 size={14} className="animate-spin" /> Loading project activity…</div>
+  }
+  if (!dashboard) {
+    return <div className="py-16 text-center text-sm text-gray-500">Project activity is unavailable.</div>
+  }
+  const stats = [
+    { label: 'Open work', value: dashboard.issues.open, icon: <CircleDot size={16} />, tone: 'text-emerald-300' },
+    { label: 'In progress', value: dashboard.issues.in_progress, icon: <Activity size={16} />, tone: 'text-blue-300' },
+    { label: 'Sessions', value: dashboard.sessions.total, icon: <TerminalSquare size={16} />, tone: 'text-violet-300' },
+    { label: 'Live now', value: dashboard.sessions.active, icon: <Users size={16} />, tone: 'text-teal-300' },
+  ]
+  return (
+    <div className="mt-4 space-y-5" data-testid="project-home">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {stats.map(stat => (
+          <div key={stat.label} className="rounded-lg border border-gray-800 bg-gray-900/40 p-4">
+            <div className={`mb-3 ${stat.tone}`}>{stat.icon}</div>
+            <div className="text-2xl font-semibold text-white">{stat.value}</div>
+            <div className="mt-0.5 text-xs text-gray-500">{stat.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {dashboard.issues.favorites.length > 0 && (
+        <section className="rounded-lg border border-amber-500/20 bg-amber-500/[0.03] p-4">
+          <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-amber-300">
+            <Star size={14} fill="currentColor" /> Tracked work
+          </div>
+          <IssuePreviewList issues={dashboard.issues.favorites} onOpen={onOpenIssue} />
+        </section>
+      )}
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <section className="rounded-lg border border-gray-800 bg-gray-950/30 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="flex items-center gap-2 text-sm font-medium text-gray-200"><Activity size={14} className="text-orange-300" /> Priority attention</h3>
+            <span className="text-[11px] text-gray-600">Open P0 / P1</span>
+          </div>
+          {dashboard.issues.urgent.length > 0
+            ? <IssuePreviewList issues={dashboard.issues.urgent} onOpen={onOpenIssue} />
+            : <p className="py-5 text-center text-xs text-gray-600">No open P0 or P1 work.</p>}
+        </section>
+        <section className="rounded-lg border border-gray-800 bg-gray-950/30 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="flex items-center gap-2 text-sm font-medium text-gray-200"><Clock3 size={14} className="text-sky-300" /> Recently updated</h3>
+            <span className="text-[11px] text-gray-600">Across every item type</span>
+          </div>
+          {dashboard.issues.recent.length > 0
+            ? <IssuePreviewList issues={dashboard.issues.recent} onOpen={onOpenIssue} />
+            : <p className="py-5 text-center text-xs text-gray-600">No work has been filed yet.</p>}
+        </section>
+      </div>
+
+      <section className="rounded-lg border border-gray-800 bg-gray-950/30 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h3 className="flex items-center gap-2 text-sm font-medium text-gray-200"><TerminalSquare size={14} className="text-violet-300" /> Session trajectory</h3>
+            <p className="mt-0.5 text-[11px] text-gray-600">Current campaigns and durable worker history associated with this project.</p>
+          </div>
+          <button onClick={onOpenSessions} className="inline-flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300">View all <ChevronRight size={13} /></button>
+        </div>
+        {dashboard.sessions.recent.length > 0 ? (
+          <div className="grid gap-2 lg:grid-cols-2">
+            {dashboard.sessions.recent.map(session => (
+              <button key={session.name} onClick={onOpenSessions} className="rounded-lg border border-gray-800 bg-gray-900/50 p-3 text-left hover:border-gray-700">
+                <div className="flex items-center gap-2">
+                  <span className={`h-2 w-2 rounded-full ${session.live ? 'bg-emerald-400' : 'bg-gray-600'}`} />
+                  <code className="truncate text-xs text-gray-300">{session.name}</code>
+                  <span className="ml-auto text-[10px] text-gray-600">{session.worker_count} workers</span>
+                </div>
+                <div className="mt-2 truncate text-[11px] text-gray-600">{session.associated_by.join(' · ') || 'associated session'}</div>
+              </button>
+            ))}
+          </div>
+        ) : <p className="py-6 text-center text-xs text-gray-600">No CAO sessions are associated yet.</p>}
+      </section>
+    </div>
+  )
+}
+
+function IssuePreviewList({ issues, onOpen }: { issues: TrackerIssueBrief[]; onOpen: (key: string) => void }) {
+  return (
+    <div className="space-y-1.5">
+      {issues.map(issue => (
+        <button key={issue.key} onClick={() => onOpen(issue.key)} className="flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-2 text-left hover:border-gray-800 hover:bg-gray-900/60">
+          {issue.favorite && <Star size={11} className="shrink-0 text-amber-300" fill="currentColor" />}
+          <code className="w-20 shrink-0 text-[11px] text-gray-600">{issue.key}</code>
+          <span className={`rounded border px-1.5 py-0.5 text-[10px] ${KIND_CLASS[issue.kind] ?? KIND_CLASS.task}`}>{issue.kind}</span>
+          <span className="min-w-0 flex-1 truncate text-xs text-gray-300">{issue.title}</span>
+          <Pill text={issue.severity} className={SEVERITY_CLASS[issue.severity] ?? SEVERITY_CLASS.unset} />
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ProjectSessionsPanel({
+  projectId, data, loading, onOpenIssue,
+}: {
+  projectId: string
+  data: TrackerProjectSessions | null
+  loading: boolean
+  onOpenIssue: (key: string) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState<string | null>(null)
+  const [detail, setDetail] = useState<TrackerProjectSessionDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [logTarget, setLogTarget] = useState<{ session: string; terminal: string } | null>(null)
+
+  useEffect(() => {
+    setSelected(null)
+    setDetail(null)
+    setQuery('')
+  }, [projectId])
+
+  useEffect(() => {
+    if (!selected) { setDetail(null); return }
+    let active = true
+    setDetailLoading(true)
+    api.getTrackerProjectSession(projectId, selected)
+      .then(result => { if (active) setDetail(result.session) })
+      .catch(() => { if (active) setDetail(null) })
+      .finally(() => { if (active) setDetailLoading(false) })
+    return () => { active = false }
+  }, [projectId, selected])
+
+  if (loading && !data) {
+    return <div className="flex items-center justify-center gap-2 py-16 text-sm text-gray-500"><Loader2 size={14} className="animate-spin" /> Loading session history…</div>
+  }
+  const sessions = (data?.sessions ?? []).filter(session => {
+    const haystack = [session.name, ...session.providers, ...session.workdirs, ...session.associated_by].join(' ').toLowerCase()
+    return haystack.includes(query.trim().toLowerCase())
+  })
+  return (
+    <div className="mt-4 space-y-4" data-testid="project-sessions">
+      <div className="grid gap-3 sm:grid-cols-3">
+        {[
+          ['All sessions', data?.total ?? 0],
+          ['Live now', data?.active ?? 0],
+          ['Historical', data?.historical ?? 0],
+        ].map(([label, value]) => (
+          <div key={String(label)} className="rounded-lg border border-gray-800 bg-gray-900/40 p-3">
+            <div className="text-lg font-semibold text-white">{value}</div>
+            <div className="text-[11px] text-gray-500">{label}</div>
+          </div>
+        ))}
+      </div>
+      <div className="relative">
+        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+        <input value={query} onChange={event => setQuery(event.target.value)} aria-label="Search sessions" placeholder="Search session, provider, worktree, or association" className="w-full rounded-lg border border-gray-800 bg-gray-900 py-2 pl-9 pr-3 text-sm text-gray-200 placeholder-gray-600 focus:border-emerald-600/50 focus:outline-none" />
+      </div>
+      <div className="grid items-start gap-4 xl:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.7fr)]">
+        <div className="space-y-2">
+          {sessions.map(session => (
+            <SessionSummaryButton key={session.name} session={session} selected={selected === session.name} onClick={() => setSelected(session.name)} />
+          ))}
+          {sessions.length === 0 && <div className="rounded-lg border border-gray-800 py-10 text-center text-xs text-gray-600">No matching sessions.</div>}
+        </div>
+        <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950/30">
+          {!selected && <div className="py-16 text-center text-sm text-gray-600">Select a session to inspect its workers, lineage, issues, and logs.</div>}
+          {selected && detailLoading && <div className="flex items-center justify-center gap-2 py-16 text-sm text-gray-500"><Loader2 size={14} className="animate-spin" /> Loading {selected}…</div>}
+          {selected && !detailLoading && detail && (
+            <SessionDetailPanel detail={detail} onOpenIssue={onOpenIssue} onOpenLog={terminal => setLogTarget({ session: detail.name, terminal })} />
+          )}
+          {selected && !detailLoading && !detail && <div className="py-16 text-center text-sm text-gray-600">This session history could not be loaded.</div>}
+        </div>
+      </div>
+      {logTarget && <SessionLogModal projectId={projectId} sessionName={logTarget.session} terminalId={logTarget.terminal} onClose={() => setLogTarget(null)} />}
+    </div>
+  )
+}
+
+function SessionSummaryButton({ session, selected, onClick }: { session: TrackerProjectSessionSummary; selected: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} className={`w-full rounded-lg border p-3 text-left transition-colors ${selected ? 'border-emerald-600/50 bg-emerald-500/[0.06]' : 'border-gray-800 bg-gray-900/40 hover:border-gray-700'}`}>
+      <div className="flex items-center gap-2">
+        <span className={`h-2 w-2 rounded-full ${session.live ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,.5)]' : 'bg-gray-600'}`} />
+        <code className="min-w-0 flex-1 truncate text-xs text-gray-200">{session.name}</code>
+        <ChevronRight size={13} className={`text-gray-600 transition-transform ${selected ? 'rotate-90' : ''}`} />
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-gray-500">
+        <span>{session.worker_count} workers</span>
+        <span>{session.issue_count} issues</span>
+        <span>{session.artifact_count} artifacts</span>
+        {session.providers.map(provider => <span key={provider} className="rounded bg-gray-800 px-1.5 py-0.5">{provider}</span>)}
+      </div>
+      <div className="mt-2 truncate text-[10px] text-gray-600">{session.associated_by.join(' · ')}</div>
+    </button>
+  )
+}
+
+function SessionDetailPanel({
+  detail, onOpenIssue, onOpenLog,
+}: {
+  detail: TrackerProjectSessionDetail
+  onOpenIssue: (key: string) => void
+  onOpenLog: (terminal: string) => void
+}) {
+  return (
+    <div>
+      <div className="border-b border-gray-800 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${detail.live ? 'bg-emerald-400' : 'bg-gray-600'}`} /><code className="text-sm text-gray-200">{detail.name}</code></div>
+            <div className="mt-2 flex flex-wrap gap-1.5">{detail.associated_by.map(reason => <span key={reason} className="rounded border border-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{reason}</span>)}</div>
+          </div>
+          <div className="text-right text-[11px] text-gray-600"><div>{detail.worker_count} worker records</div><div>{detail.last_seen ? `Last activity ${shortDate(detail.last_seen)}` : 'No activity timestamp'}</div></div>
+        </div>
+        {detail.workdirs.length > 0 && <div className="mt-3 space-y-1">{detail.workdirs.slice(0, 4).map(path => <div key={path} className="truncate font-mono text-[10px] text-gray-600">{path}</div>)}</div>}
+      </div>
+      <div className="p-4">
+        <h4 className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-gray-500"><GitBranch size={13} /> Worker lineage</h4>
+        <div className="space-y-2">
+          {detail.terminals.map(worker => (
+            <div key={worker.terminal_id} className="rounded-lg border border-gray-800 bg-gray-900/40 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <TerminalSquare size={13} className={worker.wedged ? 'text-red-300' : 'text-gray-500'} />
+                <code className="text-xs text-gray-300">{worker.terminal_id}</code>
+                <span className="truncate text-xs text-gray-400">{worker.agent_profile || worker.name || 'unprofiled worker'}</span>
+                <span className={`ml-auto rounded px-1.5 py-0.5 text-[10px] ${worker.lifecycle_state === 'live' ? STATUS_CLASS.open : 'bg-gray-800 text-gray-500'}`}>{worker.status || worker.lifecycle_state || 'historical'}</span>
+              </div>
+              <div className="mt-2 grid gap-1 text-[10px] text-gray-600 sm:grid-cols-2">
+                <div>Provider: <span className="text-gray-500">{worker.provider || 'unknown'}</span></div>
+                <div>Vintage: <span className="text-gray-500">{worker.protocol_vintage || 'unknown'}</span></div>
+                {worker.caller_id && <div>Launched by: <code className="text-gray-500">{worker.caller_id}</code></div>}
+                {worker.native_session_id && <div className="truncate">Native session: <code className="text-gray-500">{worker.native_session_id}</code></div>}
+              </div>
+              {worker.working_directory && <div className="mt-2 truncate font-mono text-[10px] text-gray-600">{worker.working_directory}</div>}
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {worker.issue_keys.map(key => <button key={key} onClick={() => onOpenIssue(key)} className="text-[10px] text-sky-400 hover:text-sky-300">{key}</button>)}
+                {worker.snapshot_available && <span className="inline-flex items-center gap-1 text-[10px] text-gray-600"><Box size={10} /> snapshot</span>}
+                {worker.log_available && <button onClick={() => onOpenLog(worker.terminal_id)} className="ml-auto inline-flex items-center gap-1 text-[10px] text-emerald-400 hover:text-emerald-300"><ExternalLink size={10} /> Logs</button>}
+              </div>
+            </div>
+          ))}
+          {detail.terminals.length === 0 && <div className="py-8 text-center text-xs text-gray-600">The session is associated, but no retained worker records were found.</div>}
+        </div>
+        {detail.issues.length > 0 && (
+          <div className="mt-5 border-t border-gray-800 pt-4">
+            <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Session issues</h4>
+            <IssuePreviewList issues={detail.issues} onOpen={onOpenIssue} />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SessionLogModal({ projectId, sessionName, terminalId, onClose }: { projectId: string; sessionName: string; terminalId: string; onClose: () => void }) {
+  const [mode, setMode] = useState<'last' | 'full'>('last')
+  const [output, setOutput] = useState('')
+  const [loading, setLoading] = useState(true)
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    api.getTrackerProjectTerminalLog(projectId, sessionName, terminalId, mode)
+      .then(result => { if (active) setOutput(result.output) })
+      .catch(() => { if (active) setOutput('No captured output is available.') })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [projectId, sessionName, terminalId, mode])
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center">
+      <button aria-label="Close session log" className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative mx-4 flex max-h-[82vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+        <div className="flex items-center gap-3 border-b border-gray-800 px-4 py-3"><TerminalSquare size={15} className="text-emerald-400" /><div><div className="text-sm text-gray-200">Captured terminal log</div><code className="text-[10px] text-gray-600">{sessionName} · {terminalId}</code></div><button onClick={onClose} className="ml-auto text-gray-500 hover:text-white"><X size={16} /></button></div>
+        <div className="flex gap-1 border-b border-gray-800 px-4 py-2">{(['last', 'full'] as const).map(value => <button key={value} onClick={() => setMode(value)} className={`rounded px-2 py-1 text-[11px] ${mode === value ? 'bg-emerald-600 text-white' : 'text-gray-500 hover:text-gray-300'}`}>{value === 'last' ? 'Last 200 lines' : 'Full capture'}</button>)}</div>
+        <pre className="min-h-[240px] flex-1 overflow-auto whitespace-pre-wrap p-4 font-mono text-xs leading-relaxed text-gray-300">{loading ? 'Loading…' : output}</pre>
+      </div>
     </div>
   )
 }
