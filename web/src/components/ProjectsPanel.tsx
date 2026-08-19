@@ -103,6 +103,17 @@ const KIND_LABEL: Record<ItemKind, string> = {
   task: 'Task',
 }
 
+const KIND_PLURAL: Record<ItemKind, string> = {
+  project: 'Projects',
+  bug: 'Bugs',
+  feature: 'Features',
+  milestone: 'Milestones',
+  goal: 'Goals',
+  epic: 'Epics',
+  story: 'Stories',
+  task: 'Tasks',
+}
+
 interface KindPresentation {
   kind: ItemKind
   createButtonLabel: string
@@ -739,8 +750,8 @@ export function ProjectsPanel() {
                   <input
                     value={currentFilters.query}
                     onChange={e => updateCurrentFilters({ query: e.target.value, offset: 0 })}
-                    placeholder={kind === 'all' ? 'Search all project work' : `Search ${KIND_LABEL[kind].toLowerCase()}s`}
-                    aria-label={kind === 'all' ? 'Search all' : `Search ${KIND_LABEL[kind]}s`}
+                    placeholder={kind === 'all' ? 'Search all project work' : `Search ${KIND_PLURAL[kind].toLowerCase()}`}
+                    aria-label={kind === 'all' ? 'Search all' : `Search ${KIND_PLURAL[kind]}`}
                     className="w-full pl-9 pr-3 py-2 rounded-lg bg-gray-900 border border-gray-800 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-emerald-600/50"
                   />
                 </div>
@@ -759,7 +770,7 @@ export function ProjectsPanel() {
               <div className="flex flex-wrap gap-1.5 items-center">
                 <span className="text-[11px] font-medium text-gray-500 mr-1">Type:</span>
                 {(['all', ...(vocab?.item_kinds ?? ITEM_KINDS)] as TabKind[]).map(k => {
-                  const label = k === 'all' ? 'All' : `${KIND_LABEL[k]}s`
+                  const label = k === 'all' ? 'All' : KIND_PLURAL[k]
                   const count = k === 'all'
                     ? (project.counts?.all_open ?? project.counts?.open ?? 0)
                     : (project.counts?.by_kind?.[k]?.open ?? 0)

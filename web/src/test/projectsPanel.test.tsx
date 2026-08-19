@@ -253,6 +253,14 @@ describe('ProjectsPanel', () => {
     expect(filters.length).toBeGreaterThan(0)
   })
 
+  it('uses the correct plural for stories', async () => {
+    render(<ProjectsPanel />)
+    await openIssues()
+
+    expect(await screen.findByRole('button', { name: 'Show Stories' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Show Storys' })).not.toBeInTheDocument()
+  })
+
   it('shows the scopes that decide where issues file', async () => {
     render(<ProjectsPanel />)
     fireEvent.click(await screen.findByText(/2 scopes/))
