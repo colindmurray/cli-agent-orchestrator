@@ -5,10 +5,11 @@ set of accepted resume forms. Routine launch admission is open by default so
 an ordinary CLI update does not freeze a campaign, and capability is
 unpinned: an installed build receives full capability through per-surface
 conservative defaults and runtime reads of its own bundle, without being
-listed anywhere first.  ``SUPPORTED_VERSIONS`` survives only as the
-strict-mode quarantine set, consulted when an operator forces
+listed anywhere first.  Every provider runs ``latest``.  ``SUPPORTED_VERSIONS``
+survives only as the strict-mode quarantine — empty unless a rollback is
+open — consulted when an operator forces
 ``CAO_PROVIDER_VERSION_ENFORCEMENT_<PROVIDER>=strict`` after a reproduced
-regression.  Unparseable version banners fail closed in every mode:
+regression, and emptied again in the change that lands the fix.  Unparseable version banners fail closed in every mode:
 unparseable is a failed observation, not merely an unlisted build.
 
 No provider may use a "newest" or implicit-current-session shortcut, a
@@ -129,139 +130,59 @@ PRE_TASK_IDENTITY_PENDING = "pre-task native identity pending"
 PRE_TASK_IDENTITY_CAPTURED = "pre-task native identity captured"
 PRE_TASK_IDENTITY_READY = "pre-task native identity ready"
 
-#: The single *current* pin per provider: the version a fresh mint/proof
-#: is expected to run, and the one a receipt records when it cannot read a
-#: more specific fact.  This map is advisory everywhere — the representative
-#: head of each provider's accepted tuple, naming the build that is
-#: known-good today.  It is not a ceiling, not an equality check, and not a
-#: capability authority: an unlisted build launches with full capability.
-PINNED_VERSIONS = {
-    PROVIDER_CODEX: "0.146.0",
-    PROVIDER_KIMI: "0.34.0",
-    PROVIDER_CLAUDE: "2.1.233",
-    PROVIDER_MUSE: "0.1.0",
+#: The version every provider is expected to run.
+#:
+#: ``LATEST`` means exactly that: run whatever is installed. It is not a
+#: build number because a build number here is an expiry date — it goes stale
+#: the moment the vendor ships, and a stale literal is worse than none: an
+#: agent reading it cannot tell "this is the build we require" from "this is
+#: the build someone happened to have installed months ago."
+#:
+#: **A rollback replaces the sentinel with the exact build being pinned to.**
+#: That is the only reason a build number appears here, it names a real
+#: incident, and it is removed in the same change that lands the fix. See
+#: ``docs/provider-version-policy.md`` §4.
+VERSION_LATEST = "latest"
+
+PINNED_VERSIONS: dict[str, str] = {
+    PROVIDER_CODEX: VERSION_LATEST,
+    PROVIDER_KIMI: VERSION_LATEST,
+    PROVIDER_CLAUDE: VERSION_LATEST,
+    PROVIDER_MUSE: VERSION_LATEST,
+    PROVIDER_ANTIGRAVITY: VERSION_LATEST,
 }
 
-#: Every exact version accepted for a provider, current first.  A tuple of
-#: exact strings, never a range: which builds are proven is a fact about
-#: each specific build, and a range would silently assert something about
-#: builds nobody has read.
+#: The version quarantine: builds held back because one of them is known
+#: broken.  **Empty for every provider, because no incident is open.**
 #:
-#: Kimi accepts ``0.34.0`` (cond-0331: the generic provider-version policy
-#: moves Kimi to open launch admission so normal future updates do not trip
-#: stale launch breakers before task bytes. The installed 0.34.0 bundle was
-#: inspected at SHA-256
-#: ``d3e781774e7a95f71e9d813e2cda95486d15db73712b3e821dd4a357b0511d8c``;
-#: source inspection found the observed composer, paste, steer, process-title
-#: and session-option facts, and a bounded private-TUI probe rendered its
-#: exact version/session header. A durable ACP kill/load proof was *not*
-#: established, so resume and route authority remain gated by the exact proof
-#: table rather than inferred from this observation), retains ``0.33.0``
-#: (cond-0315: the provider's
-#: supported background updater installed it over 0.32.0 mid-verification
-#: — ``~/.kimi-code/updates/`` ``rollout.log``
-#: ``startup-cache reason:"eligible"`` at 2026-08-05T09:54:47Z,
-#: ``install.json.lastSuccess`` at 09:54:49Z — and every gate refused it
-#: fail-closed; the installed 0.33.0 bundle ``main.mjs`` sha256
-#: 0e77b9c64e67a4eecb96aae011750668aab11bd781564fe3e4855513812247b2,
-#: matching the npm-published digest, declares the composer-newline/submit,
-#: paste-burst, steer-chord, process-title-rewrite, resume-option, and
-#: native-header facts byte-identical to the attested 0.32.0 bundle.  Its
-#: ACP surface is natively reimplemented, so it was proven live rather than
-#: by bytes: bounded ``--version`` (0.38–0.47 s warm), zero-prompt ACP
-#: K3/max select+read-back with ``agentInfo.version`` agreement, the
-#: durable ACP session/new→kill→session/load proof on the installed
-#: binary, and a private-tmux resume rendering the strict boot header with
-#: the kernel argv rewritten to ``['kimi-code','','','']``), accepts
-#: ``0.32.0`` (cond-0315: the
-#: operator's binary auto-updated again and the managed launcher refused
-#: it fail-closed — run cond-0303-pr74-review-k3-r5, zero task bytes; the
-#: installed 0.32.0 bundle ``main.mjs`` sha256
-#: b02ebfe77dda7d9f38cf61c5a923567eb7ff4f3bc914dff24b02b5fd22b4ff79,
-#: matching the npm-published digest, declares the composer-newline/submit,
-#: paste-burst, steer-chord, process-title-rewrite, resume-option, and
-#: native-header facts byte-identical to the attested 0.31.0 bundle — and
-#: the build was live-verified: bounded ``--version``, zero-prompt ACP
-#: K3/max route observation, exact ``--session <id>`` resume continuity,
-#: and the rendered boot header on a private tmux stage), accepts
-#: ``0.31.0`` (cond-0310: the
-#: operator's binary auto-updated again; the installed 0.31.0 bundle
-#: ``main.mjs`` sha256
-#: 689fc2a123dfc3145dab26a8e6a86c71a5dc8552b13fe0449679e065ce96774e
-#: declares the composer-newline/submit, paste-burst, and steer-chord facts
-#: byte-identical to the 0.29.x/0.30.0 line — ``tui.input.newLine``
-#: ``['shift+enter','ctrl+j']`` with ``tui.input.submit`` ``'enter'``,
-#: ``submitValue()`` computes ``expandPasteMarkers(lines.join('\\n')).trim()``,
-#: ``PASTE_ENTER_SUPPRESS_WINDOW_MS = 120``, and ``Key.ctrl("s")`` for steer),
-#: so its bundle-read tier is proven; live text/control EFFECT on the real
-#: build remains a separate post-review acceptance gate), accepts ``0.30.0``
-#: (cond-0198: the operator's binary auto-updated; the installed 0.30.0
-#: bundle's composer, paste-burst, and steer-chord facts read byte-identical
-#: to the 0.29.x line, with the text/control path live-proven on the real
-#: build) and retains ``0.29.2``, ``0.29.1``, and ``0.29.0`` so sessions
-#: minted under them still validate (installed 0.29.2 bundle ``main.mjs``
-#: sha256 2ee6e2f15d68bffdce532d1c8e50f8d40e0230090b3a0dd1dbcdb7c29bf532db,
-#: matching the npm-published digest; the three-way 0.29.0/0.29.1/0.29.2
-#: bundle comparison proved the composer, paste-burst, and steer-chord
-#: facts byte-identical).  Image delivery authority stays pinned to
-#: ``0.29.2`` alone — no image block is advertised for ``0.30.0``,
-#: ``0.31.0``, ``0.32.0``, ``0.33.0``, or ``0.34.0``.
+#: This is not an acceptance list and never was a capability gate.  It is
+#: consulted only under a ``strict`` enforcement override, which is the
+#: rollback lever: when a build breaks something, the operator sets strict
+#: for that provider and writes the exact known-good build here, in the same
+#: change as the P0 that removes both again.
 #:
-#: Claude accepts only ``2.1.220``, the stage-verified installed build
-#: (``versions/2.1.220`` sha256
-#: 8addc857f3fe64d5a0368af9ee50321b50afb4a6918ba3ef018ab84f5dbbe081).
-#: ``2.1.218`` is *not* retained: unlike Kimi, no managed Claude session
-#: has ever been minted, so there is no existing receipt that retaining it
-#: would keep valid — it would only assert that a build nobody has read
-#: the composer behaviour of is acceptable.
+#: Empty plus strict therefore refuses every build, which is the intended
+#: fail-closed reading of "hold everything back, and nothing has been named
+#: as safe."  It is a misconfiguration rather than a policy, and
+#: :func:`check_pinned_version` says so rather than reporting drift against
+#: an empty list.
 #:
-#: Codex accepts only ``0.146.0``.  Its generated app-server schemas were
-#: compared with ``0.145.0`` for every method CAO uses: ``initialize``,
-#: ``config/read``, ``thread/start``, ``turn/start``, and ``turn/interrupt``.
-#: Their required request and consumed response fields are unchanged; the
-#: observed differences are property ordering or additive optional fields.
-#:
-#: In open-enforcement mode (every provider's default) a launch succeeds
-#: against any non-empty semver-shaped version and receives full capability:
-#: the per-surface conservative defaults and runtime bundle reads cover
-#: builds nobody has listed.  The tuple below is consulted again only when a
-#: provider is forced to strict mode after a reproduced regression — it is
-#: the quarantine set, not a capability gate.
+#: Do not enumerate builds here when nothing is broken.  Entries that outlive
+#: their incident go stale against the installed build, and the lever then
+#: cannot express "hold back the new build" without also refusing the one
+#: that is running.
 SUPPORTED_VERSIONS: dict[str, tuple[str, ...]] = {
-    PROVIDER_CODEX: ("0.146.0",),
-    PROVIDER_KIMI: ("0.34.0", "0.33.0", "0.32.0", "0.31.0", "0.30.0", "0.29.2", "0.29.1", "0.29.0"),
-    PROVIDER_CLAUDE: ("2.1.233", "2.1.220"),
-    PROVIDER_MUSE: ("0.1.0",),
-    # Antigravity is deliberately UNPINNED: no reference build in
-    # ``PINNED_VERSIONS`` and no listed build here.  In the OPEN mode it ships
-    # with, this table is not consulted at all -- ``check_pinned_version``
-    # returns before the membership test -- so every installed build launches,
-    # which is the whole point.  Naming an exact build would be an expiry date:
-    # 1.1.11 was already stale against the installed 1.1.13 when this landed,
-    # and 1.1.13 went stale during the very session that merged it (agy
-    # auto-updated to 1.1.14).
-    #
-    # Under a STRICT override this empty tuple refuses EVERY agy build, because
-    # :func:`check_pinned_version` implements strict as allowlist membership
-    # (``normalized not in accepted`` raises), not as a denylist -- despite the
-    # "quarantine" name the policy doc uses for it.  That is the intended
-    # fail-closed reading for a provider with no stage-proven build on record,
-    # and the exit is unsetting ``CAO_PROVIDER_VERSION_ENFORCEMENT_ANTIGRAVITY``
-    # or listing the build the operator has proven.  Stated explicitly because
-    # the surrounding vocabulary invites the opposite (denylist) reading.
+    PROVIDER_CODEX: (),
+    PROVIDER_KIMI: (),
+    PROVIDER_CLAUDE: (),
+    PROVIDER_MUSE: (),
     PROVIDER_ANTIGRAVITY: (),
 }
-
-# The current pin must always be an accepted version — asserted here so the
-# two maps cannot silently drift apart.
-# Iterated over the PINS, not the accepted sets, so that a provider may carry no
-# pin at all (the unpinned default) while still holding a quarantine entry.
-assert all(pin in SUPPORTED_VERSIONS.get(provider, ()) for provider, pin in PINNED_VERSIONS.items())
 
 #: Seconds one ``--version`` observation may take before the launch fails
 #: closed.  The bound must be finite — a probe that cannot answer inside it
 #: fails before any pane, session, or task byte — but it must also survive
-#: a cold start on a loaded host: a healthy pinned Kimi 0.31.0 answered in
+#: a cold start on a loaded host: a healthy installed Kimi answered in
 #: 0.37–0.41 s warm, yet one campaign launch observed its Node bundle miss
 #: a fixed 5 s deadline under startup load and the launch failed closed
 #: before any delivery (cond-0313).  Kimi therefore observes under the
@@ -624,29 +545,19 @@ def check_pinned_version(provider: str, installed_version: str) -> None:
     if version_enforcement_mode(provider) == VERSION_ENFORCEMENT_OPEN:
         return
     accepted = SUPPORTED_VERSIONS[provider]
+    if not accepted:
+        raise ProviderVersionDrift(
+            f"{provider} strict version enforcement is on but no build is "
+            "quarantined, so every build is refused. Either unset "
+            f"CAO_PROVIDER_VERSION_ENFORCEMENT_{_VERSION_ENV_SUFFIX.get(provider, provider.upper())}"
+            f" or add the exact build to roll back to in SUPPORTED_VERSIONS[{provider!r}]"
+        )
     if normalized not in accepted:
         raise ProviderVersionDrift(
-            f"{provider} version drift: accepted {list(accepted)}, installed "
-            f"{installed_version.strip()!r}; resume refuses (41) until a "
-            "stage-verified pinned binary is installed"
+            f"{provider} version drift: quarantine allows {list(accepted)}, installed "
+            f"{installed_version.strip()!r}; resume refuses (41) until the "
+            "pinned binary is installed or the quarantine is lifted"
         )
-
-
-def is_listed_version(provider: str, installed_version: str | None) -> bool:
-    """Return whether an exact build is a member of ``SUPPORTED_VERSIONS``.
-
-    This is strict-mode quarantine membership, **not** a capability
-    authority.  Under the unpinned provider-version policy an unlisted build
-    receives full capability through the per-surface conservative defaults
-    and runtime bundle reads; this predicate survives only for the surfaces
-    that still name exact builds (the §6 narrow tables' reference cells and
-    the strict-mode launch quarantine in :func:`check_pinned_version`).
-    It intentionally ignores the launch enforcement mode.
-    """
-    if provider not in SUPPORTED_VERSIONS or not isinstance(installed_version, str):
-        return False
-    normalized = normalized_version(installed_version)
-    return bool(normalized and normalized in SUPPORTED_VERSIONS[provider])
 
 
 # Native bind and zero-task route attestation are proven at runtime against

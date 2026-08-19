@@ -21,32 +21,46 @@ from cli_agent_orchestrator.services.recovery_capabilities import build_capabili
 # ------------------------------------------------------- provider contracts
 
 
-def test_pinned_versions():
-    # The pin is advisory: the representative head of each provider's
-    # accepted tuple, never a ceiling.  The pairing is asserted in both
-    # directions so the two maps cannot silently drift apart, and the
-    # baseline is derived from the tables rather than frozen beside them —
-    # a hand-maintained copy here would be a gate that decays.
-    for provider, pin in pc.PINNED_VERSIONS.items():
-        assert pin in pc.SUPPORTED_VERSIONS[provider]
-        assert pc.SUPPORTED_VERSIONS[provider][0] == pin
-    # Open mode (the default for every provider): an unlisted semver-shaped
-    # build launches, listed or not, current or future.
-    pc.check_pinned_version("codex", "0.146.0")
-    pc.check_pinned_version("codex", "codex-cli 0.146.0")
-    pc.check_pinned_version("codex", "codex-cli 0.145.0")
-    pc.check_pinned_version("codex", "codex-cli 0.146.1")
-    pc.check_pinned_version("kimi", "0.28.0")
-    pc.check_pinned_version("kimi", "0.99.0")
+def test_every_provider_runs_latest():
+    """No provider names a build. ``latest`` means run what is installed.
+
+    A build number here is an expiry date: it goes stale the moment the
+    vendor ships, and a stale literal is worse than none, because a reader
+    cannot tell a requirement from an artefact of whoever last touched the
+    file. A rollback is the only thing that writes a number here, and it
+    removes it again in the same change that lands the fix.
+    """
+    assert set(pc.PINNED_VERSIONS.values()) == {pc.VERSION_LATEST}
+    assert all(quarantined == () for quarantined in pc.SUPPORTED_VERSIONS.values())
+    # Open mode (the default for every provider): any semver-shaped build
+    # launches, current or future, listed nowhere.
+    pc.check_pinned_version("codex", "codex-cli 0.147.0")
+    pc.check_pinned_version("codex", "codex-cli 0.999.0")
+    pc.check_pinned_version("kimi", "0.36.1")
+    pc.check_pinned_version("claude", "2.1.235 (Claude Code)")
+    pc.check_pinned_version("muse", "Muse Code 0.2.1 (0.2.1-R1215.1)")
 
 
-def test_strict_mode_quarantines_an_unlisted_build_at_the_launch_boundary(monkeypatch):
-    """The one place listing still gates: the opt-in quarantine."""
+def test_strict_with_an_empty_quarantine_names_the_misconfiguration(monkeypatch):
+    """Strict plus an empty quarantine refuses everything, and says why.
+
+    That combination is not a policy anyone chose — it is strict enforcement
+    turned on without naming the build to roll back to. Reporting it as
+    "drift against []" sent the reader looking for a version problem that
+    does not exist.
+    """
     monkeypatch.setenv("CAO_PROVIDER_VERSION_ENFORCEMENT_KIMI", "strict")
-    with pytest.raises(pc.ProviderVersionDrift):
-        pc.check_pinned_version("kimi", "0.99.0")
-    # The listed builds still pass under strict quarantine.
-    pc.check_pinned_version("kimi", pc.PINNED_VERSIONS["kimi"])
+    with pytest.raises(pc.ProviderVersionDrift, match="no build is quarantined"):
+        pc.check_pinned_version("kimi", "0.36.1")
+
+
+def test_a_rollback_quarantine_admits_only_the_named_build(monkeypatch):
+    """The lever still works: name the known-good build, hold back the rest."""
+    monkeypatch.setenv("CAO_PROVIDER_VERSION_ENFORCEMENT_KIMI", "strict")
+    monkeypatch.setitem(pc.SUPPORTED_VERSIONS, "kimi", ("0.34.0",))
+    pc.check_pinned_version("kimi", "kimi 0.34.0")
+    with pytest.raises(pc.ProviderVersionDrift, match="quarantine allows"):
+        pc.check_pinned_version("kimi", "kimi 0.36.1")
 
 
 @pytest.mark.parametrize("mode", ["open", "strict"])
@@ -59,45 +73,18 @@ def test_an_unparseable_banner_fails_closed_in_every_mode(monkeypatch, mode):
             pc.check_pinned_version("kimi", rejected)
 
 
-def test_kimi_accepts_both_pinned_and_retained_versions_but_never_a_range():
-    # Exact-set acceptance for *proven builds*: 0.34.0 is the current pin
-    # (cond-0331: open enforcement admits it and every future semver at the
-    # launch identity boundary, while the exact set below still gates
-    # feature-specific authority), 0.33.0 (cond-0315), 0.32.0 (cond-0315),
-    # 0.31.0 (cond-0310), 0.30.0 (cond-0198) and 0.29.2/0.29.1/0.29.0 are
-    # retained for already-minted sessions.  Nothing outside this set may
-    # inherit feature-specific authority — this is a set of proven builds,
-    # not a version range.
-    assert pc.SUPPORTED_VERSIONS["kimi"] == (
-        "0.34.0",
-        "0.33.0",
-        "0.32.0",
-        "0.31.0",
-        "0.30.0",
-        "0.29.2",
-        "0.29.1",
-        "0.29.0",
-    )
-    pc.check_pinned_version("kimi", "kimi 0.34.0")
-    pc.check_pinned_version("kimi", "kimi 0.33.0")
-    pc.check_pinned_version("kimi", "kimi 0.32.0")
-    pc.check_pinned_version("kimi", "kimi 0.31.0")
-    pc.check_pinned_version("kimi", "kimi 0.30.0")
-    pc.check_pinned_version("kimi", "kimi 0.29.2")
-    pc.check_pinned_version("kimi", "kimi 0.29.1")
-    pc.check_pinned_version("kimi", "kimi 0.29.0")
-    # Open enforcement: semver-shaped versions outside the proven set are
-    # accepted at the launch identity boundary, but they do not inherit
-    # feature-specific authority (control/resume/image/steer/composer).
-    pc.check_pinned_version("kimi", "0.28.0")
-    pc.check_pinned_version("kimi", "0.35.0")
-    pc.check_pinned_version("kimi", "1.29.0")
-    # Malformed or unparseable versions still fail closed at the boundary.
+def test_no_build_inherits_or_is_denied_authority_by_listing(monkeypatch):
+    """Listing is not a capability axis at all any more.
+
+    Every one of these once had to appear in a tuple to launch. The
+    remaining fail-closed case is a *failed observation* — an unparseable
+    banner — which is a different answer from "nothing was written down".
+    """
+    for build in ("0.28.0", "0.29.0", "0.34.0", "0.36.1", "1.29.0", "0.99.0"):
+        pc.check_pinned_version("kimi", f"kimi {build}")
     for rejected in ("kimi", "", "not-a-version"):
         with pytest.raises(pc.ProviderVersionDrift):
             pc.check_pinned_version("kimi", rejected)
-    # The current pin is always an accepted build.
-    assert pc.PINNED_VERSIONS["kimi"] in pc.SUPPORTED_VERSIONS["kimi"]
 
 
 def test_normalized_version_extracts_the_semver_token():
@@ -116,7 +103,9 @@ def test_kimi_enforcement_mode_is_open_by_default():
 def test_kimi_can_be_reverted_to_strict_by_environment_variable(monkeypatch):
     monkeypatch.setenv("CAO_PROVIDER_VERSION_ENFORCEMENT_KIMI", "strict")
     assert pc.version_enforcement_mode("kimi") == pc.VERSION_ENFORCEMENT_STRICT
-    # In strict mode, versions outside the exact proven set are refused.
+    # The lever is the env var plus the build to roll back to. Both are part
+    # of one rollback; neither alone expresses an incident.
+    monkeypatch.setitem(pc.SUPPORTED_VERSIONS, "kimi", ("0.34.0",))
     with pytest.raises(pc.ProviderVersionDrift):
         pc.check_pinned_version("kimi", "0.35.0")
     pc.check_pinned_version("kimi", "0.34.0")

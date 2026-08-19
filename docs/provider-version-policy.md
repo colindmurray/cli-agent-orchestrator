@@ -43,6 +43,13 @@ is trusted until it earns suspicion and the list shrinks as fixes land.
   listed to launch at all. This is the quarantine mode: an opt-in containment for
   a **reproduced** regression, never the normal update policy.
 
+`PINNED_VERSIONS` reads `latest` for every provider and `SUPPORTED_VERSIONS` is
+empty for every provider, because no rollback is open. Those are the resting
+values. A rollback writes a build into both; landing the fix restores them.
+
+A build number in either map is therefore a live incident, readable as one, and
+its absence is not an omission anybody needs to correct.
+
 Either can be forced at runtime with no code change:
 
 ```bash
@@ -210,6 +217,18 @@ the fix landed?
 2. Verify against the build that exhibited the breakage.
 3. Remove the pin and its entry in the same change.
 4. Close the issue, naming the verification.
+
+**Restore `latest`, and delete every trace of the pin.** Lifting a pin is not
+finished when the build launches again. The enforcement override, the build
+listed in `SUPPORTED_VERSIONS`, the build named in `PINNED_VERSIONS`, any test
+asserting either, and any comment or document explaining the pin all describe a
+condition that no longer exists, and each one read on its own says the system
+still requires that build. Return both maps to their resting values and remove
+the prose in the same change, so the repository states the present situation and
+nothing else.
+
+The next reader has no memory of the incident. What survives it, they will act
+on.
 
 **A pin with no active fix effort is escalated, not renewed.** Either fix it or
 decide explicitly that the capability is abandoned. Quietly carrying the pin is

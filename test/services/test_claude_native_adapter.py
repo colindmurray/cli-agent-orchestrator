@@ -548,15 +548,16 @@ class TestCapabilityAdvertisement:
         same tables, and the pairing is what is asserted.
         """
         claude = v2.native_tui_capabilities()["providers"]["claude_code"]
-        assert claude["supported_versions"] == list(provider_contracts.SUPPORTED_VERSIONS["claude"])
+        assert claude["quarantined_versions"] == list(
+            provider_contracts.SUPPORTED_VERSIONS["claude"]
+        )
         assert claude["pinned_version"] == provider_contracts.PINNED_VERSIONS["claude"]
         assert claude["version_enforcement"] == provider_contracts.VERSION_ENFORCEMENT_OPEN
-        # The pin is the advisory head of the quarantine set, in both
-        # directions.
-        assert claude["pinned_version"] == claude["supported_versions"][0]
-        # The quarantine set's content itself is a literal a test may pin:
-        # strict mode refuses exactly the builds absent from it.
-        assert provider_contracts.SUPPORTED_VERSIONS["claude"] == ("2.1.233", PINNED)
+        # What a peer reads off the handshake today: run whatever is
+        # installed, nothing quarantined. A build number here would be a
+        # peer-visible expiry date.
+        assert claude["pinned_version"] == provider_contracts.VERSION_LATEST
+        assert claude["quarantined_versions"] == []
 
     def test_an_unlisted_build_is_not_a_capability_refusal(self):
         """Open mode admits an unlisted build, and capability follows.

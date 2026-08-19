@@ -132,13 +132,19 @@ def test_antigravity_carries_no_version_pin_at_all():
     the whole suite green before this test existed, so the requirement was
     unpinned in both senses of the word.
     """
-    assert (
-        pc.PROVIDER_ANTIGRAVITY not in pc.PINNED_VERSIONS
-    ), "antigravity must carry no reference build; unpinned is the required state"
-    assert (
-        pc.SUPPORTED_VERSIONS[pc.PROVIDER_ANTIGRAVITY] == ()
-    ), "antigravity must list no exact build; a one-element allowlist is an expiry date"
-    assert pc.version_enforcement_mode(pc.PROVIDER_ANTIGRAVITY) == pc.VERSION_ENFORCEMENT_OPEN
+    # Antigravity was the first provider to carry no build, and is now simply
+    # the rule rather than the exception: every provider runs `latest` and
+    # quarantines nothing, so a reintroduced literal stands out anywhere.
+    for provider in pc.PROVIDERS:
+        assert pc.PINNED_VERSIONS[provider] == pc.VERSION_LATEST, (
+            f"{provider} names a build; a reference build is an expiry date. "
+            "Only a rollback writes one here, and it removes it again with the fix."
+        )
+        assert pc.SUPPORTED_VERSIONS[provider] == (), (
+            f"{provider} quarantines a build with no incident open. "
+            "A quarantine with no incident behind it is an unexplained ceiling."
+        )
+        assert pc.version_enforcement_mode(provider) == pc.VERSION_ENFORCEMENT_OPEN
 
     # Any semver-shaped build admits, including ones nobody has written down.
     for build in ("1.1.11", "1.1.13", "1.1.14", "99.99.99"):

@@ -1125,13 +1125,17 @@ def native_tui_capabilities() -> dict[str, Any]:
             "id_source": _ISSUANCE_SOURCES[provider],
             "readiness_receipt_kind": _NATIVE_TUI_READINESS_RECEIPT_KINDS[provider],
             "executable": executable,
-            # Advisory: the known-good reference build, not a ceiling.
+            # ``latest`` — run whatever is installed. A build number appears
+            # here only while a rollback is open, and names the build being
+            # rolled back to.
             "pinned_version": contracts.PINNED_VERSIONS[executable],
-            # The strict-mode quarantine set, not a capability gate: in
-            # open enforcement a launch accepts any semver-shaped version
-            # and unlisted builds receive full capability through the
-            # per-surface conservative defaults and runtime bundle reads.
-            "supported_versions": list(contracts.SUPPORTED_VERSIONS[executable]),
+            # Builds held back by an open incident; empty when none is.
+            # Never a capability gate — an unlisted build receives full
+            # capability, and under the open default this is not consulted
+            # at all. Named for what it holds back rather than what it
+            # admits, because an empty admission list reads as "nothing is
+            # supported", which is the opposite of what emptiness means here.
+            "quarantined_versions": list(contracts.SUPPORTED_VERSIONS[executable]),
             "version_enforcement": contracts.version_enforcement_mode(executable),
         }
         if provider == "muse_cli":

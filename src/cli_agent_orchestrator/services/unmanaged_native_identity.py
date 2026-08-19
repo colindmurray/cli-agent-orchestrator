@@ -394,15 +394,12 @@ def _mint_antigravity_session(
     version_output = _version_output("antigravity_cli", executable, env)
 
     # Delegate to the canonical version seam rather than hand-rolling the mode
-    # check here.  The hand-rolled form named a function that no longer exists
-    # (``is_proven_version`` was renamed ``is_listed_version``), so the strict
-    # branch raised AttributeError instead of a typed refusal; and because it
-    # only inspected the banner under strict enforcement, an UNPARSEABLE banner
-    # was silently discarded in the default open mode.  ``check_pinned_version``
-    # gets both right: open admits any parseable build (antigravity is unpinned,
-    # so every installed build launches), strict quarantines, and an unparseable
-    # banner fails closed in BOTH modes -- a failed observation is distinct from
-    # a version nobody wrote down.
+    # check here.  ``check_pinned_version`` admits any parseable build in the
+    # default open mode, honours a strict rollback quarantine, and fails closed
+    # on an unparseable banner in BOTH modes -- a failed observation is distinct
+    # from a version nobody wrote down.  A hand-rolled check here would inspect
+    # the banner only under strict enforcement and discard an unparseable one
+    # in the mode that is actually in use.
     try:
         # The version tables are keyed by the SHORT provider vocabulary
         # (``antigravity``), not the wire key (``antigravity_cli``); passing the

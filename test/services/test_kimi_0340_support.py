@@ -60,65 +60,6 @@ HEADER_0340_ROWS = [
 # --------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("banner", ["0.34.0", "kimi 0.34.0"])
-def test_check_pinned_version_accepts_the_stage_verified_0340(banner):
-    pc.check_pinned_version("kimi", banner)
-
-
-@pytest.mark.parametrize("banner", ["0.35.0", "kimi 0.35.0", "9.9.9"])
-def test_check_pinned_version_accepts_a_future_semver_at_launch_boundary(banner):
-    # Open enforcement: normal future updates must not be refused before
-    # task bytes just because the pin file has not been updated.
-    pc.check_pinned_version("kimi", banner)
-
-
-@pytest.mark.parametrize("bad", ["kimi", ""])
-def test_check_pinned_version_still_refuses_unparseable_builds(bad):
-    # Unparseable banners fail closed even in open mode.
-    with pytest.raises(pc.ProviderVersionDrift):
-        pc.check_pinned_version("kimi", bad)
-
-
-def test_0340_is_the_current_pin_and_open_enforcement_allows_future_semver():
-    assert pc.PINNED_VERSIONS["kimi"] == PIN_0340
-    assert pc.SUPPORTED_VERSIONS["kimi"] == (
-        PIN_0340,
-        "0.33.0",
-        "0.32.0",
-        "0.31.0",
-        "0.30.0",
-        "0.29.2",
-        "0.29.1",
-        "0.29.0",
-    )
-    assert pc.version_enforcement_mode("kimi") == pc.VERSION_ENFORCEMENT_OPEN
-
-
-def test_open_admission_keeps_quarantine_membership_exact():
-    """Listing is the strict-mode quarantine set, not a capability gate."""
-    assert pc.is_listed_version("kimi", PIN_0340)
-    assert not pc.is_listed_version("kimi", "0.35.0")
-    assert not pc.is_listed_version("unknown", PIN_0340)
-
-
-# --------------------------------------------------------------------
-# Strict override reverts to exact pins after a reproducible regression
-# --------------------------------------------------------------------
-
-
-def test_strict_override_refuses_unproven_semver(monkeypatch):
-    monkeypatch.setenv("CAO_PROVIDER_VERSION_ENFORCEMENT_KIMI", "strict")
-    assert pc.version_enforcement_mode("kimi") == pc.VERSION_ENFORCEMENT_STRICT
-    pc.check_pinned_version("kimi", PIN_0340)
-    with pytest.raises(pc.ProviderVersionDrift):
-        pc.check_pinned_version("kimi", "0.35.0")
-
-
-# --------------------------------------------------------------------
-# Proven 0.34.0 composer/steer entries, keyed by the compatibility check
-# --------------------------------------------------------------------
-
-
 def test_the_composer_newline_table_has_a_separate_proven_0340_entry():
     entry = knc._PROVEN_COMPOSER_NEWLINE.get(PIN_0340)
     assert entry is not None, "0.34.0 must be a separate keyed entry, never a range"

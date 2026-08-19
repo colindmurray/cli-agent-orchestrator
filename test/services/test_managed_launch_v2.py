@@ -9,8 +9,6 @@ from copy import deepcopy
 
 import pytest
 
-from cli_agent_orchestrator.services import codex_native_bootstrap
-
 from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.models.managed_launch_v2 import (
     PROTOCOL_VERSION_V2,
@@ -18,6 +16,7 @@ from cli_agent_orchestrator.models.managed_launch_v2 import (
     ManagedLaunchV2BindRequest,
     ManagedLaunchV2ReserveRequest,
 )
+from cli_agent_orchestrator.services import codex_native_bootstrap
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
 from cli_agent_orchestrator.services import managed_provider_bridge as bridge
 from cli_agent_orchestrator.services.managed_launch import (
