@@ -47,9 +47,15 @@ _STATUS_FOR_CODE = {
 
 
 def _http(exc: tracker.TrackerError) -> HTTPException:
+    # A refusal that observed record state carries it in ``details`` so a
+    # programmatic caller (a wayfinder session retrying a stale map edit, a
+    # worker that lost a claim) can branch on facts, not on message text.
+    detail: Any = exc.message
+    if exc.details:
+        detail = {"message": exc.message, "code": exc.code, **exc.details}
     return HTTPException(
         status_code=_STATUS_FOR_CODE.get(exc.code, status.HTTP_400_BAD_REQUEST),
-        detail=exc.message,
+        detail=detail,
     )
 
 
@@ -118,6 +124,12 @@ class IssueUpdateBody(StrictBody):
     ``model_fields_set`` distinguishes "not sent" from "sent as null", which is
     what lets the dashboard clear an assignee (send ``""``) without every other
     unsent field being wiped.
+
+    ``expected_updated_at`` is not a field but an optimistic-concurrency
+    precondition on the write itself: when sent, the PATCH applies only if the
+    issue's ``updated_at`` still equals it; a stale value answers 409 carrying
+    the current version. ``add_labels``/``remove_labels``/``clear_labels`` are
+    atomic label deltas; ``labels`` (full replacement) never combines with them.
     """
 
     title: Optional[str] = None
@@ -128,11 +140,15 @@ class IssueUpdateBody(StrictBody):
     reporter: Optional[str] = None
     assignee: Optional[str] = None
     labels: Optional[List[str]] = None
+    add_labels: Optional[List[str]] = None
+    remove_labels: Optional[List[str]] = None
+    clear_labels: Optional[bool] = None
     failing_command: Optional[str] = None
     evidence: Optional[str] = None
     resolution: Optional[str] = None
     duplicate_of: Optional[str] = None
     kind: Optional[str] = None
+    expected_updated_at: Optional[str] = None
     actor: Optional[str] = None
 
 
@@ -157,6 +173,10 @@ class FeatureCreateBody(StrictBody):
 
 
 class FeatureUpdateBody(StrictBody):
+    """Feature edits share the issue update machinery, so they accept the same
+    atomic label deltas and the same ``expected_updated_at`` precondition —
+    the dashboard must not lie about generic support depending on kind."""
+
     title: Optional[str] = None
     body: Optional[str] = None
     status: Optional[str] = None
@@ -165,10 +185,14 @@ class FeatureUpdateBody(StrictBody):
     reporter: Optional[str] = None
     assignee: Optional[str] = None
     labels: Optional[List[str]] = None
+    add_labels: Optional[List[str]] = None
+    remove_labels: Optional[List[str]] = None
+    clear_labels: Optional[bool] = None
     evidence: Optional[str] = None
     resolution: Optional[str] = None
     duplicate_of: Optional[str] = None
     kind: Optional[str] = None
+    expected_updated_at: Optional[str] = None
     actor: Optional[str] = None
 
 
@@ -180,6 +204,14 @@ class CommentBody(StrictBody):
 class LinkBody(StrictBody):
     to_key: str
     kind: str
+    actor: Optional[str] = None
+
+
+class ClaimBody(StrictBody):
+    claimant: str
+
+
+class UnclaimBody(StrictBody):
     actor: Optional[str] = None
 
 
@@ -297,6 +329,16 @@ async def delete_project(
         raise _http(exc) from exc
 
 
+@router.get("/tracker/projects/{project_id}/labels")
+async def project_label_facets(project_id: str, _scopes: List[str] = _READ) -> Dict[str, Any]:
+    """Every label on the project's issues with total/open counts — the
+    discovery surface behind the dashboard's label filter bar."""
+    try:
+        return tracker.label_facets(project_id)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
 @router.get("/tracker/projects/{project_id}/export")
 async def export_project_markdown(
     project_id: str,
@@ -355,6 +397,7 @@ async def list_issues(
     assignee: Optional[str] = Query(None),
     reporter: Optional[str] = Query(None),
     label: Optional[str] = Query(None),
+    unlabeled: bool = Query(False, description="only issues with an empty label set"),
     q: Optional[str] = Query(None),
     open_only: bool = Query(False),
     limit: int = Query(100, ge=1, le=500),
@@ -374,6 +417,7 @@ async def list_issues(
             assignee=assignee,
             reporter=reporter,
             label=label,
+            unlabeled=unlabeled,
             query=q,
             open_only=open_only,
             limit=limit,
@@ -443,7 +487,7 @@ async def update_issue(
     changes = {
         name: value
         for name, value in body.model_dump().items()
-        if name != "actor" and name in body.model_fields_set
+        if name not in ("actor", "expected_updated_at") and name in body.model_fields_set
     }
     try:
         existing = tracker.get_issue(issue_key)
@@ -457,7 +501,12 @@ async def update_issue(
             raise tracker.TrackerError(
                 "invalid", "duplicate status requires duplicate_of canonical key"
             )
-        return tracker.update_issue(issue_key, actor=body.actor, **changes)
+        return tracker.update_issue(
+            issue_key,
+            actor=body.actor,
+            expected_updated_at=body.expected_updated_at,
+            **changes,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
@@ -522,6 +571,77 @@ async def remove_link(
 
 
 # --------------------------------------------------------------------------
+# map membership, frontier, and claim lifecycle (cond-0394)
+#
+# These routes serve the wayfinding workflow: a map is an issue, its tickets
+# are `part-of` children, the frontier is what a session may take next, and
+# claim/unclaim is how concurrent sessions avoid picking the same ticket.
+# They are deliberately generic over the shared store — a feature can be a map
+# or a ticket exactly as an issue can.
+# --------------------------------------------------------------------------
+
+
+@router.get("/tracker/issues/{issue_key}/children")
+async def list_children(issue_key: str, _scopes: List[str] = _READ) -> Dict[str, Any]:
+    """Direct children of a parent/map issue (its `part-of` members)."""
+    try:
+        return tracker.list_children(issue_key)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/tracker/issues/{issue_key}/frontier")
+async def issue_frontier(issue_key: str, _scopes: List[str] = _READ) -> Dict[str, Any]:
+    """Takeable children: nonterminal, unassigned, no nonterminal blocker.
+
+    Ordered by creation (``created_at``, ties by row id) — deterministic, so
+    concurrent sessions picking "the first frontier ticket" see the same list.
+    """
+    try:
+        return tracker.frontier(issue_key)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/tracker/issues/{issue_key}/map")
+async def issue_map_projection(issue_key: str, _scopes: List[str] = _READ) -> Dict[str, Any]:
+    """The one-request map projection: map, classified children, ordered
+    frontier, member links, every external link endpoint (each carrying the
+    member children it actually blocks), and progress counts."""
+    try:
+        return tracker.map_projection(issue_key)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/tracker/issues/{issue_key}/claim")
+async def claim_issue(
+    issue_key: str,
+    body: ClaimBody,
+    _scopes: List[str] = _WRITE,
+) -> Dict[str, Any]:
+    """Atomically claim an open issue. A second claimant gets 409 naming the
+    observed owner; a retry by the current claimant is idempotent."""
+    try:
+        return tracker.claim_issue(issue_key, claimant=body.claimant)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/tracker/issues/{issue_key}/unclaim")
+async def unclaim_issue(
+    issue_key: str,
+    body: UnclaimBody,
+    _scopes: List[str] = _WRITE,
+) -> Dict[str, Any]:
+    """Release a claim — the ordinary exit from a stale assignment."""
+    try:
+        return tracker.unclaim_issue(issue_key, actor=body.actor)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+# --------------------------------------------------------------------------
 # features — typed aliases over shared storage (D4)
 # --------------------------------------------------------------------------
 
@@ -547,6 +667,7 @@ async def list_features(
     assignee: Optional[str] = Query(None),
     reporter: Optional[str] = Query(None),
     label: Optional[str] = Query(None),
+    unlabeled: bool = Query(False, description="only features with an empty label set"),
     q: Optional[str] = Query(None),
     open_only: bool = Query(False),
     limit: int = Query(100, ge=1, le=500),
@@ -563,6 +684,7 @@ async def list_features(
             assignee=assignee,
             reporter=reporter,
             label=label,
+            unlabeled=unlabeled,
             query=q,
             open_only=open_only,
             limit=limit,
@@ -635,9 +757,14 @@ async def update_feature(
         changes = {
             name: value
             for name, value in body.model_dump().items()
-            if name != "actor" and name in body.model_fields_set
+            if name not in ("actor", "expected_updated_at") and name in body.model_fields_set
         }
-        return tracker.update_issue(feature_key, actor=body.actor, **changes)
+        return tracker.update_issue(
+            feature_key,
+            actor=body.actor,
+            expected_updated_at=body.expected_updated_at,
+            **changes,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 

@@ -243,6 +243,17 @@ cao project resolve            # which project would an issue filed here belong 
 cao project export cao-system  # render the log as markdown
 ```
 
+Issues form maps: link a ticket to a parent with `--kind part-of`, then
+`cao issue children` lists a map's tickets and `cao issue frontier` lists the
+takeable ones (open, unclaimed, nothing open blocking them, oldest first).
+Concurrent workers coordinate with `cao issue claim <key> --as <worker>` —
+atomic, so a second claimant gets a conflict naming the observed owner — and
+`cao issue unclaim` releases a stale claim. `cao issue edit` additionally
+takes `--expect-updated-at <iso>` for optimistic concurrency on shared map
+bodies, and `--add-label` / `--remove-label` / `--clear-labels` for atomic
+label deltas; `cao issue list` takes `--unlabeled` and `--kind
+issue|feature|all` for triage discovery.
+
 Filing resolves the project from where you are: explicit id, then session, then
 campaign alias, then directory, then git remote. A filing site that resolves to
 no project is refused rather than dropped into a default bucket. Issue keys
@@ -257,6 +268,20 @@ writes an audit event naming the actor.
 Existing markdown ledgers import with their ids, filing dates, severities and
 reporters intact (`cao issue import-ledger OPEN_ISSUES.md --project <id>`), and
 the markdown becomes a rendered export rather than a second source of truth.
+
+The **Projects** tab also carries a **Wayfinder** view for map-driven work: a
+map is an issue labelled `wayfinder:map`, its decision tickets link to it with
+`part-of`, and the view renders the map's destination, progress, the ordered
+frontier (open, unclaimed, unblocked — oldest first), every ticket's state, and
+the relationship graph — every link kind and direction (`part-of`/`blocks`/
+`relates`/`duplicates`/`caused-by`), including endpoints outside the map, with
+the actual external blockers flagged in red. A legend and an adjacent
+keyboard-accessible list carry the same information. Claim/unclaim buttons hit
+the atomic endpoints (a lost claim names the observed owner), map-body edits
+are optimistic-concurrency safe — a stale save keeps your draft and offers
+re-read & retry instead of overwriting a concurrent session — and the whole
+view state (project, view, map, open ticket, label filters) lives in the URL,
+so it is shareable and Back/Forward traverses it.
 
 ## MCP Apps — host-rendered fleet UI
 

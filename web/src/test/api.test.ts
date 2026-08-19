@@ -327,3 +327,82 @@ describe('API wrapper', () => {
     ).rejects.toMatchObject({ status: 422, detail: "export rejected: secret pattern 'aws-key' detected" })
   })
 })
+
+describe('Tracker wayfinding wrappers (cond-0394)', () => {
+  const mockFetch = vi.fn()
+
+  beforeEach(() => {
+    mockFetch.mockClear()
+    vi.stubGlobal('fetch', mockFetch)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function mockResponse(data: unknown, status = 200) {
+    mockFetch.mockResolvedValueOnce({
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: status === 200 ? 'OK' : 'Conflict',
+      json: () => Promise.resolve(data),
+    })
+  }
+
+  it('passes the unlabeled and exact-label filters through to the query string', async () => {
+    mockResponse({ total: 0, limit: 100, offset: 0, issues: [] })
+    await api.listTrackerIssues({ projectId: 'cao-system', label: 'wayfinder:map', unlabeled: true })
+    const url = mockFetch.mock.calls[0][0] as string
+    expect(url).toContain('project_id=cao-system')
+    expect(url).toContain('label=wayfinder%3Amap')
+    expect(url).toContain('unlabeled=true')
+  })
+
+  it('fetches label facets for a project', async () => {
+    mockResponse({ project_id: 'cao-system', labels: [], unlabeled: 0, unlabeled_open: 0 })
+    await api.getTrackerLabels('cao-system')
+    expect(mockFetch.mock.calls[0][0]).toBe('/tracker/projects/cao-system/labels')
+  })
+
+  it('fetches the map projection in one request', async () => {
+    mockResponse({ map: { key: 'cond-0001' }, children: [], frontier: [], links: [], external: [], progress: {} })
+    const got = await api.getTrackerMap('cond-0001')
+    expect(mockFetch.mock.calls[0][0]).toBe('/tracker/issues/cond-0001/map')
+    expect(got.map.key).toBe('cond-0001')
+  })
+
+  it('children and frontier have their own routes', async () => {
+    mockResponse({ parent: 'cond-0001', children: [] })
+    await api.listTrackerChildren('cond-0001')
+    mockResponse({ parent: 'cond-0001', frontier: [] })
+    await api.getTrackerFrontier('cond-0001')
+    expect(mockFetch.mock.calls[0][0]).toBe('/tracker/issues/cond-0001/children')
+    expect(mockFetch.mock.calls[1][0]).toBe('/tracker/issues/cond-0001/frontier')
+  })
+
+  it('claim posts the claimant, unclaim posts the actor', async () => {
+    mockResponse({ key: 'cond-0002', claimed: true, already_claimed: false })
+    await api.claimTrackerIssue('cond-0002', 'dashboard')
+    expect(mockFetch.mock.calls[0][0]).toBe('/tracker/issues/cond-0002/claim')
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body as string)).toEqual({ claimant: 'dashboard' })
+
+    mockResponse({ key: 'cond-0002', unclaimed: true, was_claimed: true })
+    await api.unclaimTrackerIssue('cond-0002', 'dashboard')
+    expect(mockFetch.mock.calls[1][0]).toBe('/tracker/issues/cond-0002/unclaim')
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body as string)).toEqual({ actor: 'dashboard' })
+  })
+
+  it('a typed 409 surfaces the structured detail, not just a string', async () => {
+    // A lost claim names the observed owner; a stale map edit names the
+    // current version. Both live in the OBJECT detail the server sends.
+    mockResponse(
+      { detail: { message: 'cond-0002 is already claimed by terra', code: 'conflict', observed_assignee: 'terra' } },
+      409,
+    )
+    const { conflictDetail } = await import('../api')
+    const err = await api.claimTrackerIssue('cond-0002', 'dashboard').catch(e => e)
+    expect(err.status).toBe(409)
+    expect(err.detail).toBe('cond-0002 is already claimed by terra')
+    expect(conflictDetail(err)).toMatchObject({ observed_assignee: 'terra' })
+  })
+})

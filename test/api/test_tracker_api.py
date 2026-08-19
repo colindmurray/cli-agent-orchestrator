@@ -294,3 +294,291 @@ class TestUnknownFieldsAreRefused:
         )
         assert response.status_code == 409
         assert "cao-system" in response.json()["detail"]
+
+
+class TestMapMembershipRoutes:
+    def test_part_of_link_round_trips_and_children_lists_members(self, client, project):
+        m = _issue(client, title="map")
+        a, b = _issue(client, title="a"), _issue(client, title="b")
+        created = client.post(
+            f"/tracker/issues/{a['key']}/links",
+            json={"to_key": m["key"], "kind": "part-of"},
+        )
+        assert created.status_code == 201
+        client.post(
+            f"/tracker/issues/{b['key']}/links", json={"to_key": m["key"], "kind": "part-of"}
+        )
+        body = client.get(f"/tracker/issues/{m['key']}/children").json()
+        assert [c["title"] for c in body["children"]] == ["a", "b"]
+        # Raw JSON direction stays explicit: from the child, to the map.
+        link = client.get(f"/tracker/issues/{m['key']}").json()["links"][0]
+        assert (link["kind"], link["from_key"], link["to_key"]) == ("part-of", a["key"], m["key"])
+
+    def test_children_of_an_unknown_issue_is_404(self, client, project):
+        assert client.get("/tracker/issues/cond-9999/children").status_code == 404
+
+    def test_the_vocabulary_offers_part_of(self, client):
+        body = client.get("/tracker/vocabulary").json()
+        assert "part-of" in body["link_kinds"]
+
+
+class TestFrontierRoute:
+    def test_frontier_returns_only_takeable_children(self, client, project):
+        m = _issue(client, title="map")
+        a, b, c = (_issue(client, title=t) for t in ("a", "b", "c"))
+        for t in (a, b, c):
+            client.post(
+                f"/tracker/issues/{t['key']}/links", json={"to_key": m["key"], "kind": "part-of"}
+            )
+        # Claim b (assigned), block c with an open ticket; a stays takeable.
+        client.patch(f"/tracker/issues/{b['key']}", json={"assignee": "terra"})
+        client.post(
+            f"/tracker/issues/{a['key']}/links", json={"to_key": c["key"], "kind": "blocks"}
+        )
+        body = client.get(f"/tracker/issues/{m['key']}/frontier").json()
+        assert [t["title"] for t in body["frontier"]] == ["a"]
+
+    def test_frontier_of_an_unknown_issue_is_404(self, client, project):
+        assert client.get("/tracker/issues/cond-9999/frontier").status_code == 404
+
+
+class TestClaimRoutes:
+    def test_claim_assigns_the_issue(self, client, project):
+        issue = _issue(client)
+        response = client.post(f"/tracker/issues/{issue['key']}/claim", json={"claimant": "terra"})
+        assert response.status_code == 200
+        body = response.json()
+        assert (body["assignee"], body["claimed"], body["already_claimed"]) == (
+            "terra",
+            True,
+            False,
+        )
+
+    def test_a_second_claim_is_a_409_reporting_the_observed_claimant(self, client, project):
+        issue = _issue(client)
+        client.post(f"/tracker/issues/{issue['key']}/claim", json={"claimant": "terra"})
+        response = client.post(f"/tracker/issues/{issue['key']}/claim", json={"claimant": "muse"})
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["observed_assignee"] == "terra"
+        assert "terra" in detail["message"]
+
+    def test_a_retry_by_the_current_claimant_is_idempotent(self, client, project):
+        issue = _issue(client)
+        client.post(f"/tracker/issues/{issue['key']}/claim", json={"claimant": "terra"})
+        again = client.post(f"/tracker/issues/{issue['key']}/claim", json={"claimant": "terra"})
+        assert again.status_code == 200
+        assert again.json()["already_claimed"] is True
+
+    def test_unclaim_is_the_exit_that_lets_another_worker_in(self, client, project):
+        issue = _issue(client)
+        client.post(f"/tracker/issues/{issue['key']}/claim", json={"claimant": "terra"})
+        released = client.post(f"/tracker/issues/{issue['key']}/unclaim", json={"actor": "colin"})
+        assert released.status_code == 200
+        assert released.json()["assignee"] is None
+        reclaim = client.post(f"/tracker/issues/{issue['key']}/claim", json={"claimant": "muse"})
+        assert reclaim.status_code == 200
+
+    def test_claiming_a_terminal_issue_is_409(self, client, project):
+        issue = _issue(client, status="closed")
+        response = client.post(f"/tracker/issues/{issue['key']}/claim", json={"claimant": "terra"})
+        assert response.status_code == 409
+
+    def test_claiming_an_unknown_issue_is_404(self, client, project):
+        response = client.post("/tracker/issues/cond-9999/claim", json={"claimant": "terra"})
+        assert response.status_code == 404
+
+    def test_a_claim_without_a_claimant_is_422_or_400(self, client, project):
+        issue = _issue(client)
+        response = client.post(f"/tracker/issues/{issue['key']}/claim", json={})
+        assert response.status_code in (400, 422)
+
+
+class TestOptimisticUpdateRoute:
+    def test_a_matching_expected_updated_at_applies(self, client, project):
+        issue = _issue(client, body="v1")
+        response = client.patch(
+            f"/tracker/issues/{issue['key']}",
+            json={"body": "v2", "expected_updated_at": issue["updated_at"]},
+        )
+        assert response.status_code == 200
+        assert response.json()["body"] == "v2"
+
+    def test_a_stale_expected_updated_at_is_409_with_the_current_version(self, client, project):
+        issue = _issue(client, body="v1")
+        stale = issue["updated_at"]
+        current = client.patch(f"/tracker/issues/{issue['key']}", json={"body": "other"}).json()
+        response = client.patch(
+            f"/tracker/issues/{issue['key']}",
+            json={"body": "v2", "expected_updated_at": stale},
+        )
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["current_updated_at"] == current["updated_at"]
+        # The refused write changed nothing.
+        assert client.get(f"/tracker/issues/{issue['key']}").json()["body"] == "other"
+
+    def test_an_edit_without_the_precondition_stays_unconditional(self, client, project):
+        issue = _issue(client, body="v1")
+        client.patch(f"/tracker/issues/{issue['key']}", json={"body": "v2"})
+        response = client.patch(f"/tracker/issues/{issue['key']}", json={"body": "v3"})
+        assert response.status_code == 200
+
+
+class TestAtomicLabelRoutes:
+    def test_add_labels_merges_via_patch(self, client, project):
+        issue = _issue(client, labels=["bug"])
+        body = client.patch(
+            f"/tracker/issues/{issue['key']}", json={"add_labels": ["needs-triage"]}
+        ).json()
+        assert body["labels"] == ["bug", "needs-triage"]
+
+    def test_remove_and_clear_labels_via_patch(self, client, project):
+        issue = _issue(client, labels=["a", "b", "c"])
+        body = client.patch(f"/tracker/issues/{issue['key']}", json={"remove_labels": ["b"]}).json()
+        assert body["labels"] == ["a", "c"]
+        body = client.patch(f"/tracker/issues/{issue['key']}", json={"clear_labels": True}).json()
+        assert body["labels"] == []
+
+    def test_full_replacement_plus_a_delta_is_400(self, client, project):
+        issue = _issue(client, labels=["a"])
+        response = client.patch(
+            f"/tracker/issues/{issue['key']}", json={"labels": ["b"], "add_labels": ["c"]}
+        )
+        assert response.status_code == 400
+        assert client.get(f"/tracker/issues/{issue['key']}").json()["labels"] == ["a"]
+
+    def test_the_resulting_label_set_is_audited(self, client, project):
+        issue = _issue(client, labels=["a"])
+        client.patch(
+            f"/tracker/issues/{issue['key']}",
+            json={"add_labels": ["b"], "remove_labels": ["a"], "actor": "colin"},
+        )
+        events = client.get(f"/tracker/issues/{issue['key']}").json()["events"]
+        label_events = [e for e in events if e["kind"] == "field" and e["field"] == "labels"]
+        assert len(label_events) == 1
+        assert label_events[0]["actor"] == "colin"
+
+
+class TestTriageDiscoveryRoutes:
+    def test_the_unlabeled_filter(self, client, project):
+        _issue(client, title="bare")
+        _issue(client, title="tagged", labels=["bug"])
+        body = client.get("/tracker/issues", params={"unlabeled": True}).json()
+        assert [i["title"] for i in body["issues"]] == ["bare"]
+
+    def test_unlabeled_composes_with_kind_and_the_total_stays_unpaged(self, client, project):
+        _issue(client, title="bare issue")
+        client.post("/tracker/features", json={"project_id": "cao-system", "title": "bare feature"})
+        body = client.get(
+            "/tracker/issues", params={"unlabeled": True, "kind": "all", "limit": 1}
+        ).json()
+        assert body["total"] == 2
+        assert len(body["issues"]) == 1
+        only_features = client.get(
+            "/tracker/issues", params={"unlabeled": True, "kind": "feature"}
+        ).json()
+        assert [i["title"] for i in only_features["issues"]] == ["bare feature"]
+        # The default stays issue-only.
+        default = client.get("/tracker/issues").json()
+        assert [i["title"] for i in default["issues"]] == ["bare issue"]
+
+
+class TestLabelFacetRoute:
+    def test_label_counts_for_a_project(self, client, project):
+        _issue(client, title="a", labels=["effort:maps", "wayfinder:map"])
+        _issue(client, title="b", labels=["effort:maps"])
+        _issue(client, title="bare")
+        body = client.get("/tracker/projects/cao-system/labels").json()
+        by_label = {f["label"]: f for f in body["labels"]}
+        assert by_label["effort:maps"]["total"] == 2
+        assert by_label["wayfinder:map"]["open"] == 1
+        assert body["unlabeled"] == 1
+
+    def test_labels_of_an_unknown_project_is_404(self, client, project):
+        assert client.get("/tracker/projects/nope/labels").status_code == 404
+
+
+class TestMapProjectionRoute:
+    def test_the_projection_round_trips(self, client, project):
+        m = _issue(client, title="the map", labels=["wayfinder:map"])
+        a, b = _issue(client, title="a"), _issue(client, title="b")
+        for t in (a, b):
+            client.post(
+                f"/tracker/issues/{t['key']}/links", json={"to_key": m["key"], "kind": "part-of"}
+            )
+        client.post(
+            f"/tracker/issues/{a['key']}/links", json={"to_key": b["key"], "kind": "blocks"}
+        )
+        body = client.get(f"/tracker/issues/{m['key']}/map").json()
+        assert body["map"]["key"] == m["key"]
+        assert body["progress"]["total"] == 2
+        assert body["frontier"] == [a["key"]]
+        children = {c["key"]: c for c in body["children"]}
+        assert children[b["key"]]["blocked_by"] == [a["key"]]
+        assert children[a["key"]]["frontier"] is True
+
+    def test_map_of_an_unknown_issue_is_404(self, client, project):
+        assert client.get("/tracker/issues/cond-9999/map").status_code == 404
+
+    def test_every_external_link_endpoint_is_served_with_its_blocking_role(self, client, project):
+        m = _issue(client, title="the map", labels=["wayfinder:map"])
+        a = _issue(client, title="a")
+        client.post(
+            f"/tracker/issues/{a['key']}/links", json={"to_key": m["key"], "kind": "part-of"}
+        )
+        blocker = _issue(client, title="outside blocker")
+        neighbour = _issue(client, title="related work")
+        client.post(
+            f"/tracker/issues/{blocker['key']}/links", json={"to_key": a["key"], "kind": "blocks"}
+        )
+        client.post(
+            f"/tracker/issues/{a['key']}/links",
+            json={"to_key": neighbour["key"], "kind": "relates"},
+        )
+        body = client.get(f"/tracker/issues/{m['key']}/map").json()
+        external = {e["key"]: e for e in body["external"]}
+        # Both endpoints are materialized — the relates neighbour is visible
+        # exactly like the blocker — and `blocking` tells them apart.
+        assert external[blocker["key"]]["blocking"] == [a["key"]]
+        assert external[neighbour["key"]]["blocking"] == []
+
+
+class TestFeatureParity:
+    """Feature edits share the issue machinery, so the deltas and the CAS
+    precondition must work there too — otherwise the dashboard would be lying
+    about generic support depending on kind."""
+
+    def test_feature_patch_accepts_label_deltas(self, client, project):
+        client.post(
+            "/tracker/features", json={"project_id": "cao-system", "title": "wish", "labels": ["a"]}
+        )
+        body = client.patch(
+            "/tracker/features/cond-0001", json={"add_labels": ["b"], "remove_labels": ["a"]}
+        ).json()
+        assert body["labels"] == ["b"]
+
+    def test_feature_patch_honors_expected_updated_at(self, client, project):
+        created = client.post(
+            "/tracker/features", json={"project_id": "cao-system", "title": "wish"}
+        ).json()
+        ok = client.patch(
+            "/tracker/features/cond-0001",
+            json={"body": "v2", "expected_updated_at": created["updated_at"]},
+        )
+        assert ok.status_code == 200
+        stale = client.patch(
+            "/tracker/features/cond-0001",
+            json={"body": "v3", "expected_updated_at": created["updated_at"]},
+        )
+        assert stale.status_code == 409
+        assert stale.json()["detail"]["current_updated_at"] == ok.json()["updated_at"]
+
+    def test_the_features_list_accepts_unlabeled(self, client, project):
+        client.post("/tracker/features", json={"project_id": "cao-system", "title": "bare"})
+        client.post(
+            "/tracker/features",
+            json={"project_id": "cao-system", "title": "tagged", "labels": ["x"]},
+        )
+        body = client.get("/tracker/features", params={"unlabeled": True}).json()
+        assert [i["title"] for i in body["issues"]] == ["bare"]

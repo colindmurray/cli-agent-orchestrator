@@ -279,3 +279,288 @@ class TestLedgerImportCommand:
         out = run(runner, issue_cli.issue, "import-ledger", str(ledger), "--project", "p")
         assert "1 skipped" in out or "already present" in out
         assert tracker.list_issues(project_id="p")["total"] == 1
+
+
+class TestMapCommands:
+    """Map membership over the CLI: part-of links, children, and directional
+    rendering in `show` (cond-0394)."""
+
+    @pytest.fixture(autouse=True)
+    def project(self, runner, repo):
+        run(
+            runner,
+            issue_cli.project,
+            "create",
+            "CAO System",
+            "--id",
+            "cao-system",
+            "--prefix",
+            "cond",
+            "--path",
+            str(repo),
+        )
+        run(runner, issue_cli.issue, "file", "--title", "the map", "--project", "cao-system")
+        run(runner, issue_cli.issue, "file", "--title", "a ticket", "--project", "cao-system")
+
+    def test_part_of_link_and_children(self, runner):
+        run(
+            runner,
+            issue_cli.issue,
+            "link",
+            "cond-0002",
+            "--to",
+            "cond-0001",
+            "--kind",
+            "part-of",
+        )
+        out = run(runner, issue_cli.issue, "children", "cond-0001")
+        assert "cond-0002" in out
+        assert "a ticket" in out
+
+    def test_children_json_is_parseable(self, runner):
+        run(runner, issue_cli.issue, "link", "cond-0002", "--to", "cond-0001", "--kind", "part-of")
+        payload = json.loads(run(runner, issue_cli.issue, "children", "cond-0001", "--json"))
+        assert [c["key"] for c in payload["children"]] == ["cond-0002"]
+
+    def test_show_distinguishes_part_of_from_contains(self, runner):
+        run(runner, issue_cli.issue, "link", "cond-0002", "--to", "cond-0001", "--kind", "part-of")
+        child_view = run(runner, issue_cli.issue, "show", "cond-0002")
+        parent_view = run(runner, issue_cli.issue, "show", "cond-0001")
+        assert "part of cond-0001" in child_view
+        assert "contains cond-0002" in parent_view
+
+    def test_show_distinguishes_blocks_from_blocked_by(self, runner):
+        run(runner, issue_cli.issue, "link", "cond-0001", "--to", "cond-0002", "--kind", "blocks")
+        blocker_view = run(runner, issue_cli.issue, "show", "cond-0001")
+        blocked_view = run(runner, issue_cli.issue, "show", "cond-0002")
+        assert "blocks cond-0002" in blocker_view
+        assert "blocked by cond-0001" in blocked_view
+
+
+class TestFrontierCommand:
+    @pytest.fixture(autouse=True)
+    def project(self, runner, repo):
+        run(
+            runner,
+            issue_cli.project,
+            "create",
+            "CAO System",
+            "--id",
+            "cao-system",
+            "--prefix",
+            "cond",
+            "--path",
+            str(repo),
+        )
+
+    def _map_with_two_tickets(self, runner):
+        run(runner, issue_cli.issue, "file", "--title", "the map", "--project", "cao-system")
+        run(runner, issue_cli.issue, "file", "--title", "first ticket", "--project", "cao-system")
+        run(runner, issue_cli.issue, "file", "--title", "second ticket", "--project", "cao-system")
+        for ticket in ("cond-0002", "cond-0003"):
+            run(runner, issue_cli.issue, "link", ticket, "--to", "cond-0001", "--kind", "part-of")
+
+    def test_frontier_lists_takeable_tickets_oldest_first(self, runner):
+        self._map_with_two_tickets(runner)
+        payload = json.loads(run(runner, issue_cli.issue, "frontier", "cond-0001", "--json"))
+        assert [t["key"] for t in payload["frontier"]] == ["cond-0002", "cond-0003"]
+
+    def test_frontier_skips_claimed_and_blocked_tickets(self, runner):
+        self._map_with_two_tickets(runner)
+        run(runner, issue_cli.issue, "claim", "cond-0002", "--as", "terra")
+        run(
+            runner,
+            issue_cli.issue,
+            "link",
+            "cond-0002",
+            "--to",
+            "cond-0003",
+            "--kind",
+            "blocks",
+        )
+        payload = json.loads(run(runner, issue_cli.issue, "frontier", "cond-0001", "--json"))
+        # cond-0002 is claimed; cond-0003 is blocked by the (claimed, open)
+        # cond-0002. The frontier is empty and says so truthfully.
+        assert payload["frontier"] == []
+        out = run(runner, issue_cli.issue, "frontier", "cond-0001")
+        assert "nothing takeable" in out
+
+    def test_frontier_of_an_unknown_map_refuses(self, runner):
+        result = runner.invoke(issue_cli.issue, ["frontier", "cond-9999"])
+        assert result.exit_code == 1
+        assert "[not-found]" in result.output
+
+
+class TestClaimCommands:
+    @pytest.fixture(autouse=True)
+    def project(self, runner, repo):
+        run(
+            runner,
+            issue_cli.project,
+            "create",
+            "CAO System",
+            "--id",
+            "cao-system",
+            "--prefix",
+            "cond",
+            "--path",
+            str(repo),
+        )
+        run(runner, issue_cli.issue, "file", "--title", "a ticket", "--project", "cao-system")
+
+    def test_claim_then_unclaim_round_trip(self, runner):
+        out = run(runner, issue_cli.issue, "claim", "cond-0001", "--as", "terra")
+        assert "claimed by terra" in out
+        assert tracker.get_issue("cond-0001")["assignee"] == "terra"
+        out = run(runner, issue_cli.issue, "unclaim", "cond-0001", "--actor", "colin")
+        assert "released" in out
+        assert tracker.get_issue("cond-0001")["assignee"] is None
+
+    def test_a_conflicting_claim_fails_and_names_the_claimant(self, runner):
+        run(runner, issue_cli.issue, "claim", "cond-0001", "--as", "terra")
+        result = runner.invoke(issue_cli.issue, ["claim", "cond-0001", "--as", "muse"])
+        assert result.exit_code == 1
+        assert "[conflict]" in result.output
+        assert "terra" in result.output
+
+    def test_a_retry_by_the_same_claimant_is_idempotent(self, runner):
+        run(runner, issue_cli.issue, "claim", "cond-0001", "--as", "terra")
+        out = run(runner, issue_cli.issue, "claim", "cond-0001", "--as", "terra")
+        assert "already claimed" in out
+
+    def test_claim_json_is_parseable(self, runner):
+        payload = json.loads(
+            run(runner, issue_cli.issue, "claim", "cond-0001", "--as", "terra", "--json")
+        )
+        assert (payload["assignee"], payload["claimed"]) == ("terra", True)
+
+
+class TestEditConcurrencyAndLabelFlags:
+    @pytest.fixture(autouse=True)
+    def project(self, runner, repo):
+        run(
+            runner,
+            issue_cli.project,
+            "create",
+            "CAO System",
+            "--id",
+            "cao-system",
+            "--prefix",
+            "cond",
+            "--path",
+            str(repo),
+        )
+        run(
+            runner,
+            issue_cli.issue,
+            "file",
+            "--title",
+            "a ticket",
+            "--project",
+            "cao-system",
+            "--label",
+            "needs-triage",
+        )
+
+    def test_edit_with_a_matching_expect_updated_at_applies(self, runner):
+        current = tracker.get_issue("cond-0001")["updated_at"]
+        run(
+            runner,
+            issue_cli.issue,
+            "edit",
+            "cond-0001",
+            "--body",
+            "v2",
+            "--expect-updated-at",
+            current,
+        )
+        assert tracker.get_issue("cond-0001")["body"] == "v2"
+
+    def test_edit_with_a_stale_expect_updated_at_is_a_conflict(self, runner):
+        stale = tracker.get_issue("cond-0001")["updated_at"]
+        run(runner, issue_cli.issue, "edit", "cond-0001", "--body", "somebody else")
+        result = runner.invoke(
+            issue_cli.issue,
+            ["edit", "cond-0001", "--body", "v2", "--expect-updated-at", stale],
+        )
+        assert result.exit_code == 1
+        assert "[conflict]" in result.output
+        assert tracker.get_issue("cond-0001")["body"] == "somebody else"
+
+    def test_add_and_remove_label_flags_merge(self, runner):
+        run(
+            runner,
+            issue_cli.issue,
+            "edit",
+            "cond-0001",
+            "--add-label",
+            "ready-for-agent",
+            "--remove-label",
+            "needs-triage",
+        )
+        assert tracker.get_issue("cond-0001")["labels"] == ["ready-for-agent"]
+
+    def test_clear_labels_empties_the_set(self, runner):
+        run(runner, issue_cli.issue, "edit", "cond-0001", "--clear-labels")
+        assert tracker.get_issue("cond-0001")["labels"] == []
+
+    def test_full_replacement_cannot_mix_with_a_delta(self, runner):
+        result = runner.invoke(
+            issue_cli.issue,
+            ["edit", "cond-0001", "--label", "x", "--add-label", "y"],
+        )
+        assert result.exit_code == 1
+        assert "[invalid]" in result.output
+
+
+class TestListDiscoveryFlags:
+    @pytest.fixture(autouse=True)
+    def project(self, runner, repo):
+        run(
+            runner,
+            issue_cli.project,
+            "create",
+            "CAO System",
+            "--id",
+            "cao-system",
+            "--prefix",
+            "cond",
+            "--path",
+            str(repo),
+        )
+
+    def test_unlabeled_lists_only_labelless_issues(self, runner):
+        run(runner, issue_cli.issue, "file", "--title", "bare", "--project", "cao-system")
+        run(
+            runner,
+            issue_cli.issue,
+            "file",
+            "--title",
+            "tagged",
+            "--project",
+            "cao-system",
+            "--label",
+            "bug",
+        )
+        payload = json.loads(
+            run(runner, issue_cli.issue, "list", "--project", "cao-system", "--unlabeled", "--json")
+        )
+        assert [i["title"] for i in payload["issues"]] == ["bare"]
+
+    def test_kind_selects_issue_feature_or_all_with_issue_the_default(self, runner):
+        run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
+        run(
+            runner,
+            issue_cli.feature,
+            "file",
+            "--title",
+            "a wish",
+            "--project",
+            "cao-system",
+        )
+        default = json.loads(run(runner, issue_cli.issue, "list", "--json"))
+        assert [i["title"] for i in default["issues"]] == ["a defect"]
+        everything = json.loads(run(runner, issue_cli.issue, "list", "--kind", "all", "--json"))
+        assert sorted(i["title"] for i in everything["issues"]) == ["a defect", "a wish"]
+        features = json.loads(run(runner, issue_cli.issue, "list", "--kind", "feature", "--json"))
+        assert [i["title"] for i in features["issues"]] == ["a wish"]

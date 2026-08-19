@@ -172,6 +172,81 @@ Legend: **E** = exercised end-to-end against the isolated instance (see
 | J2 | No tracker **rows** in the live install | 0 rows | Empty tracker *tables* do appear there — `init_db`'s `create_all` creates every registered model whenever the CAO suite runs without `CAO_STATE_ROOT`. That is pre-existing suite behaviour and harmless; leaked data would not be | E |
 | J3 | Conductor test suite performs no live tracker writes | `CAO_API_PORT` pinned closed in `tests/test_issue.py` | Otherwise running the suite files junk into the live tracker | E |
 
+## K. Map membership and frontier (cond-0394)
+
+| # | Check | Expected | Why it matters | |
+|---|---|---|---|---|
+| K1 | Link a child to a map with `part-of` (child → parent) | 201, visible from both issues | A wayfinder map's tickets are first-class members, not a body convention | U |
+| K2 | `GET …/children` / `cao issue children` | direct members only, creation order | Grandchildren and non-members leaking in misstates the map | U |
+| K3 | `GET …/frontier` / `cao issue frontier` | nonterminal, unassigned, no nonterminal incoming `blocks`; oldest first | A wayfinder session takes the first row; a wrong row means double work or skipped work | U |
+| K4 | Frontier with a claimed, closed, or blocked child | excluded | Computed from canonical records — no derived blocked flag to drift | U |
+| K5 | Blocker in `resolved` (not a terminal status) | still blocks | Landed ≠ verified; reopening vocabulary would split the two stores' meanings | U |
+| K6 | `cao issue show` link direction | "blocks/blocked by", "part of/contains" | A directionless "blocks X" on the blocked issue reads as its opposite; JSON keeps from/to/kind explicit | U |
+| K7 | children/frontier of an unknown key | 404 | | U |
+
+## L. Claim lifecycle (cond-0394)
+
+| # | Check | Expected | Why it matters | |
+|---|---|---|---|---|
+| L1 | Claim an open issue | assignee set atomically, `claim` event | Two cooperative workers must not both win the same ticket | U |
+| L2 | Second claim by another worker | 409 naming the observed claimant | The conflict must state what was observed, or the loser cannot act on it | U |
+| L3 | Retry by the current claimant | 200, `already_claimed`, no second event | Retries happen; idempotency keeps the audit trail honest | U |
+| L4 | Claim a terminal issue | 409 naming the observed status | Claiming closed work is a stale observation, not ownership | U |
+| L5 | Unclaim, then another worker claims | succeeds | Unclaim is the ordinary exit; it ships with claim, not later | U |
+| L6 | Unclaim an unclaimed issue | 200 idempotent, no event | The exit must always work | U |
+
+## M. Optimistic map edits (cond-0394)
+
+| # | Check | Expected | Why it matters | |
+|---|---|---|---|---|
+| M1 | PATCH with matching `expected_updated_at` | applies | The wayfinder read-then-write loop works when nobody raced it | U |
+| M2 | PATCH with a stale value | 409 carrying `current_updated_at`; nothing written | A silent overwrite of a concurrent map edit is the failure this exists to prevent | U |
+| M3 | PATCH without the precondition | unconditional | Legacy callers keep their semantics; protection is opt-in | U |
+| M4 | An unparseable value | 400 | | U |
+
+## N. Atomic label deltas (cond-0394)
+
+| # | Check | Expected | Why it matters | |
+|---|---|---|---|---|
+| N1 | `add_labels` | merged; unrelated labels kept | Triage adds a role without dropping labels another actor set | U |
+| N2 | `remove_labels` | only the named labels dropped | | U |
+| N3 | `clear_labels` | the set is emptied | The CLI previously had no way to clear all labels | U |
+| N4 | `labels` combined with any delta | 400, nothing written | The combination's meaning would depend on a read nobody performed; refuse it | U |
+| N5 | A delta that would exceed 32 labels | 400, set unchanged | Bounds apply to the merged result | U |
+| N6 | The resulting set | one `labels` audit event, old → new | The audit trail records the outcome, not the arithmetic | U |
+
+## O. Triage discovery (cond-0394)
+
+| # | Check | Expected | Why it matters | |
+|---|---|---|---|---|
+| O1 | `unlabeled=true` | only label-less issues | "Never triaged" is the first bucket a triage pass works from | U |
+| O2 | `unlabeled` composed with status/kind/limit | intersection; `total` unpaged | A wrong total reads as "that was everything" | U |
+| O3 | `cao issue list --kind issue\|feature\|all` | default stays `issue` | Triage spans features; existing scripts must not change meaning | U |
+| O4 | `label=ui` still exact | no substring matches | Exactness must survive the new filters | U |
+
+## W. Wayfinder dashboard (cond-0394)
+
+Covered by vitest (`web/src/test/wayfinder.test.tsx`) and Playwright at
+1280×800 + 390×844 (`web/e2e/wayfinder.spec.ts`, screenshots under
+`web/e2e/__screenshots__/wayfinder/`).
+
+| # | Check | Expected | Why it matters | |
+|---|---|---|---|---|
+| W1 | List ⇄ Wayfinder view switch | URL carries `view=wayfinder` | Maps are first-class, and the view is shareable | U |
+| W2 | Label chips with counts (`GET /tracker/projects/{id}/labels`) | exact-label filter; `unlabeled` chip with its count | Labels are discovered from the project, never hard-coded | U |
+| W3 | Map browser → map view (`GET /tracker/issues/{key}/map`) | destination/body, progress, ordered frontier, classified children, external blockers, links — one request | N detail fetches would let widgets derive state inconsistently | U |
+| W4 | Graph | arrow edges colored per kind; legend names every state/kind as text; node click selects; adjacent list carries the same state and is keyboard-operable | A merely-decorative graph is a failure; direction must be readable | U |
+| W5 | Claim from frontier/detail | atomic endpoint; 409 surfaces the observed owner | The generic assignee PATCH cannot refuse a second claimant | U |
+| W6 | Unclaim | releases; row re-reads | The recovery exit ships with the guard | U |
+| W7 | Map-body edit with `expected_updated_at` | stale 409 preserves the draft, banner names the current version, re-read & retry applies the draft | A concurrent session's map edit is never silently overwritten | U |
+| W8 | Label edits from the detail | `add_labels`/`remove_labels` deltas, never full replacement | A concurrent tag survives | U |
+| W9 | Link rendering in detail | "blocks/blocked by", "part of/contains", etc., key navigates | Directionless "blocks X" reads as its opposite on the wrong issue | U |
+| W10 | Empty/loading/error states; no horizontal overflow at 390px | truthful empty state naming the `wayfinder:map` convention | | U |
+| W11 | External endpoints in the projection | every link endpoint that is not a member materializes in `external` with a `blocking` list naming the children it actually benches; graph and list render relates/duplicates/caused-by to non-members in both directions, the actual blocker marked | A link whose endpoint is invisible renders as nothing — the map silently loses relationships | U |
+| W12 | Back/Forward across the tracker URL state | view/map/key/label/unlabeled/project all restore, absent params clear, and no duplicate entry is pushed (the forward stack survives) | A popstate-triggered duplicate push truncates Forward and strands the operator mid-history | U |
+
+
+
 ---
 
 ## Run log
