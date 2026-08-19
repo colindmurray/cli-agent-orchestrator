@@ -371,6 +371,15 @@ describe('Tracker wayfinding wrappers (cond-0394)', () => {
     expect(got.map.key).toBe('cond-0001')
   })
 
+  it('fetches a bounded generic issue graph in one request', async () => {
+    mockResponse({ root: { key: 'cond-0001' }, nodes: [], external: [], links: [] })
+    const got = await api.getTrackerGraph('cond-0001', 6, 150)
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      '/tracker/issues/cond-0001/graph?max_depth=6&max_nodes=150',
+    )
+    expect(got.root.key).toBe('cond-0001')
+  })
+
   it('children and frontier have their own routes', async () => {
     mockResponse({ parent: 'cond-0001', children: [] })
     await api.listTrackerChildren('cond-0001')

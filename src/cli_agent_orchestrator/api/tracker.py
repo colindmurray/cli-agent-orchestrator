@@ -728,6 +728,23 @@ async def issue_map_projection(issue_key: str, _scopes: List[str] = _READ) -> Di
         raise _http(exc) from exc
 
 
+@router.get("/tracker/issues/{issue_key}/graph")
+async def issue_graph_projection(
+    issue_key: str,
+    max_depth: int = Query(default=8, ge=1, le=12),
+    max_nodes: int = Query(default=300, ge=1, le=500),
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    """Bounded transitive ``part-of`` hierarchy rooted at any issue, plus
+    every visible relationship and its materialized external endpoint."""
+    try:
+        return tracker.graph_projection(
+            issue_key, max_depth=max_depth, max_nodes=max_nodes
+        )
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
 @router.post("/tracker/issues/{issue_key}/claim")
 async def claim_issue(
     issue_key: str,

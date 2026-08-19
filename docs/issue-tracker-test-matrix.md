@@ -245,6 +245,21 @@ Covered by vitest (`web/src/test/wayfinder.test.tsx`) and Playwright at
 | W11 | External endpoints in the projection | every link endpoint that is not a member materializes in `external` with a `blocking` list naming the children it actually benches; graph and list render relates/duplicates/caused-by to non-members in both directions, the actual blocker marked | A link whose endpoint is invisible renders as nothing — the map silently loses relationships | U |
 | W12 | Back/Forward across the tracker URL state | view/map/key/label/unlabeled/project all restore, absent params clear, and no duplicate entry is pushed (the forward stack survives) | A popstate-triggered duplicate push truncates Forward and strands the operator mid-history | U |
 
+## X. Generic issue graph (cond-0521)
+
+Covered by service/API pytest and vitest
+(`web/src/test/issueGraph.test.ts`, `web/src/test/wayfinder.test.tsx`, and
+`web/src/test/appDeepLink.test.tsx`).
+
+| # | Check | Expected | Why it matters | |
+|---|---|---|---|---|
+| X1 | `GET /tracker/issues/{key}/graph` from any issue | bounded transitive `part-of` descendants, depth and parent metadata | Planning hierarchy is not restricted to Wayfinder maps or issue kinds | U |
+| X2 | Relationship context | every returned edge has a materialized endpoint; hierarchy children omitted by a bound do not reappear as external context | The graph neither drops meaningful links nor disguises a partial hierarchy | U |
+| X3 | Cycle and depth/node bounds | traversal terminates; response names every truncation reason | A malformed hierarchy cannot hang the dashboard or look complete when partial | U |
+| X4 | Projects → Issues → Graph | searchable root, quick project roots, Hierarchy/Relationships modes, static type/status filters | Large open vocabularies stay searchable while enums remain quick toggles | U |
+| X5 | Collapse, select, and focus | descendants collapse in graph and accessible list; selection opens shared detail; focus reroots | The visualization remains operable without pixel hunting and supports progressive exploration | U |
+| X6 | Graph deep link | URL carries `view=graph&root=<key>` and restores Projects/Issues/Graph | A planning view can be shared and refreshed without losing context | U |
+
 
 
 ---

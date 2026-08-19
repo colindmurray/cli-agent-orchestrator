@@ -6,6 +6,15 @@ import { act, render, screen } from '@testing-library/react'
 import App from '../App'
 
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
+vi.mock('sigma', () => ({
+  default: class {
+    on() {}
+    kill() {}
+    refresh() {}
+    setSetting() {}
+    getCamera() { return { setState() {} } }
+  },
+}))
 
 const VOCAB = {
   statuses: ['open', 'triage', 'in-progress', 'blocked', 'resolved', 'closed', 'wontfix', 'duplicate'],
@@ -34,6 +43,14 @@ function respond(url: string): unknown {
   if (url === '/settings/memory') return { enabled: false }
   if (url === '/agents/profiles') return []
   if (url.startsWith('/tracker/vocabulary')) return VOCAB
+  if (url.startsWith('/tracker/issues/cond-0001/graph')) {
+    return {
+      root: { key: 'cond-0001', title: 'Project root' },
+      nodes: [], external: [], links: [],
+      bounds: { max_depth: 8, max_nodes: 300, truncated: false, reasons: [] },
+      stats: { nodes: 1, descendants: 0, external: 0, links: 0, depth: 0 },
+    }
+  }
   if (url.startsWith('/tracker/issues') || url.startsWith('/tracker/features')) {
     return { total: 0, limit: 50, offset: 0, issues: [] }
   }
@@ -75,6 +92,15 @@ describe('App deep-link restoration', () => {
     // The panel's own restore then lands on the Wayfinder view, not the list.
     const wayfinder = await screen.findByRole('tab', { name: 'Wayfinder' })
     expect(wayfinder).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('opens the Projects tab on the generic Graph view for a root deep link', async () => {
+    setUrl('/?project=cao-system&view=graph&root=cond-0001')
+    render(<App />)
+    expect(screen.getByRole('tab', { name: 'Projects' })).toHaveAttribute('aria-selected', 'true')
+    const graph = await screen.findByRole('tab', { name: 'Graph' })
+    expect(graph).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByLabelText('Issue graph root')).toHaveValue('cond-0001')
   })
 
   it('opens Home on bare /', () => {

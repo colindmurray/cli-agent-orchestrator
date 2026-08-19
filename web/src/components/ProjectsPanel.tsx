@@ -7,13 +7,14 @@ import {
 import { linkPhrase } from '../lib/issueMap'
 import { useStore } from '../store'
 import { ConfirmModal } from './ConfirmModal'
+import { IssueGraphPanel } from './IssueGraphPanel'
 import { WayfinderPanel } from './WayfinderPanel'
 import { SearchableMultiSelect, SearchableOption, SearchableSelect } from './SearchablePicker'
 import {
   FolderGit2, Plus, Search, Trash2, X, Loader2, Archive, ChevronRight, MessageSquare,
   History, Link2, Save, FileDown, CircleDot, CheckCircle2, Lightbulb, Compass, List,
   SlidersHorizontal, ChevronDown, Star, Home, Activity, Users, GitBranch, TerminalSquare,
-  ExternalLink, Clock3, Box,
+  ExternalLink, Clock3, Box, Network,
 } from 'lucide-react'
 
 /**
@@ -234,8 +235,9 @@ export function ProjectsPanel() {
       [...ITEM_KINDS, 'all'].map(itemKind => [itemKind, defaultTabFilters()]),
     ) as Record<TabKind, TabFilters>,
   )
-  // List ⇄ Wayfinder view and the open map.
-  const [view, setView] = useState<'list' | 'wayfinder'>('list')
+  // Flat list, generic issue graph, or Wayfinder-specific projection.
+  const [view, setView] = useState<'list' | 'graph' | 'wayfinder'>('list')
+  const [graphRootKey, setGraphRootKey] = useState<string | null>(null)
   const [mapKey, setMapKey] = useState<string | null>(null)
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
   // Bumped whenever tracker state changes so the map projection re-reads.
@@ -248,7 +250,8 @@ export function ProjectsPanel() {
   }, [kind])
 
   // URL state: ?project=cao-system&kind=feature&key=cond-0342 plus
-  // &view=wayfinder&map=cond-0001&label=effort:x&unlabeled=1 — shareable and
+  // &view=graph&root=cond-0001 (or &view=wayfinder&map=cond-0001) plus
+  // filters such as &label=effort:x&unlabeled=1 — shareable and
   // Back/Forward traverses it.
   const urlSyncRef = useRef(false)
 
@@ -261,6 +264,7 @@ export function ProjectsPanel() {
       const urlKey = params.get('key')
       const urlSection = params.get('section') as ProjectTab | null
       const urlView = params.get('view')
+      const urlRoot = params.get('root')
       const urlMap = params.get('map')
       const urlLabels = params.getAll('label')
       const urlStatuses = params.getAll('status')
@@ -272,9 +276,10 @@ export function ProjectsPanel() {
         setKind(urlKind)
       }
       if (urlKey) setSelectedKey(urlKey)
-      if (urlKey || urlView === 'wayfinder') setProjectTab('issues')
+      if (urlKey || urlView === 'wayfinder' || urlView === 'graph') setProjectTab('issues')
       else if (urlSection && ['home', 'issues', 'sessions'].includes(urlSection)) setProjectTab(urlSection)
-      if (urlView === 'wayfinder') setView('wayfinder')
+      if (urlView === 'wayfinder' || urlView === 'graph') setView(urlView)
+      if (urlRoot) setGraphRootKey(urlRoot)
       if (urlMap) setMapKey(urlMap)
       setFiltersByKind(prev => ({
         ...prev,
@@ -391,7 +396,7 @@ export function ProjectsPanel() {
 
   useEffect(() => { loadIssues() }, [loadIssues])
 
-  // Sync URL on project/kind/key/view/map/label/unlabeled changes — pushState
+  // Sync URL on project/kind/key/view/root/map/filter changes — pushState
   // so Back/Forward traverses history. `kind` is written only when it differs
   // from the default: the bare entry every session starts from must
   // round-trip byte-identically, or restoring it would push a duplicate.
@@ -411,8 +416,10 @@ export function ProjectsPanel() {
       else params.delete('kind')
       if (selectedKey) params.set('key', selectedKey)
       else params.delete('key')
-      if (view === 'wayfinder') params.set('view', 'wayfinder')
+      if (view !== 'list') params.set('view', view)
       else params.delete('view')
+      if (view === 'graph' && graphRootKey) params.set('root', graphRootKey)
+      else params.delete('root')
       if (view === 'wayfinder' && mapKey) params.set('map', mapKey)
       else params.delete('map')
       params.delete('label')
@@ -441,7 +448,7 @@ export function ProjectsPanel() {
       if (newUrl === window.location.pathname + window.location.search) return
       window.history.pushState(null, '', newUrl)
     } catch { /* test env */ }
-  }, [activeId, projectTab, kind, selectedKey, view, mapKey, currentFilters])
+  }, [activeId, projectTab, kind, selectedKey, view, graphRootKey, mapKey, currentFilters])
 
   // Cleanup stale key on unmount so next test starts collapsed
   useEffect(() => {
@@ -469,6 +476,7 @@ export function ProjectsPanel() {
         const urlKey = params.get('key')
         const urlSection = params.get('section') as ProjectTab | null
         const urlView = params.get('view')
+        const urlRoot = params.get('root')
         const urlMap = params.get('map')
         const urlLabels = params.getAll('label')
         const urlStatuses = params.getAll('status')
@@ -479,9 +487,10 @@ export function ProjectsPanel() {
         setActiveId(urlProject)
         setKind(tab)
         setSelectedKey(urlKey)
-        if (urlKey || urlView === 'wayfinder') setProjectTab('issues')
+        if (urlKey || urlView === 'wayfinder' || urlView === 'graph') setProjectTab('issues')
         else setProjectTab(urlSection && ['home', 'issues', 'sessions'].includes(urlSection) ? urlSection : 'home')
-        setView(urlView === 'wayfinder' ? 'wayfinder' : 'list')
+        setView(urlView === 'wayfinder' || urlView === 'graph' ? urlView : 'list')
+        setGraphRootKey(urlRoot)
         setMapKey(urlMap)
         setFiltersByKind(prev => ({
           ...prev,
@@ -510,6 +519,9 @@ export function ProjectsPanel() {
   const handleSelectProject = useCallback((id: string) => {
     setActiveId(id)
     setProjectTab('home')
+    setView('list')
+    setGraphRootKey(null)
+    setMapKey(null)
     setSelectedKey(null)
     setFiltersByKind(prev => Object.fromEntries(
       Object.entries(prev).map(([itemKind, filters]) => [
@@ -717,11 +729,12 @@ export function ProjectsPanel() {
 
             {projectTab === 'issues' && (
             <>
-            {/* View switch — Wayfinder maps are first-class, not an easter egg
-                in the flat list. */}
+            {/* Generic planning graphs and Wayfinder maps are first-class
+                tracker views, not hidden affordances in the flat list. */}
             <div className="mt-4 flex gap-1.5" role="tablist" aria-label="Tracker view">
               {([
                 { key: 'list', label: 'List', icon: <List size={12} /> },
+                { key: 'graph', label: 'Graph', icon: <Network size={12} /> },
                 { key: 'wayfinder', label: 'Wayfinder', icon: <Compass size={12} /> },
               ] as const).map(v => (
                 <button
@@ -1017,10 +1030,33 @@ export function ProjectsPanel() {
               />
             )}
 
+            {view === 'graph' && activeId && vocab && (
+              <IssueGraphPanel
+                projectId={activeId}
+                vocab={vocab}
+                rootKey={graphRootKey}
+                onSelectRoot={key => setGraphRootKey(key)}
+                selectedKey={selectedKey}
+                onSelectIssue={key => setSelectedKey(key)}
+                refreshSignal={trackerVersion}
+              />
+            )}
+
             {/* Selecting a node or row in the map opens the same editable
                 detail, below the map — map context is never lost. */}
             {view === 'wayfinder' && selectedKey && vocab && (
               <div className="mt-4 rounded-lg border border-gray-800 overflow-hidden" data-testid="wayfinder-detail">
+                <ItemDetail
+                  issueKey={selectedKey}
+                  vocab={vocab}
+                  onChanged={refreshAfterIssueChange}
+                  onDeleted={() => { setSelectedKey(null); refreshAfterIssueChange() }}
+                  onNavigate={key => setSelectedKey(key)}
+                />
+              </div>
+            )}
+            {view === 'graph' && selectedKey && vocab && (
+              <div className="mt-4 rounded-lg border border-gray-800 overflow-hidden" data-testid="issue-graph-detail">
                 <ItemDetail
                   issueKey={selectedKey}
                   vocab={vocab}

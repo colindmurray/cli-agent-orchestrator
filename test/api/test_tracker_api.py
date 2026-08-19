@@ -774,6 +774,42 @@ class TestMapProjectionRoute:
     def test_map_of_an_unknown_issue_is_404(self, client, project):
         assert client.get("/tracker/issues/cond-9999/map").status_code == 404
 
+
+class TestGraphProjectionRoute:
+    def test_graph_returns_transitive_hierarchy_and_relationship_context(self, client, project):
+        root = _issue(client, title="root", kind="project")
+        child = _issue(client, title="child", kind="milestone")
+        leaf = _issue(client, title="leaf", kind="task")
+        outside = _issue(client, title="outside")
+        client.post(
+            f"/tracker/issues/{child['key']}/links",
+            json={"to_key": root["key"], "kind": "part-of"},
+        )
+        client.post(
+            f"/tracker/issues/{leaf['key']}/links",
+            json={"to_key": child["key"], "kind": "part-of"},
+        )
+        client.post(
+            f"/tracker/issues/{outside['key']}/links",
+            json={"to_key": leaf["key"], "kind": "blocks"},
+        )
+        response = client.get(f"/tracker/issues/{root['key']}/graph")
+        assert response.status_code == 200
+        body = response.json()
+        assert [(row["title"], row["depth"]) for row in body["nodes"]] == [
+            ("root", 0), ("child", 1), ("leaf", 2)
+        ]
+        assert [row["title"] for row in body["external"]] == ["outside"]
+
+    def test_graph_bounds_are_validated_and_unknown_root_is_404(self, client, project):
+        issue = _issue(client)
+        assert client.get(
+            f"/tracker/issues/{issue['key']}/graph", params={"max_depth": 0}
+        ).status_code == 422
+        assert client.get("/tracker/issues/cond-9999/graph").status_code == 404
+
+
+class TestMapProjectionRouteExternalEndpoints:
     def test_every_external_link_endpoint_is_served_with_its_blocking_role(self, client, project):
         m = _issue(client, title="the map", labels=["wayfinder:map"])
         a = _issue(client, title="a")

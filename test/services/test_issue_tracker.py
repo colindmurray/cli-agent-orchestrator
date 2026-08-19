@@ -1509,3 +1509,89 @@ class TestMapProjection:
         with pytest.raises(TrackerError) as exc:
             tracker.map_projection("cond-9999")
         assert exc.value.code == "not-found"
+
+
+class TestGraphProjection:
+    def test_transitive_part_of_hierarchy_starts_from_any_issue(self, cao_system):
+        root = tracker.create_issue(project_id="cao-system", title="product", kind="project")
+        milestone = tracker.create_issue(
+            project_id="cao-system", title="milestone", kind="milestone"
+        )
+        story = tracker.create_issue(project_id="cao-system", title="story", kind="story")
+        task = tracker.create_issue(project_id="cao-system", title="task", kind="task")
+        tracker.add_link(milestone["key"], to_key=root["key"], kind="part-of")
+        tracker.add_link(story["key"], to_key=milestone["key"], kind="part-of")
+        tracker.add_link(task["key"], to_key=story["key"], kind="part-of")
+
+        got = tracker.graph_projection(root["key"])
+        by_key = {row["key"]: row for row in got["nodes"]}
+        assert [by_key[key]["depth"] for key in (
+            root["key"], milestone["key"], story["key"], task["key"]
+        )] == [0, 1, 2, 3]
+        assert by_key[story["key"]]["parent_keys"] == [milestone["key"]]
+        assert by_key[milestone["key"]]["child_count"] == 1
+        assert got["stats"] == {
+            "nodes": 4, "descendants": 3, "external": 0, "links": 3, "depth": 3
+        }
+
+    def test_relationship_endpoints_are_materialized_without_becoming_children(self, cao_system):
+        root, children = _map_with_tickets(cao_system, titles=("child",))
+        blocker = tracker.create_issue(project_id="cao-system", title="blocker")
+        related = tracker.create_issue(project_id="cao-system", title="related")
+        tracker.add_link(blocker["key"], to_key=children[0]["key"], kind="blocks")
+        tracker.add_link(children[0]["key"], to_key=related["key"], kind="relates")
+
+        got = tracker.graph_projection(root["key"])
+        assert {row["key"] for row in got["external"]} == {
+            blocker["key"], related["key"]
+        }
+        visible = {row["key"] for row in got["nodes"] + got["external"]}
+        assert all(
+            link["from_key"] in visible and link["to_key"] in visible
+            for link in got["links"]
+        )
+
+    def test_cycles_do_not_loop_or_duplicate_nodes(self, cao_system):
+        a = tracker.create_issue(project_id="cao-system", title="a")
+        b = tracker.create_issue(project_id="cao-system", title="b")
+        tracker.add_link(b["key"], to_key=a["key"], kind="part-of")
+        tracker.add_link(a["key"], to_key=b["key"], kind="part-of")
+        got = tracker.graph_projection(a["key"])
+        assert [row["key"] for row in got["nodes"]] == [a["key"], b["key"]]
+        assert len(got["links"]) == 2
+
+    def test_depth_bound_is_reported_and_omitted_children_are_not_external(self, cao_system):
+        root = tracker.create_issue(project_id="cao-system", title="root")
+        child = tracker.create_issue(project_id="cao-system", title="child")
+        grandchild = tracker.create_issue(project_id="cao-system", title="grandchild")
+        tracker.add_link(child["key"], to_key=root["key"], kind="part-of")
+        tracker.add_link(grandchild["key"], to_key=child["key"], kind="part-of")
+        # A second relationship touching the included child must not smuggle
+        # the depth-omitted grandchild back as generic external context.
+        tracker.add_link(grandchild["key"], to_key=child["key"], kind="blocks")
+        got = tracker.graph_projection(root["key"], max_depth=1)
+        assert [row["key"] for row in got["nodes"]] == [root["key"], child["key"]]
+        assert grandchild["key"] not in {row["key"] for row in got["external"]}
+        assert got["bounds"]["truncated"] is True
+        assert got["bounds"]["reasons"] == ["depth-limit"]
+
+    def test_node_bound_is_reported_without_leaking_omitted_siblings(self, cao_system):
+        root = tracker.create_issue(project_id="cao-system", title="root")
+        children = [
+            tracker.create_issue(project_id="cao-system", title=f"child-{index}")
+            for index in range(3)
+        ]
+        for child in children:
+            tracker.add_link(child["key"], to_key=root["key"], kind="part-of")
+
+        got = tracker.graph_projection(root["key"], max_nodes=2)
+        assert len(got["nodes"]) == 2
+        visible = {row["key"] for row in got["nodes"] + got["external"]}
+        assert len(visible & {child["key"] for child in children}) == 1
+        assert got["bounds"]["truncated"] is True
+        assert "node-limit" in got["bounds"]["reasons"]
+
+    def test_unknown_root_is_not_found(self, cao_system):
+        with pytest.raises(TrackerError) as exc:
+            tracker.graph_projection("cond-9999")
+        assert exc.value.code == "not-found"

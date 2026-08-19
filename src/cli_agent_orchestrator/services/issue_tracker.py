@@ -2093,6 +2093,181 @@ def map_projection(map_key: str) -> Dict[str, Any]:
         }
 
 
+def graph_projection(
+    root_key: str,
+    *,
+    max_depth: int = 8,
+    max_nodes: int = 300,
+) -> Dict[str, Any]:
+    """A bounded transitive issue hierarchy plus its relationship context.
+
+    ``part-of`` is the only hierarchy edge and runs child -> parent. Starting
+    from any issue, breadth-first traversal discovers descendants without
+    prescribing which issue kinds may contain which others. All links touching
+    the resulting hierarchy are returned, with non-member endpoints
+    materialized in ``external`` so the relationship view has no dangling
+    edges. Bounds are explicit response metadata, never a silent partial list.
+    """
+    key = str(root_key or "").strip().lower()
+    depth_limit = max(1, min(int(max_depth or 8), 12))
+    node_limit = max(1, min(int(max_nodes or 300), 500))
+    external_limit = 200
+
+    with SessionLocal() as db:
+        root = _require_issue(db, key)
+        rows_by_key: Dict[str, TrackerIssueModel] = {key: root}
+        depths: Dict[str, int] = {key: 0}
+        frontier_keys = [key]
+        truncated_reasons: set[str] = set()
+
+        for depth in range(1, depth_limit + 1):
+            if not frontier_keys or len(rows_by_key) >= node_limit:
+                break
+            pairs = (
+                db.query(TrackerLinkModel, TrackerIssueModel)
+                .join(TrackerIssueModel, TrackerIssueModel.key == TrackerLinkModel.from_key)
+                .filter(
+                    TrackerLinkModel.kind == "part-of",
+                    TrackerLinkModel.to_key.in_(frontier_keys),
+                )
+                .order_by(TrackerIssueModel.created_at.asc(), TrackerIssueModel.id.asc())
+                .all()
+            )
+            next_keys: List[str] = []
+            for _link, child in pairs:
+                if child.key in rows_by_key:
+                    continue
+                if len(rows_by_key) >= node_limit:
+                    truncated_reasons.add("node-limit")
+                    break
+                rows_by_key[child.key] = child
+                depths[child.key] = depth
+                next_keys.append(child.key)
+            frontier_keys = next_keys
+
+        if len(rows_by_key) >= node_limit and frontier_keys and db.query(
+            TrackerLinkModel.id
+        ).filter(
+            TrackerLinkModel.kind == "part-of",
+            TrackerLinkModel.to_key.in_(frontier_keys),
+            ~TrackerLinkModel.from_key.in_(list(rows_by_key)),
+        ).first() is not None:
+            truncated_reasons.add("node-limit")
+
+        # If the last included level still has children, depth bounded the
+        # projection. This extra existence query records that fact explicitly.
+        deepest = [node_key for node_key, depth in depths.items() if depth == depth_limit]
+        if deepest and db.query(TrackerLinkModel.id).filter(
+            TrackerLinkModel.kind == "part-of",
+            TrackerLinkModel.to_key.in_(deepest),
+        ).first() is not None:
+            truncated_reasons.add("depth-limit")
+
+        members = set(rows_by_key)
+        touching = (
+            db.query(TrackerLinkModel)
+            .filter(
+                (TrackerLinkModel.from_key.in_(members))
+                | (TrackerLinkModel.to_key.in_(members))
+            )
+            .order_by(TrackerLinkModel.id.asc())
+            .all()
+        )
+
+        # A child omitted by a hierarchy bound must not sneak back in as an
+        # "external" relationship node. Other neighbours are useful context.
+        omitted_hierarchy_children = {
+            link.from_key
+            for link in touching
+            if link.kind == "part-of"
+            and link.to_key in members
+            and link.from_key not in members
+        }
+        candidate_external: List[str] = []
+        for link in touching:
+            for endpoint in (link.from_key, link.to_key):
+                if endpoint in members or endpoint in candidate_external:
+                    continue
+                if endpoint in omitted_hierarchy_children:
+                    continue
+                candidate_external.append(endpoint)
+        if len(candidate_external) > external_limit:
+            candidate_external = candidate_external[:external_limit]
+            truncated_reasons.add("external-limit")
+        external_set = set(candidate_external)
+
+        external_rows = []
+        if external_set:
+            by_external_key = {
+                row.key: row
+                for row in db.query(TrackerIssueModel)
+                .filter(TrackerIssueModel.key.in_(external_set))
+                .all()
+            }
+            external_rows = [
+                _issue_row(by_external_key[external_key])
+                for external_key in candidate_external
+                if external_key in by_external_key
+            ]
+            external_set = {row["key"] for row in external_rows}
+
+        visible = members | external_set
+        links = [
+            link for link in touching
+            if link.from_key in visible and link.to_key in visible
+        ]
+        parent_keys: Dict[str, List[str]] = {node_key: [] for node_key in members}
+        child_counts: Dict[str, int] = {node_key: 0 for node_key in members}
+        for link in links:
+            if link.kind != "part-of":
+                continue
+            if link.from_key in members and link.to_key in members:
+                parent_keys[link.from_key].append(link.to_key)
+                child_counts[link.to_key] += 1
+
+        ordered_keys = sorted(
+            members,
+            key=lambda node_key: (
+                depths[node_key],
+                rows_by_key[node_key].created_at,
+                rows_by_key[node_key].id,
+            ),
+        )
+        nodes = []
+        for node_key in ordered_keys:
+            payload = _issue_row(rows_by_key[node_key])
+            payload.update({
+                "depth": depths[node_key],
+                "parent_keys": parent_keys[node_key],
+                "child_count": child_counts[node_key],
+            })
+            nodes.append(payload)
+
+        return {
+            "root": _issue_row(root),
+            "nodes": nodes,
+            "external": external_rows,
+            "links": [
+                {"id": link.id, "kind": link.kind,
+                 "from_key": link.from_key, "to_key": link.to_key}
+                for link in links
+            ],
+            "bounds": {
+                "max_depth": depth_limit,
+                "max_nodes": node_limit,
+                "truncated": bool(truncated_reasons),
+                "reasons": sorted(truncated_reasons),
+            },
+            "stats": {
+                "nodes": len(nodes),
+                "descendants": max(0, len(nodes) - 1),
+                "external": len(external_rows),
+                "links": len(links),
+                "depth": max(depths.values()),
+            },
+        }
+
+
 def field_options(
     project_id: str,
     *,

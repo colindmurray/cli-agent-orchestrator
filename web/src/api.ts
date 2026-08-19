@@ -1159,6 +1159,32 @@ export interface TrackerMapProjection {
   }
 }
 
+export interface TrackerGraphNode extends TrackerIssue {
+  depth: number
+  parent_keys: string[]
+  child_count: number
+}
+
+export interface TrackerGraphProjection {
+  root: TrackerIssue
+  nodes: TrackerGraphNode[]
+  external: TrackerIssue[]
+  links: TrackerLink[]
+  bounds: {
+    max_depth: number
+    max_nodes: number
+    truncated: boolean
+    reasons: string[]
+  }
+  stats: {
+    nodes: number
+    descendants: number
+    external: number
+    links: number
+    depth: number
+  }
+}
+
 export interface TrackerClaimResult extends TrackerIssue {
   claimed: boolean
   already_claimed: boolean
@@ -1790,6 +1816,10 @@ export const api = {
     ),
   getTrackerMap: (key: string) =>
     fetchJSON<TrackerMapProjection>(`/tracker/issues/${encodeURIComponent(key)}/map`),
+  getTrackerGraph: (key: string, maxDepth = 8, maxNodes = 300) =>
+    fetchJSON<TrackerGraphProjection>(
+      `/tracker/issues/${encodeURIComponent(key)}/graph?max_depth=${maxDepth}&max_nodes=${maxNodes}`,
+    ),
   claimTrackerIssue: (key: string, claimant: string) =>
     fetchJSON<TrackerClaimResult>(`/tracker/issues/${encodeURIComponent(key)}/claim`, {
       method: 'POST',

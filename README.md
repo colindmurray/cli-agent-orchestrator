@@ -269,6 +269,16 @@ Existing markdown ledgers import with their ids, filing dates, severities and
 reporters intact (`cao issue import-ledger OPEN_ISSUES.md --project <id>`), and
 the markdown becomes a rendered export rather than a second source of truth.
 
+The Issues area has a generic **Graph** view rooted at any issue. Its
+**Hierarchy** mode follows `part-of` transitively, so a project can unfold into
+milestones, goals, stories, tasks, and bugs without prescribing which kinds may
+contain which. **Relationships** adds blockers and other linked issues outside
+that hierarchy. Searchable root selection, quick project roots, type/status
+filters, collapsible subtrees, node-to-detail navigation, and one-click
+rerooting make the view useful for both whole-project planning and local issue
+context. The bounded projection is available at
+`GET /tracker/issues/{key}/graph`; truncation is explicit in its response.
+
 The **Projects** tab also carries a **Wayfinder** view for map-driven work: a
 map is an issue labelled `wayfinder:map`, its decision tickets link to it with
 `part-of`, and the view renders the map's destination, progress, the ordered

@@ -12,12 +12,17 @@ import { Bot, Home, Clock, Settings, Brain, FolderGit2, CheckCircle, XCircle, In
 
 type TabKey = 'home' | 'agents' | 'flows' | 'settings' | 'memory' | 'projects'
 
-// Tracker deep links — ?project=…&view=wayfinder&map=… etc. — are owned by
+// Tracker deep links — ?project=…&view=graph&root=… (or Wayfinder's map)
+// and issue-filter queries — are owned by
 // the Projects tab, but the tab itself is not in the URL. Derive the landing
 // tab from the query so a hard refresh or a copied link opens Projects
 // instead of stranding the restored tracker state under Home; bare / stays
 // Home. These param names are exactly the set ProjectsPanel reads and writes.
-const TRACKER_PARAMS = ['project', 'kind', 'key', 'view', 'map', 'label', 'unlabeled']
+const TRACKER_PARAMS = [
+  'project', 'section', 'kind', 'key', 'view', 'root', 'map',
+  'label', 'status', 'severity', 'component', 'assignee', 'reporter',
+  'open', 'unlabeled',
+]
 
 function tabForLocation(): TabKey {
   try {

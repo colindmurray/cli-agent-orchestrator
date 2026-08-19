@@ -161,6 +161,24 @@ const PROJECTION = {
   progress: { total: 4, open: 3, terminal: 1, resolved: 0, claimed: 1, frontier: 1 },
 }
 
+const GRAPH_PROJECTION = {
+  root: MAP,
+  nodes: [
+    { ...MAP, depth: 0, parent_keys: [], child_count: 1 },
+    { ...T_RESEARCH, kind: 'milestone', depth: 1, parent_keys: ['cond-0001'], child_count: 1 },
+    { ...T_MIGRATE, kind: 'task', depth: 2, parent_keys: ['cond-0002'], child_count: 0 },
+  ],
+  external: [EXT, EXT2],
+  links: [
+    { id: 21, kind: 'part-of', from_key: 'cond-0002', to_key: 'cond-0001' },
+    { id: 22, kind: 'part-of', from_key: 'cond-0005', to_key: 'cond-0002' },
+    { id: 23, kind: 'blocks', from_key: 'cond-0009', to_key: 'cond-0005' },
+    { id: 24, kind: 'relates', from_key: 'cond-0010', to_key: 'cond-0002' },
+  ],
+  bounds: { max_depth: 8, max_nodes: 300, truncated: false, reasons: [] },
+  stats: { nodes: 3, descendants: 2, external: 2, links: 4, depth: 2 },
+}
+
 const FACETS = {
   project_id: 'cao-system',
   labels: [
@@ -202,6 +220,7 @@ describe('Wayfinder view', () => {
     if (path === '/tracker/projects/cao-system') return PROJECT
     if (path === '/tracker/projects') return [PROJECT]
     if (path === '/tracker/issues/cond-0001/map') return PROJECTION
+    if (path === '/tracker/issues/cond-0001/graph') return GRAPH_PROJECTION
     if (path === '/tracker/issues' && method === 'GET') {
       const params = new URLSearchParams(url.split('?')[1] ?? '')
       let rows = ALL_ISSUES
@@ -260,6 +279,54 @@ describe('Wayfinder view', () => {
     await openIssues()
     fireEvent.click(await screen.findByRole('tab', { name: 'Wayfinder' }))
   }
+
+  async function openGraph() {
+    render(<ProjectsPanel />)
+    await openIssues()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Graph' }))
+  }
+
+  it('opens a root-scoped transitive hierarchy and persists the graph deep link', async () => {
+    await openGraph()
+    const hierarchy = await screen.findByLabelText('Issue hierarchy')
+    expect(within(hierarchy).getByText('Find the deploy path')).toBeInTheDocument()
+    expect(within(hierarchy).getByText('research providers')).toBeInTheDocument()
+    expect(within(hierarchy).getByText('migrate the store')).toBeInTheDocument()
+    expect(screen.getByText('2 descendants · 2 related · 4 links · depth 2')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(window.location.search).toContain('view=graph')
+      expect(window.location.search).toContain('root=cond-0001')
+    })
+
+    const sigma = getLastSigma()
+    expect(sigma.graph.order).toBe(3)
+    expect(sigma.graph.size).toBe(2)
+    expect(sigma.graph.getEdgeAttributes('cond-0005', 'cond-0002').kind).toBe('part-of')
+  })
+
+  it('switches to the relationship graph with materialized external context', async () => {
+    await openGraph()
+    await screen.findByLabelText('Issue hierarchy')
+    fireEvent.click(screen.getByRole('tab', { name: 'Relationships' }))
+    const relationships = await screen.findByLabelText('Issue relationships')
+    expect(within(relationships).getByText('blocks')).toBeInTheDocument()
+    expect(within(relationships).getByText('relates to')).toBeInTheDocument()
+    await waitFor(() => expect(getLastSigma().graph.order).toBe(5))
+    expect(getLastSigma().graph.getEdgeAttributes('cond-0009', 'cond-0005').kind).toBe('blocks')
+  })
+
+  it('collapses descendants and opens the shared editable issue detail', async () => {
+    await openGraph()
+    const hierarchy = await screen.findByLabelText('Issue hierarchy')
+    fireEvent.click(within(hierarchy).getByRole('button', { name: 'Collapse cond-0002' }))
+    expect(within(hierarchy).queryByText('migrate the store')).not.toBeInTheDocument()
+    await waitFor(() => expect(getLastSigma().graph.order).toBe(2))
+
+    fireEvent.click(within(hierarchy).getByText('research providers'))
+    const detail = await screen.findByTestId('issue-graph-detail')
+    expect(await within(detail).findByLabelText('Bug title')).toHaveValue('research providers')
+    expect(screen.getByTestId('issue-graph-view')).toBeInTheDocument()
+  })
 
   it('switches between List and Wayfinder views and persists it in the URL', async () => {
     render(<ProjectsPanel />)
