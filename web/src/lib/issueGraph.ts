@@ -62,7 +62,10 @@ export interface IssueDependencyPlan {
   edges: IssueDependencyEdge[]
   tracks: IssueDependencyTrack[]
   cycles: string[][]
+  totalDependencyCount: number
+  visibleDependencyCount: number
   openDependencyCount: number
+  clearedDependencyCount: number
   hiddenDependencyCount: number
 }
 
@@ -317,6 +320,9 @@ export function buildIssueDependencyPlan(
 
   const edgeRows = new Map<string, IssueDependencyEdge>()
   const hiddenDependencyCount = new Map<string, number>()
+  let totalDependencyCount = 0
+  let openDependencyCount = 0
+  let clearedDependencyCount = 0
   for (const link of projection.links) {
     if (link.kind !== 'blocks') continue
     const from = representative(link.from_key)
@@ -328,6 +334,10 @@ export function buildIssueDependencyPlan(
       || (byKey.get(link.from_key) ? nodeMatches(byKey.get(link.from_key)!, filters) : false)
       || (byKey.get(link.to_key) ? nodeMatches(byKey.get(link.to_key)!, filters) : false)
     if (!relevant) continue
+    const cleared = TERMINAL_ISSUE_STATUSES.has(byKey.get(link.from_key)?.status ?? '')
+    totalDependencyCount += 1
+    if (cleared) clearedDependencyCount += 1
+    else openDependencyCount += 1
     // A dependency internal to a collapsed scope is summarized by the scope
     // count, not misrepresented as a container blocking itself.
     if (from === to && link.from_key !== link.to_key) {
@@ -337,7 +347,6 @@ export function buildIssueDependencyPlan(
     candidates.add(from)
     candidates.add(to)
     const pair = JSON.stringify([from, to])
-    const cleared = TERMINAL_ISSUE_STATUSES.has(byKey.get(link.from_key)?.status ?? '')
     const existing = edgeRows.get(pair)
     if (existing) {
       existing.cleared = existing.cleared && cleared
@@ -521,7 +530,10 @@ export function buildIssueDependencyPlan(
     cycles: [...cyclicComponents]
       .map(index => components[index])
       .sort((left, right) => (order.get(left[0]) ?? 0) - (order.get(right[0]) ?? 0)),
-    openDependencyCount: edges.filter(edge => !edge.cleared).length,
+    totalDependencyCount,
+    visibleDependencyCount: edges.length,
+    openDependencyCount,
+    clearedDependencyCount,
     hiddenDependencyCount: [...hiddenDependencyCount.values()].reduce((sum, count) => sum + count, 0),
   }
 }
