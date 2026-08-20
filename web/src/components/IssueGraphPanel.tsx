@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Focus, GitFork, Loader2, Network, Search } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronDown, ChevronRight, Focus, GitFork, Loader2, Network, Search, Workflow } from 'lucide-react'
 import type {
   TrackerGraphProjection,
   TrackerIssue,
@@ -7,6 +7,7 @@ import type {
 } from '../api'
 import { api, errorText } from '../api'
 import {
+  buildIssueDependencyPlan,
   IssueGraphMode,
   orderIssueHierarchyNodes,
   visibleIssueGraphKeys,
@@ -15,6 +16,7 @@ import { linkPhrase } from '../lib/issueMap'
 import { useStore } from '../store'
 import { SearchableOption, SearchableSelect } from './SearchablePicker'
 import { IssueGraphCanvas } from './IssueGraphCanvas'
+import { IssueDependencyTracks } from './IssueDependencyTracks'
 
 export function IssueGraphPanel({
   projectId,
@@ -42,6 +44,8 @@ export function IssueGraphPanel({
   const [kinds, setKinds] = useState<string[]>([])
   const [statuses, setStatuses] = useState<string[]>([])
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [dependencyCollapsed, setDependencyCollapsed] = useState<Set<string>>(new Set())
+  const dependencyRootRef = useRef<string | null>(null)
 
   const loadIssueOptions = useCallback(async (needle: string): Promise<SearchableOption[]> => {
     const result = await api.listTrackerIssues({
@@ -78,6 +82,7 @@ export function IssueGraphPanel({
 
   useEffect(() => {
     setCollapsed(new Set())
+    setDependencyCollapsed(new Set())
     setQuery('')
     setKinds([])
     setStatuses([])
@@ -88,7 +93,18 @@ export function IssueGraphPanel({
     let active = true
     setLoading(true)
     api.getTrackerGraph(rootKey)
-      .then(result => { if (active) setProjection(result) })
+      .then(result => {
+        if (!active) return
+        setProjection(result)
+        if (dependencyRootRef.current !== result.root.key) {
+          dependencyRootRef.current = result.root.key
+          setDependencyCollapsed(new Set(
+            result.nodes
+              .filter(node => node.key !== result.root.key && node.child_count > 0)
+              .map(node => node.key),
+          ))
+        }
+      })
       .catch(err => {
         if (active) {
           setProjection(null)
@@ -99,10 +115,18 @@ export function IssueGraphPanel({
     return () => { active = false }
   }, [rootKey, refreshSignal, showSnackbar])
 
-  const filters = useMemo(() => ({ query, kinds, statuses, collapsed }), [query, kinds, statuses, collapsed])
+  const activeCollapsed = mode === 'dependencies' ? dependencyCollapsed : collapsed
+  const filters = useMemo(
+    () => ({ query, kinds, statuses, collapsed: activeCollapsed }),
+    [query, kinds, statuses, activeCollapsed],
+  )
   const visible = useMemo(
     () => projection ? visibleIssueGraphKeys(projection, mode, filters) : new Set<string>(),
     [projection, mode, filters],
+  )
+  const dependencyPlan = useMemo(
+    () => projection ? buildIssueDependencyPlan(projection, filters) : null,
+    [projection, filters],
   )
   const selected = projection
     ? [...projection.nodes, ...projection.external].find(issue => issue.key === selectedKey) ?? null
@@ -112,7 +136,8 @@ export function IssueGraphPanel({
     setValues(values.includes(value) ? values.filter(item => item !== value) : [...values, value])
   }
   const toggleCollapsed = (key: string) => {
-    setCollapsed(current => {
+    const setter = mode === 'dependencies' ? setDependencyCollapsed : setCollapsed
+    setter(current => {
       const next = new Set(current)
       if (next.has(key)) next.delete(key)
       else next.add(key)
@@ -140,6 +165,7 @@ export function IssueGraphPanel({
             <div className="flex gap-1" role="tablist" aria-label="Issue graph mode">
               {([
                 { key: 'hierarchy', label: 'Hierarchy', icon: <GitFork size={12} /> },
+                { key: 'dependencies', label: 'Dependencies', icon: <Workflow size={12} /> },
                 { key: 'relationships', label: 'Relationships', icon: <Network size={12} /> },
               ] as const).map(item => (
                 <button
@@ -260,6 +286,13 @@ export function IssueGraphPanel({
                 </div>
               ))}
             </div>
+          ) : mode === 'dependencies' && dependencyPlan ? (
+            <IssueDependencyTracks
+              plan={dependencyPlan}
+              collapsed={dependencyCollapsed}
+              onToggleScope={toggleCollapsed}
+              onSelectIssue={onSelectIssue}
+            />
           ) : (
             <div className="rounded-lg border border-gray-800 overflow-hidden" aria-label="Issue relationships">
               {projection.links.filter(link => visible.has(link.from_key) && visible.has(link.to_key)).map(link => {
