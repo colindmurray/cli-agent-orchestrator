@@ -20,9 +20,10 @@ const { FakeSigma, getLastSigma, resetLastSigma } = vi.hoisted(() => {
     handlers: Record<string, AnyHandler[]> = {}
     killed = false
     settings: Record<string, unknown> = {}
-    constructor(graph: unknown, container: HTMLElement) {
+    constructor(graph: unknown, container: HTMLElement, settings?: Record<string, unknown>) {
       this.graph = graph
       this.container = container
+      this.settings = settings ?? {}
       last = this
     }
     on(event: string, handler: AnyHandler) {
@@ -306,6 +307,38 @@ describe('Wayfinder view', () => {
     expect(sigma.graph.order).toBe(3)
     expect(sigma.graph.size).toBe(2)
     expect(sigma.graph.getEdgeAttributes('cond-0005', 'cond-0002').kind).toBe('part-of')
+    expect(sigma.settings.defaultDrawNodeHover).toBeTypeOf('function')
+  })
+
+  it('renders each expanded subtree contiguously when the API returns breadth-first nodes', async () => {
+    routeOverrides['GET /tracker/issues/cond-0001/graph'] = () => ({
+      status: 200,
+      data: {
+        ...GRAPH_PROJECTION,
+        nodes: [
+          { ...MAP, depth: 0, parent_keys: [], child_count: 2 },
+          { ...T_RESEARCH, kind: 'story', depth: 1, parent_keys: ['cond-0001'], child_count: 1 },
+          { ...T_GRILL, kind: 'story', depth: 1, parent_keys: ['cond-0001'], child_count: 0 },
+          { ...T_MIGRATE, kind: 'task', depth: 2, parent_keys: ['cond-0002'], child_count: 0 },
+        ],
+        links: [
+          { id: 21, kind: 'part-of', from_key: 'cond-0002', to_key: 'cond-0001' },
+          { id: 22, kind: 'part-of', from_key: 'cond-0003', to_key: 'cond-0001' },
+          { id: 23, kind: 'part-of', from_key: 'cond-0005', to_key: 'cond-0002' },
+        ],
+        stats: { nodes: 4, descendants: 3, external: 2, links: 3, depth: 2 },
+      },
+    })
+
+    await openGraph()
+    const hierarchy = await screen.findByLabelText('Issue hierarchy')
+    const titles = Array.from(hierarchy.querySelectorAll('button.min-w-0')).map(row => row.textContent)
+    expect(titles).toEqual([
+      'cond-0001Find the deploy path',
+      'cond-0002research providers',
+      'cond-0005migrate the store',
+      'cond-0003grill the operator',
+    ])
   })
 
   it('switches to the relationship graph with materialized external context', async () => {
