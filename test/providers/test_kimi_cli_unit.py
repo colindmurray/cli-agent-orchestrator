@@ -1016,15 +1016,17 @@ class TestKimiCliProviderModelFlag:
                 command = provider._build_kimi_command()
 
             assert _model_argv_values(command) == ["kimi-code/k3"]
-            disagreement_warnings = [
-                record.getMessage()
+            disagreement_records = [
+                record
                 for record in caplog.records
                 if record.getMessage().startswith("kimi_model_route_disagreement ")
             ]
-            assert disagreement_warnings == [
+            assert len(disagreement_records) == 1
+            assert disagreement_records[0].levelno == logging.WARNING
+            assert disagreement_records[0].getMessage() == (
                 "kimi_model_route_disagreement terminal_id='term-route' "
                 "profile_model='kimi-code/k2.5' expected_model='kimi-code/k3'"
-            ]
+            )
         finally:
             provider.cleanup()
 
