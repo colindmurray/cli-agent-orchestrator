@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { TrackerGraphNode, TrackerGraphProjection, TrackerIssue } from '../api'
-import { buildIssueGraph, visibleIssueGraphKeys } from '../lib/issueGraph'
+import {
+  buildIssueGraph,
+  orderIssueHierarchyNodes,
+  visibleIssueGraphKeys,
+} from '../lib/issueGraph'
 
 function issue(overrides: Partial<TrackerIssue> & Pick<TrackerIssue, 'key' | 'title'>): TrackerIssue {
   return {
@@ -122,6 +126,28 @@ describe('generic issue graph', () => {
     expect(graph.getNodeAttribute(LEFT_B.key, 'x')).toBeLessThan(
       graph.getNodeAttribute(RIGHT_A.key, 'x'),
     )
+  })
+
+  it('orders breadth-first API nodes as a subtree-contiguous hierarchy', () => {
+    const LEFT = node('cond-0503', 'Left branch', 1, [ROOT.key], 1)
+    const RIGHT = node('cond-0504', 'Right branch', 1, [ROOT.key], 0)
+    const LEFT_CHILD = node('cond-0505', 'Left child', 2, [LEFT.key], 0)
+    const ROOT_ROW: TrackerGraphNode = { ...ROOT, child_count: 2 }
+    const projection: TrackerGraphProjection = {
+      ...PROJECTION,
+      root: ROOT,
+      // The API returns breadth-first order: both siblings precede the child.
+      nodes: [ROOT_ROW, LEFT, RIGHT, LEFT_CHILD],
+      external: [],
+      links: [
+        { id: 10, kind: 'part-of', from_key: LEFT.key, to_key: ROOT.key },
+        { id: 11, kind: 'part-of', from_key: RIGHT.key, to_key: ROOT.key },
+        { id: 12, kind: 'part-of', from_key: LEFT_CHILD.key, to_key: LEFT.key },
+      ],
+    }
+
+    expect(orderIssueHierarchyNodes(projection, new Set(projection.nodes.map(row => row.key))))
+      .toEqual([ROOT_ROW, LEFT, LEFT_CHILD, RIGHT])
   })
 
   it('preserves ancestors of a matching descendant and hides collapsed descendants', () => {

@@ -86,6 +86,66 @@ export function visibleIssueGraphKeys(
   return visible
 }
 
+/**
+ * Return hierarchy rows in deterministic preorder, independently of the order
+ * used by the graph API. The API currently walks breadth-first, which is useful
+ * for bounded discovery but makes an expanded tree look as though children
+ * belong to the final sibling above them.
+ */
+export function orderIssueHierarchyNodes(
+  projection: TrackerGraphProjection,
+  visible: Set<string>,
+): TrackerGraphNode[] {
+  const byKey = new Map(projection.nodes.map(node => [node.key, node]))
+  const apiOrder = new Map(projection.nodes.map((node, index) => [node.key, index]))
+  const parentCandidates = new Map<string, string[]>()
+
+  for (const link of projection.links) {
+    if (link.kind !== 'part-of' || !byKey.has(link.from_key) || !byKey.has(link.to_key)) continue
+    const candidates = parentCandidates.get(link.from_key) ?? []
+    candidates.push(link.to_key)
+    parentCandidates.set(link.from_key, candidates)
+  }
+  for (const node of projection.nodes) {
+    if (parentCandidates.has(node.key)) continue
+    const candidates = node.parent_keys.filter(key => byKey.has(key))
+    if (candidates.length) parentCandidates.set(node.key, candidates)
+  }
+
+  const primaryParent = new Map<string, string>()
+  for (const [child, candidates] of parentCandidates) {
+    const parent = [...new Set(candidates)].sort()[0]
+    if (parent && child !== projection.root.key) primaryParent.set(child, parent)
+  }
+  const children = new Map<string, string[]>()
+  for (const [child, parent] of primaryParent) {
+    const branch = children.get(parent) ?? []
+    branch.push(child)
+    children.set(parent, branch)
+  }
+  for (const branch of children.values()) {
+    branch.sort((left, right) =>
+      (apiOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
+        (apiOrder.get(right) ?? Number.MAX_SAFE_INTEGER) || left.localeCompare(right),
+    )
+  }
+
+  const ordered: TrackerGraphNode[] = []
+  const visited = new Set<string>()
+  const visit = (key: string): void => {
+    if (visited.has(key)) return
+    visited.add(key)
+    const node = byKey.get(key)
+    if (!node) return
+    if (visible.has(key)) ordered.push(node)
+    for (const child of children.get(key) ?? []) visit(child)
+  }
+
+  visit(projection.root.key)
+  for (const node of projection.nodes) visit(node.key)
+  return ordered
+}
+
 function nodeColor(
   issue: TrackerIssue,
   projection: TrackerGraphProjection,

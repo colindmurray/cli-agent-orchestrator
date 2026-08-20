@@ -42,6 +42,10 @@ export function IssueGraphCanvas({
         labelRenderedSizeThreshold: 4,
         labelColor: { color: '#d1d5db' },
         labelSize: 10,
+        // Sigma's default hover painter draws a pale tooltip behind the label.
+        // The dark, high-contrast focus card below is the single hover detail
+        // surface for this graph, while the node reducer still highlights it.
+        defaultDrawNodeHover: () => {},
       })
       sigma.on('clickNode', ({ node }) => onSelectRef.current(node))
       sigma.on('enterNode', ({ node }) => setHoveredKey(node))

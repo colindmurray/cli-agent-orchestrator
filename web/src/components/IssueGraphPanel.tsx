@@ -8,6 +8,7 @@ import type {
 import { api, errorText } from '../api'
 import {
   IssueGraphMode,
+  orderIssueHierarchyNodes,
   visibleIssueGraphKeys,
 } from '../lib/issueGraph'
 import { linkPhrase } from '../lib/issueMap'
@@ -239,7 +240,7 @@ export function IssueGraphPanel({
           />
           {mode === 'hierarchy' ? (
             <div className="rounded-lg border border-gray-800 overflow-hidden" aria-label="Issue hierarchy">
-              {projection.nodes.filter(node => visible.has(node.key)).map(node => (
+              {orderIssueHierarchyNodes(projection, visible).map(node => (
                 <div key={node.key} className="flex items-center gap-2 border-b border-gray-800/70 px-3 py-2 last:border-b-0" style={{ paddingLeft: `${12 + node.depth * 22}px` }}>
                   {node.child_count > 0 ? (
                     <button
