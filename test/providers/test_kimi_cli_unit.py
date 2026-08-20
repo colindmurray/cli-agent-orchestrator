@@ -4,8 +4,10 @@ Covers initialization, status detection, message extraction, command building,
 pattern matching, and cleanup — targeting >90% code coverage.
 """
 
+import logging
 import os
 import re
+import shlex
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -938,8 +940,13 @@ class TestKimiCliProviderBuildCommand:
 # =============================================================================
 
 
+def _model_argv_values(command: str) -> list[str]:
+    argv = shlex.split(command)
+    return [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--model"]
+
+
 class TestKimiCliProviderModelFlag:
-    """Tests that profile.model is forwarded to Kimi CLI via --model."""
+    """Tests Kimi CLI's single model-flag resolution."""
 
     @patch("cli_agent_orchestrator.providers.kimi_cli.load_agent_profile")
     def test_build_command_appends_model_when_set(self, mock_load):
@@ -950,9 +957,78 @@ class TestKimiCliProviderModelFlag:
         mock_load.return_value = mock_profile
 
         provider = KimiCliProvider("term-1", "sess", "win", "agent")
-        command = provider._build_kimi_command()
+        try:
+            command = provider._build_kimi_command()
+            assert _model_argv_values(command) == ["kimi-k2-turbo"]
+        finally:
+            provider.cleanup()
 
-        assert "--model kimi-k2-turbo" in command
+    @patch("cli_agent_orchestrator.providers.kimi_cli.load_agent_profile")
+    def test_build_command_emits_equal_profile_and_expected_model_once(self, mock_load, caplog):
+        mock_profile = MagicMock()
+        mock_profile.model = "kimi-code/k3"
+        mock_profile.system_prompt = None
+        mock_profile.mcpServers = None
+        mock_load.return_value = mock_profile
+
+        provider = KimiCliProvider(
+            "term-equal",
+            "sess",
+            "win",
+            "agent",
+            expected_model="kimi-code/k3",
+        )
+        try:
+            with caplog.at_level(
+                logging.WARNING,
+                logger="cli_agent_orchestrator.providers.kimi_cli",
+            ):
+                command = provider._build_kimi_command()
+
+            assert _model_argv_values(command) == ["kimi-code/k3"]
+            assert not any(
+                record.getMessage().startswith("kimi_model_route_disagreement ")
+                for record in caplog.records
+            )
+        finally:
+            provider.cleanup()
+
+    @patch("cli_agent_orchestrator.providers.kimi_cli.load_agent_profile")
+    def test_managed_model_overrides_disagreeing_profile_once(self, mock_load, caplog):
+        mock_profile = MagicMock()
+        mock_profile.model = "kimi-code/k2.5"
+        mock_profile.system_prompt = None
+        mock_profile.mcpServers = None
+        mock_load.return_value = mock_profile
+
+        provider = KimiCliProvider(
+            "term-route",
+            "sess",
+            "win",
+            "agent",
+            expected_model="kimi-code/k3",
+        )
+        try:
+            with caplog.at_level(
+                logging.WARNING,
+                logger="cli_agent_orchestrator.providers.kimi_cli",
+            ):
+                command = provider._build_kimi_command()
+
+            assert _model_argv_values(command) == ["kimi-code/k3"]
+            disagreement_records = [
+                record
+                for record in caplog.records
+                if record.getMessage().startswith("kimi_model_route_disagreement ")
+            ]
+            assert len(disagreement_records) == 1
+            assert disagreement_records[0].levelno == logging.WARNING
+            assert disagreement_records[0].getMessage() == (
+                "kimi_model_route_disagreement terminal_id='term-route' "
+                "profile_model='kimi-code/k2.5' expected_model='kimi-code/k3'"
+            )
+        finally:
+            provider.cleanup()
 
     @patch("cli_agent_orchestrator.providers.kimi_cli.load_agent_profile")
     def test_build_command_omits_model_when_unset(self, mock_load):
@@ -963,9 +1039,11 @@ class TestKimiCliProviderModelFlag:
         mock_load.return_value = mock_profile
 
         provider = KimiCliProvider("term-1", "sess", "win", "agent")
-        command = provider._build_kimi_command()
-
-        assert "--model" not in command
+        try:
+            command = provider._build_kimi_command()
+            assert _model_argv_values(command) == []
+        finally:
+            provider.cleanup()
 
 
 class TestKimiCliProviderMisc:

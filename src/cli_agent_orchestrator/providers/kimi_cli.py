@@ -273,6 +273,18 @@ class KimiCliProvider(BaseProvider):
         except Exception:
             return None
 
+    def _resolve_model(self, profile_model: Optional[str]) -> Optional[str]:
+        """Prefer the managed route and warn when profile metadata disagrees."""
+        if self._expected_model and profile_model and self._expected_model != profile_model:
+            logger.warning(
+                "kimi_model_route_disagreement terminal_id=%r profile_model=%r "
+                "expected_model=%r",
+                self.terminal_id,
+                profile_model,
+                self._expected_model,
+            )
+        return self._expected_model or profile_model
+
     def _build_kimi_command(self) -> str:
         """Build Kimi CLI command with agent profile and MCP config if provided.
 
@@ -300,12 +312,11 @@ class KimiCliProvider(BaseProvider):
         if not self._temp_dir:
             self._temp_dir = tempfile.mkdtemp(prefix="cao_kimi_")
 
+        profile_model: Optional[str] = None
         if self._agent_profile is not None:
             try:
                 profile = load_agent_profile(self._agent_profile)
-
-                if profile.model:
-                    command_parts.extend(["--model", profile.model])
+                profile_model = profile.model
 
                 # Build agent file from profile's system prompt.
                 # Kimi uses YAML agent files with a system_prompt_path pointing
@@ -379,10 +390,10 @@ class KimiCliProvider(BaseProvider):
             except Exception as e:
                 raise ProviderError(f"Failed to load agent profile '{self._agent_profile}': {e}")
 
-        # Managed launches force the provider-native route after profile-derived
-        # arguments so the attested values cannot be shadowed by profile drift.
-        if self._expected_model is not None:
-            command_parts.extend(["--model", self._expected_model])
+        model = self._resolve_model(profile_model)
+        if model:
+            # Preserve the profile model flag's argv position while emitting it once.
+            command_parts[2:2] = ["--model", model]
 
         # cd to unique temp dir (per-directory lock) + set TERM for tmux compatibility
         kimi_cmd = shlex.join(command_parts)
