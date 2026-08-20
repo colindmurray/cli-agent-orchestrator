@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from types import SimpleNamespace
 
@@ -263,7 +264,7 @@ def test_the_probe_suppresses_the_updater_for_both_kimi_processes(tmp_path, monk
     assert clients[0].env["KIMI_CODE_NO_AUTO_UPDATE"] == "1"
 
 
-def test_managed_kimi_command_forces_attested_route_last():
+def test_managed_kimi_command_emits_attested_route_once():
     provider = KimiCliProvider(
         "deadbeef",
         "cao-test",
@@ -274,7 +275,11 @@ def test_managed_kimi_command_forces_attested_route_last():
     command = provider._build_kimi_command()
     try:
         assert "KIMI_MODEL_THINKING_EFFORT=max" in command
-        assert command.endswith("kimi --yolo --model kimi-code/k3")
+        argv = shlex.split(command)
+        model_values = [
+            argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--model"
+        ]
+        assert model_values == ["kimi-code/k3"]
     finally:
         provider.cleanup()
 
