@@ -29,11 +29,18 @@ class TestHealthCheck:
 
     def test_health_check_returns_ok(self, client):
         """GET /health returns status ok with component health."""
-        response = client.get("/health")
+        with patch(
+            "cli_agent_orchestrator.api.main.installation_identity.get_installation_id",
+            return_value="11111111-1111-4111-8111-111111111111",
+        ):
+            response = client.get("/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
         assert data["service"] == "cli-agent-orchestrator"
+        assert data["installation_id"] == "11111111-1111-4111-8111-111111111111"
+        assert data["tracker_api_version"] == 2
+        assert "issue-graph" in data["tracker_capabilities"]
         components = data["components"]
         assert components["cao"] == "ok"
         assert components["herdr"] in ("ok", "unavailable")

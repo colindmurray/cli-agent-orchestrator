@@ -88,6 +88,40 @@ describe('generic issue graph', () => {
     expect(graph.getNodeAttribute(TASK.key, 'y')).toBeLessThan(
       graph.getNodeAttribute(MILESTONE.key, 'y'),
     )
+    expect(graph.getNodeAttribute(TASK.key, 'label')).toBe(TASK.key)
+    expect(graph.getNodeAttribute(TASK.key, 'displayLabel')).toContain(TASK.title)
+  })
+
+  it('allocates horizontal space by subtree leaves instead of row index alone', () => {
+    const LEFT = node('cond-0503', 'Left branch', 1, [ROOT.key], 2)
+    const RIGHT = node('cond-0504', 'Right branch', 1, [ROOT.key], 1)
+    const LEFT_A = node('cond-0505', 'Left A', 2, [LEFT.key], 0)
+    const LEFT_B = node('cond-0506', 'Left B', 2, [LEFT.key], 0)
+    const RIGHT_A = node('cond-0507', 'Right A', 2, [RIGHT.key], 0)
+    const projection: TrackerGraphProjection = {
+      ...PROJECTION,
+      root: ROOT,
+      nodes: [{ ...ROOT, child_count: 2 }, LEFT, RIGHT, LEFT_A, LEFT_B, RIGHT_A],
+      external: [],
+      links: [
+        { id: 10, kind: 'part-of', from_key: LEFT.key, to_key: ROOT.key },
+        { id: 11, kind: 'part-of', from_key: RIGHT.key, to_key: ROOT.key },
+        { id: 12, kind: 'part-of', from_key: LEFT_A.key, to_key: LEFT.key },
+        { id: 13, kind: 'part-of', from_key: LEFT_B.key, to_key: LEFT.key },
+        { id: 14, kind: 'part-of', from_key: RIGHT_A.key, to_key: RIGHT.key },
+      ],
+    }
+    const graph = buildIssueGraph(projection, 'hierarchy', EMPTY_FILTERS)
+    const leftMidpoint = (
+      graph.getNodeAttribute(LEFT_A.key, 'x') + graph.getNodeAttribute(LEFT_B.key, 'x')
+    ) / 2
+    expect(graph.getNodeAttribute(LEFT.key, 'x')).toBe(leftMidpoint)
+    expect(graph.getNodeAttribute(RIGHT.key, 'x')).toBe(
+      graph.getNodeAttribute(RIGHT_A.key, 'x'),
+    )
+    expect(graph.getNodeAttribute(LEFT_B.key, 'x')).toBeLessThan(
+      graph.getNodeAttribute(RIGHT_A.key, 'x'),
+    )
   })
 
   it('preserves ancestors of a matching descendant and hides collapsed descendants', () => {

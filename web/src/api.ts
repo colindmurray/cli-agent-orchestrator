@@ -1176,6 +1176,7 @@ export interface TrackerGraphProjection {
     max_nodes: number
     truncated: boolean
     reasons: string[]
+    live_children_beyond_bound?: string[]
   }
   stats: {
     nodes: number

@@ -462,9 +462,7 @@ class TestAssignmentAndWorkContext:
         assert created["worktrees"] == ["/tmp/wt-a", "/tmp/wt-review"]
         assert created["pull_requests"] == ["https://github.com/o/r/pull/1", "o/r#2"]
 
-        updated = tracker.update_issue(
-            created["key"], collaborators=["codex:sess-1"], branches=[]
-        )
+        updated = tracker.update_issue(created["key"], collaborators=["codex:sess-1"], branches=[])
         assert updated["collaborators"] == ["codex:sess-1"]
         assert updated["branches"] == []
         events = tracker.get_issue(created["key"])["events"]
@@ -486,9 +484,7 @@ class TestAssignmentAndWorkContext:
         issue = tracker.create_issue(project_id="cao-system", title="normal")
         with pytest.raises(TrackerError):
             tracker.update_issue(issue["key"], status="in-progress")
-        active = tracker.update_issue(
-            issue["key"], status="in-progress", assignee="colin"
-        )
+        active = tracker.update_issue(issue["key"], status="in-progress", assignee="colin")
         assert (active["status"], active["assignee"]) == ("in-progress", "colin")
         with pytest.raises(TrackerError):
             tracker.update_issue(issue["key"], assignee="")
@@ -523,12 +519,18 @@ class TestFieldOptions:
             worktrees=["/tmp/context-a"],
             pull_requests=["o/r#42"],
         )
-        assert tracker.field_options(
-            "cao-system", field="collaborator", query="sess"
-        )["options"][0]["value"] == "codex:sess-a"
-        assert tracker.field_options(
-            "cao-system", field="pull_request", query="#42"
-        )["options"][0]["value"] == "o/r#42"
+        assert (
+            tracker.field_options("cao-system", field="collaborator", query="sess")["options"][0][
+                "value"
+            ]
+            == "codex:sess-a"
+        )
+        assert (
+            tracker.field_options("cao-system", field="pull_request", query="#42")["options"][0][
+                "value"
+            ]
+            == "o/r#42"
+        )
 
     def test_unknown_option_field_is_refused(self, cao_system):
         with pytest.raises(TrackerError) as exc:
@@ -1152,14 +1154,10 @@ class TestUnlabeledFilter:
 
 class TestWithoutLabelFilter:
     def test_repeated_exclusions_remove_any_exact_match(self, cao_system):
-        tracker.create_issue(
-            project_id="cao-system", title="ready", labels=["source:wayfinder"]
-        )
+        tracker.create_issue(project_id="cao-system", title="ready", labels=["source:wayfinder"])
         tracker.create_issue(project_id="cao-system", title="triaged", labels=["needs-triage"])
         tracker.create_issue(project_id="cao-system", title="waiting", labels=["needs-info"])
-        tracker.create_issue(
-            project_id="cao-system", title="similar", labels=["needs-info-extra"]
-        )
+        tracker.create_issue(project_id="cao-system", title="similar", labels=["needs-info-extra"])
 
         got = tracker.list_issues(
             project_id="cao-system", without_label=["needs-triage", "needs-info"]
@@ -1168,9 +1166,7 @@ class TestWithoutLabelFilter:
         assert {i["title"] for i in got["issues"]} == {"ready", "similar"}
 
     def test_exclusions_compose_with_inclusion_and_keep_unpaged_total(self, cao_system):
-        tracker.create_issue(
-            project_id="cao-system", title="a", labels=["wayfinder:task"]
-        )
+        tracker.create_issue(project_id="cao-system", title="a", labels=["wayfinder:task"])
         tracker.create_issue(
             project_id="cao-system", title="b", labels=["wayfinder:task", "needs-info"]
         )
@@ -1562,14 +1558,13 @@ class TestGraphProjection:
 
         got = tracker.graph_projection(root["key"])
         by_key = {row["key"]: row for row in got["nodes"]}
-        assert [by_key[key]["depth"] for key in (
-            root["key"], milestone["key"], story["key"], task["key"]
-        )] == [0, 1, 2, 3]
+        assert [
+            by_key[key]["depth"]
+            for key in (root["key"], milestone["key"], story["key"], task["key"])
+        ] == [0, 1, 2, 3]
         assert by_key[story["key"]]["parent_keys"] == [milestone["key"]]
         assert by_key[milestone["key"]]["child_count"] == 1
-        assert got["stats"] == {
-            "nodes": 4, "descendants": 3, "external": 0, "links": 3, "depth": 3
-        }
+        assert got["stats"] == {"nodes": 4, "descendants": 3, "external": 0, "links": 3, "depth": 3}
 
     def test_relationship_endpoints_are_materialized_without_becoming_children(self, cao_system):
         root, children = _map_with_tickets(cao_system, titles=("child",))
@@ -1579,13 +1574,10 @@ class TestGraphProjection:
         tracker.add_link(children[0]["key"], to_key=related["key"], kind="relates")
 
         got = tracker.graph_projection(root["key"])
-        assert {row["key"] for row in got["external"]} == {
-            blocker["key"], related["key"]
-        }
+        assert {row["key"] for row in got["external"]} == {blocker["key"], related["key"]}
         visible = {row["key"] for row in got["nodes"] + got["external"]}
         assert all(
-            link["from_key"] in visible and link["to_key"] in visible
-            for link in got["links"]
+            link["from_key"] in visible and link["to_key"] in visible for link in got["links"]
         )
 
     def test_cycles_do_not_loop_or_duplicate_nodes(self, cao_system):
@@ -1632,3 +1624,70 @@ class TestGraphProjection:
         with pytest.raises(TrackerError) as exc:
             tracker.graph_projection("cond-9999")
         assert exc.value.code == "not-found"
+
+
+class TestHierarchyAudit:
+    def test_recursive_counts_findings_blockers_and_leaf_frontier(self, cao_system):
+        root = tracker.create_issue(project_id="cao-system", title="root", kind="project")
+        story = tracker.create_issue(project_id="cao-system", title="story", kind="story")
+        ready = tracker.create_issue(project_id="cao-system", title="ready", kind="task")
+        held = tracker.create_issue(project_id="cao-system", title="held", kind="task")
+        blocker = tracker.create_issue(project_id="cao-system", title="blocker", kind="bug")
+        tracker.add_link(story["key"], to_key=root["key"], kind="part-of")
+        tracker.add_link(ready["key"], to_key=story["key"], kind="part-of")
+        tracker.add_link(held["key"], to_key=story["key"], kind="part-of")
+        tracker.add_link(ready["key"], to_key=root["key"], kind="part-of")
+        tracker.add_link(blocker["key"], to_key=held["key"], kind="blocks")
+
+        got = tracker.hierarchy_audit(root["key"])
+
+        assert got["counts"]["nodes"] == 4
+        assert got["counts"]["part_of"] == 4
+        assert got["counts"]["blocks"] == 1
+        assert got["findings"]["multiple_parents"] == [
+            {"key": ready["key"], "parents": [root["key"], story["key"]]}
+        ]
+        assert got["findings"]["hierarchy_cycles"] == []
+        assert got["unresolved_blockers"] == [{"blocker": blocker["key"], "blocked": held["key"]}]
+        assert [row["key"] for row in got["frontier"]] == [ready["key"]]
+
+    def test_hierarchy_and_blocker_cycles_are_reported(self, cao_system):
+        root = tracker.create_issue(project_id="cao-system", title="root")
+        child = tracker.create_issue(project_id="cao-system", title="child")
+        tracker.add_link(child["key"], to_key=root["key"], kind="part-of")
+        tracker.add_link(root["key"], to_key=child["key"], kind="part-of")
+        tracker.add_link(root["key"], to_key=child["key"], kind="blocks")
+        tracker.add_link(child["key"], to_key=root["key"], kind="blocks")
+
+        got = tracker.hierarchy_audit(root["key"])
+
+        expected_cycle = [sorted([child["key"], root["key"]])]
+        assert got["findings"]["hierarchy_cycles"] == expected_cycle
+        assert got["findings"]["blocker_cycles"] == expected_cycle
+
+    def test_selected_root_reports_a_parent_outside_the_audited_subtree(self, cao_system):
+        outer = tracker.create_issue(project_id="cao-system", title="outer", kind="project")
+        root = tracker.create_issue(project_id="cao-system", title="root", kind="project")
+        child = tracker.create_issue(project_id="cao-system", title="child", kind="task")
+        tracker.add_link(root["key"], to_key=outer["key"], kind="part-of")
+        tracker.add_link(child["key"], to_key=root["key"], kind="part-of")
+
+        got = tracker.hierarchy_audit(root["key"])
+
+        assert got["counts"]["nodes"] == 2
+        assert got["counts"]["part_of"] == 1
+        assert got["counts"]["relationships"] == 0
+        assert got["findings"]["root_parents"] == [outer["key"]]
+
+    def test_depth_bound_keeps_a_parent_with_an_external_child_off_the_frontier(self, cao_system):
+        root = tracker.create_issue(project_id="cao-system", title="root", kind="project")
+        parent = tracker.create_issue(project_id="cao-system", title="parent", kind="story")
+        child = tracker.create_issue(project_id="cao-system", title="child", kind="task")
+        tracker.add_link(parent["key"], to_key=root["key"], kind="part-of")
+        tracker.add_link(child["key"], to_key=parent["key"], kind="part-of")
+
+        got = tracker.hierarchy_audit(root["key"], max_depth=1)
+
+        assert got["bounds"]["truncated"] is True
+        assert got["bounds"]["live_children_beyond_bound"] == [parent["key"]]
+        assert got["frontier"] == []

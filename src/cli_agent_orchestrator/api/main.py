@@ -48,6 +48,10 @@ from cli_agent_orchestrator.api.roster import router as roster_router
 from cli_agent_orchestrator.api.session_lifecycle import router as session_lifecycle_router
 from cli_agent_orchestrator.api.task_handoff import router as task_handoff_router
 from cli_agent_orchestrator.api.task_occurrence import router as task_occurrence_router
+from cli_agent_orchestrator.api.tracker import (
+    TRACKER_API_VERSION,
+    TRACKER_CAPABILITIES,
+)
 from cli_agent_orchestrator.api.tracker import router as tracker_router
 from cli_agent_orchestrator.backends import TerminalBackendError, TerminalNotFoundError
 from cli_agent_orchestrator.backends.herdr_backend import HerdrBackend
@@ -141,6 +145,7 @@ from cli_agent_orchestrator.services import (
     control_input_service,
     flow_service,
     image_attachments,
+    installation_identity,
     macro_notation,
     managed_launch,
     managed_launch_v2,
@@ -942,6 +947,10 @@ async def health_check():
     return {
         "status": "ok",
         "service": "cli-agent-orchestrator",
+        "installation_id": installation_identity.get_installation_id(),
+        "server_version": SERVER_VERSION,
+        "tracker_api_version": TRACKER_API_VERSION,
+        "tracker_capabilities": list(TRACKER_CAPABILITIES),
         "terminal_backend": backend_name,
         "components": {
             "cao": "ok",

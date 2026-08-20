@@ -1334,16 +1334,10 @@ def list_issues(
                 q = q.filter(TrackerIssueModel.labels.like(f'%"{needle}"%', escape="\\"))
         if without_label:
             excluded_labels = (
-                [without_label]
-                if isinstance(without_label, str)
-                else list(without_label)
+                [without_label] if isinstance(without_label, str) else list(without_label)
             )
             for raw_label in normalise_labels(excluded_labels):
-                needle = (
-                    raw_label.replace("\\", "\\\\")
-                    .replace("%", "\\%")
-                    .replace("_", "\\_")
-                )
+                needle = raw_label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 q = q.filter(~TrackerIssueModel.labels.like(f'%"{needle}"%', escape="\\"))
         if unlabeled:
             # The stored value is always a JSON array ("[]" when empty), so an
@@ -1649,12 +1643,9 @@ def _apply_issue_update(
             "expected_outcome",
             "actual_outcome",
         )
-        validates_bug_details = (
-            ("kind" in changes and getattr(row, "kind", "bug") != "bug")
-            or any(
-                field in changes and not str(changes.get(field) or "").strip()
-                for field in required_bug_fields
-            )
+        validates_bug_details = ("kind" in changes and getattr(row, "kind", "bug") != "bug") or any(
+            field in changes and not str(changes.get(field) or "").strip()
+            for field in required_bug_fields
         )
         if validates_bug_details and not force:
             missing = []
@@ -2165,30 +2156,40 @@ def graph_projection(
                 next_keys.append(child.key)
             frontier_keys = next_keys
 
-        if len(rows_by_key) >= node_limit and frontier_keys and db.query(
-            TrackerLinkModel.id
-        ).filter(
-            TrackerLinkModel.kind == "part-of",
-            TrackerLinkModel.to_key.in_(frontier_keys),
-            ~TrackerLinkModel.from_key.in_(list(rows_by_key)),
-        ).first() is not None:
+        if (
+            len(rows_by_key) >= node_limit
+            and frontier_keys
+            and db.query(TrackerLinkModel.id)
+            .filter(
+                TrackerLinkModel.kind == "part-of",
+                TrackerLinkModel.to_key.in_(frontier_keys),
+                ~TrackerLinkModel.from_key.in_(list(rows_by_key)),
+            )
+            .first()
+            is not None
+        ):
             truncated_reasons.add("node-limit")
 
         # If the last included level still has children, depth bounded the
         # projection. This extra existence query records that fact explicitly.
         deepest = [node_key for node_key, depth in depths.items() if depth == depth_limit]
-        if deepest and db.query(TrackerLinkModel.id).filter(
-            TrackerLinkModel.kind == "part-of",
-            TrackerLinkModel.to_key.in_(deepest),
-        ).first() is not None:
+        if (
+            deepest
+            and db.query(TrackerLinkModel.id)
+            .filter(
+                TrackerLinkModel.kind == "part-of",
+                TrackerLinkModel.to_key.in_(deepest),
+            )
+            .first()
+            is not None
+        ):
             truncated_reasons.add("depth-limit")
 
         members = set(rows_by_key)
         touching = (
             db.query(TrackerLinkModel)
             .filter(
-                (TrackerLinkModel.from_key.in_(members))
-                | (TrackerLinkModel.to_key.in_(members))
+                (TrackerLinkModel.from_key.in_(members)) | (TrackerLinkModel.to_key.in_(members))
             )
             .order_by(TrackerLinkModel.id.asc())
             .all()
@@ -2199,10 +2200,24 @@ def graph_projection(
         omitted_hierarchy_children = {
             link.from_key
             for link in touching
-            if link.kind == "part-of"
-            and link.to_key in members
-            and link.from_key not in members
+            if link.kind == "part-of" and link.to_key in members and link.from_key not in members
         }
+        live_omitted_children: set[str] = set()
+        if omitted_hierarchy_children:
+            live_omitted_children = {
+                row.key
+                for row in db.query(TrackerIssueModel)
+                .filter(TrackerIssueModel.key.in_(omitted_hierarchy_children))
+                .all()
+                if row.status not in TERMINAL_STATUSES
+            }
+        live_children_beyond_bound = sorted(
+            {
+                link.to_key
+                for link in touching
+                if link.kind == "part-of" and link.from_key in live_omitted_children
+            }
+        )
         candidate_external: List[str] = []
         for link in touching:
             for endpoint in (link.from_key, link.to_key):
@@ -2232,10 +2247,7 @@ def graph_projection(
             external_set = {row["key"] for row in external_rows}
 
         visible = members | external_set
-        links = [
-            link for link in touching
-            if link.from_key in visible and link.to_key in visible
-        ]
+        links = [link for link in touching if link.from_key in visible and link.to_key in visible]
         parent_keys: Dict[str, List[str]] = {node_key: [] for node_key in members}
         child_counts: Dict[str, int] = {node_key: 0 for node_key in members}
         for link in links:
@@ -2256,11 +2268,13 @@ def graph_projection(
         nodes = []
         for node_key in ordered_keys:
             payload = _issue_row(rows_by_key[node_key])
-            payload.update({
-                "depth": depths[node_key],
-                "parent_keys": parent_keys[node_key],
-                "child_count": child_counts[node_key],
-            })
+            payload.update(
+                {
+                    "depth": depths[node_key],
+                    "parent_keys": parent_keys[node_key],
+                    "child_count": child_counts[node_key],
+                }
+            )
             nodes.append(payload)
 
         return {
@@ -2268,8 +2282,7 @@ def graph_projection(
             "nodes": nodes,
             "external": external_rows,
             "links": [
-                {"id": link.id, "kind": link.kind,
-                 "from_key": link.from_key, "to_key": link.to_key}
+                {"id": link.id, "kind": link.kind, "from_key": link.from_key, "to_key": link.to_key}
                 for link in links
             ],
             "bounds": {
@@ -2277,6 +2290,7 @@ def graph_projection(
                 "max_nodes": node_limit,
                 "truncated": bool(truncated_reasons),
                 "reasons": sorted(truncated_reasons),
+                "live_children_beyond_bound": live_children_beyond_bound,
             },
             "stats": {
                 "nodes": len(nodes),
@@ -2286,6 +2300,183 @@ def graph_projection(
                 "depth": max(depths.values()),
             },
         }
+
+
+def _strongly_connected_components(
+    nodes: Iterable[str], edges: Iterable[Tuple[str, str]]
+) -> List[List[str]]:
+    """Return deterministic directed cycles as strongly connected components."""
+
+    node_set = set(nodes)
+    adjacency: Dict[str, List[str]] = {key: [] for key in node_set}
+    self_loops: set[str] = set()
+    for source, target in edges:
+        if source not in node_set or target not in node_set:
+            continue
+        adjacency[source].append(target)
+        if source == target:
+            self_loops.add(source)
+    for values in adjacency.values():
+        values.sort()
+
+    index = 0
+    indexes: Dict[str, int] = {}
+    lowlinks: Dict[str, int] = {}
+    stack: List[str] = []
+    on_stack: set[str] = set()
+    components: List[List[str]] = []
+
+    def visit(node: str) -> None:
+        nonlocal index
+        indexes[node] = index
+        lowlinks[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+
+        for neighbour in adjacency[node]:
+            if neighbour not in indexes:
+                visit(neighbour)
+                lowlinks[node] = min(lowlinks[node], lowlinks[neighbour])
+            elif neighbour in on_stack:
+                lowlinks[node] = min(lowlinks[node], indexes[neighbour])
+
+        if lowlinks[node] != indexes[node]:
+            return
+        component: List[str] = []
+        while stack:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node:
+                break
+        component.sort()
+        if len(component) > 1 or component[0] in self_loops:
+            components.append(component)
+
+    for node in sorted(node_set):
+        if node not in indexes:
+            visit(node)
+    return sorted(components)
+
+
+def hierarchy_audit(
+    root_key: str,
+    *,
+    max_depth: int = 8,
+    max_nodes: int = 300,
+) -> Dict[str, Any]:
+    """Audit a bounded hierarchy and derive its actionable leaf frontier.
+
+    Parent/child links remain policy-flexible: multiple parents and cycles are
+    reported rather than refused.  The projection is one read of canonical
+    issue/link state, so counts, blockers, findings and frontier cannot drift
+    between separate client-side walks.
+    """
+
+    projection = graph_projection(root_key, max_depth=max_depth, max_nodes=max_nodes)
+    nodes = projection["nodes"]
+    members = {row["key"] for row in nodes}
+    by_key = {row["key"]: row for row in [*nodes, *projection["external"]]}
+    links = projection["links"]
+    internal_hierarchy_links = [
+        link
+        for link in links
+        if link["kind"] == "part-of" and link["from_key"] in members and link["to_key"] in members
+    ]
+    member_parent_links = [
+        link for link in links if link["kind"] == "part-of" and link["from_key"] in members
+    ]
+    visible_child_links = [
+        link for link in links if link["kind"] == "part-of" and link["to_key"] in members
+    ]
+    block_links = [link for link in links if link["kind"] == "blocks"]
+
+    parents: Dict[str, List[str]] = {key: [] for key in members}
+    for link in member_parent_links:
+        parents[link["from_key"]].append(link["to_key"])
+    for values in parents.values():
+        values.sort()
+
+    unresolved_blockers = []
+    blocked_keys: set[str] = set()
+    for link in block_links:
+        blocked = link["to_key"]
+        blocker = by_key.get(link["from_key"])
+        if blocked not in members or blocker is None:
+            continue
+        if blocker["status"] in TERMINAL_STATUSES:
+            continue
+        blocked_keys.add(blocked)
+        unresolved_blockers.append({"blocker": link["from_key"], "blocked": blocked})
+    unresolved_blockers.sort(key=lambda row: (row["blocked"], row["blocker"]))
+
+    parents_with_live_children = {
+        link["to_key"]
+        for link in visible_child_links
+        if by_key[link["from_key"]]["status"] not in TERMINAL_STATUSES
+    }
+    parents_with_live_children.update(projection["bounds"].get("live_children_beyond_bound", []))
+    root = projection["root"]
+    frontier = []
+    for row in nodes:
+        if row["key"] == root["key"] and len(nodes) > 1:
+            continue
+        if row["status"] in TERMINAL_STATUSES or row["status"] in {"blocked", "in-progress"}:
+            continue
+        if row.get("assignee") is not None:
+            continue
+        if row["key"] in parents_with_live_children or row["key"] in blocked_keys:
+            continue
+        frontier.append(row)
+
+    counts_by_kind: Dict[str, int] = {}
+    counts_by_status: Dict[str, int] = {}
+    counts_by_link: Dict[str, int] = {}
+    for row in nodes:
+        counts_by_kind[row["kind"]] = counts_by_kind.get(row["kind"], 0) + 1
+        counts_by_status[row["status"]] = counts_by_status.get(row["status"], 0) + 1
+    for link in links:
+        counts_by_link[link["kind"]] = counts_by_link.get(link["kind"], 0) + 1
+
+    hierarchy_edges = [(link["from_key"], link["to_key"]) for link in internal_hierarchy_links]
+    blocker_edges = [
+        (link["from_key"], link["to_key"])
+        for link in block_links
+        if link["from_key"] in members and link["to_key"] in members
+    ]
+    findings = {
+        "hierarchy_cycles": _strongly_connected_components(members, hierarchy_edges),
+        "blocker_cycles": _strongly_connected_components(members, blocker_edges),
+        "multiple_parents": [
+            {"key": key, "parents": parent_keys}
+            for key, parent_keys in sorted(parents.items())
+            if len(parent_keys) > 1
+        ],
+        "root_parents": parents.get(root["key"], []),
+        "active_without_assignee": sorted(
+            row["key"]
+            for row in nodes
+            if row["status"] == "in-progress" and row.get("assignee") is None
+        ),
+    }
+    return {
+        "root": root,
+        "counts": {
+            "nodes": len(nodes),
+            "descendants": max(0, len(nodes) - 1),
+            "part_of": len(internal_hierarchy_links),
+            "blocks": len(block_links),
+            "relationships": sum(link["kind"] != "part-of" for link in links),
+            "by_kind": dict(sorted(counts_by_kind.items())),
+            "by_status": dict(sorted(counts_by_status.items())),
+            "by_link_kind": dict(sorted(counts_by_link.items())),
+        },
+        "findings": findings,
+        "unresolved_blockers": unresolved_blockers,
+        "frontier": frontier,
+        "bounds": projection["bounds"],
+    }
 
 
 def field_options(
@@ -2717,9 +2908,7 @@ def stats(project_id: Optional[str] = None, *, kind: Optional[str] = "bug") -> D
     return result
 
 
-def render_markdown(
-    project_id: str, *, open_only: bool = True, kind: Optional[str] = "bug"
-) -> str:
+def render_markdown(project_id: str, *, open_only: bool = True, kind: Optional[str] = "bug") -> str:
     """Render an issue log as markdown.
 
     The markdown ledger this replaces is now an *export*: a view produced from

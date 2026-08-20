@@ -125,7 +125,8 @@ export function buildIssueGraph(
   for (const issue of allNodes) {
     if (!visible.has(issue.key)) continue
     graph.addNode(issue.key, {
-      label: `${issue.key} · ${issue.title}`,
+      label: issue.key,
+      displayLabel: `${issue.key} · ${issue.title}`,
       title: issue.title,
       kind: issue.kind,
       status: issue.status,
@@ -159,20 +160,71 @@ export function buildIssueGraph(
   if (mode === 'relationships') {
     circular.assign(graph)
   } else {
-    const levels = new Map<number, string[]>()
-    graph.forEachNode((key, attributes) => {
-      const depth = Number(attributes.depth ?? 0)
-      const rows = levels.get(depth) ?? []
-      rows.push(key)
-      levels.set(depth, rows)
-    })
-    for (const [depth, keys] of levels) {
-      keys.sort()
-      keys.forEach((key, index) => {
-        graph.setNodeAttribute(key, 'x', index - (keys.length - 1) / 2)
-        graph.setNodeAttribute(key, 'y', -depth * 1.5)
-      })
-    }
+    assignHierarchyLayout(graph, projection.root.key)
   }
   return graph
+}
+
+function assignHierarchyLayout(graph: Graph, preferredRoot: string): void {
+  const parents = new Map<string, string[]>()
+  graph.forEachEdge((_edge, attributes, source, target) => {
+    if (attributes.kind !== 'part-of') return
+    const values = parents.get(source) ?? []
+    values.push(target)
+    parents.set(source, values)
+  })
+  for (const values of parents.values()) values.sort()
+
+  // Layout one canonical tree while retaining every graph edge. Multiple
+  // parents remain visible and are reported by the audit; choosing one
+  // deterministic parent here prevents a node receiving incompatible
+  // coordinates.
+  const primaryParent = new Map<string, string>()
+  graph.forEachNode(key => {
+    const candidates = parents.get(key) ?? []
+    if (candidates.length) primaryParent.set(key, candidates[0])
+  })
+  const children = new Map<string, string[]>()
+  for (const [child, parent] of primaryParent) {
+    const values = children.get(parent) ?? []
+    values.push(child)
+    children.set(parent, values)
+  }
+  for (const values of children.values()) values.sort()
+
+  const assigned = new Map<string, number>()
+  const visiting = new Set<string>()
+  let nextLeaf = 0
+  const assign = (key: string): number => {
+    const known = assigned.get(key)
+    if (known !== undefined) return known
+    if (visiting.has(key)) {
+      const x = nextLeaf++ * 3
+      assigned.set(key, x)
+      return x
+    }
+    visiting.add(key)
+    const branch = (children.get(key) ?? []).filter(child => graph.hasNode(child))
+    const childXs = branch.map(assign)
+    const x = childXs.length
+      ? childXs.reduce((sum, value) => sum + value, 0) / childXs.length
+      : nextLeaf++ * 3
+    visiting.delete(key)
+    assigned.set(key, x)
+    return x
+  }
+
+  const roots = [
+    ...(graph.hasNode(preferredRoot) ? [preferredRoot] : []),
+    ...graph.nodes().filter(key => key !== preferredRoot && !primaryParent.has(key)).sort(),
+    ...graph.nodes().filter(key => key !== preferredRoot).sort(),
+  ]
+  for (const key of roots) assign(key)
+
+  const values = [...assigned.values()]
+  const centre = values.length ? (Math.min(...values) + Math.max(...values)) / 2 : 0
+  graph.forEachNode((key, attributes) => {
+    graph.setNodeAttribute(key, 'x', (assigned.get(key) ?? 0) - centre)
+    graph.setNodeAttribute(key, 'y', -Number(attributes.depth ?? 0) * 3)
+  })
 }

@@ -30,6 +30,17 @@ from cli_agent_orchestrator.services import project_dashboard
 
 logger = logging.getLogger(__name__)
 
+TRACKER_API_VERSION = 2
+TRACKER_CAPABILITIES = (
+    "generic-item-kinds",
+    "bug-diagnostics",
+    "claims",
+    "issue-graph",
+    "hierarchy-audit",
+    "project-dashboard",
+    "searchable-field-options",
+)
+
 router = APIRouter(tags=["issue-tracker"])
 
 _READ = Depends(require_any_scope(SCOPE_READ, SCOPE_WRITE, SCOPE_ADMIN))
@@ -742,9 +753,21 @@ async def issue_graph_projection(
     """Bounded transitive ``part-of`` hierarchy rooted at any issue, plus
     every visible relationship and its materialized external endpoint."""
     try:
-        return tracker.graph_projection(
-            issue_key, max_depth=max_depth, max_nodes=max_nodes
-        )
+        return tracker.graph_projection(issue_key, max_depth=max_depth, max_nodes=max_nodes)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/tracker/issues/{issue_key}/audit")
+async def issue_hierarchy_audit(
+    issue_key: str,
+    max_depth: int = Query(default=8, ge=1, le=12),
+    max_nodes: int = Query(default=300, ge=1, le=500),
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    """Audit one bounded transitive hierarchy and derive its leaf frontier."""
+    try:
+        return tracker.hierarchy_audit(issue_key, max_depth=max_depth, max_nodes=max_nodes)
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
