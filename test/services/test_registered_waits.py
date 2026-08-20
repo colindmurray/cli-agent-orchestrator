@@ -419,3 +419,28 @@ def test_reverse_rollback_disables_registration_while_consumer_drains(monkeypatc
         now=NOW + timedelta(seconds=1), receipt_probe=lambda _terminal, _message: {"ok": True}
     )
     assert waits.get(record["wait_id"])["state"] == waits.STATE_RESOLVED
+
+
+def test_deadman_absent_when_registered_waits_table_missing(isolated_memory_db):
+    """Table genuinely absent proves vacuity: no table means no rows means writer never ran."""
+    from sqlalchemy import text
+
+    with isolated_memory_db.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS registered_waits"))
+    result = waits.deadman_disposition("term-absent-0000", "gen-absent-0000")
+    assert result == {"state": "absent", "suppress_ordinary_deadman": False}
+
+
+def test_deadman_unreadable_when_registered_waits_table_has_incompatible_schema(
+    isolated_memory_db,
+):
+    """Existing table with older/incompatible minimal schema is unreadable, not absent."""
+    from sqlalchemy import text
+
+    with isolated_memory_db.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS registered_waits"))
+        conn.execute(text("CREATE TABLE registered_waits (wait_id TEXT PRIMARY KEY)"))
+    result = waits.deadman_disposition("term-unreadable-0000", "gen-unreadable-0000")
+    assert result["state"] == "unreadable"
+    assert result["suppress_ordinary_deadman"] is True
+    assert "detail" in result
