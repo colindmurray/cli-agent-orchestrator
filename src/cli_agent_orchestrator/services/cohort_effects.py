@@ -471,16 +471,10 @@ def _pending_reincarnations(session_name: str) -> list[dict[str, Any]]:
 
 
 def _default_wait_interruptor(session_name: str, operation_id: str) -> Sequence[Mapping[str, Any]]:
-    """Dark M7 seam: there is no registered-wait store in this fork yet.
+    """Interrupt M7 waits after the Stop barrier and before member teardown."""
+    from cli_agent_orchestrator.services import registered_waits
 
-    M7 owns registration meaning and the durable ``interrupted-by-stop``
-    records.  M3-C owns when that exact-retry interruptor runs: immediately
-    after the Stop barrier and before member teardown.  Until M7 supplies the
-    callback, the empty sequence truthfully means no fork registrations were
-    available to interrupt; this module never invents or resumes a wait.
-    """
-    del session_name, operation_id
-    return ()
+    return registered_waits.interrupt_session_waits(session_name, operation_id)
 
 
 def reap_reincarnation_resources(

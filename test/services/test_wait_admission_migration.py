@@ -179,18 +179,24 @@ def test_migration_is_idempotent(tmp_path, monkeypatch):
         assert _columns(conn, "wait_message_admissions") == _ADMISSION_COLUMNS
 
 
-def test_init_db_runs_the_wait_admission_migration(tmp_path, monkeypatch):
+def test_init_db_runs_both_wait_migrations_in_dependency_order(tmp_path, monkeypatch):
     called: list[str] = []
     from cli_agent_orchestrator.clients import database as db_module
 
-    monkeypatch.setattr(db_module, "_migrate_wait_message_admissions", lambda: called.append("m7"))
+    monkeypatch.setattr(
+        db_module, "_migrate_wait_message_admissions", lambda: called.append("admission")
+    )
+    monkeypatch.setattr(db_module, "_migrate_registered_waits", lambda: called.append("registered"))
     for name in dir(db_module):
-        if name.startswith("_migrate_") and name != "_migrate_wait_message_admissions":
+        if name.startswith("_migrate_") and name not in {
+            "_migrate_wait_message_admissions",
+            "_migrate_registered_waits",
+        }:
             monkeypatch.setattr(db_module, name, lambda *a, **k: None)
     monkeypatch.setattr(db_module, "_restrict_db_file_permissions", lambda: None)
     monkeypatch.setattr(db_module.Base.metadata, "create_all", lambda **kwargs: None)
     db_module.init_db()
-    assert called == ["m7"]
+    assert called == ["admission", "registered"]
 
 
 def _restart_cycle(path, monkeypatch):

@@ -1,11 +1,9 @@
 """Who a wait message is for, and whether it was ever admitted (M7 Stage 2).
 
-This is the durable contract underneath a future wait/interrupt surface, and
-nothing else. It is deliberately **dark**: the capability that would deliver,
-suppress, or expire a wait message is disabled, no consumer is attached, the
-M3-C stop-interruptor callback is untouched, and there is no route or CLI. What
-exists here is the part that has to be right *before* anything is allowed to
-act — because once a consumer exists, an admission record is what it obeys.
+This is the durable admission contract underneath the registered timer-wait
+surface. M7's timer consumer now uses it immediately before creating the one
+exact-generation inbox wake; this module still owns no timer, suppression,
+delivery, cancellation, Stop, route, or CLI state of its own.
 
 Three guarantees, and the failure each one prevents:
 
@@ -79,6 +77,7 @@ STATE_ADMITTED = "admitted"
 STATE_DENIED = "denied"
 
 DENY_OWNER_UNKNOWN = "owner-unknown"
+DENY_OWNER_UNREADABLE = "owner-unreadable"
 DENY_OWNER_RETIRED = "owner-retired"
 DENY_OWNER_AMBIGUOUS = "owner-ambiguous"
 DENY_OWNER_REPLACED = "owner-replaced"
@@ -87,6 +86,7 @@ DENY_IDENTITY_MISMATCH = "owner-identity-mismatch"
 DENIAL_REASONS = frozenset(
     {
         DENY_OWNER_UNKNOWN,
+        DENY_OWNER_UNREADABLE,
         DENY_OWNER_RETIRED,
         DENY_OWNER_AMBIGUOUS,
         DENY_OWNER_REPLACED,
@@ -151,39 +151,22 @@ class WaitAdmissionUnavailable(WaitAdmissionError):
 
 
 # ---------------------------------------------------------------------------
-# the capability, and the fact that it is off
+# internal admission capability consumed by the registered-timer lifecycle
 # ---------------------------------------------------------------------------
-
-_DISABLED_REASON = (
-    "M7 Stage 2 ships the durable wait-message admission contract only; no "
-    "consumer, interruptor, suppression, expiry, route, or CLI is attached in "
-    "this build"
-)
 
 
 def capability() -> dict[str, Any]:
-    """What this build can actually do with a wait message: nothing.
-
-    Published as a block rather than inferred from absence, so an operator or
-    a later stage reads one truthful record instead of concluding "no endpoint
-    exists, therefore it must be off". The four authority fields are the ones
-    worth stating explicitly, because each is a thing M7 will eventually hold
-    and does not hold yet.
-
-    No verb taxonomy and no future-stage gates: enumerating what a later stage
-    might enable would be vocabulary describing a surface that does not exist,
-    and it cannot be kept honest by any test in this build.
-    """
+    """Truthful capability for admission now consumed by registered timers."""
     return {
         "schema_version": CAPABILITY_SCHEMA_VERSION,
         "capability": CAPABILITY_NAME,
         "contract_schema_version": SCHEMA_VERSION,
         "message_schema_version": MESSAGE_SCHEMA_VERSION,
-        "enabled": False,
-        "reason": _DISABLED_REASON,
+        "enabled": True,
+        "reason": None,
         "message_kinds": sorted(MESSAGE_KINDS),
         "denial_reasons": sorted(DENIAL_REASONS),
-        "consumer_attached": False,
+        "consumer_attached": True,
         "stop_interruptor_attached": False,
         "public_surface": False,
         "recovery_authority": False,
@@ -532,7 +515,7 @@ def _verify_owner(db: Any, owner: WaitOwner) -> _Verdict:
     except roster.StableAgentNotFound:
         return _Verdict(DENY_OWNER_UNKNOWN, f"no stable agent {owner.agent_id}")
     except roster.StableAgentError as exc:
-        return _Verdict(DENY_OWNER_UNKNOWN, f"stable agent unreadable: {exc}")
+        return _Verdict(DENY_OWNER_UNREADABLE, f"stable agent unreadable: {exc}")
 
     incarnation = agent.get("current_incarnation")
     if not incarnation:
@@ -600,6 +583,18 @@ def _verify_owner(db: Any, owner: WaitOwner) -> _Verdict:
         )
 
     return _verify_restore_identity(db, owner)
+
+
+def verify_owner(owner: WaitOwner, db: Any = None) -> dict[str, Optional[str]]:
+    """Return the current exact-owner verdict without writing an admission."""
+    if not isinstance(owner, WaitOwner):
+        raise WaitAdmissionInvalid(f"owner must be a WaitOwner; got {type(owner).__name__}")
+
+    def _verify(session: Any) -> dict[str, Optional[str]]:
+        verdict = _verify_owner(session, owner)
+        return {"denial_reason": verdict.denial_reason, "detail": verdict.detail}
+
+    return _read(_verify, db, "wait owner verification failed")
 
 
 def _verify_restore_identity(db: Any, owner: WaitOwner) -> _Verdict:
@@ -794,9 +789,8 @@ def admit(request: AdmissionRequest, db: Any = None) -> dict[str, Any]:
     """Record the one admission verdict for one operation's wait message.
 
     Returns the durable record with ``adopted`` set when this call replayed an
-    existing one. Recording a verdict is the whole effect: nothing is
-    delivered, suppressed, expired, or interrupted, because the capability
-    that would dispatch a wait message is off.
+    existing one. Recording a verdict is the whole effect of this module; the
+    registered-wait consumer separately decides whether to create an inbox row.
 
     Malformed input and divergent replays raise; an owner that does not match
     the roster is a durable *denial*, not an exception, so the refusal is
