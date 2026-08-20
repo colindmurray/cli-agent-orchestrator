@@ -163,6 +163,69 @@ class TestIssueCommands:
         assert result.exit_code == 1
         assert "[unresolved]" in result.output
 
+    def test_list_defaults_to_all_item_kinds(self, runner):
+        run(
+            runner,
+            issue_cli.issue,
+            "file",
+            "--title",
+            "project root",
+            "--project",
+            "cao-system",
+            "--kind",
+            "project",
+        )
+        run(
+            runner,
+            issue_cli.issue,
+            "file",
+            "--title",
+            "a bug",
+            "--project",
+            "cao-system",
+        )
+        payload = json.loads(run(runner, issue_cli.issue, "list", "--json"))
+        assert {row["kind"] for row in payload["issues"]} == {"project", "bug"}
+
+    def test_audit_renders_the_recursive_projection(self, runner):
+        run(
+            runner,
+            issue_cli.issue,
+            "file",
+            "--title",
+            "root",
+            "--project",
+            "cao-system",
+            "--kind",
+            "project",
+        )
+        run(
+            runner,
+            issue_cli.issue,
+            "file",
+            "--title",
+            "task",
+            "--project",
+            "cao-system",
+            "--kind",
+            "task",
+        )
+        run(
+            runner,
+            issue_cli.issue,
+            "link",
+            "cond-0002",
+            "--to",
+            "cond-0001",
+            "--kind",
+            "part-of",
+        )
+
+        payload = json.loads(run(runner, issue_cli.issue, "audit", "cond-0001", "--json"))
+
+        assert payload["counts"]["nodes"] == 2
+        assert [row["key"] for row in payload["frontier"]] == ["cond-0002"]
+
     def test_bug_filing_requires_diagnostics_unless_explicitly_overridden(self, runner):
         refused = runner.invoke(
             issue_cli.issue,
@@ -634,7 +697,7 @@ class TestListDiscoveryFlags:
         )
         assert {i["title"] for i in payload["issues"]} == {"ready", "similar"}
 
-    def test_kind_selects_bug_feature_or_all_with_bug_the_default(self, runner):
+    def test_kind_selects_bug_feature_or_all_with_all_the_default(self, runner):
         run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
         run(
             runner,
@@ -646,7 +709,7 @@ class TestListDiscoveryFlags:
             "cao-system",
         )
         default = json.loads(run(runner, issue_cli.issue, "list", "--json"))
-        assert [i["title"] for i in default["issues"]] == ["a defect"]
+        assert sorted(i["title"] for i in default["issues"]) == ["a defect", "a wish"]
         everything = json.loads(run(runner, issue_cli.issue, "list", "--kind", "all", "--json"))
         assert sorted(i["title"] for i in everything["issues"]) == ["a defect", "a wish"]
         features = json.loads(run(runner, issue_cli.issue, "list", "--kind", "feature", "--json"))

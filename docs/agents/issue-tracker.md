@@ -9,10 +9,16 @@ The primary Mac mini serves the dashboard on `http://127.0.0.1:9889`. Select
 the `cao-system` project there for its Home, Issues, Wayfinder, Graph, and
 Sessions views.
 
+The Mac mini installation and database are authoritative. From the MacBook,
+run tracker commands through `ssh mac-mini` from the matching repository path;
+do not use a MacBook loopback server or its legacy `cond-*` records.
+
 ## Resolve and inspect
 
-`conduct issue where` resolves this repository and its worktrees. Use
-`--tracker-project cao-system` when operating outside a resolved path.
+`conduct issue where` resolves this repository and its worktrees and reports
+the installation ID. Use `--tracker-project cao-system` when operating outside
+a resolved path. Before a write, pass the reported ID as
+`--expect-installation <uuid>` or set `CAO_EXPECTED_INSTALLATION_ID`.
 
 ```sh
 conduct issue show --id <key>
@@ -93,6 +99,7 @@ Create every ticket before adding `part-of` and `blocks` relationships. Use:
 ```sh
 conduct issue map --id <map>
 conduct issue frontier --id <map>
+conduct issue audit --id <map>
 conduct issue claim --id <ticket>
 ```
 

@@ -412,8 +412,8 @@ def issue_file(
 @click.option(
     "--kind",
     type=click.Choice([*tracker.ITEM_KINDS, "all"]),
-    default="bug",
-    help="which item type to list (default: bug)",
+    default="all",
+    help="which item type to list (default: all)",
 )
 @click.option("-q", "--query", default=None, help="search title, body, key and failing command")
 @click.option("--open", "open_only", is_flag=True, help="exclude closed/wontfix/duplicate")
@@ -641,7 +641,9 @@ def issue_edit(
     }
     for field, (values, clear) in repeatable.items():
         if values and clear:
-            raise click.UsageError(f"use either --{field.replace('_', '-')} or --clear-{field.replace('_', '-')}")
+            raise click.UsageError(
+                f"use either --{field.replace('_', '-')} or --clear-{field.replace('_', '-')}"
+            )
         if values:
             changes[field] = list(values)
         elif clear:
@@ -761,6 +763,42 @@ def issue_frontier(issue_key, as_json):
         for row in payload["frontier"]:
             click.echo(_issue_line(row))
         click.echo(f"-- {len(payload['frontier'])} takeable")
+
+    _emit(payload, as_json, render)
+
+
+@issue.command(name="audit")
+@click.argument("issue_key")
+@click.option("--max-depth", default=8, type=click.IntRange(1, 12))
+@click.option("--max-nodes", default=300, type=click.IntRange(1, 500))
+@click.option("--json", "as_json", is_flag=True)
+def issue_audit(issue_key, max_depth, max_nodes, as_json):
+    """Audit a recursive hierarchy and show its actionable leaf frontier."""
+    try:
+        payload = tracker.hierarchy_audit(issue_key, max_depth=max_depth, max_nodes=max_nodes)
+    except TrackerError as exc:
+        _fail(exc)
+
+    def render(payload):
+        counts = payload["counts"]
+        click.echo(
+            f"{payload['root']['key']}: {counts['nodes']} nodes, "
+            f"{counts['part_of']} part-of, {counts['blocks']} blocks"
+        )
+        findings = payload["findings"]
+        click.echo(
+            "findings: "
+            f"{len(findings['hierarchy_cycles'])} hierarchy cycle(s), "
+            f"{len(findings['blocker_cycles'])} blocker cycle(s), "
+            f"{len(findings['multiple_parents'])} multiple-parent node(s)"
+        )
+        for row in payload["frontier"]:
+            click.echo(f"frontier  {_issue_line(row)}")
+        if payload["bounds"]["truncated"]:
+            click.echo(
+                "partial: " + ", ".join(payload["bounds"]["reasons"]),
+                err=True,
+            )
 
     _emit(payload, as_json, render)
 

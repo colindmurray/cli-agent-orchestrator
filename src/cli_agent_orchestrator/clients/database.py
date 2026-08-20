@@ -2217,7 +2217,9 @@ def _migrate_tracker_kind_column() -> None:
             else:
                 # Column missing — add it with the canonical bug default.
                 conn.execute(
-                    sa_text("ALTER TABLE tracker_issues ADD COLUMN kind TEXT NOT NULL DEFAULT 'bug'")
+                    sa_text(
+                        "ALTER TABLE tracker_issues ADD COLUMN kind TEXT NOT NULL DEFAULT 'bug'"
+                    )
                 )
             conn.execute(
                 sa_text(

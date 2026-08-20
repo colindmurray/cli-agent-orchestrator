@@ -810,16 +810,34 @@ class TestGraphProjectionRoute:
         assert response.status_code == 200
         body = response.json()
         assert [(row["title"], row["depth"]) for row in body["nodes"]] == [
-            ("root", 0), ("child", 1), ("leaf", 2)
+            ("root", 0),
+            ("child", 1),
+            ("leaf", 2),
         ]
         assert [row["title"] for row in body["external"]] == ["outside"]
 
     def test_graph_bounds_are_validated_and_unknown_root_is_404(self, client, project):
         issue = _issue(client)
-        assert client.get(
-            f"/tracker/issues/{issue['key']}/graph", params={"max_depth": 0}
-        ).status_code == 422
+        assert (
+            client.get(f"/tracker/issues/{issue['key']}/graph", params={"max_depth": 0}).status_code
+            == 422
+        )
         assert client.get("/tracker/issues/cond-9999/graph").status_code == 404
+
+    def test_hierarchy_audit_returns_recursive_frontier(self, client, project):
+        root = _issue(client, title="root", kind="project")
+        child = _issue(client, title="child", kind="task")
+        client.post(
+            f"/tracker/issues/{child['key']}/links",
+            json={"to_key": root["key"], "kind": "part-of"},
+        )
+
+        response = client.get(f"/tracker/issues/{root['key']}/audit")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["counts"]["nodes"] == 2
+        assert [row["key"] for row in payload["frontier"]] == [child["key"]]
 
 
 class TestMapProjectionRouteExternalEndpoints:
@@ -898,7 +916,5 @@ class TestFeatureParity:
             "/tracker/features",
             json={"project_id": "cao-system", "title": "waiting", "labels": ["needs-info"]},
         )
-        body = client.get(
-            "/tracker/features", params={"without_label": "needs-info"}
-        ).json()
+        body = client.get("/tracker/features", params={"without_label": "needs-info"}).json()
         assert [i["title"] for i in body["issues"]] == ["ready"]
