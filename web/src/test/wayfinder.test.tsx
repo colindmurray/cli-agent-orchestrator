@@ -378,7 +378,10 @@ describe('Wayfinder view', () => {
     const lanes = await screen.findByLabelText('Dependency work tracks')
     expect(within(lanes).getByText('Parallel work')).toBeInTheDocument()
     expect(within(lanes).getByText('Integration')).toBeInTheDocument()
-    expect(within(lanes).getByText('2 open blocker links')).toBeInTheDocument()
+    expect(within(lanes).getByText('3 blocker links total')).toBeInTheDocument()
+    expect(within(lanes).getByText('2 open · 1 cleared')).toBeInTheDocument()
+    expect(within(lanes).getByText('3 visible')).toBeInTheDocument()
+    expect(within(lanes).getByText('0 hidden')).toBeInTheDocument()
     expect(within(lanes).getByText('quota repair')).toBeInTheDocument()
     expect(within(lanes).getByText('research providers')).toBeInTheDocument()
     expect(within(lanes).getByText('grill the operator')).toBeInTheDocument()
@@ -392,23 +395,25 @@ describe('Wayfinder view', () => {
     expect(sigma.graph.getEdgeAttributes('cond-0009', 'cond-0002').kind).toBe('blocks')
   })
 
-  it('aggregates nested blockers onto a collapsed story and expands to the precise task', async () => {
+  it('shows nested blocker scopes by default and offers explicit collapse and expand controls', async () => {
     routeOverrides['GET /tracker/issues/cond-0001/graph'] = () => ({
       status: 200,
       data: {
         ...GRAPH_PROJECTION,
         nodes: [
           { ...MAP, depth: 0, parent_keys: [], child_count: 1 },
-          { ...T_RESEARCH, kind: 'story', depth: 1, parent_keys: ['cond-0001'], child_count: 1 },
+          { ...T_RESEARCH, kind: 'story', depth: 1, parent_keys: ['cond-0001'], child_count: 2 },
+          { ...T_GRILL, kind: 'task', depth: 2, parent_keys: ['cond-0002'], child_count: 0 },
           { ...T_MIGRATE, kind: 'task', depth: 2, parent_keys: ['cond-0002'], child_count: 0 },
         ],
-        external: [EXT],
+        external: [],
         links: [
           { id: 41, kind: 'part-of', from_key: T_RESEARCH.key, to_key: MAP.key },
-          { id: 42, kind: 'part-of', from_key: T_MIGRATE.key, to_key: T_RESEARCH.key },
-          { id: 43, kind: 'blocks', from_key: EXT.key, to_key: T_MIGRATE.key },
+          { id: 42, kind: 'part-of', from_key: T_GRILL.key, to_key: T_RESEARCH.key },
+          { id: 43, kind: 'part-of', from_key: T_MIGRATE.key, to_key: T_RESEARCH.key },
+          { id: 44, kind: 'blocks', from_key: T_GRILL.key, to_key: T_MIGRATE.key },
         ],
-        stats: { nodes: 3, descendants: 2, external: 1, links: 3, depth: 2 },
+        stats: { nodes: 4, descendants: 3, external: 0, links: 4, depth: 2 },
       },
     })
 
@@ -416,12 +421,28 @@ describe('Wayfinder view', () => {
     fireEvent.click(await screen.findByRole('tab', { name: 'Dependencies' }))
     const lanes = await screen.findByLabelText('Dependency work tracks')
     expect(within(lanes).getByText('research providers')).toBeInTheDocument()
-    expect(within(lanes).queryByText('migrate the store')).not.toBeInTheDocument()
-    expect(getLastSigma().graph.getEdgeAttributes(EXT.key, T_RESEARCH.key).kind).toBe('blocks')
+    expect(within(lanes).getByText('grill the operator')).toBeInTheDocument()
+    expect(within(lanes).getByText('migrate the store')).toBeInTheDocument()
+    expect(within(lanes).getByText('1 blocker link total')).toBeInTheDocument()
+    expect(within(lanes).getByText('1 visible')).toBeInTheDocument()
+    expect(within(lanes).getByText('0 hidden')).toBeInTheDocument()
+    expect(getLastSigma().graph.getEdgeAttributes(T_GRILL.key, T_MIGRATE.key).kind).toBe('blocks')
 
-    fireEvent.click(within(lanes).getByRole('button', { name: 'Expand nested scope for cond-0002' }))
+    const collapse = within(lanes).getByRole('button', { name: 'Collapse nested scope for cond-0002' })
+    expect(collapse).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(collapse)
+    expect(within(lanes).queryByText('grill the operator')).not.toBeInTheDocument()
+    expect(within(lanes).queryByText('migrate the store')).not.toBeInTheDocument()
+    expect(within(lanes).getByText('1 blocker link total')).toBeInTheDocument()
+    expect(within(lanes).getByText('0 visible')).toBeInTheDocument()
+    expect(within(lanes).getByText('1 hidden')).toBeInTheDocument()
+
+    const expand = within(lanes).getByRole('button', { name: 'Expand nested scope for cond-0002' })
+    expect(expand).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(within(lanes).getByRole('button', { name: 'Expand all scopes' }))
+    expect(await within(lanes).findByText('grill the operator')).toBeInTheDocument()
     expect(await within(lanes).findByText('migrate the store')).toBeInTheDocument()
-    await waitFor(() => expect(getLastSigma().graph.getEdgeAttributes(EXT.key, T_MIGRATE.key).kind).toBe('blocks'))
+    await waitFor(() => expect(getLastSigma().graph.getEdgeAttributes(T_GRILL.key, T_MIGRATE.key).kind).toBe('blocks'))
   })
 
   it('collapses descendants and opens the shared editable issue detail', async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, Focus, GitFork, Loader2, Network, Search, Workflow } from 'lucide-react'
 import type {
   TrackerGraphProjection,
@@ -45,7 +45,6 @@ export function IssueGraphPanel({
   const [statuses, setStatuses] = useState<string[]>([])
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [dependencyCollapsed, setDependencyCollapsed] = useState<Set<string>>(new Set())
-  const dependencyRootRef = useRef<string | null>(null)
 
   const loadIssueOptions = useCallback(async (needle: string): Promise<SearchableOption[]> => {
     const result = await api.listTrackerIssues({
@@ -96,14 +95,6 @@ export function IssueGraphPanel({
       .then(result => {
         if (!active) return
         setProjection(result)
-        if (dependencyRootRef.current !== result.root.key) {
-          dependencyRootRef.current = result.root.key
-          setDependencyCollapsed(new Set(
-            result.nodes
-              .filter(node => node.key !== result.root.key && node.child_count > 0)
-              .map(node => node.key),
-          ))
-        }
       })
       .catch(err => {
         if (active) {
@@ -127,6 +118,12 @@ export function IssueGraphPanel({
   const dependencyPlan = useMemo(
     () => projection ? buildIssueDependencyPlan(projection, filters) : null,
     [projection, filters],
+  )
+  const dependencyScopeKeys = useMemo(
+    () => projection?.nodes
+      .filter(node => node.key !== projection.root.key && node.child_count > 0)
+      .map(node => node.key) ?? [],
+    [projection],
   )
   const selected = projection
     ? [...projection.nodes, ...projection.external].find(issue => issue.key === selectedKey) ?? null
@@ -291,6 +288,8 @@ export function IssueGraphPanel({
               plan={dependencyPlan}
               collapsed={dependencyCollapsed}
               onToggleScope={toggleCollapsed}
+              onExpandAll={() => setDependencyCollapsed(new Set())}
+              onCollapseAll={() => setDependencyCollapsed(new Set(dependencyScopeKeys))}
               onSelectIssue={onSelectIssue}
             />
           ) : (

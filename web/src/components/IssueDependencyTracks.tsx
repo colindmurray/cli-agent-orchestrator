@@ -5,14 +5,17 @@ export function IssueDependencyTracks({
   plan,
   collapsed,
   onToggleScope,
+  onExpandAll,
+  onCollapseAll,
   onSelectIssue,
 }: {
   plan: IssueDependencyPlan
   collapsed: Set<string>
   onToggleScope: (key: string) => void
+  onExpandAll: () => void
+  onCollapseAll: () => void
   onSelectIssue: (key: string) => void
 }) {
-  const cleared = plan.edges.length - plan.openDependencyCount
   return (
     <div className="space-y-3" aria-label="Dependency work tracks">
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gray-800 bg-gray-950/40 px-4 py-3 text-xs">
@@ -24,16 +27,33 @@ export function IssueDependencyTracks({
             Tracks have no blocker edges between them and can proceed independently.
           </div>
         </div>
-        <div className="flex flex-wrap gap-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
           <span className="rounded bg-red-500/10 px-2 py-1 text-red-300">
-            {plan.openDependencyCount} open blocker {plan.openDependencyCount === 1 ? 'link' : 'links'}
+            {plan.totalDependencyCount} blocker {plan.totalDependencyCount === 1 ? 'link' : 'links'} total
           </span>
-          <span className="rounded bg-gray-800 px-2 py-1 text-gray-400">{cleared} cleared</span>
-          {plan.hiddenDependencyCount > 0 && (
-            <span className="rounded bg-amber-500/10 px-2 py-1 text-amber-300">
-              {plan.hiddenDependencyCount} nested {plan.hiddenDependencyCount === 1 ? 'link' : 'links'} collapsed
-            </span>
-          )}
+          <span className="rounded bg-gray-800 px-2 py-1 text-gray-400">
+            {plan.openDependencyCount} open · {plan.clearedDependencyCount} cleared
+          </span>
+          <span className="rounded bg-sky-500/10 px-2 py-1 text-sky-300">{plan.visibleDependencyCount} visible</span>
+          <span className={`rounded px-2 py-1 ${plan.hiddenDependencyCount ? 'bg-amber-500/10 text-amber-300' : 'bg-gray-800 text-gray-500'}`}>
+            {plan.hiddenDependencyCount} hidden
+          </span>
+          <span className="mx-0.5 h-4 w-px bg-gray-800" aria-hidden="true" />
+          <button
+            type="button"
+            onClick={onExpandAll}
+            disabled={collapsed.size === 0}
+            className="rounded border border-gray-700 px-2 py-1 text-gray-300 hover:border-emerald-600/60 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Expand all scopes
+          </button>
+          <button
+            type="button"
+            onClick={onCollapseAll}
+            className="rounded border border-gray-700 px-2 py-1 text-gray-300 hover:border-amber-600/60"
+          >
+            Collapse all scopes
+          </button>
         </div>
       </div>
 
@@ -144,7 +164,8 @@ function DependencyStageColumn({
                   type="button"
                   onClick={() => onToggleScope(node.key)}
                   aria-label={`${collapsed.has(node.key) ? 'Expand' : 'Collapse'} nested scope for ${node.key}`}
-                  className="mt-2 inline-flex items-center gap-1 text-[10px] text-gray-500 hover:text-gray-200"
+                  aria-expanded={!collapsed.has(node.key)}
+                  className="mt-2 inline-flex items-center gap-1 rounded border border-gray-800 bg-gray-900/70 px-2 py-1 text-[10px] text-gray-400 hover:border-gray-700 hover:text-gray-100"
                 >
                   {collapsed.has(node.key) ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
                   {collapsed.has(node.key) ? 'Expand' : 'Collapse'} {node.hiddenScopeCount || childCount} nested

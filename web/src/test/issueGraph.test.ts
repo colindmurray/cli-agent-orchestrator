@@ -252,6 +252,10 @@ describe('generic issue graph', () => {
     expect(plan.edges).toHaveLength(2)
     expect(plan.nodes.find(row => row.key === STORY.key)?.hiddenScopeCount).toBe(2)
     expect(plan.nodes.find(row => row.key === STORY.key)?.hiddenDependencyCount).toBe(1)
+    expect(plan.totalDependencyCount).toBe(3)
+    expect(plan.visibleDependencyCount).toBe(2)
+    expect(plan.openDependencyCount).toBe(3)
+    expect(plan.clearedDependencyCount).toBe(0)
     expect(plan.hiddenDependencyCount).toBe(1)
     expect(plan.tracks[0].total).toBe(5)
 
