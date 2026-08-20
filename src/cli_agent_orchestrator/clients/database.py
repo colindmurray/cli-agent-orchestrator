@@ -95,10 +95,12 @@ class TerminalModel(Base):
     # join, and will then show a card that cannot be traced back to a
     # resumable session.
     native_session_id = Column(Text, nullable=True)
-    # Assigned provider route for managed/resumable reconstruction (cond-0550).
-    # Nullable: legacy/operator rows stay NULL; a row with non-null native_session_id
-    # but NULL assigned fields is incomplete and refuses reconstruction. Never
-    # backfilled by migration; existing rows keep NULL.
+    # Assigned provider route pin for managed/resumable reconstruction (cond-0550).
+    # Nullable: legacy/operator and generation-NULL ordinary pre-task rows may stay
+    # NULL. A managed v1 row (non-null generation) with NULL assigned fields is
+    # incomplete and refuses reconstruction. For Claude Code the pin is proof
+    # that a managed launch existed — profile frontmatter is the accepted model
+    # channel. Never backfilled by migration; existing rows keep NULL.
     assigned_model = Column(Text, nullable=True)
     assigned_effort = Column(Text, nullable=True)
     # The pre-task identity launch state of an activated ordinary launch:

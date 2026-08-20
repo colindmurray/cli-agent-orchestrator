@@ -21,6 +21,10 @@ from cli_agent_orchestrator.providers.opencode_cli import OpenCodeCliProvider
 logger = logging.getLogger(__name__)
 
 
+class TerminalAssignedRouteIncompleteError(Exception):
+    """A generation-bound terminal lacks a complete assigned route pin."""
+
+
 class ProviderManager:
     """Simplified provider manager with direct mapping."""
 
@@ -202,25 +206,23 @@ class ProviderManager:
         if not metadata:
             raise ValueError(f"Terminal {terminal_id} not found in database")
 
-        # A row with non-null native_session_id represents a managed/resumable
-        # reconstruction. If either assigned field is NULL, refuse before
-        # provider reconstruction with a truthful error naming the missing field(s).
-        # Legacy/operator rows (null native_session_id) remain reconstructable
-        # with nullable expected values.
-        if metadata.get("native_session_id") is not None:
+        # Managed v1 rows are classified by non-null ``generation`` alone.
+        # A row with generation and missing assigned fields must not reconstruct
+        # on ambient defaults even when native_session_id is still None.
+        if metadata.get("generation") is not None:
             missing: list[str] = []
             if metadata.get("assigned_model") is None:
                 missing.append("assigned_model")
             if metadata.get("assigned_effort") is None:
                 missing.append("assigned_effort")
             if missing:
-                raise ValueError(
-                    f"Terminal {terminal_id} is a managed terminal with native_session_id "
-                    f"{metadata.get('native_session_id')!r} but missing {', '.join(missing)}; "
-                    "cannot reconstruct provider route without assigned model/effort"
+                raise TerminalAssignedRouteIncompleteError(
+                    f"Terminal {terminal_id} generation {metadata.get('generation')!r} "
+                    f"native_session_id {metadata.get('native_session_id')!r} "
+                    f"missing {', '.join(missing)}"
                 )
 
-        # Create provider on-demand from persisted assigned route
+        # Create provider on-demand from persisted assigned route pin.
         provider = self.create_provider(
             metadata["provider"],
             terminal_id,
