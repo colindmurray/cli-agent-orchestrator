@@ -50,7 +50,7 @@ export function IssueGraphCanvas({
       sigma.on('clickNode', ({ node }) => onSelectRef.current(node))
       sigma.on('enterNode', ({ node }) => setHoveredKey(node))
       sigma.on('leaveNode', ({ node }) => setHoveredKey(current => current === node ? null : current))
-      try { sigma.getCamera().setState({ ratio: mode === 'hierarchy' ? 1.25 : 1.5 }) } catch { /* test double */ }
+      try { sigma.getCamera().setState({ ratio: mode === 'relationships' ? 1.5 : 1.25 }) } catch { /* test double */ }
       sigmaRef.current = sigma
       setFailed(false)
       return () => {
@@ -96,7 +96,7 @@ export function IssueGraphCanvas({
     if (action === 'zoom' && camera.animatedZoom) camera.animatedZoom({ duration: 180 })
     else if (action === 'unzoom' && camera.animatedUnzoom) camera.animatedUnzoom({ duration: 180 })
     else if (action === 'reset' && camera.animatedReset) camera.animatedReset({ duration: 220 })
-    else camera.setState({ ratio: mode === 'hierarchy' ? 1.25 : 1.5, x: 0.5, y: 0.5, angle: 0 })
+    else camera.setState({ ratio: mode === 'relationships' ? 1.5 : 1.25, x: 0.5, y: 0.5, angle: 0 })
   }
 
   return (
@@ -105,7 +105,7 @@ export function IssueGraphCanvas({
         <div
           ref={containerRef}
           role="img"
-          aria-label={`${mode === 'hierarchy' ? 'Issue hierarchy' : 'Issue relationship'} graph; the list below carries the same information`}
+          aria-label={`${mode === 'hierarchy' ? 'Issue hierarchy' : mode === 'dependencies' ? 'Issue dependency DAG' : 'Issue relationship'} graph; the structured view below carries the same information`}
           data-testid="issue-graph-canvas"
           className="h-[460px] w-full"
         />
@@ -147,7 +147,7 @@ export function IssueGraphCanvas({
         ))}
         <span className="mx-1 h-4 w-px bg-gray-800" />
         {Object.entries(MAP_EDGE_COLORS)
-          .filter(([kind]) => mode === 'relationships' || kind === 'part-of')
+          .filter(([kind]) => mode === 'relationships' || kind === (mode === 'dependencies' ? 'blocks' : 'part-of'))
           .map(([kind, color]) => (
             <span key={kind} className="flex items-center gap-1.5">
               <span className="inline-block w-3.5 border-t-2" style={{ borderColor: color }} />

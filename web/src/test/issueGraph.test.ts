@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { TrackerGraphNode, TrackerGraphProjection, TrackerIssue } from '../api'
 import {
   buildIssueGraph,
+  buildIssueDependencyPlan,
   orderIssueHierarchyNodes,
   visibleIssueGraphKeys,
 } from '../lib/issueGraph'
@@ -181,5 +182,107 @@ describe('generic issue graph', () => {
       statuses: ['blocked'],
     })
     expect([...visible]).toEqual([ROOT.key, BLOCKER.key])
+  })
+
+  it('projects blocker fan-out and joins into deterministic execution stages', () => {
+    const DISCOVER = node('cond-0600', 'Discover constraints', 1, [ROOT.key], 0)
+    const API = node('cond-0601', 'Build API', 1, [ROOT.key], 0)
+    const UI = node('cond-0602', 'Build UI', 1, [ROOT.key], 0)
+    const SHIP = node('cond-0603', 'Ship integration', 1, [ROOT.key], 0)
+    const DOCS = node('cond-0604', 'Write independent docs', 1, [ROOT.key], 0)
+    const projection: TrackerGraphProjection = {
+      ...PROJECTION,
+      nodes: [ROOT, DISCOVER, API, UI, SHIP, DOCS],
+      external: [],
+      links: [
+        { id: 20, kind: 'blocks', from_key: DISCOVER.key, to_key: API.key },
+        { id: 21, kind: 'blocks', from_key: DISCOVER.key, to_key: UI.key },
+        { id: 22, kind: 'blocks', from_key: API.key, to_key: SHIP.key },
+        { id: 23, kind: 'blocks', from_key: UI.key, to_key: SHIP.key },
+      ],
+    }
+
+    const plan = buildIssueDependencyPlan(projection, EMPTY_FILTERS)
+    expect(plan.nodes.map(row => [row.key, row.stage])).toEqual([
+      [DISCOVER.key, 0],
+      [API.key, 1],
+      [UI.key, 1],
+      [SHIP.key, 2],
+      [DOCS.key, 0],
+    ])
+    expect(plan.tracks).toHaveLength(2)
+    expect(plan.tracks[0].stages.map(stage => stage.nodes.map(row => row.key))).toEqual([
+      [DISCOVER.key],
+      [API.key, UI.key],
+      [SHIP.key],
+    ])
+    expect(plan.tracks[1].independent).toBe(true)
+    expect(plan.cycles).toEqual([])
+  })
+
+  it('keeps sequencing visible when a container hides nested scope', () => {
+    const STORY = node('cond-0610', 'Deliver recovery', 1, [ROOT.key], 1, { kind: 'story' })
+    const TASK = node('cond-0611', 'Implement recovery', 2, [STORY.key], 0)
+    const VERIFY = node('cond-0612', 'Verify recovery', 1, [ROOT.key], 0)
+    const PREP = node('cond-0613', 'Prepare recovery', 2, [STORY.key], 0)
+    const projection: TrackerGraphProjection = {
+      ...PROJECTION,
+      nodes: [ROOT, { ...STORY, child_count: 2 }, VERIFY, TASK, PREP],
+      external: [BLOCKER],
+      links: [
+        { id: 30, kind: 'part-of', from_key: STORY.key, to_key: ROOT.key },
+        { id: 31, kind: 'part-of', from_key: TASK.key, to_key: STORY.key },
+        { id: 32, kind: 'part-of', from_key: VERIFY.key, to_key: ROOT.key },
+        { id: 33, kind: 'blocks', from_key: BLOCKER.key, to_key: TASK.key },
+        { id: 34, kind: 'blocks', from_key: TASK.key, to_key: VERIFY.key },
+        { id: 35, kind: 'part-of', from_key: PREP.key, to_key: STORY.key },
+        { id: 36, kind: 'blocks', from_key: TASK.key, to_key: PREP.key },
+      ],
+    }
+
+    const plan = buildIssueDependencyPlan(projection, {
+      ...EMPTY_FILTERS,
+      collapsed: new Set([STORY.key]),
+    })
+    expect(plan.nodes.map(row => row.key)).toEqual([BLOCKER.key, STORY.key, VERIFY.key])
+    expect(plan.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from: BLOCKER.key, to: STORY.key, cleared: false }),
+      expect.objectContaining({ from: STORY.key, to: VERIFY.key, cleared: false }),
+    ]))
+    expect(plan.edges).toHaveLength(2)
+    expect(plan.nodes.find(row => row.key === STORY.key)?.hiddenScopeCount).toBe(2)
+    expect(plan.nodes.find(row => row.key === STORY.key)?.hiddenDependencyCount).toBe(1)
+    expect(plan.hiddenDependencyCount).toBe(1)
+    expect(plan.tracks[0].total).toBe(5)
+
+    const graph = buildIssueGraph(projection, 'dependencies', {
+      ...EMPTY_FILTERS,
+      collapsed: new Set([STORY.key]),
+    })
+    expect(graph.edges().map(edge => graph.getEdgeAttributes(edge).kind)).toEqual(['blocks', 'blocks'])
+    expect(graph.getNodeAttribute(BLOCKER.key, 'x')).toBeLessThan(graph.getNodeAttribute(STORY.key, 'x'))
+    expect(graph.getNodeAttribute(STORY.key, 'x')).toBeLessThan(graph.getNodeAttribute(VERIFY.key, 'x'))
+  })
+
+  it('condenses blocker cycles without inventing a false order', () => {
+    const LEFT = node('cond-0620', 'Left side', 1, [ROOT.key], 0)
+    const RIGHT = node('cond-0621', 'Right side', 1, [ROOT.key], 0)
+    const AFTER = node('cond-0622', 'After cycle', 1, [ROOT.key], 0)
+    const projection: TrackerGraphProjection = {
+      ...PROJECTION,
+      nodes: [ROOT, LEFT, RIGHT, AFTER],
+      external: [],
+      links: [
+        { id: 40, kind: 'blocks', from_key: LEFT.key, to_key: RIGHT.key },
+        { id: 41, kind: 'blocks', from_key: RIGHT.key, to_key: LEFT.key },
+        { id: 42, kind: 'blocks', from_key: RIGHT.key, to_key: AFTER.key },
+      ],
+    }
+
+    const plan = buildIssueDependencyPlan(projection, EMPTY_FILTERS)
+    expect(plan.cycles).toEqual([[LEFT.key, RIGHT.key]])
+    expect(plan.nodes.find(row => row.key === LEFT.key)?.stage).toBe(0)
+    expect(plan.nodes.find(row => row.key === RIGHT.key)?.stage).toBe(0)
+    expect(plan.nodes.find(row => row.key === AFTER.key)?.stage).toBe(1)
   })
 })

@@ -352,6 +352,78 @@ describe('Wayfinder view', () => {
     expect(getLastSigma().graph.getEdgeAttributes('cond-0009', 'cond-0005').kind).toBe('blocks')
   })
 
+  it('shows blocker sequencing as staged parallel work tracks', async () => {
+    routeOverrides['GET /tracker/issues/cond-0001/graph'] = () => ({
+      status: 200,
+      data: {
+        ...GRAPH_PROJECTION,
+        nodes: [
+          { ...MAP, depth: 0, parent_keys: [], child_count: 3 },
+          { ...T_RESEARCH, kind: 'story', depth: 1, parent_keys: ['cond-0001'], child_count: 0 },
+          { ...T_GRILL, kind: 'story', depth: 1, parent_keys: ['cond-0001'], child_count: 0 },
+          { ...T_MIGRATE, kind: 'task', depth: 1, parent_keys: ['cond-0001'], child_count: 0 },
+        ],
+        external: [{ ...EXT, status: 'closed' }],
+        links: [
+          { id: 31, kind: 'blocks', from_key: EXT.key, to_key: T_RESEARCH.key },
+          { id: 32, kind: 'blocks', from_key: T_RESEARCH.key, to_key: T_MIGRATE.key },
+          { id: 33, kind: 'blocks', from_key: T_GRILL.key, to_key: T_MIGRATE.key },
+        ],
+        stats: { nodes: 4, descendants: 3, external: 1, links: 3, depth: 1 },
+      },
+    })
+
+    await openGraph()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Dependencies' }))
+    const lanes = await screen.findByLabelText('Dependency work tracks')
+    expect(within(lanes).getByText('Parallel work')).toBeInTheDocument()
+    expect(within(lanes).getByText('Integration')).toBeInTheDocument()
+    expect(within(lanes).getByText('2 open blocker links')).toBeInTheDocument()
+    expect(within(lanes).getByText('quota repair')).toBeInTheDocument()
+    expect(within(lanes).getByText('research providers')).toBeInTheDocument()
+    expect(within(lanes).getByText('grill the operator')).toBeInTheDocument()
+    expect(within(lanes).getByText('migrate the store')).toBeInTheDocument()
+    expect(within(lanes).getByText('prerequisites cleared')).toBeInTheDocument()
+    expect(within(lanes).getByText('external')).toBeInTheDocument()
+
+    const sigma = getLastSigma()
+    expect(sigma.graph.order).toBe(4)
+    expect(sigma.graph.size).toBe(3)
+    expect(sigma.graph.getEdgeAttributes('cond-0009', 'cond-0002').kind).toBe('blocks')
+  })
+
+  it('aggregates nested blockers onto a collapsed story and expands to the precise task', async () => {
+    routeOverrides['GET /tracker/issues/cond-0001/graph'] = () => ({
+      status: 200,
+      data: {
+        ...GRAPH_PROJECTION,
+        nodes: [
+          { ...MAP, depth: 0, parent_keys: [], child_count: 1 },
+          { ...T_RESEARCH, kind: 'story', depth: 1, parent_keys: ['cond-0001'], child_count: 1 },
+          { ...T_MIGRATE, kind: 'task', depth: 2, parent_keys: ['cond-0002'], child_count: 0 },
+        ],
+        external: [EXT],
+        links: [
+          { id: 41, kind: 'part-of', from_key: T_RESEARCH.key, to_key: MAP.key },
+          { id: 42, kind: 'part-of', from_key: T_MIGRATE.key, to_key: T_RESEARCH.key },
+          { id: 43, kind: 'blocks', from_key: EXT.key, to_key: T_MIGRATE.key },
+        ],
+        stats: { nodes: 3, descendants: 2, external: 1, links: 3, depth: 2 },
+      },
+    })
+
+    await openGraph()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Dependencies' }))
+    const lanes = await screen.findByLabelText('Dependency work tracks')
+    expect(within(lanes).getByText('research providers')).toBeInTheDocument()
+    expect(within(lanes).queryByText('migrate the store')).not.toBeInTheDocument()
+    expect(getLastSigma().graph.getEdgeAttributes(EXT.key, T_RESEARCH.key).kind).toBe('blocks')
+
+    fireEvent.click(within(lanes).getByRole('button', { name: 'Expand nested scope for cond-0002' }))
+    expect(await within(lanes).findByText('migrate the store')).toBeInTheDocument()
+    await waitFor(() => expect(getLastSigma().graph.getEdgeAttributes(EXT.key, T_MIGRATE.key).kind).toBe('blocks'))
+  })
+
   it('collapses descendants and opens the shared editable issue detail', async () => {
     await openGraph()
     const hierarchy = await screen.findByLabelText('Issue hierarchy')
