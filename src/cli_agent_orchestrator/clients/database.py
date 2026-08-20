@@ -1680,6 +1680,44 @@ class WaitMessageAdmissionModel(Base):
     )
 
 
+class RegisteredWaitModel(Base):
+    """One exact-owner scheduled timer wait and its durable outcome.
+
+    ``operation_id`` is the registration replay key.  Expiry and cancellation
+    mutate this one row under a database transaction, so only one truthful
+    terminal outcome can win.  The request and outcome stay canonical JSON;
+    the duplicated owner columns are the bounded lookup surface Sentinel and
+    Stop need without interpreting arbitrary JSON.
+    """
+
+    __tablename__ = "registered_waits"
+
+    wait_id = Column(Text, primary_key=True)
+    operation_id = Column(Text, nullable=False)
+    request_digest = Column(Text, nullable=False)
+    request_json = Column(Text, nullable=False)
+    session_name = Column(Text, nullable=False)
+    owner_agent_id = Column(Text, nullable=False)
+    owner_incarnation_id = Column(Text, nullable=False)
+    owner_terminal_id = Column(Text, nullable=False)
+    owner_generation = Column(Text, nullable=False)
+    state = Column(Text, nullable=False)
+    deadline_at = Column(Text, nullable=False)
+    expiry_operation_id = Column(Text, nullable=False)
+    wake_message_id = Column(Integer, nullable=True)
+    wake_pending_since = Column(Text, nullable=True)
+    outcome_json = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False)
+    updated_at = Column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("ix_registered_waits_operation", "operation_id", unique=True),
+        Index("ix_registered_waits_expiry_operation", "expiry_operation_id", unique=True),
+        Index("ix_registered_waits_owner", "owner_terminal_id", "owner_generation"),
+        Index("ix_registered_waits_session", "session_name"),
+    )
+
+
 class NativeStatusRepairEvidenceModel(Base):
     """One immutable bounded record of a native /status identity repair.
 
@@ -2439,6 +2477,7 @@ def init_db() -> None:
     _migrate_task_occurrence_handoffs()
     _migrate_supervisor_drain()
     _migrate_wait_message_admissions()
+    _migrate_registered_waits()
     _migrate_native_status_repair()
     _migrate_provider_recovery_episodes()
     _migrate_native_status_observation_attempt()
@@ -3876,6 +3915,14 @@ def _migrate_wait_message_admissions() -> None:
             )
     except Exception as e:  # noqa: BLE001 - dark seam fails closed
         logger.warning(f"wait-message-admission migration failed: {e}")
+
+
+def _migrate_registered_waits() -> None:
+    """Create the M7 scheduled-wait lifecycle store on existing databases."""
+    try:
+        RegisteredWaitModel.__table__.create(bind=engine, checkfirst=True)
+    except Exception as exc:  # noqa: BLE001 - operation paths fail closed
+        logger.warning("registered-wait migration failed: %s", exc)
 
 
 def _migrate_native_status_repair() -> None:

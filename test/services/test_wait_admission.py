@@ -88,21 +88,20 @@ def _request(owner, message=None, operation_id=None):
 
 
 # ---------------------------------------------------------------------------
-# the capability is visibly off
+# the admission capability is truthfully attached to the M7 consumer
 # ---------------------------------------------------------------------------
 
 
-class TestDisabledCapability:
-    def test_the_capability_block_says_disabled_in_every_field_that_matters(self):
+class TestCapability:
+    def test_the_capability_block_names_the_attached_consumer(self):
         block = wa.capability()
         assert block["capability"] == wa.CAPABILITY_NAME
-        assert block["enabled"] is False
-        assert block["reason"]
-        # The three things a reader would otherwise have to infer from absence.
-        assert block["consumer_attached"] is False
+        assert block["enabled"] is True
+        assert block["reason"] is None
+        assert block["consumer_attached"] is True
         assert block["stop_interruptor_attached"] is False
         assert block["public_surface"] is False
-        # Authority this slice explicitly does not hold.
+        # Admission still never owns broader recovery policy.
         assert block["recovery_authority"] is False
         assert block["action_authority"] is False
         assert block["completion_authority"] is False
@@ -125,6 +124,7 @@ class TestDisabledCapability:
         assert wa.capability()["denial_reasons"] == sorted(wa.DENIAL_REASONS)
         assert wa.DENIAL_REASONS == {
             wa.DENY_OWNER_UNKNOWN,
+            wa.DENY_OWNER_UNREADABLE,
             wa.DENY_OWNER_RETIRED,
             wa.DENY_OWNER_AMBIGUOUS,
             wa.DENY_OWNER_REPLACED,
@@ -692,24 +692,19 @@ class TestReads:
 
 
 # ---------------------------------------------------------------------------
-# nothing is consumed, nothing is attached
+# admission remains isolated; only the registered-wait consumer is attached
 # ---------------------------------------------------------------------------
 
 
-class TestNoConsumerNoEffects:
-    def test_the_m3c_stop_interruptor_is_still_the_empty_dark_seam(self):
+class TestConsumerBoundary:
+    def test_admission_rows_alone_are_not_registered_waits_for_stop(self):
         from cli_agent_orchestrator.services import cohort_effects
 
         bound = _bind(suffix="1")
         wa.admit(_request(_owner_from(bound)))
-        assert cohort_effects._default_wait_interruptor(SESSION, str(uuid.uuid4())) == ()
+        assert cohort_effects._default_wait_interruptor(SESSION, str(uuid.uuid4())) == []
 
-    def test_no_other_module_imports_this_one_yet(self):
-        """Stage 2 is a contract, not a wiring change.
-
-        If a consumer appears, this assertion is the thing that has to be
-        deliberately updated — which is the point.
-        """
+    def test_only_the_public_wait_surface_and_registered_consumer_import_admission(self):
         root = _cao_source_root()
         scanned = list(root.rglob("*.py"))
         # Guard against a vacuous pass from a wrong root.
@@ -719,7 +714,7 @@ class TestNoConsumerNoEffects:
             for path in scanned
             if path.name != "wait_admission.py" and "wait_admission" in path.read_text()
         ]
-        assert offenders == []
+        assert offenders == ["api/wait.py", "services/registered_waits.py"]
 
     def test_admitting_writes_exactly_one_row_and_touches_no_other_table(self):
         bound = _bind(suffix="1")

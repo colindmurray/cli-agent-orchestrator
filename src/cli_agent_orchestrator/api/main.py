@@ -53,6 +53,7 @@ from cli_agent_orchestrator.api.tracker import (
     TRACKER_CAPABILITIES,
 )
 from cli_agent_orchestrator.api.tracker import router as tracker_router
+from cli_agent_orchestrator.api.wait import router as wait_router
 from cli_agent_orchestrator.backends import TerminalBackendError, TerminalNotFoundError
 from cli_agent_orchestrator.backends.herdr_backend import HerdrBackend
 from cli_agent_orchestrator.backends.registry import get_backend
@@ -877,6 +878,7 @@ app.include_router(task_occurrence_router)
 app.include_router(task_handoff_router)
 app.include_router(communications_router)
 app.include_router(roster_router)
+app.include_router(wait_router)
 
 
 @app.exception_handler(RequestValidationError)
