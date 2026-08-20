@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from cli_agent_orchestrator.clients import database
@@ -722,6 +723,8 @@ def deadman_disposition(terminal_id: str, generation: str) -> dict[str, Any]:
     """Owner-scoped ordinary-deadman decision; unreadable is not absence."""
     try:
         with database.SessionLocal() as db:
+            if not sa_inspect(db.get_bind()).has_table(database.RegisteredWaitModel.__tablename__):
+                return {"state": "absent", "suppress_ordinary_deadman": False}
             rows = (
                 db.query(database.RegisteredWaitModel)
                 .filter(
