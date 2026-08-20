@@ -6,15 +6,17 @@ import json
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.models.inbox import MessageStatus
-from cli_agent_orchestrator.services import cohort_effects
+from cli_agent_orchestrator.services import cohort_effects, generation_fence, inbox_service
 from cli_agent_orchestrator.services import registered_waits as waits
 from cli_agent_orchestrator.services import stable_agent_roster as roster
 from cli_agent_orchestrator.services import wait_admission
+from cli_agent_orchestrator.services.control_input_contract import ACCEPTED
 from cli_agent_orchestrator.services.inbox_service import InboxService
 
 SESSION = "cao-timer-tests"
@@ -79,6 +81,31 @@ def _request(bound, *, operation_id=None, duration=60, name="coffee", estimated=
 def _inbox_rows():
     with database.SessionLocal() as db:
         return db.query(database.InboxModel).all()
+
+
+def _deliver_native_accepted(monkeypatch, bound):
+    owner = _owner(bound)
+    monkeypatch.setattr(
+        inbox_service.managed_launch,
+        "managed_control_identity",
+        lambda terminal_id: {
+            "reservation_id": f"rsv-{terminal_id}",
+            "terminal_id": terminal_id,
+            "generation": owner.generation,
+            "provider": "codex",
+            "state": "admitted",
+            "controllable": True,
+            "vintage": "v2",
+            "execution_mode": "native_tui",
+        },
+    )
+    monkeypatch.setattr(generation_fence, "installed_receipt", lambda *_args: None)
+    monkeypatch.setattr(
+        inbox_service.control_input_service,
+        "deliver_native_inbox_payload",
+        lambda *_args, **_kwargs: SimpleNamespace(outcome=ACCEPTED, reason_code="accepted"),
+    )
+    InboxService().deliver_pending(owner.terminal_id)
 
 
 def test_happy_registration_status_list_restart_and_replay_adoption():
@@ -166,6 +193,20 @@ def test_expiry_persists_one_exact_message_and_confirmed_receipt_resolves():
     assert waits.get(record["wait_id"])["state"] == waits.STATE_RESOLVED
 
 
+def test_native_accepted_inbox_delivery_resolves_without_a_stronger_receipt(monkeypatch):
+    bound = _bind()
+    record = waits.register(_request(bound, duration=1), now=NOW)
+    waits.process_due(now=NOW + timedelta(seconds=1))
+
+    _deliver_native_accepted(monkeypatch, bound)
+    assert _inbox_rows()[0].status == MessageStatus.DELIVERED
+
+    result = waits.process_due(now=NOW + timedelta(seconds=2))[-1]
+    assert result["state"] == waits.STATE_RESOLVED
+    assert result["outcome"]["reason_code"] == "wake-delivered"
+    assert waits.get(record["wait_id"])["state"] == waits.STATE_RESOLVED
+
+
 def test_pending_response_loss_queries_same_operation_without_resending():
     bound = _bind()
     waits.register(_request(bound, duration=1), now=NOW)
@@ -241,6 +282,37 @@ def test_refused_wake_invalidates_and_ambiguity_uses_grace_without_resend():
     assert result["state"] == waits.STATE_INVALID
     assert result["outcome"]["reason_code"] == "expiry-wake-ambiguous"
     assert len(_inbox_rows()) == 2
+    assert _inbox_rows()[1].status == MessageStatus.FAILED
+
+
+def test_unreadable_due_wait_does_not_starve_a_later_valid_wait():
+    bound = _bind()
+    unreadable = waits.register(_request(bound, duration=1, name="unreadable"), now=NOW)
+    valid = waits.register(_request(bound, duration=2, name="valid"), now=NOW)
+    with database.SessionLocal() as db:
+        db.get(database.RegisteredWaitModel, unreadable["wait_id"]).request_json = "{broken"
+        db.commit()
+
+    results = waits.process_due(now=NOW + timedelta(seconds=2))
+
+    assert results[0]["wait_id"] == unreadable["wait_id"]
+    assert results[0]["state"] == "unreadable"
+    assert results[0]["reason_code"] == waits.RegisteredWaitUnavailable.code
+    assert waits.get(valid["wait_id"])["state"] == waits.STATE_EXPIRY_WAKE_PENDING
+    assert [row.receiver_id for row in _inbox_rows()] == [_owner(bound).terminal_id]
+
+
+def test_due_scan_does_not_hide_an_unexpected_programming_failure(monkeypatch):
+    bound = _bind()
+    waits.register(_request(bound, duration=1), now=NOW)
+    monkeypatch.setattr(
+        waits,
+        "_request_from_row",
+        lambda _row: (_ for _ in ()).throw(AssertionError("unexpected defect")),
+    )
+
+    with pytest.raises(AssertionError, match="unexpected defect"):
+        waits.process_due(now=NOW + timedelta(seconds=1))
 
 
 def test_owner_replacement_invalidates_instead_of_transferring():

@@ -511,173 +511,211 @@ def process_due(
         raise RegisteredWaitUnavailable(f"due-wait scan failed: {exc}") from exc
 
     for wait_id in ids:
-        with database.SessionLocal() as db:
-            row = _wait_row(db, wait_id)
-            if row is None or row.state not in ACTIVE_STATES:
-                continue
-            request = _request_from_row(row)
-            owner = _owner(request)
-            verdict = wait_admission.verify_owner(owner, db=db)
-            if verdict["denial_reason"] is not None:
-                if verdict["denial_reason"] == wait_admission.DENY_OWNER_UNREADABLE:
-                    results.append({"wait_id": wait_id, "state": "owner-unreadable"})
-                    continue
-                _mark_terminal(
-                    row,
-                    state=STATE_INVALID,
-                    reason=str(verdict["denial_reason"]),
-                    detail=verdict["detail"],
-                    now=observed,
-                )
-                db.commit()
-                results.append(_record(row, now=observed))
-                continue
-            if row.state == STATE_REGISTRATION_PENDING:
-                row.state = STATE_ACKNOWLEDGED
-                row.updated_at = _isots(observed)
-                db.commit()
-                if observed < _parse_time(row.deadline_at):
-                    continue
-            if observed < _parse_time(row.deadline_at) and row.state == STATE_ACKNOWLEDGED:
-                continue
-            if row.state == STATE_ACKNOWLEDGED:
-                row.state = STATE_EXPIRY_INTENT
-                row.updated_at = _isots(observed)
-                db.commit()  # expiry intent before any delivery I/O
-            if input_held and input_held(row.owner_terminal_id, row.owner_generation):
-                results.append({"wait_id": wait_id, "state": STATE_EXPIRY_INTENT})
-                continue
-
-        # Admit once, outside the state transaction. A retry adopts this exact
-        # immutable verdict. Cancellation may win while admission runs.
-        record = get(wait_id)
-        if record is None:
-            continue
-        created_message = False
-        with database.SessionLocal() as db:
-            current = _wait_row(db, wait_id)
-            if current is None or current.state not in {
-                STATE_EXPIRY_INTENT,
-                STATE_EXPIRY_WAKE_PENDING,
-            }:
-                continue
-            request = _request_from_row(current)
-            owner = _owner(request)
-            message_id = str(uuid.uuid5(_MESSAGE_NAMESPACE, current.expiry_operation_id))
-            admission = wait_admission.admit(
-                wait_admission.AdmissionRequest(
-                    operation_id=current.expiry_operation_id,
-                    session_name=current.session_name,
-                    owner=owner,
-                    message=wait_admission.WaitMessage(
-                        message_id=message_id,
-                        kind=wait_admission.KIND_EXPIRY,
-                        reason_code="scheduled-wait-expired",
-                        payload_digest=current.request_digest,
-                        source_operation_id=current.operation_id,
-                        text=_wake_text(record),
-                    ),
-                ),
-                db=db,
+        try:
+            result = _process_due_wait(
+                wait_id,
+                observed=observed,
+                deliver=deliver,
+                receipt_probe=receipt_probe,
+                input_held=input_held,
+                ambiguity_grace_seconds=ambiguity_grace_seconds,
             )
-            if admission["admission_state"] != wait_admission.STATE_ADMITTED:
-                _mark_terminal(
-                    current,
-                    state=STATE_INVALID,
-                    reason=str(admission["denial_reason"]),
-                    detail=admission.get("detail"),
-                    now=observed,
-                )
-                db.commit()
-                results.append(_record(current, now=observed))
-                continue
-            if current.wake_message_id is None:
-                inbox = database.InboxModel(
-                    sender_id=current.owner_terminal_id,
-                    receiver_id=current.owner_terminal_id,
-                    message=_wake_text(record),
-                    status=MessageStatus.PENDING.value,
-                    sender_generation=current.owner_generation,
-                    expected_receiver_generation=current.owner_generation,
-                )
-                db.add(inbox)
-                db.flush()
-                installed = (
-                    db.query(database.RegisteredWaitModel)
-                    .filter(
-                        database.RegisteredWaitModel.wait_id == wait_id,
-                        database.RegisteredWaitModel.state == STATE_EXPIRY_INTENT,
-                        database.RegisteredWaitModel.wake_message_id.is_(None),
-                    )
-                    .update(
-                        {
-                            database.RegisteredWaitModel.state: STATE_EXPIRY_WAKE_PENDING,
-                            database.RegisteredWaitModel.wake_message_id: inbox.id,
-                            database.RegisteredWaitModel.wake_pending_since: _isots(observed),
-                            database.RegisteredWaitModel.updated_at: _isots(observed),
-                        },
-                        synchronize_session=False,
-                    )
-                )
-                if installed != 1:
-                    db.rollback()
-                    continue
-                message_id_int = int(inbox.id)
-                created_message = True
-            else:
-                message_id_int = int(current.wake_message_id)
-            terminal_id = current.owner_terminal_id
-            db.commit()
-
-        # A response-loss retry never calls this for a row whose inbox message
-        # has already left PENDING; it only queries the durable receipt below.
-        with database.SessionLocal() as db:
-            current = _wait_row(db, wait_id)
-            inbox = _inbox_row(db, message_id_int)
-            should_deliver = inbox is not None and inbox.status == MessageStatus.PENDING.value
-        if created_message and should_deliver and deliver is not None:
-            try:
-                deliver(terminal_id)
-            except Exception:
-                # Outcome is ambiguous. The stored message and operation are
-                # queried during grace; they are never recreated or resent.
-                pass
-
-        receipt = receipt_probe(terminal_id, message_id_int) if receipt_probe else None
-        with database.SessionLocal() as db:
-            current = _wait_row(db, wait_id)
-            if current is None or current.state != STATE_EXPIRY_WAKE_PENDING:
-                continue
-            inbox = _inbox_row(db, message_id_int)
-            if receipt is not None:
-                _mark_terminal(
-                    current,
-                    state=STATE_RESOLVED,
-                    reason="wake-confirmed",
-                    detail=f"durable receiver receipt for inbox message {message_id_int}",
-                    now=observed,
-                )
-            elif inbox is not None and inbox.status == MessageStatus.FAILED.value:
-                _mark_terminal(
-                    current,
-                    state=STATE_INVALID,
-                    reason="wake-refused",
-                    detail=f"inbox message {message_id_int} was refused",
-                    now=observed,
-                )
-            elif observed >= _parse_time(current.wake_pending_since) + timedelta(
-                seconds=ambiguity_grace_seconds
-            ):
-                _mark_terminal(
-                    current,
-                    state=STATE_INVALID,
-                    reason="expiry-wake-ambiguous",
-                    detail=f"no durable receipt after {ambiguity_grace_seconds} seconds",
-                    now=observed,
-                )
-            db.commit()
-            results.append(_record(current, now=observed))
+        except (RegisteredWaitError, wait_admission.WaitAdmissionError) as exc:
+            results.append(
+                {
+                    "wait_id": wait_id,
+                    "state": "unreadable",
+                    "reason_code": exc.code,
+                    "detail": str(exc),
+                }
+            )
+            continue
+        if result is not None:
+            results.append(result)
     return results
+
+
+def _process_due_wait(
+    wait_id: str,
+    *,
+    observed: datetime,
+    deliver: Optional[Delivery],
+    receipt_probe: Optional[ReceiptProbe],
+    input_held: Optional[InputHold],
+    ambiguity_grace_seconds: int,
+) -> Optional[dict[str, Any]]:
+    """Advance one wait so an unreadable row cannot starve later rows."""
+    with database.SessionLocal() as db:
+        row = _wait_row(db, wait_id)
+        if row is None or row.state not in ACTIVE_STATES:
+            return None
+        request = _request_from_row(row)
+        owner = _owner(request)
+        verdict = wait_admission.verify_owner(owner, db=db)
+        if verdict["denial_reason"] is not None:
+            if verdict["denial_reason"] == wait_admission.DENY_OWNER_UNREADABLE:
+                return {"wait_id": wait_id, "state": "owner-unreadable"}
+            _mark_terminal(
+                row,
+                state=STATE_INVALID,
+                reason=str(verdict["denial_reason"]),
+                detail=verdict["detail"],
+                now=observed,
+            )
+            db.commit()
+            return _record(row, now=observed)
+        if row.state == STATE_REGISTRATION_PENDING:
+            row.state = STATE_ACKNOWLEDGED
+            row.updated_at = _isots(observed)
+            db.commit()
+            if observed < _parse_time(row.deadline_at):
+                return None
+        if observed < _parse_time(row.deadline_at) and row.state == STATE_ACKNOWLEDGED:
+            return None
+        if row.state == STATE_ACKNOWLEDGED:
+            row.state = STATE_EXPIRY_INTENT
+            row.updated_at = _isots(observed)
+            db.commit()  # expiry intent before any delivery I/O
+        if input_held and input_held(row.owner_terminal_id, row.owner_generation):
+            return {"wait_id": wait_id, "state": STATE_EXPIRY_INTENT}
+
+    # Admit once, outside the state transaction. A retry adopts this exact
+    # immutable verdict. Cancellation may win while admission runs.
+    record = get(wait_id)
+    if record is None:
+        return None
+    created_message = False
+    with database.SessionLocal() as db:
+        current = _wait_row(db, wait_id)
+        if current is None or current.state not in {
+            STATE_EXPIRY_INTENT,
+            STATE_EXPIRY_WAKE_PENDING,
+        }:
+            return None
+        request = _request_from_row(current)
+        owner = _owner(request)
+        message_id = str(uuid.uuid5(_MESSAGE_NAMESPACE, current.expiry_operation_id))
+        admission = wait_admission.admit(
+            wait_admission.AdmissionRequest(
+                operation_id=current.expiry_operation_id,
+                session_name=current.session_name,
+                owner=owner,
+                message=wait_admission.WaitMessage(
+                    message_id=message_id,
+                    kind=wait_admission.KIND_EXPIRY,
+                    reason_code="scheduled-wait-expired",
+                    payload_digest=current.request_digest,
+                    source_operation_id=current.operation_id,
+                    text=_wake_text(record),
+                ),
+            ),
+            db=db,
+        )
+        if admission["admission_state"] != wait_admission.STATE_ADMITTED:
+            _mark_terminal(
+                current,
+                state=STATE_INVALID,
+                reason=str(admission["denial_reason"]),
+                detail=admission.get("detail"),
+                now=observed,
+            )
+            db.commit()
+            return _record(current, now=observed)
+        if current.wake_message_id is None:
+            inbox = database.InboxModel(
+                sender_id=current.owner_terminal_id,
+                receiver_id=current.owner_terminal_id,
+                message=_wake_text(record),
+                status=MessageStatus.PENDING.value,
+                sender_generation=current.owner_generation,
+                expected_receiver_generation=current.owner_generation,
+            )
+            db.add(inbox)
+            db.flush()
+            installed = (
+                db.query(database.RegisteredWaitModel)
+                .filter(
+                    database.RegisteredWaitModel.wait_id == wait_id,
+                    database.RegisteredWaitModel.state == STATE_EXPIRY_INTENT,
+                    database.RegisteredWaitModel.wake_message_id.is_(None),
+                )
+                .update(
+                    {
+                        database.RegisteredWaitModel.state: STATE_EXPIRY_WAKE_PENDING,
+                        database.RegisteredWaitModel.wake_message_id: inbox.id,
+                        database.RegisteredWaitModel.wake_pending_since: _isots(observed),
+                        database.RegisteredWaitModel.updated_at: _isots(observed),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if installed != 1:
+                db.rollback()
+                return None
+            message_id_int = int(inbox.id)
+            created_message = True
+        else:
+            message_id_int = int(current.wake_message_id)
+        terminal_id = current.owner_terminal_id
+        db.commit()
+
+    # A response-loss retry never calls this for a row whose inbox message
+    # has already left PENDING; it only queries the durable evidence below.
+    with database.SessionLocal() as db:
+        inbox = _inbox_row(db, message_id_int)
+        should_deliver = inbox is not None and inbox.status == MessageStatus.PENDING.value
+    if created_message and should_deliver and deliver is not None:
+        try:
+            deliver(terminal_id)
+        except Exception:
+            # Outcome is ambiguous. The stored message and operation are
+            # queried during grace; they are never recreated or resent.
+            pass
+
+    receipt = receipt_probe(terminal_id, message_id_int) if receipt_probe else None
+    with database.SessionLocal() as db:
+        current = _wait_row(db, wait_id)
+        if current is None or current.state != STATE_EXPIRY_WAKE_PENDING:
+            return None
+        inbox = _inbox_row(db, message_id_int)
+        if receipt is not None:
+            _mark_terminal(
+                current,
+                state=STATE_RESOLVED,
+                reason="wake-confirmed",
+                detail=f"durable receiver receipt for inbox message {message_id_int}",
+                now=observed,
+            )
+        elif inbox is not None and inbox.status == MessageStatus.DELIVERED.value:
+            _mark_terminal(
+                current,
+                state=STATE_RESOLVED,
+                reason="wake-delivered",
+                detail=f"inbox message {message_id_int} reached durable DELIVERED",
+                now=observed,
+            )
+        elif inbox is not None and inbox.status == MessageStatus.FAILED.value:
+            _mark_terminal(
+                current,
+                state=STATE_INVALID,
+                reason="wake-refused",
+                detail=f"inbox message {message_id_int} was refused",
+                now=observed,
+            )
+        elif observed >= _parse_time(current.wake_pending_since) + timedelta(
+            seconds=ambiguity_grace_seconds
+        ):
+            if inbox is not None and inbox.status == MessageStatus.PENDING.value:
+                inbox.status = MessageStatus.FAILED.value
+            _mark_terminal(
+                current,
+                state=STATE_INVALID,
+                reason="expiry-wake-ambiguous",
+                detail=f"no durable delivery evidence after {ambiguity_grace_seconds} seconds",
+                now=observed,
+            )
+        db.commit()
+        return _record(current, now=observed)
 
 
 def deadman_disposition(terminal_id: str, generation: str) -> dict[str, Any]:
