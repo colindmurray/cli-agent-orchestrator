@@ -95,6 +95,14 @@ class TerminalModel(Base):
     # join, and will then show a card that cannot be traced back to a
     # resumable session.
     native_session_id = Column(Text, nullable=True)
+    # Assigned provider route pin for managed/resumable reconstruction (cond-0550).
+    # Nullable: legacy/operator and generation-NULL ordinary pre-task rows may stay
+    # NULL. A managed v1 row (non-null generation) with NULL assigned fields is
+    # incomplete and refuses reconstruction. For Claude Code the pin is proof
+    # that a managed launch existed — profile frontmatter is the accepted model
+    # channel. Never backfilled by migration; existing rows keep NULL.
+    assigned_model = Column(Text, nullable=True)
+    assigned_effort = Column(Text, nullable=True)
     # The pre-task identity launch state of an activated ordinary launch:
     # a closed vocabulary (``pending`` / ``captured`` / ``ready`` from
     # ``provider_contracts.PRE_TASK_IDENTITY_*``) that marks the row as
@@ -4533,6 +4541,8 @@ def _migrate_terminals_schema() -> None:
             ("session_id", "ALTER TABLE terminals ADD COLUMN session_id TEXT"),
             ("pane_pid", "ALTER TABLE terminals ADD COLUMN pane_pid INTEGER"),
             ("native_session_id", "ALTER TABLE terminals ADD COLUMN native_session_id TEXT"),
+            ("assigned_model", "ALTER TABLE terminals ADD COLUMN assigned_model TEXT"),
+            ("assigned_effort", "ALTER TABLE terminals ADD COLUMN assigned_effort TEXT"),
             (
                 "pre_task_identity_state",
                 "ALTER TABLE terminals ADD COLUMN pre_task_identity_state TEXT",
@@ -4874,6 +4884,8 @@ def create_terminal(
     session_id: Optional[str] = None,
     pane_pid: Optional[int] = None,
     native_session_id: Optional[str] = None,
+    assigned_model: Optional[str] = None,
+    assigned_effort: Optional[str] = None,
     pre_task_identity_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create terminal metadata record."""
@@ -4898,6 +4910,8 @@ def create_terminal(
             session_id=session_id,
             pane_pid=pane_pid,
             native_session_id=native_session_id,
+            assigned_model=assigned_model,
+            assigned_effort=assigned_effort,
             pre_task_identity_state=pre_task_identity_state,
         )
         db.add(terminal)
@@ -4919,6 +4933,8 @@ def create_terminal(
             "session_id": terminal.session_id,
             "pane_pid": terminal.pane_pid,
             "native_session_id": terminal.native_session_id,
+            "assigned_model": terminal.assigned_model,
+            "assigned_effort": terminal.assigned_effort,
             "pre_task_identity_state": terminal.pre_task_identity_state,
         }
 
@@ -5243,6 +5259,8 @@ def get_terminal_metadata(
             "session_id": terminal.session_id,
             "pane_pid": terminal.pane_pid,
             "native_session_id": terminal.native_session_id,
+            "assigned_model": terminal.assigned_model,
+            "assigned_effort": terminal.assigned_effort,
             "pre_task_identity_state": terminal.pre_task_identity_state,
             "lifecycle_state": terminal.lifecycle_state,
             "lifecycle_reason": terminal.lifecycle_reason,

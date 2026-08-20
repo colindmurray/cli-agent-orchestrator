@@ -128,6 +128,7 @@ from cli_agent_orchestrator.models.memory import (
 )
 from cli_agent_orchestrator.models.terminal import Terminal, TerminalId
 from cli_agent_orchestrator.plugins import PluginRegistry
+from cli_agent_orchestrator.providers.manager import TerminalAssignedRouteIncompleteError
 from cli_agent_orchestrator.security.auth import (
     SCOPE_ADMIN,
     SCOPE_READ,
@@ -3710,6 +3711,8 @@ async def send_terminal_input(
         raise
     except TerminalInputBlockedError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except TerminalAssignedRouteIncompleteError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
@@ -3768,6 +3771,8 @@ async def get_terminal_output(
         # transcript can't stall the whole server.
         output = await asyncio.to_thread(terminal_service.get_output, terminal_id, mode)
         return TerminalOutputResponse(output=output, mode=mode)
+    except TerminalAssignedRouteIncompleteError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
@@ -3798,6 +3803,8 @@ async def exit_terminal(
         return {"success": True}
     except HTTPException:
         raise
+    except TerminalAssignedRouteIncompleteError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:

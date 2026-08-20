@@ -21,6 +21,10 @@ from cli_agent_orchestrator.providers.opencode_cli import OpenCodeCliProvider
 logger = logging.getLogger(__name__)
 
 
+class TerminalAssignedRouteIncompleteError(Exception):
+    """A generation-bound terminal lacks a complete assigned route pin."""
+
+
 class ProviderManager:
     """Simplified provider manager with direct mapping."""
 
@@ -186,6 +190,7 @@ class ProviderManager:
 
         Raises:
             ValueError: If terminal not found in database or provider creation fails
+            RuntimeError/OperationalError: If metadata cannot be read (distinct from absence)
         """
         # Check if already exists
         provider = self._providers.get(terminal_id)
@@ -193,11 +198,31 @@ class ProviderManager:
             return provider
 
         # Try to create on-demand from database metadata
+        # Do not catch exceptions: an unreadable projection must propagate distinctly
+        # from an actually absent terminal, otherwise callers cannot distinguish
+        # "no row" from "could not read row" and may treat an unreadable
+        # managed terminal as a legacy row.
         metadata = get_terminal_metadata(terminal_id)
         if not metadata:
             raise ValueError(f"Terminal {terminal_id} not found in database")
 
-        # Create provider on-demand
+        # Managed v1 rows are classified by non-null ``generation`` alone.
+        # A row with generation and missing assigned fields must not reconstruct
+        # on ambient defaults even when native_session_id is still None.
+        if metadata.get("generation") is not None:
+            missing: list[str] = []
+            if metadata.get("assigned_model") is None:
+                missing.append("assigned_model")
+            if metadata.get("assigned_effort") is None:
+                missing.append("assigned_effort")
+            if missing:
+                raise TerminalAssignedRouteIncompleteError(
+                    f"Terminal {terminal_id} generation {metadata.get('generation')!r} "
+                    f"native_session_id {metadata.get('native_session_id')!r} "
+                    f"missing {', '.join(missing)}"
+                )
+
+        # Create provider on-demand from persisted assigned route pin.
         provider = self.create_provider(
             metadata["provider"],
             terminal_id,
@@ -205,8 +230,8 @@ class ProviderManager:
             metadata["tmux_window"],
             metadata["agent_profile"],
             native_session_id=metadata.get("native_session_id"),
-            expected_model=metadata.get("model"),
-            expected_effort=metadata.get("effort"),
+            expected_model=metadata.get("assigned_model"),
+            expected_effort=metadata.get("assigned_effort"),
         )
         # Restore shell_command baseline from DB so get_status() can detect kiro exit.
         # The terminal already exists in the DB, so its CLI has long since

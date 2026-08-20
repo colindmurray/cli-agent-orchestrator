@@ -2079,6 +2079,8 @@ async def create_terminal(
                 # be replaced rather than one that merely reads oddly.
                 session_id=identity.get("session_id"),
                 pane_pid=int(identity["pane_pid"]) if identity.get("pane_pid") else None,
+                assigned_model=expected_model,
+                assigned_effort=expected_effort,
                 pre_task_identity_state=(
                     unmanaged_native_identity.PRE_TASK_IDENTITY_PENDING
                     if activated_unmanaged
