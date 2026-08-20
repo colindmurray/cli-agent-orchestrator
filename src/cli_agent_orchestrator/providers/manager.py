@@ -186,6 +186,7 @@ class ProviderManager:
 
         Raises:
             ValueError: If terminal not found in database or provider creation fails
+            RuntimeError/OperationalError: If metadata cannot be read (distinct from absence)
         """
         # Check if already exists
         provider = self._providers.get(terminal_id)
@@ -193,11 +194,33 @@ class ProviderManager:
             return provider
 
         # Try to create on-demand from database metadata
+        # Do not catch exceptions: an unreadable projection must propagate distinctly
+        # from an actually absent terminal, otherwise callers cannot distinguish
+        # "no row" from "could not read row" and may treat an unreadable
+        # managed terminal as a legacy row.
         metadata = get_terminal_metadata(terminal_id)
         if not metadata:
             raise ValueError(f"Terminal {terminal_id} not found in database")
 
-        # Create provider on-demand
+        # A row with non-null native_session_id represents a managed/resumable
+        # reconstruction. If either assigned field is NULL, refuse before
+        # provider reconstruction with a truthful error naming the missing field(s).
+        # Legacy/operator rows (null native_session_id) remain reconstructable
+        # with nullable expected values.
+        if metadata.get("native_session_id") is not None:
+            missing: list[str] = []
+            if metadata.get("assigned_model") is None:
+                missing.append("assigned_model")
+            if metadata.get("assigned_effort") is None:
+                missing.append("assigned_effort")
+            if missing:
+                raise ValueError(
+                    f"Terminal {terminal_id} is a managed terminal with native_session_id "
+                    f"{metadata.get('native_session_id')!r} but missing {', '.join(missing)}; "
+                    "cannot reconstruct provider route without assigned model/effort"
+                )
+
+        # Create provider on-demand from persisted assigned route
         provider = self.create_provider(
             metadata["provider"],
             terminal_id,
@@ -205,8 +228,8 @@ class ProviderManager:
             metadata["tmux_window"],
             metadata["agent_profile"],
             native_session_id=metadata.get("native_session_id"),
-            expected_model=metadata.get("model"),
-            expected_effort=metadata.get("effort"),
+            expected_model=metadata.get("assigned_model"),
+            expected_effort=metadata.get("assigned_effort"),
         )
         # Restore shell_command baseline from DB so get_status() can detect kiro exit.
         # The terminal already exists in the DB, so its CLI has long since
