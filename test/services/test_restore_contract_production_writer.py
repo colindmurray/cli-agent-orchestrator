@@ -28,8 +28,8 @@ import pytest
 from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.clients.tmux import PaneControlIdentity, TmuxClient
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.services import execution_mode as em
 from cli_agent_orchestrator.services import exact_executor as xe
+from cli_agent_orchestrator.services import execution_mode as em
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
 from cli_agent_orchestrator.services import native_attachment
 from cli_agent_orchestrator.services import native_pane_input as npi
@@ -41,14 +41,16 @@ from cli_agent_orchestrator.services import session_lifecycle as sl
 from cli_agent_orchestrator.services import stable_agent_roster as roster
 from cli_agent_orchestrator.services import supervisor_worker_ops as ops
 from cli_agent_orchestrator.services import task_occurrence as occ
-from cli_agent_orchestrator.services import terminal_service
-from cli_agent_orchestrator.services import unmanaged_native_identity
+from cli_agent_orchestrator.services import terminal_service, unmanaged_native_identity
 
 SESSION = "cao-test-restore-writer"
 _NATIVE_ID = "11111111-2222-4333-8444-555555555555"
 _DIGEST_A = "a" * 64
 _CELL_REF = "claude_code:anthropic"
 _CELL_DIGEST = "c" * 64
+# Use canonical real path so the contract passes _require_canonical_realpath on both
+# macOS (/bin/sh -> /bin/sh) and Linux (/bin/sh -> /usr/bin/dash).
+_CANONICAL_SH = os.path.realpath("/bin/sh")
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +128,7 @@ def test_seam_a_unmanaged_bind_publishes_restore_contract(tmp_path, monkeypatch)
             "working_directory": os.path.realpath(workdir),
             "model": "claude-3-7-sonnet-20250219",
             "effort": "high",
-            "executable_path": "/bin/sh",
+            "executable_path": _CANONICAL_SH,
             "executable_hash": "a" * 64,
             "executable_version": "1.0.0",
         },
@@ -163,7 +165,7 @@ def test_seam_a_unmanaged_bind_publishes_restore_contract(tmp_path, monkeypatch)
 
     # Executable fact must be present per cond-0496 acceptance
     assert contract["contract"]["executable"]["state"] == "present"
-    assert contract["contract"]["executable"]["value"]["path"] == "/bin/sh"
+    assert contract["contract"]["executable"]["value"]["path"] == _CANONICAL_SH
     assert contract["contract"]["executable"]["value"]["sha256"] == "a" * 64
     assert contract["contract"]["model"]["state"] == "present"
     assert contract["contract"]["model"]["value"] == "claude-3-7-sonnet-20250219"
@@ -385,7 +387,7 @@ def _setup_bound_and_dormant_worker(workdir):
             working_directory=workdir,
             model=rc.ContractFact.present("claude-3-7-sonnet-20250219"),
             effort=rc.ContractFact.present("high"),
-            executable=rc.ContractFact.present({"path": "/bin/sh", "sha256": "a" * 64}),
+            executable=rc.ContractFact.present({"path": _CANONICAL_SH, "sha256": "a" * 64}),
             profile_material=rc.ContractFact.unavailable("no profile"),
             provider_home_facts=rc.ContractFact.unavailable("no home"),
         )
@@ -490,7 +492,7 @@ def test_seam_c_exact_resume_publishes_successor_contract(tmp_path, monkeypatch)
 
     # Executable fact preserved as present per cond-0496 acceptance
     assert successor_contract["contract"]["executable"]["state"] == "present"
-    assert successor_contract["contract"]["executable"]["value"]["path"] == "/bin/sh"
+    assert successor_contract["contract"]["executable"]["value"]["path"] == _CANONICAL_SH
 
 
 def test_seam_c_publish_failure_does_not_fail_resume(tmp_path, monkeypatch):
@@ -694,7 +696,7 @@ def test_seam_d_status_repair_publishes_restore_contract(tmp_path, monkeypatch):
                     {
                         "expected_model": "claude-3-7-sonnet-20250219",
                         "expected_effort": "high",
-                        "provider_executable": "/bin/sh",
+                        "provider_executable": _CANONICAL_SH,
                         "provider_executable_sha256": "c" * 64,
                     }
                 ),
@@ -754,7 +756,7 @@ def test_seam_d_status_repair_publishes_restore_contract(tmp_path, monkeypatch):
 
     # Executable fact from reservation must be present per cond-0496 acceptance
     assert contract["contract"]["executable"]["state"] == "present"
-    assert contract["contract"]["executable"]["value"]["path"] == "/bin/sh"
+    assert contract["contract"]["executable"]["value"]["path"] == _CANONICAL_SH
     assert contract["contract"]["executable"]["value"]["sha256"] == "c" * 64
     assert contract["contract"]["model"]["state"] == "present"
     assert contract["contract"]["model"]["value"] == "claude-3-7-sonnet-20250219"
@@ -1018,7 +1020,7 @@ def test_retire_worker_pane_transitions_dormant_when_contract_exists(tmp_path, m
         working_directory=workdir,
         model=rc.ContractFact.present("claude-3-7-sonnet-20250219"),
         effort=rc.ContractFact.present("high"),
-        executable=rc.ContractFact.present({"path": "/bin/sh", "sha256": "a" * 64}),
+        executable=rc.ContractFact.present({"path": _CANONICAL_SH, "sha256": "a" * 64}),
         profile_material=rc.ContractFact.unavailable("no profile"),
         provider_home_facts=rc.ContractFact.unavailable("no home"),
     )
@@ -1103,7 +1105,7 @@ def test_recover_lost_pane_transitions_dormant_when_contract_exists(tmp_path, mo
         working_directory=workdir,
         model=rc.ContractFact.present("claude-3-7-sonnet-20250219"),
         effort=rc.ContractFact.present("high"),
-        executable=rc.ContractFact.present({"path": "/bin/sh", "sha256": "a" * 64}),
+        executable=rc.ContractFact.present({"path": _CANONICAL_SH, "sha256": "a" * 64}),
         profile_material=rc.ContractFact.unavailable("no profile"),
         provider_home_facts=rc.ContractFact.unavailable("no home"),
     )
