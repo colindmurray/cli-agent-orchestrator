@@ -49,6 +49,7 @@ _V2_RESERVATIONS_DDL = (
     "trusted_project_root TEXT, "
     "obligation_generation TEXT NOT NULL, "
     "task_id TEXT, "
+    "task_occurrence_id TEXT, "
     "run_id TEXT NOT NULL, "
     "launch_nonce_digest TEXT NOT NULL, "
     "stable_agent_id TEXT, "
@@ -78,6 +79,7 @@ _V2_RESERVATIONS_ADDITIVE_COLUMNS = (
     ("preflight_failure_json", "TEXT"),
     ("cleanup_json", "TEXT"),
     ("stable_agent_id", "TEXT"),
+    ("task_occurrence_id", "TEXT"),
 )
 
 _V2_TERMINALS_DDL = (
