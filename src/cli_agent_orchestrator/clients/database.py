@@ -615,6 +615,7 @@ class ManagedLaunchV2ReservationModel(Base):
     trusted_project_root = Column(Text, nullable=True)
     obligation_generation = Column(Text, nullable=False)
     task_id = Column(Text, nullable=True)
+    task_occurrence_id = Column(Text, nullable=True)
     run_id = Column(Text, nullable=False)
     launch_nonce_digest = Column(Text, nullable=False)
     # The explicit stable CAO agent id, minted at

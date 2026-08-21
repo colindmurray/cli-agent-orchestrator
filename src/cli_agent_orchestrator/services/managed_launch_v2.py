@@ -761,6 +761,7 @@ def _row_dict(row: Any) -> dict[str, Any]:
         # reservation created before the roster existed; the bind derives
         # a deterministic id from the terminal identity for those.
         "stable_agent_id": getattr(row, "stable_agent_id", None),
+        "task_occurrence_id": getattr(row, "task_occurrence_id", None),
         # PROJECTED, not stored. A cleaned generation answers ``cleaned``
         # while the row still holds the finalization verdict it actually
         # reached, because these are two facts about different things: the
@@ -1002,6 +1003,7 @@ _ADDITIVE_REQUEST_KEYS = (
     "worker_class",
     "provider_route",
     "route_envelope",
+    "task_occurrence_id",
 )
 
 
@@ -1336,6 +1338,7 @@ def reserve(request: ManagedLaunchV2ReserveRequest) -> tuple[dict[str, Any], boo
                 trusted_project_root=request.trusted_project_root,
                 obligation_generation=request.obligation_generation,
                 task_id=request.task_id,
+                task_occurrence_id=getattr(request, "task_occurrence_id", None),
                 run_id=request.run_id,
                 launch_nonce_digest=nonce_digest,
                 # The stable agent id is minted and persisted BEFORE
