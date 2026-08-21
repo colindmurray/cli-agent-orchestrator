@@ -1693,6 +1693,7 @@ def test_quota_provider_replay_and_legacy_compatibility(tmp_path, isolated_memor
     enriched = legacy.model_copy(update={"quota_provider": "claude"})
     assert managed_launch.reserve(enriched)[1] is False
     assert managed_launch.reserve(enriched)[1] is False
+    assert managed_launch.reserve(legacy)[1] is False
     assert managed_launch.get(legacy.reservation_id)["request"]["quota_provider"] == "claude"
     assert database.get_terminal_metadata(terminal_id)["assigned_quota_provider"] == "claude"
     with pytest.raises(managed_launch.ManagedLaunchConflict):
@@ -1730,11 +1731,44 @@ def test_quota_provider_replay_and_legacy_compatibility(tmp_path, isolated_memor
     assert outcomes.count("conflict") == 1
     assert managed_launch.get(racy.reservation_id)["request"]["quota_provider"] in outcomes
 
+    claim_first = _reserve_request(tmp_path)
+    managed_launch.reserve(claim_first)
+    claimed, should_launch = managed_launch.claim_launch(claim_first.reservation_id)
+    assert should_launch is True
+    assert claimed["request"]["quota_provider"] is None
+    claim_first_enriched = claim_first.model_copy(update={"quota_provider": "openai"})
+    with pytest.raises(managed_launch.ManagedLaunchConflict, match="launch is in progress"):
+        managed_launch.reserve(claim_first_enriched)
+    database.create_terminal(
+        claimed["terminal_id"],
+        claimed["session_name"],
+        "worker",
+        claimed["provider"],
+        generation=claimed["generation"],
+    )
+    assert managed_launch.reserve(claim_first_enriched)[1] is False
+    assert (
+        database.get_terminal_metadata(claimed["terminal_id"])["assigned_quota_provider"]
+        == "openai"
+    )
 
-def test_launch_forwards_quota_provider(isolated_memory_db, tmp_path, monkeypatch):
-    request = _reserve_request(tmp_path, quota_provider="zai")
+    enrich_first = _reserve_request(tmp_path)
+    managed_launch.reserve(enrich_first)
+    enrich_first_declared = enrich_first.model_copy(update={"quota_provider": "zai"})
+    managed_launch.reserve(enrich_first_declared)
+    claimed, should_launch = managed_launch.claim_launch(enrich_first.reservation_id)
+    assert should_launch is True
+    assert claimed["request"]["quota_provider"] == "zai"
+
+
+def test_launch_forwards_current_quota_provider(isolated_memory_db, tmp_path, monkeypatch):
+    request = _reserve_request(tmp_path)
     _commit_fixture_worktree(tmp_path)
     record, _ = managed_launch.reserve(request)
+    stale_claim = deepcopy(record)
+    managed_launch.reserve(request.model_copy(update={"quota_provider": "zai"}))
+    managed_launch.claim_launch(request.reservation_id)
+    monkeypatch.setattr(managed_launch, "claim_launch", lambda _rid: (stale_claim, True))
     monkeypatch.setattr(managed_launch, "_executable_identity", lambda _: ("/p", "d" * 64))
     monkeypatch.setattr(bridge, "profile_digest", lambda _: "e" * 64)
     monkeypatch.setattr(bridge, "write_request", lambda *args, **kwargs: None)

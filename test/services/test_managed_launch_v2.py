@@ -804,6 +804,7 @@ def test_quota_provider_replay_and_legacy_compatibility(
     enriched = legacy.model_copy(update={"quota_provider": "zai"})
     assert v2.reserve(enriched)[1] is False
     assert v2.reserve(enriched)[1] is False
+    assert v2.reserve(legacy)[1] is False
     assert v2.get(legacy.reservation_id)["request"]["quota_provider"] == "zai"
     assert database.get_terminal_metadata_v2(terminal_id)["v2_assigned_quota_provider"] == "zai"
     with pytest.raises(ManagedLaunchConflict):
@@ -841,13 +842,48 @@ def test_quota_provider_replay_and_legacy_compatibility(
     assert outcomes.count("conflict") == 1
     assert v2.get(racy.reservation_id)["request"]["quota_provider"] in outcomes
 
+    claim_first = _reserve_request(worktree, tmp_path)
+    v2.reserve(claim_first)
+    claimed, should_launch = v2.claim_launch(claim_first.reservation_id)
+    assert should_launch is True
+    assert claimed["request"]["quota_provider"] is None
+    claim_first_enriched = claim_first.model_copy(update={"quota_provider": "bytedance"})
+    with pytest.raises(ManagedLaunchConflict, match="launch is in progress"):
+        v2.reserve(claim_first_enriched)
+    database.create_terminal_v2(
+        claimed["terminal_id"],
+        claimed["session_name"],
+        "worker",
+        claimed["provider"],
+        generation=claimed["generation"],
+    )
+    assert v2.reserve(claim_first_enriched)[1] is False
+    assert (
+        database.get_terminal_metadata_v2(claimed["terminal_id"])["v2_assigned_quota_provider"]
+        == "bytedance"
+    )
 
-def test_v2_acp_forwards_quota_provider(isolated_memory_db, worktree, tmp_path, monkeypatch):
+    enrich_first = _reserve_request(worktree, tmp_path)
+    v2.reserve(enrich_first)
+    enrich_first_declared = enrich_first.model_copy(update={"quota_provider": "zai"})
+    v2.reserve(enrich_first_declared)
+    claimed, should_launch = v2.claim_launch(enrich_first.reservation_id)
+    assert should_launch is True
+    assert claimed["request"]["quota_provider"] == "zai"
+
+
+def test_v2_acp_forwards_current_quota_provider(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
     from types import SimpleNamespace
     import asyncio
 
-    request = _reserve_request(worktree, tmp_path, quota_provider="bytedance", execution_mode="acp")
-    v2.reserve(request)
+    request = _reserve_request(worktree, tmp_path, execution_mode="acp")
+    record, _ = v2.reserve(request)
+    stale_claim = deepcopy(record)
+    v2.reserve(request.model_copy(update={"quota_provider": "bytedance"}))
+    v2.claim_launch(request.reservation_id)
+    monkeypatch.setattr(v2, "claim_launch", lambda _rid: (stale_claim, True))
     seen = {}
 
     async def fake_create(**kwargs):
@@ -868,20 +904,22 @@ def test_v2_acp_forwards_quota_provider(isolated_memory_db, worktree, tmp_path, 
     assert seen["assigned_quota_provider"] == "bytedance"
 
 
-def test_v2_native_forwards_quota_provider(isolated_memory_db, worktree, tmp_path, monkeypatch):
+def test_v2_native_forwards_current_quota_provider(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
     import asyncio
     from types import SimpleNamespace
 
     request = _reserve_request(
         worktree,
         tmp_path,
-        quota_provider="zai",
         execution_mode="native_tui",
         provider="claude_code",
         expected_model="claude-sonnet-4-5-20250929",
         trusted_project_root=None,
     )
     record, _ = v2.reserve(request)
+    v2.reserve(request.model_copy(update={"quota_provider": "zai"}))
     seen = {}
 
     async def fake_create(**kwargs):
@@ -894,7 +932,6 @@ def test_v2_native_forwards_quota_provider(isolated_memory_db, worktree, tmp_pat
     loop = asyncio.new_event_loop()
     pane = v2._V2NativePane(
         record=record,
-        request=request.model_dump(),
         environment={},
         loop=loop,
         registry=SimpleNamespace(),
@@ -914,3 +951,23 @@ def test_v2_native_forwards_quota_provider(isolated_memory_db, worktree, tmp_pat
     loop.run_until_complete(pane._create(["echo", "hello"]))
     loop.close()
     assert seen["assigned_quota_provider"] == "zai"
+
+
+def test_v2_response_propagates_unreadable_terminal_projection(
+    isolated_memory_db, worktree, tmp_path
+):
+    request = _reserve_request(worktree, tmp_path)
+    record, _ = v2.reserve(request)
+    database.create_terminal_v2(
+        record["terminal_id"],
+        record["session_name"],
+        "worker",
+        record["provider"],
+        generation=record["generation"],
+    )
+    with isolated_memory_db.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE managed_launch_v2_terminals DROP COLUMN v2_assigned_quota_provider"
+        )
+    with pytest.raises(v2.ManagedLaunchUnavailable, match="v2_assigned_quota_provider"):
+        v2.get(request.reservation_id)
