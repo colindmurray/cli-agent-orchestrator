@@ -49,6 +49,10 @@ const { FakeSigma, getLastSigma, resetLastSigma } = vi.hoisted(() => {
   }
 })
 
+function issueGraphEdgeKinds(graph: any, source: string, target: string): string[] {
+  return graph.edges(source, target).map((edge: string) => graph.getEdgeAttribute(edge, 'kind')).sort()
+}
+
 vi.mock('sigma', () => ({ default: FakeSigma }))
 
 // eslint-disable-next-line import/first
@@ -304,9 +308,9 @@ describe('Wayfinder view', () => {
     })
 
     const sigma = getLastSigma()
-    expect(sigma.graph.order).toBe(3)
-    expect(sigma.graph.size).toBe(2)
-    expect(sigma.graph.getEdgeAttributes('cond-0005', 'cond-0002').kind).toBe('part-of')
+    expect(sigma.graph.order).toBe(5)
+    expect(sigma.graph.size).toBe(4)
+    expect(issueGraphEdgeKinds(sigma.graph, 'cond-0005', 'cond-0002')).toEqual(['part-of'])
     expect(sigma.settings.defaultDrawNodeHover).toBeTypeOf('function')
   })
 
@@ -349,7 +353,56 @@ describe('Wayfinder view', () => {
     expect(within(relationships).getByText('blocks')).toBeInTheDocument()
     expect(within(relationships).getByText('relates to')).toBeInTheDocument()
     await waitFor(() => expect(getLastSigma().graph.order).toBe(5))
-    expect(getLastSigma().graph.getEdgeAttributes('cond-0009', 'cond-0005').kind).toBe('blocks')
+    expect(issueGraphEdgeKinds(getLastSigma().graph, 'cond-0009', 'cond-0005')).toEqual(['blocks'])
+  })
+
+  it('toggles every node state and edge kind from one legend shared across graph modes', async () => {
+    routeOverrides['GET /tracker/issues/cond-0001/graph'] = () => ({
+      status: 200,
+      data: {
+        ...GRAPH_PROJECTION,
+        nodes: GRAPH_PROJECTION.nodes.map(node =>
+          node.key === T_MIGRATE.key ? { ...node, status: 'blocked' } : node,
+        ),
+      },
+    })
+
+    await openGraph()
+    const legend = await screen.findByTestId('issue-graph-legend')
+    for (const state of ['root', 'open', 'active', 'blocked', 'resolved', 'terminal', 'external']) {
+      expect(within(legend).getByRole('button', { name: `Hide ${state} nodes` }))
+        .toHaveAttribute('aria-pressed', 'true')
+    }
+    for (const kind of ['part-of', 'blocks', 'relates', 'duplicates', 'caused-by']) {
+      expect(within(legend).getByRole('button', { name: `Hide ${kind} edges` }))
+        .toHaveAttribute('aria-pressed', 'true')
+    }
+
+    expect(getLastSigma().graph.hasNode(T_MIGRATE.key)).toBe(true)
+    fireEvent.click(within(legend).getByRole('button', { name: 'Hide blocked nodes' }))
+    await waitFor(() => expect(getLastSigma().graph.hasNode(T_MIGRATE.key)).toBe(false))
+    expect(within(legend).getByRole('button', { name: 'Show blocked nodes' }))
+      .toHaveAttribute('aria-pressed', 'false')
+
+    const nodesBeforeEdgeToggle = new Set(getLastSigma().graph.nodes())
+    fireEvent.click(within(legend).getByRole('button', { name: 'Hide relates edges' }))
+    await waitFor(() => {
+      expect(getLastSigma().graph.edges().map((edge: string) => getLastSigma().graph.getEdgeAttribute(edge, 'kind')))
+        .not.toContain('relates')
+    })
+    expect(new Set(getLastSigma().graph.nodes())).toEqual(nodesBeforeEdgeToggle)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Dependencies' }))
+    await screen.findByLabelText('Dependency work tracks')
+    expect(within(legend).getByRole('button', { name: 'Show blocked nodes' })).toBeInTheDocument()
+    expect(within(legend).getByRole('button', { name: 'Show relates edges' })).toBeInTheDocument()
+    expect(getLastSigma().graph.edges().map((edge: string) => getLastSigma().graph.getEdgeAttribute(edge, 'kind')))
+      .toContain('part-of')
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Relationships' }))
+    await screen.findByLabelText('Issue relationships')
+    expect(within(legend).getByRole('button', { name: 'Show blocked nodes' })).toBeInTheDocument()
+    expect(within(legend).getByRole('button', { name: 'Show relates edges' })).toBeInTheDocument()
   })
 
   it('shows blocker sequencing as staged parallel work tracks', async () => {
@@ -390,9 +443,9 @@ describe('Wayfinder view', () => {
     expect(within(lanes).getByText('external')).toBeInTheDocument()
 
     const sigma = getLastSigma()
-    expect(sigma.graph.order).toBe(4)
+    expect(sigma.graph.order).toBe(5)
     expect(sigma.graph.size).toBe(3)
-    expect(sigma.graph.getEdgeAttributes('cond-0009', 'cond-0002').kind).toBe('blocks')
+    expect(issueGraphEdgeKinds(sigma.graph, 'cond-0009', 'cond-0002')).toEqual(['blocks'])
   })
 
   it('shows nested blocker scopes by default and offers explicit collapse and expand controls', async () => {
@@ -426,7 +479,7 @@ describe('Wayfinder view', () => {
     expect(within(lanes).getByText('1 blocker link total')).toBeInTheDocument()
     expect(within(lanes).getByText('1 visible')).toBeInTheDocument()
     expect(within(lanes).getByText('0 hidden')).toBeInTheDocument()
-    expect(getLastSigma().graph.getEdgeAttributes(T_GRILL.key, T_MIGRATE.key).kind).toBe('blocks')
+    expect(issueGraphEdgeKinds(getLastSigma().graph, T_GRILL.key, T_MIGRATE.key)).toEqual(['blocks'])
 
     const collapse = within(lanes).getByRole('button', { name: 'Collapse nested scope for cond-0002' })
     expect(collapse).toHaveAttribute('aria-expanded', 'true')
@@ -442,7 +495,7 @@ describe('Wayfinder view', () => {
     fireEvent.click(within(lanes).getByRole('button', { name: 'Expand all scopes' }))
     expect(await within(lanes).findByText('grill the operator')).toBeInTheDocument()
     expect(await within(lanes).findByText('migrate the store')).toBeInTheDocument()
-    await waitFor(() => expect(getLastSigma().graph.getEdgeAttributes(T_GRILL.key, T_MIGRATE.key).kind).toBe('blocks'))
+    await waitFor(() => expect(issueGraphEdgeKinds(getLastSigma().graph, T_GRILL.key, T_MIGRATE.key)).toEqual(['blocks']))
   })
 
   it('collapses descendants and opens the shared editable issue detail', async () => {
@@ -450,7 +503,7 @@ describe('Wayfinder view', () => {
     const hierarchy = await screen.findByLabelText('Issue hierarchy')
     fireEvent.click(within(hierarchy).getByRole('button', { name: 'Collapse cond-0002' }))
     expect(within(hierarchy).queryByText('migrate the store')).not.toBeInTheDocument()
-    await waitFor(() => expect(getLastSigma().graph.order).toBe(2))
+    await waitFor(() => expect(getLastSigma().graph.order).toBe(4))
 
     fireEvent.click(within(hierarchy).getByText('research providers'))
     const detail = await screen.findByTestId('issue-graph-detail')

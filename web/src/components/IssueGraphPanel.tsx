@@ -9,6 +9,7 @@ import { api, errorText } from '../api'
 import {
   buildIssueDependencyPlan,
   IssueGraphMode,
+  IssueGraphNodeState,
   orderIssueHierarchyNodes,
   visibleIssueGraphKeys,
 } from '../lib/issueGraph'
@@ -17,6 +18,8 @@ import { useStore } from '../store'
 import { SearchableOption, SearchableSelect } from './SearchablePicker'
 import { IssueGraphCanvas } from './IssueGraphCanvas'
 import { IssueDependencyTracks } from './IssueDependencyTracks'
+
+const NO_COLLAPSED_SCOPES = new Set<string>()
 
 export function IssueGraphPanel({
   projectId,
@@ -45,6 +48,8 @@ export function IssueGraphPanel({
   const [statuses, setStatuses] = useState<string[]>([])
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [dependencyCollapsed, setDependencyCollapsed] = useState<Set<string>>(new Set())
+  const [hiddenNodeStates, setHiddenNodeStates] = useState<Set<IssueGraphNodeState>>(new Set())
+  const [hiddenEdgeKinds, setHiddenEdgeKinds] = useState<Set<string>>(new Set())
 
   const loadIssueOptions = useCallback(async (needle: string): Promise<SearchableOption[]> => {
     const result = await api.listTrackerIssues({
@@ -85,6 +90,8 @@ export function IssueGraphPanel({
     setQuery('')
     setKinds([])
     setStatuses([])
+    setHiddenNodeStates(new Set())
+    setHiddenEdgeKinds(new Set())
   }, [rootKey])
 
   useEffect(() => {
@@ -106,18 +113,24 @@ export function IssueGraphPanel({
     return () => { active = false }
   }, [rootKey, refreshSignal, showSnackbar])
 
-  const activeCollapsed = mode === 'dependencies' ? dependencyCollapsed : collapsed
+  const activeCollapsed = mode === 'dependencies'
+    ? dependencyCollapsed
+    : mode === 'hierarchy' ? collapsed : NO_COLLAPSED_SCOPES
   const filters = useMemo(
     () => ({ query, kinds, statuses, collapsed: activeCollapsed }),
     [query, kinds, statuses, activeCollapsed],
   )
+  const visibility = useMemo(
+    () => ({ hiddenNodeStates, hiddenEdgeKinds }),
+    [hiddenNodeStates, hiddenEdgeKinds],
+  )
   const visible = useMemo(
-    () => projection ? visibleIssueGraphKeys(projection, mode, filters) : new Set<string>(),
-    [projection, mode, filters],
+    () => projection ? visibleIssueGraphKeys(projection, filters, visibility) : new Set<string>(),
+    [projection, filters, visibility],
   )
   const dependencyPlan = useMemo(
-    () => projection ? buildIssueDependencyPlan(projection, filters) : null,
-    [projection, filters],
+    () => projection ? buildIssueDependencyPlan(projection, filters, visibility) : null,
+    [projection, filters, visibility],
   )
   const dependencyScopeKeys = useMemo(
     () => projection?.nodes
@@ -138,6 +151,22 @@ export function IssueGraphPanel({
       const next = new Set(current)
       if (next.has(key)) next.delete(key)
       else next.add(key)
+      return next
+    })
+  }
+  const toggleHiddenNodeState = (state: IssueGraphNodeState) => {
+    setHiddenNodeStates(current => {
+      const next = new Set(current)
+      if (next.has(state)) next.delete(state)
+      else next.add(state)
+      return next
+    })
+  }
+  const toggleHiddenEdgeKind = (kind: string) => {
+    setHiddenEdgeKinds(current => {
+      const next = new Set(current)
+      if (next.has(kind)) next.delete(kind)
+      else next.add(kind)
       return next
     })
   }
@@ -258,8 +287,11 @@ export function IssueGraphPanel({
             projection={projection}
             mode={mode}
             filters={filters}
+            visibility={visibility}
             selectedKey={selectedKey}
             onSelect={onSelectIssue}
+            onToggleNodeState={toggleHiddenNodeState}
+            onToggleEdgeKind={toggleHiddenEdgeKind}
           />
           {mode === 'hierarchy' ? (
             <div className="rounded-lg border border-gray-800 overflow-hidden" aria-label="Issue hierarchy">
@@ -294,7 +326,11 @@ export function IssueGraphPanel({
             />
           ) : (
             <div className="rounded-lg border border-gray-800 overflow-hidden" aria-label="Issue relationships">
-              {projection.links.filter(link => visible.has(link.from_key) && visible.has(link.to_key)).map(link => {
+              {projection.links.filter(link =>
+                !hiddenEdgeKinds.has(link.kind)
+                && visible.has(link.from_key)
+                && visible.has(link.to_key),
+              ).map(link => {
                 const phrase = linkPhrase(link, link.from_key)
                 return (
                   <div key={link.id} className="flex flex-wrap items-center gap-2 border-b border-gray-800/70 px-3 py-2 text-xs last:border-b-0">

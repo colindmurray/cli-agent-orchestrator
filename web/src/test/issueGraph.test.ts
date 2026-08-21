@@ -82,19 +82,80 @@ const PROJECTION: TrackerGraphProjection = {
 const EMPTY_FILTERS = { query: '', kinds: [], statuses: [], collapsed: new Set<string>() }
 
 describe('generic issue graph', () => {
-  it('lays out the full transitive hierarchy and keeps only hierarchy edges', () => {
+  it('lays out the hierarchy while retaining every mapped node and edge kind', () => {
     const graph = buildIssueGraph(PROJECTION, 'hierarchy', EMPTY_FILTERS)
-    expect(graph.nodes()).toEqual([ROOT.key, MILESTONE.key, TASK.key])
-    expect(graph.size).toBe(2)
-    expect(graph.getEdgeAttributes(TASK.key, MILESTONE.key)).toMatchObject({
+    expect(graph.nodes()).toEqual([ROOT.key, MILESTONE.key, TASK.key, BLOCKER.key])
+    expect(graph.size).toBe(4)
+    const hierarchyEdge = graph.edges(TASK.key, MILESTONE.key)[0]
+    expect(graph.getEdgeAttributes(hierarchyEdge)).toMatchObject({
       kind: 'part-of',
       type: 'arrow',
     })
+    expect(graph.edges(BLOCKER.key, TASK.key).map(edge => graph.getEdgeAttribute(edge, 'kind')).sort())
+      .toEqual(['blocks', 'relates'])
     expect(graph.getNodeAttribute(TASK.key, 'y')).toBeLessThan(
       graph.getNodeAttribute(MILESTONE.key, 'y'),
     )
     expect(graph.getNodeAttribute(TASK.key, 'label')).toBe(TASK.key)
     expect(graph.getNodeAttribute(TASK.key, 'displayLabel')).toContain(TASK.title)
+  })
+
+  it.each(['hierarchy', 'dependencies', 'relationships'] as const)(
+    '%s mode exposes the same complete node and relationship projection',
+    mode => {
+      const graph = buildIssueGraph(PROJECTION, mode, EMPTY_FILTERS)
+      expect(new Set(graph.nodes())).toEqual(new Set([ROOT.key, MILESTONE.key, TASK.key, BLOCKER.key]))
+      expect(graph.edges().map(edge => graph.getEdgeAttribute(edge, 'kind')).sort())
+        .toEqual(['blocks', 'part-of', 'part-of', 'relates'])
+    },
+  )
+
+  it('composes node-state and edge-kind visibility without leaving dangling edges', () => {
+    const blockedTaskProjection: TrackerGraphProjection = {
+      ...PROJECTION,
+      nodes: PROJECTION.nodes.map(row => row.key === TASK.key ? { ...row, status: 'blocked' } : row),
+    }
+    const withoutBlocked = buildIssueGraph(blockedTaskProjection, 'hierarchy', EMPTY_FILTERS, {
+      hiddenNodeStates: new Set(['blocked']),
+      hiddenEdgeKinds: new Set<string>(),
+    })
+    expect(withoutBlocked.hasNode(TASK.key)).toBe(false)
+    expect(withoutBlocked.edges().every(edge => {
+      const [source, target] = withoutBlocked.extremities(edge)
+      return source !== TASK.key && target !== TASK.key
+    })).toBe(true)
+
+    const withoutContextEdges = buildIssueGraph(PROJECTION, 'dependencies', EMPTY_FILTERS, {
+      hiddenNodeStates: new Set(),
+      hiddenEdgeKinds: new Set(['blocks', 'relates']),
+    })
+    expect(new Set(withoutContextEdges.nodes()))
+      .toEqual(new Set([ROOT.key, MILESTONE.key, TASK.key, BLOCKER.key]))
+    expect(withoutContextEdges.edges().map(edge => withoutContextEdges.getEdgeAttribute(edge, 'kind')).sort())
+      .toEqual(['part-of', 'part-of'])
+  })
+
+  it('moves non-tree nodes through relationship-aware hierarchy context lanes', () => {
+    const withBlockers = buildIssueGraph(PROJECTION, 'hierarchy', EMPTY_FILTERS)
+    expect(withBlockers.getNodeAttribute(BLOCKER.key, 'layoutGroup')).toBe('context:blocks')
+    expect(withBlockers.getNodeAttribute(BLOCKER.key, 'x')).toBeGreaterThan(
+      Math.max(...PROJECTION.nodes.map(row => withBlockers.getNodeAttribute(row.key, 'x'))),
+    )
+
+    const withRelatedContext = buildIssueGraph(PROJECTION, 'hierarchy', EMPTY_FILTERS, {
+      hiddenNodeStates: new Set(),
+      hiddenEdgeKinds: new Set(['blocks']),
+    })
+    expect(withRelatedContext.getNodeAttribute(BLOCKER.key, 'layoutGroup')).toBe('context:relates')
+
+    const disconnected = buildIssueGraph(PROJECTION, 'hierarchy', EMPTY_FILTERS, {
+      hiddenNodeStates: new Set(),
+      hiddenEdgeKinds: new Set(['blocks', 'relates']),
+    })
+    expect(disconnected.getNodeAttribute(BLOCKER.key, 'layoutGroup')).toBe('context:unconnected')
+    expect(disconnected.getNodeAttribute(BLOCKER.key, 'y')).toBeLessThan(
+      Math.min(...PROJECTION.nodes.map(row => disconnected.getNodeAttribute(row.key, 'y'))),
+    )
   })
 
   it('allocates horizontal space by subtree leaves instead of row index alone', () => {
@@ -152,13 +213,13 @@ describe('generic issue graph', () => {
   })
 
   it('preserves ancestors of a matching descendant and hides collapsed descendants', () => {
-    const matching = visibleIssueGraphKeys(PROJECTION, 'hierarchy', {
+    const matching = visibleIssueGraphKeys(PROJECTION, {
       ...EMPTY_FILTERS,
       query: 'Implement',
     })
     expect([...matching]).toEqual(expect.arrayContaining([ROOT.key, MILESTONE.key, TASK.key]))
 
-    const collapsed = visibleIssueGraphKeys(PROJECTION, 'hierarchy', {
+    const collapsed = visibleIssueGraphKeys(PROJECTION, {
       ...EMPTY_FILTERS,
       collapsed: new Set([MILESTONE.key]),
     })
@@ -171,12 +232,13 @@ describe('generic issue graph', () => {
     const graph = buildIssueGraph(PROJECTION, 'relationships', EMPTY_FILTERS)
     expect(graph.hasNode(BLOCKER.key)).toBe(true)
     expect(graph.getNodeAttribute(BLOCKER.key, 'external')).toBe(true)
-    expect(graph.getEdgeAttributes(BLOCKER.key, TASK.key).kind).toBe('blocks')
-    expect(graph.size).toBe(3)
+    expect(graph.edges(BLOCKER.key, TASK.key).map(edge => graph.getEdgeAttribute(edge, 'kind')).sort())
+      .toEqual(['blocks', 'relates'])
+    expect(graph.size).toBe(4)
   })
 
   it('filters relationship nodes by enum fields without losing the root', () => {
-    const visible = visibleIssueGraphKeys(PROJECTION, 'relationships', {
+    const visible = visibleIssueGraphKeys(PROJECTION, {
       ...EMPTY_FILTERS,
       kinds: ['bug'],
       statuses: ['blocked'],
@@ -263,7 +325,8 @@ describe('generic issue graph', () => {
       ...EMPTY_FILTERS,
       collapsed: new Set([STORY.key]),
     })
-    expect(graph.edges().map(edge => graph.getEdgeAttributes(edge).kind)).toEqual(['blocks', 'blocks'])
+    expect(graph.edges().map(edge => graph.getEdgeAttributes(edge).kind).sort())
+      .toEqual(['blocks', 'blocks', 'part-of', 'part-of'])
     expect(graph.getNodeAttribute(BLOCKER.key, 'x')).toBeLessThan(graph.getNodeAttribute(STORY.key, 'x'))
     expect(graph.getNodeAttribute(STORY.key, 'x')).toBeLessThan(graph.getNodeAttribute(VERIFY.key, 'x'))
   })
