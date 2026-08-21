@@ -668,6 +668,139 @@ def test_wake_installation_and_cancel_share_the_wait_stripe(tmp_path, monkeypatc
     assert registered_waits.get(record["wait_id"])["state"] == "cancelled"
 
 
+def _race_terminal(record, action):
+    operation_id = str(uuid.uuid4())
+    if action == "cancel":
+        registered_waits.cancel(record["wait_id"], operation_id=operation_id, actor="racer")
+    else:
+        with database.SessionLocal() as db:
+            session_name = db.get(database.RegisteredWaitModel, record["wait_id"]).session_name
+        registered_waits.interrupt_session_waits(session_name, operation_id)
+
+
+@pytest.mark.parametrize(
+    ("action", "terminal_state"),
+    [("cancel", "cancelled"), ("stop", "interrupted-by-stop")],
+)
+def test_terminal_commit_racing_ready_adoption_cannot_be_overwritten(
+    tmp_path, monkeypatch, action, terminal_state
+):
+    record = _pending(tmp_path, monkeypatch, f"adopt-ready-{action}")
+    paths = _paths(record["wait_id"])
+    paths["ready"].write_text(json.dumps(_ready(record["wait_id"])), encoding="utf-8")
+    entered = threading.Event()
+    release = threading.Event()
+    terminal_done = threading.Event()
+
+    def paused_alive(_pid, _marker):
+        entered.set()
+        assert release.wait(timeout=5)
+        return True
+
+    monkeypatch.setattr(monitors, "_helper_alive", paused_alive)
+    adopter = threading.Thread(target=monitors.adopt_monitor_evidence, args=(record["wait_id"],))
+    adopter.start()
+    assert entered.wait(timeout=5)
+
+    def terminalize():
+        _race_terminal(record, action)
+        terminal_done.set()
+
+    terminal = threading.Thread(target=terminalize)
+    terminal.start()
+    serialized = not terminal_done.wait(timeout=0.2)
+    release.set()
+    adopter.join(timeout=5)
+    terminal.join(timeout=5)
+
+    assert not adopter.is_alive()
+    assert not terminal.is_alive()
+    assert registered_waits.get(record["wait_id"])["state"] == terminal_state
+    assert _monitor(record["wait_id"]).state == terminal_state
+    assert serialized
+
+
+@pytest.mark.parametrize(
+    ("action", "terminal_state"),
+    [("cancel", "cancelled"), ("stop", "interrupted-by-stop")],
+)
+def test_terminal_commit_racing_result_adoption_has_no_late_wake(
+    tmp_path, monkeypatch, action, terminal_state
+):
+    record = _pending(tmp_path, monkeypatch, f"adopt-result-{action}")
+    _write_result(record["wait_id"])
+    entered = threading.Event()
+    release = threading.Event()
+    terminal_done = threading.Event()
+    original_digest = monitors._canonical_result_digest
+
+    def paused_digest(result):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_digest(result)
+
+    monkeypatch.setattr(monitors, "_canonical_result_digest", paused_digest)
+    adopter = threading.Thread(target=monitors.adopt_monitor_evidence, args=(record["wait_id"],))
+    adopter.start()
+    assert entered.wait(timeout=5)
+
+    def terminalize():
+        _race_terminal(record, action)
+        terminal_done.set()
+
+    terminal = threading.Thread(target=terminalize)
+    terminal.start()
+    serialized = not terminal_done.wait(timeout=0.2)
+    release.set()
+    adopter.join(timeout=5)
+    terminal.join(timeout=5)
+    deliveries = []
+    registered_waits.process_monitors(
+        now=NOW + timedelta(seconds=1),
+        attach_result=_good_attachment,
+        deliver=deliveries.append,
+    )
+
+    assert not adopter.is_alive()
+    assert not terminal.is_alive()
+    assert registered_waits.get(record["wait_id"])["state"] == terminal_state
+    assert _monitor(record["wait_id"]).state == terminal_state
+    assert deliveries == []
+    assert _inbox_count() == 0
+    assert serialized
+
+
+def test_committed_terminal_between_result_read_and_adoption_cas_wins(tmp_path, monkeypatch):
+    record = _pending(tmp_path, monkeypatch, "adopt-result-cas")
+    _write_result(record["wait_id"])
+    original_digest = monitors._canonical_result_digest
+
+    def terminal_then_digest(result):
+        with database.SessionLocal() as winner:
+            wait_row = winner.get(database.RegisteredWaitModel, record["wait_id"])
+            monitor = winner.get(database.RegisteredWaitMonitorModel, record["wait_id"])
+            wait_row.state = "cancelled"
+            wait_row.outcome_json = json.dumps({"reason_code": "cancelled"})
+            monitor.state = "cancelled"
+            monitor.outcome_json = json.dumps({"reason_code": "cancelled"})
+            winner.commit()
+        return original_digest(result)
+
+    monkeypatch.setattr(monitors, "_canonical_result_digest", terminal_then_digest)
+    assert monitors.adopt_monitor_evidence(record["wait_id"]) is None
+    deliveries = []
+    registered_waits.process_monitors(
+        now=NOW + timedelta(seconds=1),
+        attach_result=_good_attachment,
+        deliver=deliveries.append,
+    )
+
+    assert registered_waits.get(record["wait_id"])["state"] == "cancelled"
+    assert _monitor(record["wait_id"]).state == "cancelled"
+    assert deliveries == []
+    assert _inbox_count() == 0
+
+
 def test_adapter_capability_stays_dark_without_consumer(monkeypatch):
     monkeypatch.delenv("CAO_M7_WAIT_MONITOR_CONSUMER_ENABLED")
     assert registered_waits.capability()["adapter_support"] == []

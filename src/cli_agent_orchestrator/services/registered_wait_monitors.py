@@ -357,13 +357,48 @@ def monitor_health_for(wait_id: str) -> dict[str, Any]:
         return {"health": HEALTH_UNMONITORED, "detail": f"unreadable:store:{exc}"}
 
 
-def _ack_wait(wait_row: Any, observed: datetime) -> None:
-    if wait_row.state == "registration-pending":
-        wait_row.state = "acknowledged"
-        wait_row.updated_at = _isots(observed)
+def _commit_adoption(
+    db: Any,
+    wait_row: Any,
+    monitor: Any,
+    monitor_values: dict[Any, Any],
+    observed: datetime,
+) -> bool:
+    monitor_values[database.RegisteredWaitMonitorModel.updated_at] = _isots(observed)
+    monitor_updated = (
+        db.query(database.RegisteredWaitMonitorModel)
+        .filter(
+            database.RegisteredWaitMonitorModel.wait_id == monitor.wait_id,
+            database.RegisteredWaitMonitorModel.state == monitor.state,
+        )
+        .update(monitor_values, synchronize_session=False)
+    )
+    wait_values = {database.RegisteredWaitModel.state: "acknowledged"}
+    wait_values[database.RegisteredWaitModel.updated_at] = (
+        _isots(observed) if wait_row.state == "registration-pending" else wait_row.updated_at
+    )
+    wait_updated = (
+        db.query(database.RegisteredWaitModel)
+        .filter(
+            database.RegisteredWaitModel.wait_id == wait_row.wait_id,
+            database.RegisteredWaitModel.state == wait_row.state,
+            database.RegisteredWaitModel.state.in_(("registration-pending", "acknowledged")),
+        )
+        .update(wait_values, synchronize_session=False)
+    )
+    if monitor_updated != 1 or wait_updated != 1:
+        db.rollback()
+        return False
+    db.commit()
+    return True
 
 
 def adopt_monitor_evidence(wait_id: str) -> Optional[dict[str, Any]]:
+    with _monitor_lock(wait_id):
+        return _adopt_monitor_evidence_locked(wait_id)
+
+
+def _adopt_monitor_evidence_locked(wait_id: str) -> Optional[dict[str, Any]]:
     observed = _now()
     activate: Optional[tuple[Path, str]] = None
     ready: Optional[dict[str, Any]] = None
@@ -389,12 +424,18 @@ def adopt_monitor_evidence(wait_id: str) -> Optional[dict[str, Any]]:
                 digest,
             }:
                 return None
-            monitor.result_json = canonical
-            monitor.result_digest = digest
-            monitor.state = MONITOR_RESULT_READY
-            monitor.updated_at = _isots(observed)
-            _ack_wait(wait_row, observed)
-            db.commit()
+            if not _commit_adoption(
+                db,
+                wait_row,
+                monitor,
+                {
+                    database.RegisteredWaitMonitorModel.result_json: canonical,
+                    database.RegisteredWaitMonitorModel.result_digest: digest,
+                    database.RegisteredWaitMonitorModel.state: MONITOR_RESULT_READY,
+                },
+                observed,
+            ):
+                return None
             return {"state": MONITOR_RESULT_READY, "result": result}
 
         status, raw_ready = _load_json(paths["ready"])
@@ -412,15 +453,23 @@ def adopt_monitor_evidence(wait_id: str) -> Optional[dict[str, Any]]:
         elif monitor.state != MONITOR_LAUNCH_INTENT:
             return None
         else:
-            monitor.helper_pid = ready["pid"]
-            monitor.helper_start_marker = ready["start_marker"]
-            monitor.child_pid = ready.get("child_pid")
-            monitor.child_start_marker = ready.get("child_start_marker")
-            monitor.pgid = ready.get("pgid")
-            monitor.state = MONITOR_ACTIVE
-            monitor.updated_at = _isots(observed)
-            _ack_wait(wait_row, observed)
-            db.commit()
+            if not _commit_adoption(
+                db,
+                wait_row,
+                monitor,
+                {
+                    database.RegisteredWaitMonitorModel.helper_pid: ready["pid"],
+                    database.RegisteredWaitMonitorModel.helper_start_marker: ready["start_marker"],
+                    database.RegisteredWaitMonitorModel.child_pid: ready.get("child_pid"),
+                    database.RegisteredWaitMonitorModel.child_start_marker: ready.get(
+                        "child_start_marker"
+                    ),
+                    database.RegisteredWaitMonitorModel.pgid: ready.get("pgid"),
+                    database.RegisteredWaitMonitorModel.state: MONITOR_ACTIVE,
+                },
+                observed,
+            ):
+                return None
             activate = (paths["activate"], monitor.request_digest)
 
     if activate is not None and not activate[0].exists():
