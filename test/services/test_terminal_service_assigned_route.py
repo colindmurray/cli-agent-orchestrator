@@ -43,9 +43,7 @@ async def test_assigned_route_survives_service_write_restart_and_reconstruction(
     monkeypatch,
 ):
     db_file = tmp_path / "service-route.db"
-    first_engine = create_engine(
-        f"sqlite:///{db_file}", connect_args={"check_same_thread": False}
-    )
+    first_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
     database.Base.metadata.create_all(bind=first_engine)
     monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=first_engine))
 
@@ -80,9 +78,7 @@ async def test_assigned_route_survives_service_write_restart_and_reconstruction(
     finally:
         first_engine.dispose()
 
-    second_engine = create_engine(
-        f"sqlite:///{db_file}", connect_args={"check_same_thread": False}
-    )
+    second_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
     monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=second_engine))
     try:
         manager = ProviderManager()
