@@ -21,6 +21,7 @@ export function IssueGraphCanvas({
   onSelect,
   onToggleNodeState,
   onToggleEdgeKind,
+  onToggleUnconnected,
 }: {
   projection: TrackerGraphProjection
   mode: IssueGraphMode
@@ -30,6 +31,7 @@ export function IssueGraphCanvas({
   onSelect: (key: string) => void
   onToggleNodeState: (state: IssueGraphNodeState) => void
   onToggleEdgeKind: (kind: string) => void
+  onToggleUnconnected: () => void
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const sigmaRef = useRef<Sigma | null>(null)
@@ -161,10 +163,31 @@ export function IssueGraphCanvas({
                 : 'border-gray-800 bg-gray-950/50 text-gray-400 hover:border-gray-700 hover:text-gray-200'
             }`}
           >
-            <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: color }} />
+            <span
+              className={`inline-block h-2.5 w-2.5 rounded-full ${state === 'active' ? 'motion-safe:animate-pulse ring-2 ring-green-400/30' : ''}`}
+              style={{ background: color }}
+            />
             {state}
           </button>
         ))}
+        <span className="mx-1 h-4 w-px bg-gray-800" />
+        <button
+          type="button"
+          aria-pressed={visibility.hideUnconnected}
+          aria-label="Hide unconnected nodes"
+          onClick={onToggleUnconnected}
+          className={`flex items-center gap-1.5 rounded border px-2 py-1 transition ${
+            visibility.hideUnconnected
+              ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+              : 'border-gray-800 bg-gray-950/50 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+          }`}
+        >
+          <span className="relative inline-block h-3 w-3">
+            <span className="absolute left-0 top-1 h-1.5 w-1.5 rounded-full border border-current" />
+            <span className="absolute bottom-0 right-0 h-1.5 w-1.5 rounded-full border border-current" />
+          </span>
+          hide unconnected
+        </button>
         <span className="mx-1 h-4 w-px bg-gray-800" />
         {Object.entries(MAP_EDGE_COLORS).map(([kind, color]) => (
           <button

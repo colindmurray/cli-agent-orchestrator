@@ -377,6 +377,8 @@ describe('Wayfinder view', () => {
       expect(within(legend).getByRole('button', { name: `Hide ${kind} edges` }))
         .toHaveAttribute('aria-pressed', 'true')
     }
+    expect(within(legend).getByRole('button', { name: 'Hide unconnected nodes' }))
+      .toHaveAttribute('aria-pressed', 'false')
 
     expect(getLastSigma().graph.hasNode(T_MIGRATE.key)).toBe(true)
     fireEvent.click(within(legend).getByRole('button', { name: 'Hide blocked nodes' }))
@@ -392,10 +394,19 @@ describe('Wayfinder view', () => {
     })
     expect(new Set(getLastSigma().graph.nodes())).toEqual(nodesBeforeEdgeToggle)
 
+    fireEvent.click(within(legend).getByRole('button', { name: 'Hide unconnected nodes' }))
+    await waitFor(() => expect(getLastSigma().graph.hasNode(EXT2.key)).toBe(false))
+    expect(getLastSigma().graph.hasNode(EXT.key)).toBe(false)
+    expect(within(legend).getByRole('button', { name: 'Hide unconnected nodes' }))
+      .toHaveAttribute('aria-pressed', 'true')
+
     fireEvent.click(screen.getByRole('tab', { name: 'Dependencies' }))
     await screen.findByLabelText('Dependency work tracks')
     expect(within(legend).getByRole('button', { name: 'Show blocked nodes' })).toBeInTheDocument()
     expect(within(legend).getByRole('button', { name: 'Show relates edges' })).toBeInTheDocument()
+    expect(within(legend).getByRole('button', { name: 'Hide unconnected nodes' }))
+      .toHaveAttribute('aria-pressed', 'true')
+    expect(getLastSigma().graph.hasNode(EXT2.key)).toBe(false)
     expect(getLastSigma().graph.edges().map((edge: string) => getLastSigma().graph.getEdgeAttribute(edge, 'kind')))
       .toContain('part-of')
 
@@ -403,6 +414,9 @@ describe('Wayfinder view', () => {
     await screen.findByLabelText('Issue relationships')
     expect(within(legend).getByRole('button', { name: 'Show blocked nodes' })).toBeInTheDocument()
     expect(within(legend).getByRole('button', { name: 'Show relates edges' })).toBeInTheDocument()
+    expect(within(legend).getByRole('button', { name: 'Hide unconnected nodes' }))
+      .toHaveAttribute('aria-pressed', 'true')
+    expect(getLastSigma().graph.hasNode(EXT2.key)).toBe(false)
   })
 
   it('shows blocker sequencing as staged parallel work tracks', async () => {
