@@ -271,6 +271,14 @@ class CreateTerminalBody(BaseModel):
     initial_message_orchestration_type: Optional[str] = None
     expected_model: Optional[str] = None
     expected_effort: Optional[str] = None
+    quota_provider: Optional[str] = None
+
+    @field_validator("quota_provider")
+    @classmethod
+    def _quota_provider_non_empty(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value:
+            raise ValueError("quota_provider must be non-empty when supplied")
+        return value
 
 
 class RunStepRequest(BaseModel):
@@ -2972,6 +2980,7 @@ async def create_terminal_in_session(
         # muse-spark-1.2-contributor) at spawn time.
         expected_model = body.expected_model if body else None
         expected_effort = body.expected_effort if body else None
+        assigned_quota_provider = body.quota_provider if body else None
 
         result = await terminal_service.create_terminal(
             provider=resolved_provider,
@@ -2987,6 +2996,7 @@ async def create_terminal_in_session(
             initial_message_orchestration_type=orch_type,
             expected_model=expected_model,
             expected_effort=expected_effort,
+            assigned_quota_provider=assigned_quota_provider,
         )
         return result
     except HTTPException:

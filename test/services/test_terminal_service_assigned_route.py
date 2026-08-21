@@ -63,7 +63,7 @@ async def test_assigned_route_survives_service_write_restart_and_reconstruction(
     launched_provider.initialize.return_value = True
     service_provider_manager.create_provider.return_value = launched_provider
 
-    from cli_agent_orchestrator.services.terminal_service import create_terminal
+    from cli_agent_orchestrator.services.terminal_service import create_terminal, get_terminal
 
     try:
         with patch(f"{_SERVICE}._register_incarnation"):
@@ -73,6 +73,25 @@ async def test_assigned_route_survives_service_write_restart_and_reconstruction(
                 new_session=True,
                 expected_model="gpt-5.6-sol",
                 expected_effort="high",
+                assigned_quota_provider="openai",
+            )
+        backend.session_exists.return_value = True
+        backend.create_window_with_argv.return_value = "w-v2"
+        with (
+            patch(f"{_SERVICE}._register_v2_terminal_resources"),
+            patch(f"{_SERVICE}._mark_v2_resource_created"),
+            patch(f"{_SERVICE}._retire_reused_tmux_observation"),
+            patch(f"{_SERVICE}._register_incarnation"),
+        ):
+            terminal_v2 = await create_terminal(
+                provider="kiro_cli",
+                agent_profile="developer",
+                session_name=terminal.session_name,
+                reserved_terminal_id="abc12345",
+                terminal_generation="00000000-0000-0000-0000-000000000002",
+                managed_native_command=["/bin/true"],
+                protocol_vintage="v2",
+                assigned_quota_provider="bytedance",
             )
         assert database.set_terminal_native_session_id(terminal.id, "session-1") is True
     finally:
@@ -85,10 +104,18 @@ async def test_assigned_route_survives_service_write_restart_and_reconstruction(
         manager.create_provider = MagicMock(return_value=MagicMock(shell_baseline=None))
 
         provider = manager.get_provider(terminal.id)
+        metadata = database.get_terminal_metadata(terminal.id)
+        metadata_v2 = database.get_terminal_metadata_v2(terminal_v2.id)
+        projected = get_terminal(terminal.id)
+        projected_v2 = get_terminal(terminal_v2.id)
 
         assert manager.create_provider.call_args.kwargs["expected_model"] == "gpt-5.6-sol"
         assert manager.create_provider.call_args.kwargs["expected_effort"] == "high"
         assert manager.create_provider.call_args.kwargs["native_session_id"] == "session-1"
+        assert metadata["assigned_quota_provider"] == "openai"
+        assert metadata_v2["v2_assigned_quota_provider"] == "bytedance"
+        assert projected["assigned_quota_provider"] == "openai"
+        assert projected_v2["assigned_quota_provider"] == "bytedance"
         assert provider is manager.create_provider.return_value
     finally:
         second_engine.dispose()

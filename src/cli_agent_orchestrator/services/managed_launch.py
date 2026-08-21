@@ -118,7 +118,13 @@ SUPPORTED_EXECUTION_MODES: tuple[str, ...] = (em.ACP,)
 
 #: Request keys introduced after this surface shipped.  A reservation
 #: written before they existed simply has no such key.
-_ADDITIVE_REQUEST_KEYS = ("execution_mode", "worker_class", "provider_route", "route_envelope")
+_ADDITIVE_REQUEST_KEYS = (
+    "execution_mode",
+    "worker_class",
+    "provider_route",
+    "route_envelope",
+    "quota_provider",
+)
 
 #: The subset of additive keys the execution-mode contract shipped with.
 #: The legacy projection answers "did this row predate the *mode*
@@ -1991,6 +1997,7 @@ async def launch_reserved(reservation_id: str, *, registry=None) -> dict[str, An
             trusted_project_root=record["trusted_project_root"],
             expected_model=request["expected_model"],
             expected_effort=request["expected_effort"],
+            assigned_quota_provider=request.get("quota_provider"),
             preserve_on_init_failure=True,
             managed_native_command=[
                 os.path.abspath(sys.executable),

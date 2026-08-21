@@ -1002,6 +1002,7 @@ _ADDITIVE_REQUEST_KEYS = (
     "worker_class",
     "provider_route",
     "route_envelope",
+    "quota_provider",
 )
 
 
@@ -3529,6 +3530,7 @@ async def launch_reserved(reservation_id: str, *, registry=None) -> dict[str, An
             trusted_project_root=record["trusted_project_root"],
             expected_model=request["expected_model"],
             expected_effort=request["expected_effort"],
+            assigned_quota_provider=request.get("quota_provider"),
             preserve_on_init_failure=True,
             managed_native_command=[
                 os.path.abspath(sys.executable),
@@ -3638,6 +3640,7 @@ class _V2NativePane:
             trusted_project_root=self._record["trusted_project_root"],
             expected_model=self._request["expected_model"],
             expected_effort=self._request["expected_effort"],
+            assigned_quota_provider=self._request.get("quota_provider"),
             preserve_on_init_failure=True,
             # The TUI is the pane's OWN argv. Nothing is typed into a
             # shell, so there is no window in which a partially-typed

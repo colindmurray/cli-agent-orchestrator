@@ -1654,3 +1654,61 @@ def test_stop_barrier_refuses_managed_operation_before_status_or_bridge(
             generation="generation-1",
             message="continue",
         )
+
+
+def test_quota_provider_replay_and_legacy_compatibility(tmp_path, isolated_memory_db):
+    from cli_agent_orchestrator.clients import database
+
+    with pytest.raises(Exception, match="quota_provider"):
+        _reserve_request(tmp_path, quota_provider="")
+    request = _reserve_request(tmp_path, quota_provider="zai")
+    assert managed_launch.reserve(request)[1] is True
+    assert managed_launch.reserve(request)[1] is False
+    with pytest.raises(managed_launch.ManagedLaunchConflict):
+        managed_launch.reserve(request.model_copy(update={"quota_provider": "claude"}))
+
+    legacy = _reserve_request(tmp_path)
+    managed_launch.reserve(legacy)
+    with database.SessionLocal() as session:
+        row = (
+            session.query(database.ManagedLaunchReservationModel)
+            .filter_by(reservation_id=legacy.reservation_id)
+            .one()
+        )
+        payload = json.loads(row.request_json)
+        payload.pop("quota_provider")
+        row.request_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        session.commit()
+    assert managed_launch.reserve(legacy)[1] is False
+    with pytest.raises(managed_launch.ManagedLaunchConflict):
+        managed_launch.reserve(legacy.model_copy(update={"quota_provider": "claude"}))
+
+
+def test_launch_forwards_quota_provider(isolated_memory_db, tmp_path, monkeypatch):
+    request = _reserve_request(tmp_path, quota_provider="zai")
+    _commit_fixture_worktree(tmp_path)
+    record, _ = managed_launch.reserve(request)
+    monkeypatch.setattr(managed_launch, "_executable_identity", lambda _: ("/p", "d" * 64))
+    monkeypatch.setattr(bridge, "profile_digest", lambda _: "e" * 64)
+    monkeypatch.setattr(bridge, "write_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        bridge,
+        "request_bridge",
+        lambda *args, **kwargs: {
+            "state": "ready",
+            "readiness": _ready_receipt_for(record, request),
+        },
+    )
+    seen = {}
+
+    async def fake_create(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(status="idle")
+
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.terminal_service.create_terminal", fake_create
+    )
+    import asyncio
+
+    asyncio.run(managed_launch.launch_reserved(request.reservation_id))
+    assert seen["assigned_quota_provider"] == "zai"

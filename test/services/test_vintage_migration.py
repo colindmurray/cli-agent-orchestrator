@@ -45,6 +45,10 @@ def test_migrate_creates_surface_and_is_idempotent(tmp_path):
             row[1] for row in conn.execute("PRAGMA table_info(managed_launch_v2_reservations)")
         }
         assert "bind_intent_json" in columns
+        terminal_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(managed_launch_v2_terminals)")
+        }
+        assert "v2_assigned_quota_provider" in terminal_columns
         ddl = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='managed_launch_v2_reservations'"
         ).fetchone()[0]
@@ -81,18 +85,30 @@ def test_migrate_backfills_bind_intent_on_pre_existing_surface(tmp_path):
             "binding_json TEXT, admission_json TEXT, created_at TEXT NOT NULL, "
             "updated_at TEXT NOT NULL)"
         )
+        conn.execute(
+            "CREATE TABLE managed_launch_v2_terminals "
+            "(id TEXT PRIMARY KEY, tmux_session TEXT NOT NULL)"
+        )
+        conn.execute("INSERT INTO managed_launch_v2_terminals VALUES ('legacy-v2', 'cao-old')")
         conn.commit()
     finally:
         conn.close()
-    vm.migrate_v2(db_path)
+    receipt = vm.migrate_v2(db_path)
     conn = sqlite3.connect(str(db_path))
     try:
         columns = {
             row[1] for row in conn.execute("PRAGMA table_info(managed_launch_v2_reservations)")
         }
         assert "bind_intent_json" in columns
+        assert "v2_assigned_quota_provider" in receipt["added_columns"]
+        quota = conn.execute(
+            "SELECT v2_assigned_quota_provider FROM managed_launch_v2_terminals "
+            "WHERE id='legacy-v2'"
+        ).fetchone()[0]
+        assert quota is None
     finally:
         conn.close()
+    assert vm.migrate_v2(db_path)["added_columns"] == []
 
 
 def _insert_v2_reservation(db_path, reservation_id="r-1", generation="gen-1"):
