@@ -6,6 +6,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { HeaderBar } from "../shared/HeaderBar";
+import { RequestedRouteEntries } from "../shared/AgentStatus";
 import { describeGesture, McpApp } from "../shared/mcpApp";
 import { TaskControl } from "../shared/TaskControl";
 import type { AgentDetailSnapshot, SubmitCommandKind } from "../shared/types";
@@ -106,6 +107,9 @@ export function AgentView({
             {snapshot.status ?? "unknown"}
           </span>
         </div>
+        <dl className="cao-card-meta" data-testid="agent-route">
+          <RequestedRouteEntries route={snapshot} />
+        </dl>
         <pre className="cao-output" data-testid="agent-output">
           {snapshot.output_tail}
         </pre>

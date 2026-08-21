@@ -165,6 +165,8 @@ class TestLegacyUnknownLivenessRow:
         assert body["status"] == "unknown-liveness"
         assert "identity incomplete" in body["lifecycle_reason"]
         assert body["protocol_vintage"] == "v1"
+        assert body["assigned_route_state"] == "absent"
+        assert body["assigned_quota_provider"] is None
         # Honest means historical, not adoptable: the row wears no provider
         # status and no live lifecycle, and its identity stays unrecorded
         # rather than completed by invention.
@@ -252,6 +254,9 @@ class TestCurrentRowsUnchanged:
             server_socket_path=SOCKET,
             session_id="$1",
             pane_pid=4242,
+            assigned_model="claude-opus-5",
+            assigned_effort="high",
+            assigned_quota_provider="anthropic",
         )
 
         response = client.get(f"/terminals/{LIVE_ID}")
@@ -261,6 +266,10 @@ class TestCurrentRowsUnchanged:
         assert body["status"] == "idle"
         assert body["lifecycle_state"] == "live"
         assert body["lifecycle_reason"] is None
+        assert body["assigned_model"] == "claude-opus-5"
+        assert body["assigned_effort"] == "high"
+        assert body["assigned_quota_provider"] == "anthropic"
+        assert body["assigned_route_state"] == "present"
 
 
 class TestSupportedDeletionPath:

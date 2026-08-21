@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { cleanup, fireEvent, screen } from '@testing-library/react'
 import { useStore } from '../store'
+import { terminalMetadataSections } from '../components/TerminalMetadata'
 import {
   SESSION,
   TERMINALS,
@@ -165,5 +166,52 @@ describe('DashboardHome status summary totals (terminal lifecycle statuses)', ()
     // Unknown now means only the row whose liveness evidence is actually
     // unknown, not the rows already proven dead or superseded.
     expect(visibleTerminalIds(TERMINALS_WITH_UNRENDERABLE)).toEqual(['unkn-001'])
+  })
+})
+
+describe('requested route metadata', () => {
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    useStore.setState({ sessions: [], terminalStatuses: {} })
+  })
+
+  it('renders separate harness and AI-provider labels with qualified route values', async () => {
+    const routed = [{
+      ...TERMINALS[0],
+      provider: 'claude_code',
+      assigned_model: 'claude-opus-5',
+      assigned_effort: 'high',
+      assigned_quota_provider: 'anthropic',
+      assigned_route_state: 'present' as const,
+    }]
+    useStore.setState({ sessions: [SESSION], terminalStatuses: {} })
+    stubDashboardFetch(routed)
+    await renderDashboard(routed)
+
+    expect(screen.getByTestId('harness-label')).toHaveTextContent('Harness: claude_code')
+    expect(screen.getByTestId('ai-provider-label')).toHaveTextContent('AI provider: anthropic')
+    expect(screen.getByTestId('requested-model')).toHaveTextContent(
+      'Model: claude-opus-5 (requested, not observed)',
+    )
+    expect(screen.getByTestId('requested-effort')).toHaveTextContent(
+      'Effort: high (requested, not observed)',
+    )
+  })
+
+  it('keeps unreadable distinct from unavailable in terminal details', () => {
+    const identity = terminalMetadataSections({
+      ...TERMINALS[0],
+      assigned_model: null,
+      assigned_effort: null,
+      assigned_quota_provider: null,
+      assigned_route_state: 'unreadable',
+    }).find(section => section.id === 'identity')!
+    expect(identity.entries).toEqual(expect.arrayContaining([
+      { label: 'Harness', value: 'kimi_cli' },
+      { label: 'AI provider', value: 'unavailable' },
+      { label: 'Model', value: 'unreadable (requested, not observed)' },
+      { label: 'Effort', value: 'unreadable (requested, not observed)' },
+    ]))
   })
 })

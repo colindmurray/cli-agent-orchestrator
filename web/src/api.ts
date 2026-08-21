@@ -384,6 +384,10 @@ export interface Terminal {
   agent_profile: string | null
   status: string | null
   last_active: string | null
+  assigned_model?: string | null
+  assigned_effort?: string | null
+  assigned_quota_provider?: string | null
+  assigned_route_state?: 'present' | 'absent' | 'unreadable' | null
 }
 
 export interface SessionDetail {
@@ -442,6 +446,13 @@ export interface TerminalMeta {
   pane_id: string | null
   pane_pid: number | string | null
   native_session_id: string | null
+  // Honest requested route — durable reservation, never a footer parse.
+  // Harness (provider) and AI provider stay separate labels; model/effort
+  // always render with the exact qualifier `requested, not observed`.
+  assigned_model: string | null
+  assigned_effort: string | null
+  assigned_quota_provider: string | null
+  assigned_route_state: 'present' | 'absent' | 'unreadable' | null
   // Observed liveness — never the stored lifecycle.
   lifecycle_state: string
   lifecycle_reason: string | null

@@ -158,6 +158,10 @@ describe("AgentView — interval poll refreshes the snapshot", () => {
       agent_profile: "builder",
       status: "idle",
       last_active: null,
+      assigned_model: "gpt-5.6-sol",
+      assigned_effort: "xhigh",
+      assigned_quota_provider: "openai",
+      assigned_route_state: "present",
       output_tail: "boot",
       scopes: [],
     };
@@ -176,6 +180,15 @@ describe("AgentView — interval poll refreshes the snapshot", () => {
     );
     expect(host.toolCalls.some((c) => c.name === "render_agent_view")).toBe(
       true,
+    );
+    expect(screen.getByTestId("agent-route").textContent).toContain(
+      "gpt-5.6-sol (requested, not observed)",
+    );
+    expect(screen.getByTestId("agent-route").textContent).toContain(
+      "xhigh (requested, not observed)",
+    );
+    expect(screen.getByTestId("agent-route").textContent).toContain(
+      "AI provideropenai",
     );
     app.disconnect();
   });

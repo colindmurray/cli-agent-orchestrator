@@ -20,6 +20,7 @@ from cli_agent_orchestrator.models.managed_launch_v2 import (
 )
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
 from cli_agent_orchestrator.services import managed_provider_bridge as bridge
+from cli_agent_orchestrator.services import terminal_projection
 from cli_agent_orchestrator.services.managed_launch import (
     ManagedLaunchConflict,
     ManagedLaunchNotFound,
@@ -134,6 +135,53 @@ def test_reserve_idempotent_and_nonce_digest_only(isolated_memory_db, worktree, 
     )
     with pytest.raises(ManagedLaunchConflict):
         v2.reserve(changed)
+
+
+def test_requested_route_projection_uses_durable_v2_reservation_states(
+    isolated_memory_db, worktree, tmp_path
+):
+    request = _reserve_request(worktree, tmp_path, quota_provider="bytedance")
+    reserved, created = v2.reserve(request)
+    assert created
+    database.create_terminal_v2(
+        reserved["terminal_id"],
+        "cao-test",
+        "managed",
+        "codex",
+        generation=reserved["generation"],
+        assigned_quota_provider="bytedance",
+    )
+    metadata = database.get_terminal_metadata_v2(reserved["terminal_id"])
+    projected = terminal_projection.project_row(metadata, None, vintage="v2")
+    assert (
+        projected["assigned_model"],
+        projected["assigned_effort"],
+        projected["assigned_quota_provider"],
+        projected["assigned_route_state"],
+    ) == ("gpt-5.6-sol", "xhigh", "bytedance", "present")
+
+    with database.SessionLocal() as db:
+        row = db.get(database.ManagedLaunchV2ReservationModel, reserved["reservation_id"])
+        row.request_json = "not-json"
+        db.commit()
+    unreadable = terminal_projection.project_row(metadata, None, vintage="v2")
+    assert unreadable["assigned_model"] is None
+    assert unreadable["assigned_route_state"] == "unreadable"
+
+    database.create_terminal_v2(
+        "deadbeef",
+        "cao-test",
+        "missing-reservation",
+        "codex",
+        generation="gen-no-reservation",
+        assigned_quota_provider="openai",
+    )
+    absent = terminal_projection.project_row(
+        database.get_terminal_metadata_v2("deadbeef"), None, vintage="v2"
+    )
+    assert absent["assigned_model"] is None
+    assert absent["assigned_quota_provider"] == "openai"
+    assert absent["assigned_route_state"] == "absent"
 
 
 def test_v2_rows_invisible_to_v1_queries(isolated_memory_db, worktree, tmp_path):
@@ -875,8 +923,8 @@ def test_quota_provider_replay_and_legacy_compatibility(
 def test_v2_acp_forwards_current_quota_provider(
     isolated_memory_db, worktree, tmp_path, monkeypatch
 ):
-    from types import SimpleNamespace
     import asyncio
+    from types import SimpleNamespace
 
     request = _reserve_request(worktree, tmp_path, execution_mode="acp")
     record, _ = v2.reserve(request)

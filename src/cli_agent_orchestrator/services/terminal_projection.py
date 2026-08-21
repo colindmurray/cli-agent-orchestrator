@@ -30,6 +30,7 @@ it did.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
@@ -79,7 +80,10 @@ PROJECTION_FIELDS = (
     "pane_id",
     "pane_pid",
     "native_session_id",
+    "assigned_model",
+    "assigned_effort",
     "assigned_quota_provider",
+    "assigned_route_state",
     "lifecycle_state",
     "lifecycle_reason",
     "superseded_by_terminal_id",
@@ -125,6 +129,46 @@ def _v2_row_identity(row: Dict[str, Any]) -> Dict[str, Any]:
         "superseded_by_terminal_id": row.get("v2_superseded_by_terminal_id"),
         "superseded_by_generation": row.get("v2_superseded_by_generation"),
     }
+
+
+def _v2_requested_route(terminal_id: str) -> tuple[Optional[str], Optional[str], str]:
+    """Read durable v2 model/effort without inferring the quota provider.
+
+    A missing reservation is ``absent``. A present row whose request cannot
+    supply both strings is ``unreadable``. The quota provider stays sourced
+    from the terminal row and is projected separately.
+    """
+    try:
+        from cli_agent_orchestrator.clients.database import (
+            ManagedLaunchV2ReservationModel,
+            SessionLocal,
+        )
+
+        with SessionLocal() as db:
+            res = (
+                db.query(ManagedLaunchV2ReservationModel.request_json)
+                .filter(ManagedLaunchV2ReservationModel.terminal_id == terminal_id)
+                .one_or_none()
+            )
+            if res is None:
+                return None, None, "absent"
+            raw = res.request_json
+            if not isinstance(raw, str):
+                return None, None, "unreadable"
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                return None, None, "unreadable"
+            if not isinstance(payload, dict):
+                return None, None, "unreadable"
+            model = payload.get("expected_model")
+            effort = payload.get("expected_effort")
+            if not isinstance(model, str) or not model or not isinstance(effort, str) or not effort:
+                return None, None, "unreadable"
+            return model, effort, "present"
+    except Exception as exc:  # pragma: no cover - an unreadable store is unreadable, not absent
+        logger.debug("Requested route unavailable for %s: %s", terminal_id, exc)
+        return None, None, "unreadable"
 
 
 def observed_lifecycle(
@@ -423,6 +467,23 @@ def project_row(
     """
     if vintage == "v2":
         row = {**row, **_v2_row_identity(row)}
+        v2_model, v2_effort, v2_state = _v2_requested_route(row["id"])
+        assigned_model = v2_model
+        assigned_effort = v2_effort
+        assigned_quota_provider = row.get("assigned_quota_provider")
+        assigned_route_state = v2_state
+    else:
+        assigned_model = row.get("assigned_model")
+        assigned_effort = row.get("assigned_effort")
+        assigned_quota_provider = row.get("assigned_quota_provider")
+        if (
+            assigned_model is not None
+            or assigned_effort is not None
+            or assigned_quota_provider is not None
+        ):
+            assigned_route_state = "present"
+        else:
+            assigned_route_state = "absent"
     state, reason = observed_lifecycle(row, panes)
     native_tui = vintage == "v2" and _is_native_tui(row["id"])
     fused = None
@@ -484,7 +545,10 @@ def project_row(
         "pane_id": row.get("pane_id"),
         "pane_pid": row.get("pane_pid"),
         "native_session_id": row.get("native_session_id"),
-        "assigned_quota_provider": row.get("assigned_quota_provider"),
+        "assigned_model": assigned_model,
+        "assigned_effort": assigned_effort,
+        "assigned_quota_provider": assigned_quota_provider,
+        "assigned_route_state": assigned_route_state,
         "lifecycle_state": state,
         "lifecycle_reason": reason,
         # Stated rather than left to be inferred from the status: a
