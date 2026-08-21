@@ -262,15 +262,23 @@ class CreateTerminalBody(BaseModel):
 
     Carries the deferred-init message payload OUT of the query string:
     prompt content can be large (URL-length 414 risk) and sensitive (query
-    strings are routinely captured in HTTP access logs and traces). Routing
-    fields (provider, defer_init, etc.) stay as query params; only the
-    message content lives here.
+    strings are routinely captured in HTTP access logs and traces).
+    Endpoint-selection fields (provider, defer_init, etc.) stay as query
+    params. Message content and assigned-route identity fields live here.
     """
 
     initial_message: Optional[str] = None
     initial_message_orchestration_type: Optional[str] = None
     expected_model: Optional[str] = None
     expected_effort: Optional[str] = None
+    quota_provider: Optional[str] = None
+
+    @field_validator("quota_provider")
+    @classmethod
+    def _quota_provider_non_empty(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value:
+            raise ValueError("quota_provider must be non-empty when supplied")
+        return value
 
 
 class RunStepRequest(BaseModel):
@@ -1965,6 +1973,9 @@ async def managed_launch_capabilities(
         "zero_task_route_attestation": True,
         "pinned_provider_executable": True,
         "reservation_bound_delivery_id": True,
+        # The reserve/create surfaces persist and echo the selected AI/billing
+        # provider. A conductor must negotiate this before sending the field.
+        "assigned_quota_provider": True,
         "provider_bound_bridge_environment": True,
         # Native GLM is a closed wrapper/inner route envelope.  A conductor
         # must negotiate this exact capability before sending route fields;
@@ -2972,6 +2983,7 @@ async def create_terminal_in_session(
         # muse-spark-1.2-contributor) at spawn time.
         expected_model = body.expected_model if body else None
         expected_effort = body.expected_effort if body else None
+        assigned_quota_provider = body.quota_provider if body else None
 
         result = await terminal_service.create_terminal(
             provider=resolved_provider,
@@ -2987,6 +2999,7 @@ async def create_terminal_in_session(
             initial_message_orchestration_type=orch_type,
             expected_model=expected_model,
             expected_effort=expected_effort,
+            assigned_quota_provider=assigned_quota_provider,
         )
         return result
     except HTTPException:

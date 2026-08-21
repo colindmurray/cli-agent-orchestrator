@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -1654,3 +1655,141 @@ def test_stop_barrier_refuses_managed_operation_before_status_or_bridge(
             generation="generation-1",
             message="continue",
         )
+
+
+def test_quota_provider_replay_and_legacy_compatibility(tmp_path, isolated_memory_db, monkeypatch):
+    from cli_agent_orchestrator.clients import database
+
+    with pytest.raises(Exception, match="quota_provider"):
+        _reserve_request(tmp_path, quota_provider="")
+    request = _reserve_request(tmp_path, quota_provider="zai")
+    assert managed_launch.reserve(request)[1] is True
+    assert managed_launch.reserve(request)[1] is False
+    with pytest.raises(managed_launch.ManagedLaunchConflict):
+        managed_launch.reserve(request.model_copy(update={"quota_provider": "claude"}))
+
+    legacy = _reserve_request(tmp_path)
+    managed_launch.reserve(legacy)
+    with database.SessionLocal() as session:
+        row = (
+            session.query(database.ManagedLaunchReservationModel)
+            .filter_by(reservation_id=legacy.reservation_id)
+            .one()
+        )
+        terminal_id = row.terminal_id
+        generation = row.generation
+        payload = json.loads(row.request_json)
+        payload.pop("quota_provider")
+        row.request_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        session.commit()
+    database.create_terminal(
+        terminal_id,
+        "cao-test",
+        "worker",
+        "codex",
+        generation=generation,
+    )
+    assert managed_launch.reserve(legacy)[1] is False
+    enriched = legacy.model_copy(update={"quota_provider": "claude"})
+    assert managed_launch.reserve(enriched)[1] is False
+    assert managed_launch.reserve(enriched)[1] is False
+    assert managed_launch.reserve(legacy)[1] is False
+    assert managed_launch.get(legacy.reservation_id)["request"]["quota_provider"] == "claude"
+    assert database.get_terminal_metadata(terminal_id)["assigned_quota_provider"] == "claude"
+    with pytest.raises(managed_launch.ManagedLaunchConflict):
+        managed_launch.reserve(enriched.model_copy(update={"quota_provider": "zai"}))
+
+    racy = _reserve_request(tmp_path)
+    managed_launch.reserve(racy)
+    with database.SessionLocal() as session:
+        row = session.get(database.ManagedLaunchReservationModel, racy.reservation_id)
+        payload = json.loads(row.request_json)
+        payload.pop("quota_provider")
+        row.request_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        session.commit()
+
+    def enrich(value):
+        try:
+            managed_launch.reserve(racy.model_copy(update={"quota_provider": value}))
+            return value
+        except managed_launch.ManagedLaunchConflict:
+            return "conflict"
+
+    real_reconcile = managed_launch._reconciled_request_json
+    gate = threading.Barrier(2)
+    waits = iter((True, True))
+
+    def synchronized_reconcile(*args):
+        result = real_reconcile(*args)
+        if next(waits, False):
+            gate.wait()
+        return result
+
+    monkeypatch.setattr(managed_launch, "_reconciled_request_json", synchronized_reconcile)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(enrich, ("openai", "zai")))
+    assert outcomes.count("conflict") == 1
+    assert managed_launch.get(racy.reservation_id)["request"]["quota_provider"] in outcomes
+
+    claim_first = _reserve_request(tmp_path)
+    managed_launch.reserve(claim_first)
+    claimed, should_launch = managed_launch.claim_launch(claim_first.reservation_id)
+    assert should_launch is True
+    assert claimed["request"]["quota_provider"] is None
+    claim_first_enriched = claim_first.model_copy(update={"quota_provider": "openai"})
+    with pytest.raises(managed_launch.ManagedLaunchConflict, match="launch is in progress"):
+        managed_launch.reserve(claim_first_enriched)
+    database.create_terminal(
+        claimed["terminal_id"],
+        claimed["session_name"],
+        "worker",
+        claimed["provider"],
+        generation=claimed["generation"],
+    )
+    assert managed_launch.reserve(claim_first_enriched)[1] is False
+    assert (
+        database.get_terminal_metadata(claimed["terminal_id"])["assigned_quota_provider"]
+        == "openai"
+    )
+
+    enrich_first = _reserve_request(tmp_path)
+    managed_launch.reserve(enrich_first)
+    enrich_first_declared = enrich_first.model_copy(update={"quota_provider": "zai"})
+    managed_launch.reserve(enrich_first_declared)
+    claimed, should_launch = managed_launch.claim_launch(enrich_first.reservation_id)
+    assert should_launch is True
+    assert claimed["request"]["quota_provider"] == "zai"
+
+
+def test_launch_forwards_current_quota_provider(isolated_memory_db, tmp_path, monkeypatch):
+    request = _reserve_request(tmp_path)
+    _commit_fixture_worktree(tmp_path)
+    record, _ = managed_launch.reserve(request)
+    stale_claim = deepcopy(record)
+    managed_launch.reserve(request.model_copy(update={"quota_provider": "zai"}))
+    managed_launch.claim_launch(request.reservation_id)
+    monkeypatch.setattr(managed_launch, "claim_launch", lambda _rid: (stale_claim, True))
+    monkeypatch.setattr(managed_launch, "_executable_identity", lambda _: ("/p", "d" * 64))
+    monkeypatch.setattr(bridge, "profile_digest", lambda _: "e" * 64)
+    monkeypatch.setattr(bridge, "write_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        bridge,
+        "request_bridge",
+        lambda *args, **kwargs: {
+            "state": "ready",
+            "readiness": _ready_receipt_for(record, request),
+        },
+    )
+    seen = {}
+
+    async def fake_create(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(status="idle")
+
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.terminal_service.create_terminal", fake_create
+    )
+    import asyncio
+
+    asyncio.run(managed_launch.launch_reserved(request.reservation_id))
+    assert seen["assigned_quota_provider"] == "zai"

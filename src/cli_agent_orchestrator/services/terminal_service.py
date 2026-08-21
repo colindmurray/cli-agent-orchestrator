@@ -1647,6 +1647,7 @@ async def create_terminal(
     #: other terminal is a ``worker`` unless its owning operation
     #: explicitly says otherwise.  ``None`` means worker.
     stable_agent_role: Optional[str] = None,
+    assigned_quota_provider: Optional[str] = None,
 ) -> Terminal:
     """Create a new terminal with an initialized CLI agent.
 
@@ -2020,6 +2021,7 @@ async def create_terminal(
                 # be replaced rather than one that merely reads oddly.
                 session_id=identity.get("session_id"),
                 pane_pid=int(identity["pane_pid"]) if identity.get("pane_pid") else None,
+                assigned_quota_provider=assigned_quota_provider,
             )
             _register_incarnation(terminal_id, terminal_generation, identity, protocol_vintage="v2")
             # The v2 DB row is durably committed: observed creation.
@@ -2081,6 +2083,7 @@ async def create_terminal(
                 pane_pid=int(identity["pane_pid"]) if identity.get("pane_pid") else None,
                 assigned_model=expected_model,
                 assigned_effort=expected_effort,
+                assigned_quota_provider=assigned_quota_provider,
                 pre_task_identity_state=(
                     unmanaged_native_identity.PRE_TASK_IDENTITY_PENDING
                     if activated_unmanaged
@@ -2292,6 +2295,7 @@ async def create_terminal(
                 caller_id=caller_id,
                 allowed_tools=allowed_tools,
                 shell_command=None,
+                assigned_quota_provider=assigned_quota_provider,
                 status=TerminalStatus.UNKNOWN,
                 last_active=datetime.now(),
             )
@@ -2406,6 +2410,7 @@ async def create_terminal(
             caller_id=caller_id,
             allowed_tools=allowed_tools,
             shell_command=shell_command,
+            assigned_quota_provider=assigned_quota_provider,
             status=initial_status,
             last_active=datetime.now(),
         )
@@ -2896,6 +2901,11 @@ def get_terminal(terminal_id: str) -> Dict:
                     metadata = refreshed
 
         status = status_monitor.get_status(terminal_id).value
+        assigned_quota_provider = (
+            metadata.get("v2_assigned_quota_provider")
+            if metadata.get("protocol_vintage") == "v2"
+            else metadata.get("assigned_quota_provider")
+        )
 
         return {
             "id": metadata["id"],
@@ -2909,6 +2919,7 @@ def get_terminal(terminal_id: str) -> Dict:
             "window_id": metadata.get("window_id"),
             "status": status,
             "last_active": metadata["last_active"],
+            "assigned_quota_provider": assigned_quota_provider,
         }
 
     except Exception as e:

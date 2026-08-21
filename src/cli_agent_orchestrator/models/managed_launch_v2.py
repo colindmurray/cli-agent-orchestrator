@@ -82,6 +82,18 @@ class ManagedLaunchV2ReserveRequest(BaseModel):
     provider_route: str = "anthropic"
     #: Only the native GLM route carries executable/map/marker evidence.
     route_envelope: Optional[dict[str, Any]] = None
+    #: Canonical quota provider for billing/rate-limit attribution.
+    #: Optional for backward compatibility with rows that predate it
+    #: (reads as None/absent), but when supplied must be non-empty.
+    #: Never inferred from harness, model, or provider_route.
+    quota_provider: Optional[str] = None
+
+    @field_validator("quota_provider")
+    @classmethod
+    def _quota_provider_non_empty(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value:
+            raise ValueError("quota_provider must be non-empty when supplied")
+        return value
 
     @field_validator("project")
     @classmethod

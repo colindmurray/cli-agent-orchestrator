@@ -34,6 +34,8 @@ import logging
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy.exc import OperationalError
+
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.clients.database import (
     get_terminal_metadata,
@@ -77,6 +79,7 @@ PROJECTION_FIELDS = (
     "pane_id",
     "pane_pid",
     "native_session_id",
+    "assigned_quota_provider",
     "lifecycle_state",
     "lifecycle_reason",
     "superseded_by_terminal_id",
@@ -116,6 +119,7 @@ def _v2_row_identity(row: Dict[str, Any]) -> Dict[str, Any]:
         "session_id": row.get("v2_session_id"),
         "pane_pid": row.get("v2_pane_pid"),
         "native_session_id": row.get("v2_native_session_id"),
+        "assigned_quota_provider": row.get("v2_assigned_quota_provider"),
         "lifecycle_state": row.get("v2_lifecycle_state"),
         "lifecycle_reason": row.get("v2_lifecycle_reason"),
         "superseded_by_terminal_id": row.get("v2_superseded_by_terminal_id"),
@@ -480,6 +484,7 @@ def project_row(
         "pane_id": row.get("pane_id"),
         "pane_pid": row.get("pane_pid"),
         "native_session_id": row.get("native_session_id"),
+        "assigned_quota_provider": row.get("assigned_quota_provider"),
         "lifecycle_state": state,
         "lifecycle_reason": reason,
         # Stated rather than left to be inferred from the status: a
@@ -560,7 +565,9 @@ def project_terminal(terminal_id: str) -> Optional[Dict[str, Any]]:
         return project_row(row, panes, vintage="v1", session_paused=_session_paused(row))
     try:
         row = get_terminal_metadata_v2(terminal_id)
-    except Exception as exc:  # pragma: no cover - an uninstalled v2 surface is absent
+    except OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
         logger.debug("v2 terminal lookup unavailable for %s: %s", terminal_id, exc)
         return None
     if row is None:

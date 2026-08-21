@@ -144,6 +144,9 @@ class Terminal(BaseModel):
     native_session_id: Optional[str] = Field(
         None, description="The provider-native session running in this pane"
     )
+    assigned_quota_provider: Optional[str] = Field(
+        None, description="Canonical quota provider for billing/rate-limit attribution"
+    )
     status_confidence: Optional[str] = Field(
         None, description="Confidence of the fused terminal-status observation"
     )

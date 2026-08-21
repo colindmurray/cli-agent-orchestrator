@@ -98,6 +98,7 @@ _V2_TERMINALS_DDL = (
     "v2_session_id TEXT, "
     "v2_pane_pid INTEGER, "
     "v2_native_session_id TEXT, "
+    "v2_assigned_quota_provider TEXT, "
     "v2_lifecycle_state TEXT, "
     "v2_lifecycle_reason TEXT, "
     "v2_liveness_checked_at TEXT, "
@@ -122,6 +123,7 @@ _V2_TERMINALS_ADDITIVE_COLUMNS = (
     ("v2_session_id", "TEXT"),
     ("v2_pane_pid", "INTEGER"),
     ("v2_native_session_id", "TEXT"),
+    ("v2_assigned_quota_provider", "TEXT"),
     ("v2_lifecycle_state", "TEXT"),
     ("v2_lifecycle_reason", "TEXT"),
     ("v2_liveness_checked_at", "TEXT"),

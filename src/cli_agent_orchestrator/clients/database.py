@@ -97,12 +97,14 @@ class TerminalModel(Base):
     native_session_id = Column(Text, nullable=True)
     # Assigned provider route pin for managed/resumable reconstruction (cond-0550).
     # Nullable: legacy/operator and generation-NULL ordinary pre-task rows may stay
-    # NULL. A managed v1 row (non-null generation) with NULL assigned fields is
-    # incomplete and refuses reconstruction. For Claude Code the pin is proof
+    # NULL. A managed v1 row (non-null generation) with NULL assigned model or
+    # effort is incomplete and refuses reconstruction. For Claude Code the pin
+    # is proof
     # that a managed launch existed — profile frontmatter is the accepted model
     # channel. Never backfilled by migration; existing rows keep NULL.
     assigned_model = Column(Text, nullable=True)
     assigned_effort = Column(Text, nullable=True)
+    assigned_quota_provider = Column(Text, nullable=True)
     # The pre-task identity launch state of an activated ordinary launch:
     # a closed vocabulary (``pending`` / ``captured`` / ``ready`` from
     # ``provider_contracts.PRE_TASK_IDENTITY_*``) that marks the row as
@@ -699,6 +701,7 @@ class ManagedLaunchV2TerminalModel(Base):
     v2_session_id = Column(Text, nullable=True)
     v2_pane_pid = Column(Integer, nullable=True)
     v2_native_session_id = Column(Text, nullable=True)
+    v2_assigned_quota_provider = Column(Text, nullable=True)
     v2_lifecycle_state = Column(Text, nullable=True)
     v2_lifecycle_reason = Column(Text, nullable=True)
     v2_liveness_checked_at = Column(Text, nullable=True)
@@ -4544,6 +4547,10 @@ def _migrate_terminals_schema() -> None:
             ("assigned_model", "ALTER TABLE terminals ADD COLUMN assigned_model TEXT"),
             ("assigned_effort", "ALTER TABLE terminals ADD COLUMN assigned_effort TEXT"),
             (
+                "assigned_quota_provider",
+                "ALTER TABLE terminals ADD COLUMN assigned_quota_provider TEXT",
+            ),
+            (
                 "pre_task_identity_state",
                 "ALTER TABLE terminals ADD COLUMN pre_task_identity_state TEXT",
             ),
@@ -4886,6 +4893,7 @@ def create_terminal(
     native_session_id: Optional[str] = None,
     assigned_model: Optional[str] = None,
     assigned_effort: Optional[str] = None,
+    assigned_quota_provider: Optional[str] = None,
     pre_task_identity_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create terminal metadata record."""
@@ -4912,6 +4920,7 @@ def create_terminal(
             native_session_id=native_session_id,
             assigned_model=assigned_model,
             assigned_effort=assigned_effort,
+            assigned_quota_provider=assigned_quota_provider,
             pre_task_identity_state=pre_task_identity_state,
         )
         db.add(terminal)
@@ -4935,6 +4944,7 @@ def create_terminal(
             "native_session_id": terminal.native_session_id,
             "assigned_model": terminal.assigned_model,
             "assigned_effort": terminal.assigned_effort,
+            "assigned_quota_provider": terminal.assigned_quota_provider,
             "pre_task_identity_state": terminal.pre_task_identity_state,
         }
 
@@ -4954,6 +4964,7 @@ def create_terminal_v2(
     session_id: Optional[str] = None,
     pane_pid: Optional[int] = None,
     native_session_id: Optional[str] = None,
+    assigned_quota_provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a v2 managed terminal metadata record (isolated vintage surface).
 
@@ -4982,6 +4993,7 @@ def create_terminal_v2(
             v2_session_id=session_id,
             v2_pane_pid=pane_pid,
             v2_native_session_id=native_session_id,
+            v2_assigned_quota_provider=assigned_quota_provider,
         )
         db.add(terminal)
         db.commit()
@@ -5001,6 +5013,7 @@ def create_terminal_v2(
             "v2_session_id": terminal.v2_session_id,
             "v2_pane_pid": terminal.v2_pane_pid,
             "v2_native_session_id": terminal.v2_native_session_id,
+            "v2_assigned_quota_provider": terminal.v2_assigned_quota_provider,
         }
 
 
@@ -5035,6 +5048,7 @@ def get_terminal_metadata_v2(terminal_id: str) -> Optional[Dict[str, Any]]:
             "v2_session_id": terminal.v2_session_id,
             "v2_pane_pid": terminal.v2_pane_pid,
             "v2_native_session_id": terminal.v2_native_session_id,
+            "v2_assigned_quota_provider": terminal.v2_assigned_quota_provider,
             "v2_lifecycle_state": terminal.v2_lifecycle_state,
             "v2_lifecycle_reason": terminal.v2_lifecycle_reason,
             "v2_liveness_checked_at": terminal.v2_liveness_checked_at,
@@ -5261,6 +5275,7 @@ def get_terminal_metadata(
             "native_session_id": terminal.native_session_id,
             "assigned_model": terminal.assigned_model,
             "assigned_effort": terminal.assigned_effort,
+            "assigned_quota_provider": terminal.assigned_quota_provider,
             "pre_task_identity_state": terminal.pre_task_identity_state,
             "lifecycle_state": terminal.lifecycle_state,
             "lifecycle_reason": terminal.lifecycle_reason,

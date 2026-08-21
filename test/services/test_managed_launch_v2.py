@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
 import pytest
@@ -762,3 +764,210 @@ def test_bind_reconcile_refuses_mismatched_publication(
     with pytest.raises(ManagedLaunchConflict, match="does not match the journaled"):
         v2.bind_native(record["reservation_id"], bind_request)
     assert v2.get(record["reservation_id"])["state"] == "launching"
+
+
+def test_quota_provider_replay_and_legacy_compatibility(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    import json
+
+    with pytest.raises(Exception, match="quota_provider"):
+        _reserve_request(worktree, tmp_path, quota_provider="")
+    request = _reserve_request(worktree, tmp_path, quota_provider="bytedance")
+    assert v2.reserve(request)[1] is True
+    assert v2.reserve(request)[1] is False
+    with pytest.raises(ManagedLaunchConflict):
+        v2.reserve(request.model_copy(update={"quota_provider": "other"}))
+
+    legacy = _reserve_request(worktree, tmp_path)
+    v2.reserve(legacy)
+    with database.SessionLocal() as session:
+        row = (
+            session.query(database.ManagedLaunchV2ReservationModel)
+            .filter_by(reservation_id=legacy.reservation_id)
+            .one()
+        )
+        terminal_id = row.terminal_id
+        generation = row.generation
+        payload = json.loads(row.request_json)
+        payload.pop("quota_provider")
+        row.request_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        session.commit()
+    database.create_terminal_v2(
+        terminal_id,
+        "cao-test",
+        "worker",
+        "codex",
+        generation=generation,
+    )
+    assert v2.reserve(legacy)[1] is False
+    enriched = legacy.model_copy(update={"quota_provider": "zai"})
+    assert v2.reserve(enriched)[1] is False
+    assert v2.reserve(enriched)[1] is False
+    assert v2.reserve(legacy)[1] is False
+    assert v2.get(legacy.reservation_id)["request"]["quota_provider"] == "zai"
+    assert database.get_terminal_metadata_v2(terminal_id)["v2_assigned_quota_provider"] == "zai"
+    with pytest.raises(ManagedLaunchConflict):
+        v2.reserve(enriched.model_copy(update={"quota_provider": "other"}))
+
+    racy = _reserve_request(worktree, tmp_path)
+    v2.reserve(racy)
+    with database.SessionLocal() as session:
+        row = session.get(database.ManagedLaunchV2ReservationModel, racy.reservation_id)
+        payload = json.loads(row.request_json)
+        payload.pop("quota_provider")
+        row.request_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        session.commit()
+
+    def enrich(value):
+        try:
+            v2.reserve(racy.model_copy(update={"quota_provider": value}))
+            return value
+        except ManagedLaunchConflict:
+            return "conflict"
+
+    real_reconcile = v2._reconciled_request_json
+    gate = threading.Barrier(2)
+    waits = iter((True, True))
+
+    def synchronized_reconcile(*args):
+        result = real_reconcile(*args)
+        if next(waits, False):
+            gate.wait()
+        return result
+
+    monkeypatch.setattr(v2, "_reconciled_request_json", synchronized_reconcile)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(enrich, ("bytedance", "zai")))
+    assert outcomes.count("conflict") == 1
+    assert v2.get(racy.reservation_id)["request"]["quota_provider"] in outcomes
+
+    claim_first = _reserve_request(worktree, tmp_path)
+    v2.reserve(claim_first)
+    claimed, should_launch = v2.claim_launch(claim_first.reservation_id)
+    assert should_launch is True
+    assert claimed["request"]["quota_provider"] is None
+    claim_first_enriched = claim_first.model_copy(update={"quota_provider": "bytedance"})
+    with pytest.raises(ManagedLaunchConflict, match="launch is in progress"):
+        v2.reserve(claim_first_enriched)
+    database.create_terminal_v2(
+        claimed["terminal_id"],
+        claimed["session_name"],
+        "worker",
+        claimed["provider"],
+        generation=claimed["generation"],
+    )
+    assert v2.reserve(claim_first_enriched)[1] is False
+    assert (
+        database.get_terminal_metadata_v2(claimed["terminal_id"])["v2_assigned_quota_provider"]
+        == "bytedance"
+    )
+
+    enrich_first = _reserve_request(worktree, tmp_path)
+    v2.reserve(enrich_first)
+    enrich_first_declared = enrich_first.model_copy(update={"quota_provider": "zai"})
+    v2.reserve(enrich_first_declared)
+    claimed, should_launch = v2.claim_launch(enrich_first.reservation_id)
+    assert should_launch is True
+    assert claimed["request"]["quota_provider"] == "zai"
+
+
+def test_v2_acp_forwards_current_quota_provider(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import asyncio
+
+    request = _reserve_request(worktree, tmp_path, execution_mode="acp")
+    record, _ = v2.reserve(request)
+    stale_claim = deepcopy(record)
+    v2.reserve(request.model_copy(update={"quota_provider": "bytedance"}))
+    v2.claim_launch(request.reservation_id)
+    monkeypatch.setattr(v2, "claim_launch", lambda _rid: (stale_claim, True))
+    seen = {}
+
+    async def fake_create(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(status="idle")
+
+    monkeypatch.setattr(bridge, "profile_digest", lambda _: "e" * 64)
+    monkeypatch.setattr(bridge, "write_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        bridge,
+        "request_bridge",
+        lambda *args, **kwargs: {"state": "ready", "readiness": {"ok": True}},
+    )
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.terminal_service.create_terminal", fake_create
+    )
+    asyncio.run(v2.launch_reserved(request.reservation_id))
+    assert seen["assigned_quota_provider"] == "bytedance"
+
+
+def test_v2_native_forwards_current_quota_provider(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    request = _reserve_request(
+        worktree,
+        tmp_path,
+        execution_mode="native_tui",
+        provider="claude_code",
+        expected_model="claude-sonnet-4-5-20250929",
+        trusted_project_root=None,
+    )
+    record, _ = v2.reserve(request)
+    v2.reserve(request.model_copy(update={"quota_provider": "zai"}))
+    seen = {}
+
+    async def fake_create(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(status="idle")
+
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.terminal_service.create_terminal", fake_create
+    )
+    loop = asyncio.new_event_loop()
+    pane = v2._V2NativePane(
+        record=record,
+        environment={},
+        loop=loop,
+        registry=SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.terminal_service._register_incarnation",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.terminal_service._mark_v2_resource_created",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.terminal_service.get_session_env",
+        lambda *args, **kwargs: None,
+    )
+    loop.run_until_complete(pane._create(["echo", "hello"]))
+    loop.close()
+    assert seen["assigned_quota_provider"] == "zai"
+
+
+def test_v2_response_propagates_unreadable_terminal_projection(
+    isolated_memory_db, worktree, tmp_path
+):
+    request = _reserve_request(worktree, tmp_path)
+    record, _ = v2.reserve(request)
+    database.create_terminal_v2(
+        record["terminal_id"],
+        record["session_name"],
+        "worker",
+        record["provider"],
+        generation=record["generation"],
+    )
+    with isolated_memory_db.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE managed_launch_v2_terminals DROP COLUMN v2_assigned_quota_provider"
+        )
+    with pytest.raises(v2.ManagedLaunchUnavailable, match="v2_assigned_quota_provider"):
+        v2.get(request.reservation_id)

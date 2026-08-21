@@ -865,13 +865,9 @@ def _published_terminal_facts(terminal_id: Optional[str]) -> dict[str, Any]:
     published: dict[str, Any] = {field: None for field in PUBLISHED_TERMINAL_FIELDS}
     if not terminal_id:
         return published
-    try:
-        from cli_agent_orchestrator.services import terminal_projection
+    from cli_agent_orchestrator.services import terminal_projection
 
-        projected = terminal_projection.project_terminal(terminal_id)
-    except Exception as exc:  # noqa: BLE001 - an unreadable row publishes nulls
-        logger.debug("Could not project terminal %s for a v2 response: %s", terminal_id, exc)
-        return published
+    projected = terminal_projection.project_terminal(terminal_id)
     if not projected:
         return published
     for field in PUBLISHED_TERMINAL_FIELDS:
@@ -1002,11 +998,12 @@ _ADDITIVE_REQUEST_KEYS = (
     "worker_class",
     "provider_route",
     "route_envelope",
+    "quota_provider",
 )
 
 
-def _request_matches(stored_json: str, incoming: dict[str, Any]) -> bool:
-    """Whether a replayed reserve carries the same immutable request.
+def _reconciled_request_json(stored_json: str, incoming: dict[str, Any]) -> Optional[str]:
+    """Return the stored or truthfully quota-enriched request, else ``None``.
 
     An exact byte match is the normal case.  The one accommodation is
     the upgrade boundary: a reservation written before the
@@ -1019,13 +1016,23 @@ def _request_matches(stored_json: str, incoming: dict[str, Any]) -> bool:
     conflicts.
     """
     if stored_json == _canonical_json(incoming):
-        return True
+        return stored_json
     stored = _parse_json(stored_json, None)
     if not isinstance(stored, dict):
-        return False
+        return None
     normalized = dict(stored)
+    comparison = dict(incoming)
+    quota_enriched = False
     for key in _ADDITIVE_REQUEST_KEYS:
-        if key not in normalized:
+        if key == "quota_provider":
+            incoming_quota = incoming.get(key)
+            if normalized.get(key) is None and incoming_quota is not None:
+                normalized[key] = incoming_quota
+                quota_enriched = True
+            elif incoming_quota is None:
+                normalized.setdefault(key, None)
+                comparison[key] = normalized[key]
+        elif key not in normalized:
             if key in {"provider_route", "route_envelope"}:
                 # Rows created before route envelopes existed are the
                 # historical Anthropic/default form.  Preserve idempotent
@@ -1037,7 +1044,59 @@ def _request_matches(stored_json: str, incoming: dict[str, Any]) -> bool:
                     normalized[key] = None
             elif incoming.get(key) is None:
                 normalized[key] = None
-    return _canonical_json(normalized) == _canonical_json(incoming)
+    if _canonical_json(normalized) != _canonical_json(comparison):
+        return None
+    return _canonical_json(normalized) if quota_enriched else stored_json
+
+
+def _reconcile_existing_request(db, row: Any, incoming: dict[str, Any]) -> Any:
+    """CAS-enrich one legacy NULL quota without racing terminal creation."""
+    reconciled = _reconciled_request_json(row.request_json, incoming)
+    if reconciled is None:
+        raise ManagedLaunchConflict("reservation_id is already bound to a different request")
+    terminal = (
+        db.query(database.ManagedLaunchV2TerminalModel)
+        .filter(database.ManagedLaunchV2TerminalModel.id == row.terminal_id)
+        .first()
+    )
+    changed = False
+    if reconciled != row.request_json:
+        if terminal is None and row.state != "reserved":
+            raise ManagedLaunchConflict(
+                "reservation launch is in progress; retry quota-provider enrichment "
+                "after terminal creation"
+            )
+        query = db.query(database.ManagedLaunchV2ReservationModel).filter(
+            database.ManagedLaunchV2ReservationModel.reservation_id == row.reservation_id,
+            database.ManagedLaunchV2ReservationModel.request_json == row.request_json,
+        )
+        if terminal is None:
+            query = query.filter(database.ManagedLaunchV2ReservationModel.state == "reserved")
+        updated = query.update(
+            {"request_json": reconciled, "updated_at": _now()},
+            synchronize_session=False,
+        )
+        if updated != 1:
+            db.rollback()
+            current = _query(db, row.reservation_id)
+            if current is None:
+                raise ManagedLaunchConflict("reservation changed concurrently")
+            return _reconcile_existing_request(db, current, incoming)
+        changed = True
+
+    quota_provider = _parse_json(reconciled, {}).get("quota_provider")
+    if terminal is not None and quota_provider is not None:
+        if terminal.v2_assigned_quota_provider not in {None, quota_provider}:
+            raise ManagedLaunchConflict(
+                "terminal is already bound to a different assigned quota provider"
+            )
+        if terminal.v2_assigned_quota_provider is None:
+            terminal.v2_assigned_quota_provider = quota_provider
+            changed = True
+    if changed:
+        db.commit()
+        return _query(db, row.reservation_id)
+    return row
 
 
 #: Modes ``launch_reserved`` has a real launch branch for.
@@ -1308,10 +1367,7 @@ def reserve(request: ManagedLaunchV2ReserveRequest) -> tuple[dict[str, Any], boo
         with database.SessionLocal() as db:
             existing = _query(db, request.reservation_id)
             if existing is not None:
-                if not _request_matches(existing.request_json, payload):
-                    raise ManagedLaunchConflict(
-                        "reservation_id is already bound to a different request"
-                    )
+                existing = _reconcile_existing_request(db, existing, payload)
                 # The reserved mode is immutable. A replay that restates
                 # a different mode is refused rather than adopted, so a
                 # reservation can never change branch under a retry.
@@ -1358,8 +1414,9 @@ def reserve(request: ManagedLaunchV2ReserveRequest) -> tuple[dict[str, Any], boo
     except IntegrityError:
         with database.SessionLocal() as db:
             existing = _query(db, request.reservation_id)
-            if existing is None or not _request_matches(existing.request_json, payload):
+            if existing is None:
                 raise ManagedLaunchConflict("concurrent reservation conflict")
+            existing = _reconcile_existing_request(db, existing, payload)
             return _row_dict(existing), False
     except Exception as exc:  # noqa: BLE001 - fail closed at the store boundary
         raise ManagedLaunchUnavailable(f"managed-launch v2 reservation failed: {exc}") from exc
@@ -3514,6 +3571,7 @@ async def launch_reserved(reservation_id: str, *, registry=None) -> dict[str, An
         )
 
     try:
+        request = get(reservation_id)["request"]
         await terminal_service.create_terminal(
             provider=record["provider"],
             agent_profile=record["agent_profile"],
@@ -3529,6 +3587,7 @@ async def launch_reserved(reservation_id: str, *, registry=None) -> dict[str, An
             trusted_project_root=record["trusted_project_root"],
             expected_model=request["expected_model"],
             expected_effort=request["expected_effort"],
+            assigned_quota_provider=request.get("quota_provider"),
             preserve_on_init_failure=True,
             managed_native_command=[
                 os.path.abspath(sys.executable),
@@ -3603,13 +3662,11 @@ class _V2NativePane:
         self,
         *,
         record: dict[str, Any],
-        request: dict[str, Any],
         environment: dict[str, str],
         loop,
         registry,
     ) -> None:
         self._record = record
-        self._request = request
         self._environment = dict(environment)
         self._loop = loop
         self._registry = registry
@@ -3623,6 +3680,7 @@ class _V2NativePane:
     async def _create(self, argv: list[str]) -> str:
         from cli_agent_orchestrator.services import terminal_service
 
+        request = get(self._record["reservation_id"])["request"]
         await terminal_service.create_terminal(
             provider=self._record["provider"],
             agent_profile=self._record["agent_profile"],
@@ -3636,8 +3694,9 @@ class _V2NativePane:
             reserved_terminal_id=self._record["terminal_id"],
             terminal_generation=self._record["generation"],
             trusted_project_root=self._record["trusted_project_root"],
-            expected_model=self._request["expected_model"],
-            expected_effort=self._request["expected_effort"],
+            expected_model=request["expected_model"],
+            expected_effort=request["expected_effort"],
+            assigned_quota_provider=request.get("quota_provider"),
             preserve_on_init_failure=True,
             # The TUI is the pane's OWN argv. Nothing is typed into a
             # shell, so there is no window in which a partially-typed
@@ -4016,7 +4075,6 @@ async def _launch_native_tui(
     try:
         transport = _V2NativePane(
             record=record,
-            request=request,
             environment=environment,
             loop=asyncio.get_running_loop(),
             registry=registry,
