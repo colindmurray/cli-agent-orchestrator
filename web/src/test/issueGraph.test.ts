@@ -3,6 +3,7 @@ import type { TrackerGraphNode, TrackerGraphProjection, TrackerIssue } from '../
 import {
   buildIssueGraph,
   buildIssueDependencyPlan,
+  ISSUE_GRAPH_NODE_COLORS,
   orderIssueHierarchyNodes,
   visibleIssueGraphKeys,
 } from '../lib/issueGraph'
@@ -118,6 +119,7 @@ describe('generic issue graph', () => {
     const withoutBlocked = buildIssueGraph(blockedTaskProjection, 'hierarchy', EMPTY_FILTERS, {
       hiddenNodeStates: new Set(['blocked']),
       hiddenEdgeKinds: new Set<string>(),
+      hideUnconnected: false,
     })
     expect(withoutBlocked.hasNode(TASK.key)).toBe(false)
     expect(withoutBlocked.edges().every(edge => {
@@ -128,11 +130,66 @@ describe('generic issue graph', () => {
     const withoutContextEdges = buildIssueGraph(PROJECTION, 'dependencies', EMPTY_FILTERS, {
       hiddenNodeStates: new Set(),
       hiddenEdgeKinds: new Set(['blocks', 'relates']),
+      hideUnconnected: false,
     })
     expect(new Set(withoutContextEdges.nodes()))
       .toEqual(new Set([ROOT.key, MILESTONE.key, TASK.key, BLOCKER.key]))
     expect(withoutContextEdges.edges().map(edge => withoutContextEdges.getEdgeAttribute(edge, 'kind')).sort())
       .toEqual(['part-of', 'part-of'])
+  })
+
+  it.each(['hierarchy', 'dependencies', 'relationships'] as const)(
+    '%s mode removes nodes disconnected by the currently visible edges',
+    mode => {
+      const graph = buildIssueGraph(PROJECTION, mode, EMPTY_FILTERS, {
+        hiddenNodeStates: new Set(),
+        hiddenEdgeKinds: new Set(['blocks', 'relates']),
+        hideUnconnected: true,
+      })
+
+      expect(new Set(graph.nodes())).toEqual(new Set([ROOT.key, MILESTONE.key, TASK.key]))
+      expect(graph.hasNode(BLOCKER.key)).toBe(false)
+      expect(graph.edges().map(edge => graph.getEdgeAttribute(edge, 'kind')).sort())
+        .toEqual(['part-of', 'part-of'])
+    },
+  )
+
+  it('recomputes connectivity after node-state filtering and can produce an empty projection', () => {
+    const withoutActive = visibleIssueGraphKeys(PROJECTION, EMPTY_FILTERS, {
+      hiddenNodeStates: new Set(['active']),
+      hiddenEdgeKinds: new Set(),
+      hideUnconnected: true,
+    })
+    expect(withoutActive).toEqual(new Set([ROOT.key, MILESTONE.key]))
+
+    const empty = buildIssueGraph(PROJECTION, 'relationships', EMPTY_FILTERS, {
+      hiddenNodeStates: new Set(),
+      hiddenEdgeKinds: new Set(['part-of', 'blocks', 'relates']),
+      hideUnconnected: true,
+    })
+    expect(empty.order).toBe(0)
+    expect(empty.size).toBe(0)
+  })
+
+  it('uses distinct color and size treatments for active and resolved work', () => {
+    const resolved = node('cond-0508', 'Already shipped', 1, [ROOT.key], 0, { status: 'resolved' })
+    const projection: TrackerGraphProjection = {
+      ...PROJECTION,
+      nodes: [{ ...ROOT, child_count: 2 }, MILESTONE, TASK, resolved],
+      links: [
+        ...PROJECTION.links,
+        { id: 5, kind: 'part-of', from_key: resolved.key, to_key: ROOT.key },
+      ],
+    }
+    const graph = buildIssueGraph(projection, 'hierarchy', EMPTY_FILTERS)
+
+    expect(ISSUE_GRAPH_NODE_COLORS.active).not.toBe(ISSUE_GRAPH_NODE_COLORS.open)
+    expect(ISSUE_GRAPH_NODE_COLORS.active).not.toBe(ISSUE_GRAPH_NODE_COLORS.resolved)
+    expect(graph.getNodeAttribute(TASK.key, 'color')).toBe(ISSUE_GRAPH_NODE_COLORS.active)
+    expect(graph.getNodeAttribute(resolved.key, 'color')).toBe(ISSUE_GRAPH_NODE_COLORS.resolved)
+    expect(graph.getNodeAttribute(TASK.key, 'size')).toBeGreaterThan(
+      graph.getNodeAttribute(resolved.key, 'size'),
+    )
   })
 
   it('moves non-tree nodes through relationship-aware hierarchy context lanes', () => {
@@ -145,12 +202,14 @@ describe('generic issue graph', () => {
     const withRelatedContext = buildIssueGraph(PROJECTION, 'hierarchy', EMPTY_FILTERS, {
       hiddenNodeStates: new Set(),
       hiddenEdgeKinds: new Set(['blocks']),
+      hideUnconnected: false,
     })
     expect(withRelatedContext.getNodeAttribute(BLOCKER.key, 'layoutGroup')).toBe('context:relates')
 
     const disconnected = buildIssueGraph(PROJECTION, 'hierarchy', EMPTY_FILTERS, {
       hiddenNodeStates: new Set(),
       hiddenEdgeKinds: new Set(['blocks', 'relates']),
+      hideUnconnected: false,
     })
     expect(disconnected.getNodeAttribute(BLOCKER.key, 'layoutGroup')).toBe('context:unconnected')
     expect(disconnected.getNodeAttribute(BLOCKER.key, 'y')).toBeLessThan(

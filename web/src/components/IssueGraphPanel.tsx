@@ -50,6 +50,7 @@ export function IssueGraphPanel({
   const [dependencyCollapsed, setDependencyCollapsed] = useState<Set<string>>(new Set())
   const [hiddenNodeStates, setHiddenNodeStates] = useState<Set<IssueGraphNodeState>>(new Set())
   const [hiddenEdgeKinds, setHiddenEdgeKinds] = useState<Set<string>>(new Set())
+  const [hideUnconnected, setHideUnconnected] = useState(false)
 
   const loadIssueOptions = useCallback(async (needle: string): Promise<SearchableOption[]> => {
     const result = await api.listTrackerIssues({
@@ -92,6 +93,7 @@ export function IssueGraphPanel({
     setStatuses([])
     setHiddenNodeStates(new Set())
     setHiddenEdgeKinds(new Set())
+    setHideUnconnected(false)
   }, [rootKey])
 
   useEffect(() => {
@@ -121,8 +123,8 @@ export function IssueGraphPanel({
     [query, kinds, statuses, activeCollapsed],
   )
   const visibility = useMemo(
-    () => ({ hiddenNodeStates, hiddenEdgeKinds }),
-    [hiddenNodeStates, hiddenEdgeKinds],
+    () => ({ hiddenNodeStates, hiddenEdgeKinds, hideUnconnected }),
+    [hiddenNodeStates, hiddenEdgeKinds, hideUnconnected],
   )
   const visible = useMemo(
     () => projection ? visibleIssueGraphKeys(projection, filters, visibility) : new Set<string>(),
@@ -292,7 +294,13 @@ export function IssueGraphPanel({
             onSelect={onSelectIssue}
             onToggleNodeState={toggleHiddenNodeState}
             onToggleEdgeKind={toggleHiddenEdgeKind}
+            onToggleUnconnected={() => setHideUnconnected(current => !current)}
           />
+          {hideUnconnected && visible.size === 0 && (
+            <div role="note" className="rounded border border-dashed border-gray-800 px-4 py-3 text-center text-xs text-gray-500">
+              No connected issues remain under the current node and edge filters.
+            </div>
+          )}
           {mode === 'hierarchy' ? (
             <div className="rounded-lg border border-gray-800 overflow-hidden" aria-label="Issue hierarchy">
               {orderIssueHierarchyNodes(projection, visible).map(node => (

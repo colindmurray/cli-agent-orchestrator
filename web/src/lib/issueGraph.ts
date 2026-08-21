@@ -20,9 +20,9 @@ export interface IssueGraphFilters {
 export const ISSUE_GRAPH_NODE_COLORS = {
   root: '#f9fafb',
   open: '#38bdf8',
-  active: '#60a5fa',
+  active: '#22c55e',
   blocked: '#f87171',
-  resolved: '#2dd4bf',
+  resolved: '#0f766e',
   terminal: '#6b7280',
   external: '#fb923c',
 } as const
@@ -32,11 +32,13 @@ export type IssueGraphNodeState = keyof typeof ISSUE_GRAPH_NODE_COLORS
 export interface IssueGraphVisibility {
   hiddenNodeStates: ReadonlySet<IssueGraphNodeState>
   hiddenEdgeKinds: ReadonlySet<string>
+  hideUnconnected: boolean
 }
 
 const SHOW_ALL_GRAPH_ITEMS: IssueGraphVisibility = {
   hiddenNodeStates: new Set<IssueGraphNodeState>(),
   hiddenEdgeKinds: new Set<string>(),
+  hideUnconnected: false,
 }
 
 export interface IssueDependencyEdge {
@@ -176,6 +178,16 @@ export function visibleIssueGraphKeys(
   for (const key of [...visible]) {
     const issue = byKey.get(key)
     if (!issue || !nodeIsEnabled(issue, projection, external, visibility)) visible.delete(key)
+  }
+  if (visibility.hideUnconnected) {
+    const connected = new Set<string>()
+    for (const link of projection.links) {
+      if (visibility.hiddenEdgeKinds.has(link.kind)) continue
+      if (!visible.has(link.from_key) || !visible.has(link.to_key)) continue
+      connected.add(link.from_key)
+      connected.add(link.to_key)
+    }
+    for (const key of visible) if (!connected.has(key)) visible.delete(key)
   }
   return visible
 }
@@ -340,6 +352,9 @@ export function buildIssueDependencyPlan(
   const filteredVisible = hierarchyVisibleKeys(projection, filters)
   for (const key of [...scopeVisible]) if (!enabled(key)) scopeVisible.delete(key)
   for (const key of [...filteredVisible]) if (!enabled(key)) filteredVisible.delete(key)
+  const connectedVisible = visibility.hideUnconnected
+    ? visibleIssueGraphKeys(projection, filters, visibility)
+    : null
   const activeFilter = Boolean(filters.query.trim() || filters.kinds.length || filters.statuses.length)
 
   const representativeCache = new Map<string, string | null>()
@@ -360,7 +375,7 @@ export function buildIssueDependencyPlan(
   }
 
   const candidates = new Set<string>()
-  for (const key of filteredVisible) {
+  for (const key of connectedVisible ?? filteredVisible) {
     const mapped = representative(key)
     if (mapped && mapped !== projection.root.key) candidates.add(mapped)
   }
@@ -375,6 +390,7 @@ export function buildIssueDependencyPlan(
     const from = representative(link.from_key)
     const to = representative(link.to_key)
     if (!from || !to) continue
+    if (connectedVisible && (!connectedVisible.has(from) || !connectedVisible.has(to))) continue
     const relevant = !activeFilter
       || filteredVisible.has(link.from_key)
       || filteredVisible.has(link.to_key)
@@ -403,7 +419,7 @@ export function buildIssueDependencyPlan(
     }
   }
 
-  if (!candidates.size) candidates.add(projection.root.key)
+  if (!candidates.size && !visibility.hideUnconnected) candidates.add(projection.root.key)
   const hiddenScopeCount = new Map<string, number>()
   const scopeStats = new Map<string, { total: number; terminal: number; active: number; blocked: number }>()
   for (const key of memberKeys) {
@@ -616,7 +632,7 @@ export function buildIssueGraph(
       depth: (issue as TrackerGraphNode).depth ?? null,
       external: external.has(issue.key),
       state,
-      size: issue.key === projection.root.key ? 13 : external.has(issue.key) ? 5 : 7,
+      size: issue.key === projection.root.key ? 13 : external.has(issue.key) ? 5 : state === 'active' ? 9 : 7,
       color: nodeColor(issue, projection, external),
     })
   }
