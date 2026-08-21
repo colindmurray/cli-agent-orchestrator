@@ -47,6 +47,11 @@ jobs:
 
       - name: Run unit tests with coverage
         run: |
+          # Pure win: pytest-xdist is already in dev deps. -n auto + --dist loadfile
+          # parallelizes across hosted cores while keeping tests from the same file
+          # on the same worker (loadfile) to avoid cross-file state flakes. Coverage
+          # combines automatically via pytest-cov + xdist. Falls back to single-process
+          # if xdist is unavailable.
           uv run pytest test/ \
             --ignore=test/providers/test_kiro_cli_integration.py \
             --ignore=test/e2e \
@@ -54,6 +59,7 @@ jobs:
             --cov=src/cli_agent_orchestrator \
             --cov-report=xml \
             --cov-report=term-missing \
+            -n auto --dist loadfile \
             -v
 
       - name: Validate Markdown links
