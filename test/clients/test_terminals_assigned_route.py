@@ -30,9 +30,7 @@ def test_terminal_migration_adds_assigned_route_without_backfill(tmp_path, monke
             "VALUES ('legacy0001', 'cao-s', 'w-0', 'kiro_cli')"
         )
 
-    monkeypatch.setattr(
-        "cli_agent_orchestrator.constants.DATABASE_FILE", db_file, raising=False
-    )
+    monkeypatch.setattr("cli_agent_orchestrator.constants.DATABASE_FILE", db_file, raising=False)
 
     database._migrate_terminals_schema()
     database._migrate_terminals_schema()
@@ -40,8 +38,7 @@ def test_terminal_migration_adds_assigned_route_without_backfill(tmp_path, monke
     with sqlite3.connect(db_file) as connection:
         columns = [row[1] for row in connection.execute("PRAGMA table_info(terminals)")]
         route = connection.execute(
-            "SELECT assigned_model, assigned_effort FROM terminals "
-            "WHERE id = 'legacy0001'"
+            "SELECT assigned_model, assigned_effort FROM terminals " "WHERE id = 'legacy0001'"
         ).fetchone()
 
     assert columns.count("assigned_model") == 1
@@ -51,9 +48,7 @@ def test_terminal_migration_adds_assigned_route_without_backfill(tmp_path, monke
 
 def test_assigned_route_survives_database_restart(tmp_path, monkeypatch):
     db_file = tmp_path / "route.db"
-    first_engine = create_engine(
-        f"sqlite:///{db_file}", connect_args={"check_same_thread": False}
-    )
+    first_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
     database.Base.metadata.create_all(bind=first_engine)
     monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=first_engine))
 
@@ -72,9 +67,7 @@ def test_assigned_route_survives_database_restart(tmp_path, monkeypatch):
     )
     first_engine.dispose()
 
-    second_engine = create_engine(
-        f"sqlite:///{db_file}", connect_args={"check_same_thread": False}
-    )
+    second_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
     monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=second_engine))
     try:
         metadata = database.get_terminal_metadata("term0001")

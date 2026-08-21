@@ -1374,8 +1374,8 @@ def test_provider_manager_get_provider_reconstructs_antigravity_metadata(monkeyp
         "tmux_window": "w1",
         "agent_profile": "implementer-gemini",
         "native_session_id": sid,
-        "model": "gemini-3.7-flash",
-        "effort": "high",
+        "assigned_model": "gemini-3.7-flash",
+        "assigned_effort": "high",
     }
 
     monkeypatch.setattr(
