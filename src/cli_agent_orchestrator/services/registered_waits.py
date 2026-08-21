@@ -85,6 +85,8 @@ def capability() -> dict[str, Any]:
         "reverse_rollback": "disable registration first; consumer drains acknowledged waits",
         "max_round_seconds": MAX_ROUND_SECONDS,
         "ambiguity_grace_seconds": DEFAULT_AMBIGUITY_GRACE_SECONDS,
+        "adapter_support": ["process", "github-actions"],
+        "monitor_health_vocabulary": ["monitored", "monitor-stale", "unmonitored"],
     }
 
 
@@ -146,6 +148,7 @@ class RegistrationRequest:
     duration_seconds: int
     owner: wait_admission.WaitOwner
     estimated_seconds: Optional[int] = None
+    adapter: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operation_id", _uuid(self.operation_id, "operation_id"))
@@ -166,9 +169,29 @@ class RegistrationRequest:
             or self.estimated_seconds <= 0
         ):
             raise RegisteredWaitInvalid("estimated_seconds must be a positive integer")
+        if self.adapter is not None:
+            if not isinstance(self.adapter, dict):
+                raise RegisteredWaitInvalid("adapter must be an object when present")
+            kind = self.adapter.get("kind")
+            if kind == "process":
+                try:
+                    from cli_agent_orchestrator.services.wait_runner import validate_process_adapter
+
+                    validate_process_adapter(self.adapter)
+                except ValueError as exc:
+                    raise RegisteredWaitInvalid(str(exc)) from exc
+            elif kind == "github-actions":
+                try:
+                    from cli_agent_orchestrator.services.wait_runner import validate_github_adapter
+
+                    validate_github_adapter(self.adapter)
+                except ValueError as exc:
+                    raise RegisteredWaitInvalid(str(exc)) from exc
+            else:
+                raise RegisteredWaitInvalid("adapter kind must be process or github-actions")
 
     def canonical(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema": SCHEMA_VERSION,
             "operation_id": self.operation_id,
             "session_name": self.session_name,
@@ -180,6 +203,9 @@ class RegistrationRequest:
             "estimated_seconds": self.estimated_seconds,
             "owner": self.owner.canonical(),
         }
+        if self.adapter is not None:
+            payload["adapter"] = self.adapter
+        return payload
 
 
 def wait_id_for(operation_id: str) -> str:
@@ -208,12 +234,19 @@ def _record(row: Any, *, now: Optional[datetime] = None) -> dict[str, Any]:
         observed = _parse_time(outcome["at"])
     created = _parse_time(row.created_at)
     elapsed = max(0, int((observed - created).total_seconds()))
-    return {
+    adapter = request.get("adapter")
+    if isinstance(adapter, dict) and adapter.get("kind") == "process":
+        condition_kind = "process"
+    elif isinstance(adapter, dict) and adapter.get("kind") == "github-actions":
+        condition_kind = "github-actions"
+    else:
+        condition_kind = "scheduled-time"
+    record: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "wait_id": row.wait_id,
         "operation_id": row.operation_id,
         "condition": {
-            "kind": "scheduled-time",
+            "kind": condition_kind,
             "id": request["name"],
             "name": request["name"],
             "description": request["description"],
@@ -243,6 +276,57 @@ def _record(row: Any, *, now: Optional[datetime] = None) -> dict[str, Any]:
         "outcome": outcome,
         "updated_at": row.updated_at,
     }
+    if adapter is not None:
+        # adapter path: expose monitor health and durable monitor state
+        try:
+            from cli_agent_orchestrator.services.registered_wait_monitors import monitor_health_for
+
+            health = monitor_health_for(row.wait_id)
+            health_value = health.get("health", "unmonitored")
+            health_detail = health.get("detail")
+        except Exception as exc:
+            health_value = "unmonitored"
+            health_detail = f"unreadable:{exc}"
+        record["monitor_health"] = health_value
+        record["monitor_health_detail"] = health_detail
+        record["adapter"] = adapter
+        # durable monitor state without secrets/files
+        try:
+            with database.SessionLocal() as db2:
+                mon = db2.get(database.RegisteredWaitMonitorModel, row.wait_id)
+                if mon is not None:
+                    mon_outcome = json.loads(mon.outcome_json) if mon.outcome_json else None
+                    result_info: dict[str, Any] = {}
+                    if mon.result_json:
+                        try:
+                            rj = json.loads(mon.result_json)
+                            result_info = {
+                                "outcome": rj.get("outcome"),
+                                "reason": rj.get("reason"),
+                                "elapsed_seconds": rj.get("elapsed_seconds"),
+                            }
+                        except Exception:
+                            result_info = {}
+                    record["monitor"] = {
+                        "state": mon.state,
+                        "result_digest": mon.result_digest,
+                        "result": result_info if result_info else None,
+                        "communication_id": mon.communication_id,
+                        "attachment_id": mon.attachment_id,
+                        "attachment_digest": mon.attachment_digest,
+                        "wake_message_id": mon.wake_message_id,
+                        "wake_pending_since": mon.wake_pending_since,
+                        "outcome": mon_outcome,
+                    }
+                else:
+                    record["monitor"] = None
+        except Exception as exc:
+            record["monitor"] = {"detail": f"unreadable:{exc}"}
+    else:
+        # timer path: no monitor read, preserve shape
+        record["monitor_health"] = "unmonitored"
+        record["monitor_health_detail"] = "timer-wait"
+    return record
 
 
 def _owner(request: Mapping[str, Any]) -> wait_admission.WaitOwner:
@@ -250,7 +334,15 @@ def _owner(request: Mapping[str, Any]) -> wait_admission.WaitOwner:
 
 
 def register(request: RegistrationRequest, *, now: Optional[datetime] = None) -> dict[str, Any]:
-    """Persist registration intent, then verify and acknowledge its exact owner."""
+    """Persist registration intent, then verify and acknowledge its exact owner.
+
+    For adapter waits, intent is persisted BEFORE ``Popen``, helper identity
+    BEFORE ``Activate``, and the result BEFORE any wake.  Replay adopts exact
+    durable rows/files or refuses divergent requests.  An ambiguous launch
+    window (intent with neither ready nor result) reports ``unmonitored`` and
+    never relaunches.  Acknowledgement occurs only in the same transaction that
+    records exact live helper or exact durable result.
+    """
     if not _enabled("CAO_M7_WAIT_REGISTRATION_ENABLED"):
         raise RegisteredWaitConflict(
             "new wait registration is disabled; acknowledged waits continue to drain"
@@ -260,6 +352,8 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
     digest = canonical_sha256(canonical)
     wait_id = wait_id_for(request.operation_id)
     adopting_pending = False
+    has_adapter = request.adapter is not None
+    # --- intent phase: wait row + monitor intent ---
     try:
         with database.SessionLocal() as db:
             existing = _operation_row(db, request.operation_id)
@@ -268,6 +362,12 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
                     raise RegisteredWaitConflict(
                         f"operation {request.operation_id} is a divergent registration replay"
                     )
+                if has_adapter:
+                    mon = db.get(database.RegisteredWaitMonitorModel, existing.wait_id)
+                    if mon is not None and mon.request_digest != digest:
+                        raise RegisteredWaitConflict(
+                            f"operation {request.operation_id} monitor digest diverges"
+                        )
                 result = _record(existing, now=observed)
                 result["adopted"] = True
                 return result
@@ -276,9 +376,13 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
                     f"operation {request.operation_id} is a divergent registration replay"
                 )
             if existing is not None:
-                # A crash after the intent commit resumes the missing
-                # acknowledgement step below; it never creates a second row.
                 adopting_pending = True
+                if has_adapter:
+                    mon = db.get(database.RegisteredWaitMonitorModel, wait_id)
+                    if mon is not None and mon.request_digest != digest:
+                        raise RegisteredWaitConflict(
+                            f"operation {request.operation_id} monitor digest diverges"
+                        )
             else:
                 row = database.RegisteredWaitModel(
                     wait_id=wait_id,
@@ -297,7 +401,49 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
                     updated_at=_isots(observed),
                 )
                 db.add(row)
-                db.commit()  # intent exists before acknowledgement
+                db.commit()
+                if has_adapter:
+                    from cli_agent_orchestrator.services.registered_wait_monitors import (
+                        create_monitor_intent,
+                        monitor_run_dir,
+                    )
+
+                    run_dir = monitor_run_dir(wait_id)
+                    paths = create_monitor_intent(
+                        wait_id, digest, request.adapter, request.duration_seconds, run_dir
+                    )
+                    mon = database.RegisteredWaitMonitorModel(
+                        wait_id=wait_id,
+                        request_digest=digest,
+                        run_dir=str(run_dir),
+                        state="launch-intent",
+                        created_at=_isots(observed),
+                        updated_at=_isots(observed),
+                    )
+                    db.add(mon)
+                    db.commit()
+            if has_adapter and adopting_pending:
+                mon = db.get(database.RegisteredWaitMonitorModel, wait_id)
+                if mon is None:
+                    from cli_agent_orchestrator.services.registered_wait_monitors import (
+                        create_monitor_intent,
+                        monitor_run_dir,
+                    )
+
+                    run_dir = monitor_run_dir(wait_id)
+                    paths = create_monitor_intent(
+                        wait_id, digest, request.adapter, request.duration_seconds, run_dir
+                    )
+                    mon = database.RegisteredWaitMonitorModel(
+                        wait_id=wait_id,
+                        request_digest=digest,
+                        run_dir=str(run_dir),
+                        state="launch-intent",
+                        created_at=_isots(observed),
+                        updated_at=_isots(observed),
+                    )
+                    db.add(mon)
+                    db.commit()
     except RegisteredWaitError:
         raise
     except (OperationalError, SQLAlchemyError) as exc:
@@ -312,6 +458,121 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
             "detail": verdict["detail"],
             "at": _isots(observed),
         }
+    if has_adapter:
+        if state == STATE_INVALID:
+            try:
+                with database.SessionLocal() as db:
+                    stored = _wait_row(db, wait_id)
+                    mon = db.get(database.RegisteredWaitMonitorModel, wait_id)
+                    if stored is not None and stored.state == STATE_REGISTRATION_PENDING:
+                        stored.state = state
+                        stored.outcome_json = (
+                            json.dumps(outcome, sort_keys=True) if outcome else None
+                        )
+                        stored.updated_at = _isots(observed)
+                    if mon is not None and mon.state == "launch-intent":
+                        mon.state = "invalid"
+                        mon.outcome_json = json.dumps(outcome, sort_keys=True) if outcome else None
+                        mon.updated_at = _isots(observed)
+                    db.commit()
+                    result = _record(stored, now=observed) if stored else {}
+                    result["adopted"] = adopting_pending
+                    return result
+            except (OperationalError, SQLAlchemyError) as exc:
+                raise RegisteredWaitUnavailable(
+                    f"registration acknowledgement failed: {exc}"
+                ) from exc
+        # owner valid: adopt or launch
+        try:
+            from cli_agent_orchestrator.services.registered_wait_monitors import (
+                _helper_alive,
+                adopt_monitor_evidence,
+                launch_dormant_runner,
+                monitor_paths,
+                monitor_paths_for_monitor,
+            )
+
+            with database.SessionLocal() as db:
+                mon = db.get(database.RegisteredWaitMonitorModel, wait_id)
+                wait_row = _wait_row(db, wait_id)
+                if mon is None or wait_row is None:
+                    raise RegisteredWaitUnavailable("registration intent disappeared")
+                if mon.state != "launch-intent":
+                    if wait_row.state == STATE_REGISTRATION_PENDING:
+                        # only ack if monitor has proof (active/result)
+                        if mon.state in {"active", "result-ready", "wake-pending", "completed"}:
+                            wait_row.state = STATE_ACKNOWLEDGED
+                            wait_row.updated_at = _isots(observed)
+                            db.commit()
+                    result = _record(wait_row, now=observed)
+                    result["adopted"] = adopting_pending
+                    return result
+                # launch-intent
+                paths = monitor_paths_for_monitor(mon)
+                has_ready = paths["ready"].exists()
+                has_result = paths["result"].exists()
+                if adopting_pending and not has_ready and not has_result:
+                    # ambiguous window: stay pending, unmonitored, never relaunch
+                    result = _record(wait_row, now=observed)
+                    result["adopted"] = True
+                    return result
+                if not adopting_pending and not has_ready and not has_result:
+                    # fresh: launch dormant runner
+                    try:
+                        proc = launch_dormant_runner(paths)
+                        import time as _time
+
+                        deadline = _time.monotonic() + 2.0
+                        while _time.monotonic() < deadline:
+                            if paths["ready"].exists() or paths["result"].exists():
+                                break
+                            _time.sleep(0.05)
+                    except Exception as exc:
+                        raise RegisteredWaitUnavailable(f"monitor launch failed: {exc}") from exc
+                    # try to adopt whatever appeared
+                    adopted = adopt_monitor_evidence(wait_id)
+                    with database.SessionLocal() as db2:
+                        w2 = _wait_row(db2, wait_id)
+                        m2 = db2.get(database.RegisteredWaitMonitorModel, wait_id)
+                        # ack only if adoption succeeded (helper or result recorded)
+                        if (
+                            adopted is not None
+                            and w2 is not None
+                            and w2.state == STATE_REGISTRATION_PENDING
+                        ):
+                            # adopted already acked inside adopt if valid; ensure ack
+                            if m2 is not None and m2.state in {"active", "result-ready"}:
+                                if w2.state == STATE_REGISTRATION_PENDING:
+                                    w2.state = STATE_ACKNOWLEDGED
+                                    w2.updated_at = _isots(observed)
+                                    db2.commit()
+                        result = _record(w2, now=observed) if w2 else {}
+                        result["adopted"] = False
+                        return result
+                # adopting_pending with ready/result present: adopt
+                adopted = adopt_monitor_evidence(wait_id)
+                with database.SessionLocal() as db2:
+                    w2 = _wait_row(db2, wait_id)
+                    m2 = db2.get(database.RegisteredWaitMonitorModel, wait_id)
+                    if (
+                        adopted is not None
+                        and w2 is not None
+                        and w2.state == STATE_REGISTRATION_PENDING
+                    ):
+                        if m2 is not None and m2.state in {"active", "result-ready"}:
+                            w2.state = STATE_ACKNOWLEDGED
+                            w2.updated_at = _isots(observed)
+                            db2.commit()
+                    # if adoption failed (invalid/mismatch), stay pending
+                    result = _record(w2, now=observed) if w2 else {}
+                    result["adopted"] = adopting_pending
+                    return result
+        except RegisteredWaitError:
+            raise
+        except (OperationalError, SQLAlchemyError) as exc:
+            raise RegisteredWaitUnavailable(f"registration acknowledgement failed: {exc}") from exc
+
+    # timer path
     try:
         with database.SessionLocal() as db:
             stored = _wait_row(db, wait_id)
@@ -386,15 +647,63 @@ def cancel(
             if initial is None:
                 raise RegisteredWaitInvalid(f"unknown wait {wait_id}")
             message_id = initial.wake_message_id
+            # For adapter waits, also consider monitor wake
+            monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
+            monitor_wake = monitor.wake_message_id if monitor is not None else None
+            # need both ids for fencing
+            combined_wake = message_id if message_id is not None else monitor_wake
         lock: Any = nullcontext()
-        if message_id is not None:
+        if combined_wake is not None:
             from cli_agent_orchestrator.services.inbox_service import InboxService
 
-            lock = InboxService._managed_delivery_lock(message_id)
+            lock = InboxService._managed_delivery_lock(combined_wake)
         with lock, database.SessionLocal() as db:
             row = _wait_row(db, wait_id)
+            monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
             if row is None:
                 raise RegisteredWaitInvalid(f"unknown wait {wait_id}")
+            # check for adapter monitor hard boundary
+            request = None
+            try:
+                request = _request_from_row(row)
+            except Exception:
+                request = {}
+            has_adapter = isinstance(request, dict) and request.get("adapter") is not None
+            if has_adapter and monitor is not None:
+                # If monitor already terminal, respect history
+                if row.state in TERMINAL_STATES or monitor.state in {
+                    "completed",
+                    "invalid",
+                    "interrupted-by-stop",
+                    "cancelled",
+                }:
+                    result = _record(row, now=observed)
+                    result["adopted"] = True
+                    return result
+                # If wake already delivered (either wait or monitor), do not cancel
+                check_ids = [row.wake_message_id, monitor.wake_message_id]
+                for mid in check_ids:
+                    if mid is not None:
+                        msg = _inbox_row(db, mid)
+                        if msg is not None and msg.status == MessageStatus.DELIVERED.value:
+                            return _record(row, now=observed)
+                # For adapter, perform hard Stop fence
+                from cli_agent_orchestrator.services.registered_wait_monitors import stop_monitor
+
+                try:
+                    stop_monitor(wait_id, operation_id, actor)
+                except RegisteredWaitUnavailable:
+                    raise
+                except Exception as exc:
+                    raise RegisteredWaitUnavailable(f"monitor cancel failed: {exc}") from exc
+                # stop_monitor committed in its own session; need fresh read
+                db.expire_all()
+                fresh_row = _wait_row(db, wait_id)
+                result = (
+                    _record(fresh_row, now=observed) if fresh_row else _record(row, now=observed)
+                )
+                result["adopted"] = False
+                return result
             if row.wake_message_id != message_id:
                 # Expiry installed the immutable inbox row between the first
                 # read and lock selection. Retry once through its delivery
@@ -536,6 +845,61 @@ def process_due(
     return results
 
 
+def _settle_expiry_wake(
+    wait_id: str,
+    message_id: int,
+    terminal_id: str,
+    observed: datetime,
+    receipt_probe: Optional[ReceiptProbe],
+    ambiguity_grace_seconds: int,
+) -> Optional[dict[str, Any]]:
+    """Settle an installed wake from durable evidence without repeating admission."""
+    receipt = receipt_probe(terminal_id, message_id) if receipt_probe else None
+    with database.SessionLocal() as db:
+        current = _wait_row(db, wait_id)
+        if current is None or current.state != STATE_EXPIRY_WAKE_PENDING:
+            return None
+        inbox = _inbox_row(db, message_id)
+        if receipt is not None:
+            _mark_terminal(
+                current,
+                state=STATE_RESOLVED,
+                reason="wake-confirmed",
+                detail=f"durable receiver receipt for inbox message {message_id}",
+                now=observed,
+            )
+        elif inbox is not None and inbox.status == MessageStatus.DELIVERED.value:
+            _mark_terminal(
+                current,
+                state=STATE_RESOLVED,
+                reason="wake-delivered",
+                detail=f"inbox message {message_id} reached durable DELIVERED",
+                now=observed,
+            )
+        elif inbox is not None and inbox.status == MessageStatus.FAILED.value:
+            _mark_terminal(
+                current,
+                state=STATE_INVALID,
+                reason="wake-refused",
+                detail=f"inbox message {message_id} was refused",
+                now=observed,
+            )
+        elif observed >= _parse_time(current.wake_pending_since) + timedelta(
+            seconds=ambiguity_grace_seconds
+        ):
+            if inbox is not None and inbox.status == MessageStatus.PENDING.value:
+                inbox.status = MessageStatus.FAILED.value
+            _mark_terminal(
+                current,
+                state=STATE_INVALID,
+                reason="expiry-wake-ambiguous",
+                detail=f"no durable delivery evidence after {ambiguity_grace_seconds} seconds",
+                now=observed,
+            )
+        db.commit()
+        return _record(current, now=observed)
+
+
 def _process_due_wait(
     wait_id: str,
     *,
@@ -546,39 +910,59 @@ def _process_due_wait(
     ambiguity_grace_seconds: int,
 ) -> Optional[dict[str, Any]]:
     """Advance one wait so an unreadable row cannot starve later rows."""
+    pending_wake: Optional[tuple[str, int]] = None
     with database.SessionLocal() as db:
         row = _wait_row(db, wait_id)
         if row is None or row.state not in ACTIVE_STATES:
             return None
         request = _request_from_row(row)
-        owner = _owner(request)
-        verdict = wait_admission.verify_owner(owner, db=db)
-        if verdict["denial_reason"] is not None:
-            if verdict["denial_reason"] == wait_admission.DENY_OWNER_UNREADABLE:
-                return {"wait_id": wait_id, "state": "owner-unreadable"}
-            _mark_terminal(
-                row,
-                state=STATE_INVALID,
-                reason=str(verdict["denial_reason"]),
-                detail=verdict["detail"],
-                now=observed,
-            )
-            db.commit()
-            return _record(row, now=observed)
-        if row.state == STATE_REGISTRATION_PENDING:
-            row.state = STATE_ACKNOWLEDGED
-            row.updated_at = _isots(observed)
-            db.commit()
-            if observed < _parse_time(row.deadline_at):
-                return None
-        if observed < _parse_time(row.deadline_at) and row.state == STATE_ACKNOWLEDGED:
+        # Adapter waits are never processed as scheduled timers.
+        if isinstance(request, dict) and request.get("adapter") is not None:
             return None
-        if row.state == STATE_ACKNOWLEDGED:
-            row.state = STATE_EXPIRY_INTENT
-            row.updated_at = _isots(observed)
-            db.commit()  # expiry intent before any delivery I/O
-        if input_held and input_held(row.owner_terminal_id, row.owner_generation):
-            return {"wait_id": wait_id, "state": STATE_EXPIRY_INTENT}
+        if row.state == STATE_EXPIRY_WAKE_PENDING:
+            if row.wake_message_id is None:
+                raise RegisteredWaitUnavailable(f"wait {wait_id} has no installed wake")
+            pending_wake = (row.owner_terminal_id, int(row.wake_message_id))
+        else:
+            owner = _owner(request)
+            verdict = wait_admission.verify_owner(owner, db=db)
+            if verdict["denial_reason"] is not None:
+                if verdict["denial_reason"] == wait_admission.DENY_OWNER_UNREADABLE:
+                    return {"wait_id": wait_id, "state": "owner-unreadable"}
+                _mark_terminal(
+                    row,
+                    state=STATE_INVALID,
+                    reason=str(verdict["denial_reason"]),
+                    detail=verdict["detail"],
+                    now=observed,
+                )
+                db.commit()
+                return _record(row, now=observed)
+            if row.state == STATE_REGISTRATION_PENDING:
+                row.state = STATE_ACKNOWLEDGED
+                row.updated_at = _isots(observed)
+                db.commit()
+                if observed < _parse_time(row.deadline_at):
+                    return None
+            if observed < _parse_time(row.deadline_at) and row.state == STATE_ACKNOWLEDGED:
+                return None
+            if row.state == STATE_ACKNOWLEDGED:
+                row.state = STATE_EXPIRY_INTENT
+                row.updated_at = _isots(observed)
+                db.commit()  # expiry intent before any delivery I/O
+            if input_held and input_held(row.owner_terminal_id, row.owner_generation):
+                return {"wait_id": wait_id, "state": STATE_EXPIRY_INTENT}
+
+    if pending_wake is not None:
+        terminal_id, message_id = pending_wake
+        return _settle_expiry_wake(
+            wait_id,
+            message_id,
+            terminal_id,
+            observed,
+            receipt_probe,
+            ambiguity_grace_seconds,
+        )
 
     # Admit once, outside the state transaction. A retry adopts this exact
     # immutable verdict. Cancellation may win while admission runs.
@@ -673,54 +1057,23 @@ def _process_due_wait(
             # queried during grace; they are never recreated or resent.
             pass
 
-    receipt = receipt_probe(terminal_id, message_id_int) if receipt_probe else None
-    with database.SessionLocal() as db:
-        current = _wait_row(db, wait_id)
-        if current is None or current.state != STATE_EXPIRY_WAKE_PENDING:
-            return None
-        inbox = _inbox_row(db, message_id_int)
-        if receipt is not None:
-            _mark_terminal(
-                current,
-                state=STATE_RESOLVED,
-                reason="wake-confirmed",
-                detail=f"durable receiver receipt for inbox message {message_id_int}",
-                now=observed,
-            )
-        elif inbox is not None and inbox.status == MessageStatus.DELIVERED.value:
-            _mark_terminal(
-                current,
-                state=STATE_RESOLVED,
-                reason="wake-delivered",
-                detail=f"inbox message {message_id_int} reached durable DELIVERED",
-                now=observed,
-            )
-        elif inbox is not None and inbox.status == MessageStatus.FAILED.value:
-            _mark_terminal(
-                current,
-                state=STATE_INVALID,
-                reason="wake-refused",
-                detail=f"inbox message {message_id_int} was refused",
-                now=observed,
-            )
-        elif observed >= _parse_time(current.wake_pending_since) + timedelta(
-            seconds=ambiguity_grace_seconds
-        ):
-            if inbox is not None and inbox.status == MessageStatus.PENDING.value:
-                inbox.status = MessageStatus.FAILED.value
-            _mark_terminal(
-                current,
-                state=STATE_INVALID,
-                reason="expiry-wake-ambiguous",
-                detail=f"no durable delivery evidence after {ambiguity_grace_seconds} seconds",
-                now=observed,
-            )
-        db.commit()
-        return _record(current, now=observed)
+    return _settle_expiry_wake(
+        wait_id,
+        message_id_int,
+        terminal_id,
+        observed,
+        receipt_probe,
+        ambiguity_grace_seconds,
+    )
 
 
 def deadman_disposition(terminal_id: str, generation: str) -> dict[str, Any]:
-    """Owner-scoped ordinary-deadman decision; unreadable is not absence."""
+    """Owner-scoped ordinary-deadman decision; unreadable is not absence.
+
+    Pure read: settling of stale monitors is performed by ``process_monitors``;
+    deadman only reads durable truth and suppresses only exact monitored+
+    acknowledged before deadline.  Unreadable suppresses only this exact wait.
+    """
     try:
         with database.SessionLocal() as db:
             if not sa_inspect(db.get_bind()).has_table(database.RegisteredWaitModel.__tablename__):
@@ -752,6 +1105,42 @@ def deadman_disposition(terminal_id: str, generation: str) -> dict[str, Any]:
                         "suppress_ordinary_deadman": True,
                         "detail": verdict["detail"],
                     }
+                # Adapter waits: health drives suppression
+                if isinstance(request, dict) and request.get("adapter") is not None:
+                    try:
+                        from cli_agent_orchestrator.services.registered_wait_monitors import (
+                            monitor_health_for,
+                        )
+
+                        health = monitor_health_for(row.wait_id)
+                    except Exception as exc:
+                        return {
+                            "state": "unreadable",
+                            "suppress_ordinary_deadman": True,
+                            "detail": str(exc),
+                        }
+                    detail = str(health.get("detail") or "")
+                    if health.get("health") == "monitor-stale" or detail.startswith("unreadable"):
+                        if detail.startswith("unreadable"):
+                            return {
+                                "state": "unreadable",
+                                "suppress_ordinary_deadman": True,
+                                "detail": detail,
+                            }
+                        # stale: do not suppress, let process_monitors settle
+                        continue
+                    if (
+                        verdict["denial_reason"] is None
+                        and row.state == STATE_ACKNOWLEDGED
+                        and _now() < _parse_time(str(row.deadline_at))
+                        and health.get("health") == "monitored"
+                    ):
+                        return {
+                            "state": STATE_ACKNOWLEDGED,
+                            "wait_id": row.wait_id,
+                            "suppress_ordinary_deadman": True,
+                        }
+                    continue
                 if (
                     verdict["denial_reason"] is None
                     and row.state == STATE_ACKNOWLEDGED
@@ -792,15 +1181,58 @@ def interrupt_session_waits(session_name: str, operation_id: str) -> Sequence[Ma
         for wait_id in wait_ids:
             with database.SessionLocal() as db:
                 initial = _wait_row(db, wait_id)
+                monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
+                # For adapter, need monitor wake id for fencing
                 message_id = initial.wake_message_id if initial is not None else None
+                monitor_wake = monitor.wake_message_id if monitor is not None else None
+                combined = message_id if message_id is not None else monitor_wake
             lock: Any = nullcontext()
-            if message_id is not None:
+            if combined is not None:
                 from cli_agent_orchestrator.services.inbox_service import InboxService
 
-                lock = InboxService._managed_delivery_lock(message_id)
+                lock = InboxService._managed_delivery_lock(combined)
             with lock, database.SessionLocal() as db:
                 row = _wait_row(db, wait_id)
+                monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
                 if row is None or row.state not in ACTIVE_STATES:
+                    continue
+                # For adapter waits, use hard Stop with pid/marker validation
+                try:
+                    req = _request_from_row(row)
+                except Exception:
+                    req = {}
+                has_adapter = isinstance(req, dict) and req.get("adapter") is not None
+                if has_adapter and monitor is not None:
+                    # If monitor already terminal or wake delivered, don't rewrite
+                    if row.state in TERMINAL_STATES or monitor.state in {
+                        "completed",
+                        "invalid",
+                        "interrupted-by-stop",
+                        "cancelled",
+                    }:
+                        continue
+                    check_ids = [row.wake_message_id, monitor.wake_message_id]
+                    delivered = False
+                    for mid in check_ids:
+                        if mid is not None:
+                            msg = _inbox_row(db, mid)
+                            if msg is not None and msg.status == MessageStatus.DELIVERED.value:
+                                delivered = True
+                                break
+                    if delivered:
+                        continue
+                    # Attempt hard termination
+                    from cli_agent_orchestrator.services.registered_wait_monitors import (
+                        stop_monitor,
+                    )
+
+                    try:
+                        stop_monitor(wait_id, operation_id, "stop")
+                    except RegisteredWaitUnavailable:
+                        raise
+                    except Exception as exc:
+                        raise RegisteredWaitUnavailable(f"monitor stop failed: {exc}") from exc
+                    results.append({"wait_id": row.wait_id, "state": STATE_INTERRUPTED})
                     continue
                 if row.wake_message_id != message_id:
                     # Expiry installed a message while Stop selected the row.
@@ -822,5 +1254,29 @@ def interrupt_session_waits(session_name: str, operation_id: str) -> Sequence[Ma
                 results.append({"wait_id": row.wait_id, "state": row.state})
                 db.commit()
         return results
+    except RegisteredWaitError:
+        raise
     except (OperationalError, SQLAlchemyError) as exc:
         raise RegisteredWaitUnavailable(f"Stop wait interruption failed: {exc}") from exc
+
+
+def process_monitors(
+    *,
+    now: Optional[datetime] = None,
+    deliver: Optional[Callable[[str], None]] = None,
+    receipt_probe: Optional[Callable[[str, int], Optional[Mapping[str, Any]]]] = None,
+    attach_result: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
+    input_held: Optional[Callable[[str, str], bool]] = None,
+    ambiguity_grace_seconds: int = DEFAULT_AMBIGUITY_GRACE_SECONDS,
+) -> list[dict[str, Any]]:
+    """Sentinel entry point for monitor result persistence and wake delivery."""
+    from cli_agent_orchestrator.services.registered_wait_monitors import process_monitors as _pm
+
+    return _pm(
+        now=now,
+        deliver=deliver,
+        receipt_probe=receipt_probe,
+        attach_result=attach_result,
+        input_held=input_held,
+        ambiguity_grace_seconds=ambiguity_grace_seconds,
+    )

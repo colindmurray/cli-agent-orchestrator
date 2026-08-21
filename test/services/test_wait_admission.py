@@ -714,7 +714,11 @@ class TestConsumerBoundary:
             for path in scanned
             if path.name != "wait_admission.py" and "wait_admission" in path.read_text()
         ]
-        assert set(offenders) == {"api/wait.py", "services/registered_waits.py"}
+        assert set(offenders) == {
+            "api/wait.py",
+            "services/registered_waits.py",
+            "services/registered_wait_monitors.py",
+        }
 
     def test_admitting_writes_exactly_one_row_and_touches_no_other_table(self):
         bound = _bind(suffix="1")

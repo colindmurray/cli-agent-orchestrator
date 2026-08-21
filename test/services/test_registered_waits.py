@@ -285,6 +285,25 @@ def test_refused_wake_invalidates_and_ambiguity_uses_grace_without_resend():
     assert _inbox_rows()[1].status == MessageStatus.FAILED
 
 
+def test_failed_wake_settles_from_durable_evidence_before_owner_reverification(monkeypatch):
+    bound = _bind()
+    refused = waits.register(_request(bound, duration=1), now=NOW)
+    waits.process_due(now=NOW + timedelta(seconds=1))
+    with database.SessionLocal() as db:
+        row = db.get(database.RegisteredWaitModel, refused["wait_id"])
+        db.get(database.InboxModel, row.wake_message_id).status = MessageStatus.FAILED.value
+        db.commit()
+
+    def unavailable(*_args, **_kwargs):
+        raise wait_admission.WaitAdmissionUnavailable("owner store unavailable")
+
+    monkeypatch.setattr(wait_admission, "verify_owner", unavailable)
+    result = waits.process_due(now=NOW + timedelta(seconds=2))[-1]
+
+    assert result["state"] == waits.STATE_INVALID
+    assert result["outcome"]["reason_code"] == "wake-refused"
+
+
 def test_unreadable_due_wait_does_not_starve_a_later_valid_wait():
     bound = _bind()
     unreadable = waits.register(_request(bound, duration=1, name="unreadable"), now=NOW)

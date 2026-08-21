@@ -1729,6 +1729,42 @@ class RegisteredWaitModel(Base):
     )
 
 
+class RegisteredWaitMonitorModel(Base):
+    """One bounded monitor bound one-to-one to a registered wait and its digest.
+
+    Minimal durable truth: ``wait_id`` + ``request_digest`` already bind the
+    exact ``RegisteredWait`` row and its adapter.  One durable ``run_dir``
+    carries the deterministic file layout (spec/ready/result/activate/stop)
+    so adoption survives a state-root change.  All filenames are derived
+    from ``run_dir``; ``operation`` and adapter are derived from the wait
+    request.  Only ``state`` is indexed; no duplicate unique indexes.
+    """
+
+    __tablename__ = "registered_wait_monitors"
+
+    wait_id = Column(Text, primary_key=True)
+    request_digest = Column(Text, nullable=False)
+    run_dir = Column(Text, nullable=False)
+    state = Column(Text, nullable=False)
+    helper_pid = Column(Integer, nullable=True)
+    helper_start_marker = Column(Text, nullable=True)
+    child_pid = Column(Integer, nullable=True)
+    child_start_marker = Column(Text, nullable=True)
+    pgid = Column(Integer, nullable=True)
+    result_json = Column(Text, nullable=True)
+    result_digest = Column(Text, nullable=True)
+    communication_id = Column(Text, nullable=True)
+    attachment_id = Column(Text, nullable=True)
+    attachment_digest = Column(Text, nullable=True)
+    wake_message_id = Column(Integer, nullable=True)
+    wake_pending_since = Column(Text, nullable=True)
+    outcome_json = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False)
+    updated_at = Column(Text, nullable=False)
+
+    __table_args__ = (Index("ix_registered_wait_monitors_state", "state"),)
+
+
 class NativeStatusRepairEvidenceModel(Base):
     """One immutable bounded record of a native /status identity repair.
 
@@ -2489,6 +2525,7 @@ def init_db() -> None:
     _migrate_supervisor_drain()
     _migrate_wait_message_admissions()
     _migrate_registered_waits()
+    _migrate_registered_wait_monitors()
     _migrate_native_status_repair()
     _migrate_provider_recovery_episodes()
     _migrate_native_status_observation_attempt()
@@ -3934,6 +3971,14 @@ def _migrate_registered_waits() -> None:
         RegisteredWaitModel.__table__.create(bind=engine, checkfirst=True)
     except Exception as exc:  # noqa: BLE001 - operation paths fail closed
         logger.warning("registered-wait migration failed: %s", exc)
+
+
+def _migrate_registered_wait_monitors() -> None:
+    """Create the bounded wait-monitor store on existing databases."""
+    try:
+        RegisteredWaitMonitorModel.__table__.create(bind=engine, checkfirst=True)
+    except Exception as exc:  # noqa: BLE001 - operation paths fail closed
+        logger.warning("registered-wait-monitor migration failed: %s", exc)
 
 
 def _migrate_native_status_repair() -> None:
