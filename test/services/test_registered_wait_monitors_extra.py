@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,6 +47,7 @@ def _isolate_state(tmp_path, monkeypatch):
     database.Base.metadata.create_all(bind=engine)
     monkeypatch.setattr(monitors, "CAO_HOME_DIR", tmp_path)
     monkeypatch.setenv("CAO_WAIT_RUNNER_FAKE_MARKER", "test-marker")
+    monkeypatch.setenv("CAO_M7_WAIT_MONITOR_CONSUMER_ENABLED", "true")
     yield
     engine.dispose()
 
@@ -95,7 +97,9 @@ def _adapter(root: Path) -> dict[str, Any]:
     }
 
 
-def _pending(tmp_path, monkeypatch, name: str, duration: int = 60) -> dict[str, Any]:
+def _pending(
+    tmp_path, monkeypatch, name: str, duration: int = 60, terminal: str = "term-1"
+) -> dict[str, Any]:
     monkeypatch.setattr(monitors, "launch_dormant_runner", lambda _paths: None)
     request = RegistrationRequest(
         operation_id=str(uuid.uuid4()),
@@ -105,7 +109,7 @@ def _pending(tmp_path, monkeypatch, name: str, duration: int = 60) -> dict[str, 
         name=name,
         description="deterministic monitor test",
         duration_seconds=duration,
-        owner=_owner(name),
+        owner=_owner(name, terminal),
         adapter=_adapter(tmp_path / name),
     )
     return registered_waits.register(request, now=NOW)
@@ -514,3 +518,196 @@ def test_get_monitor_projects_durable_nonsecret_state(tmp_path, monkeypatch):
     assert "created_at" not in projected
     assert "updated_at" not in projected
     assert monitors.get_monitor(str(uuid.uuid4())) is None
+
+
+def test_adapter_cancel_records_cancelled_while_stop_records_interrupted(tmp_path, monkeypatch):
+    cancelled = _pending(tmp_path, monkeypatch, "cancel-vocabulary")
+    operation_id = str(uuid.uuid4())
+    result = registered_waits.cancel(
+        cancelled["wait_id"], operation_id=operation_id, actor="worker"
+    )
+    assert result["state"] == "cancelled"
+    assert _monitor(cancelled["wait_id"]).state == "cancelled"
+    assert (
+        registered_waits.cancel(cancelled["wait_id"], operation_id=operation_id, actor="worker")[
+            "adopted"
+        ]
+        is True
+    )
+    with pytest.raises(registered_waits.RegisteredWaitConflict, match="divergent replay"):
+        registered_waits.cancel(
+            cancelled["wait_id"], operation_id=operation_id, actor="other-worker"
+        )
+
+    stopped = _pending(tmp_path, monkeypatch, "stop-vocabulary", terminal="term-2")
+    result = registered_waits.interrupt_session_waits("stop-vocabulary", str(uuid.uuid4()))
+    assert result == [{"wait_id": stopped["wait_id"], "state": "interrupted-by-stop"}]
+    assert _monitor(stopped["wait_id"]).state == "interrupted-by-stop"
+
+
+@pytest.mark.parametrize(
+    ("inbox_status", "state", "reason"),
+    [
+        (MessageStatus.DELIVERED.value, "resolved", "wake-delivered"),
+        (MessageStatus.FAILED.value, "invalid", "wake-refused"),
+    ],
+)
+def test_installed_monitor_wake_settles_before_owner_reverification(
+    tmp_path, monkeypatch, inbox_status, state, reason
+):
+    record = _pending(tmp_path, monkeypatch, f"settle-{inbox_status}")
+    _write_result(record["wait_id"])
+    registered_waits.process_monitors(
+        now=NOW + timedelta(seconds=1), attach_result=_good_attachment
+    )
+    with database.SessionLocal() as db:
+        monitor = db.get(database.RegisteredWaitMonitorModel, record["wait_id"])
+        db.get(database.InboxModel, monitor.wake_message_id).status = inbox_status
+        db.commit()
+    monkeypatch.setattr(
+        wait_admission,
+        "verify_owner",
+        lambda _owner, db=None: {
+            "denial_reason": wait_admission.DENY_OWNER_RETIRED,
+            "detail": "owner retired after wake installation",
+        },
+    )
+
+    registered_waits.process_monitors(now=NOW + timedelta(seconds=2))
+
+    final = registered_waits.get(record["wait_id"])
+    assert final["state"] == state
+    assert final["outcome"]["reason_code"] == reason
+
+
+def test_active_adoption_repairs_missing_activation_after_commit_crash(tmp_path, monkeypatch):
+    record = _pending(tmp_path, monkeypatch, "activation-repair")
+    paths = _paths(record["wait_id"])
+    paths["ready"].write_text(json.dumps(_ready(record["wait_id"])), encoding="utf-8")
+    monkeypatch.setattr(monitors, "_helper_alive", lambda _pid, _marker: True)
+    assert monitors.adopt_monitor_evidence(record["wait_id"])["state"] == "active"
+    paths["activate"].unlink()
+
+    assert monitors.adopt_monitor_evidence(record["wait_id"])["state"] == "active"
+    assert paths["activate"].exists()
+
+
+def test_terminal_commit_between_wake_creation_and_install_prevents_late_delivery(
+    tmp_path, monkeypatch
+):
+    record = _pending(tmp_path, monkeypatch, "wake-cas")
+    _write_result(record["wait_id"])
+    deliveries = []
+
+    def terminal_wins(db, wait_row, monitor, _request):
+        wait_id = wait_row.wait_id
+        db.rollback()
+        with database.SessionLocal() as winner:
+            current_wait = winner.get(database.RegisteredWaitModel, wait_id)
+            current_monitor = winner.get(database.RegisteredWaitMonitorModel, wait_id)
+            current_wait.state = "cancelled"
+            current_monitor.state = "cancelled"
+            inbox = database.InboxModel(
+                sender_id=current_wait.owner_terminal_id,
+                receiver_id=current_wait.owner_terminal_id,
+                message="must not deliver",
+                status=MessageStatus.PENDING.value,
+            )
+            winner.add(inbox)
+            winner.commit()
+            return inbox.id
+
+    monkeypatch.setattr(monitors, "_create_wake", terminal_wins)
+    registered_waits.process_monitors(
+        now=NOW + timedelta(seconds=1),
+        attach_result=_good_attachment,
+        deliver=deliveries.append,
+    )
+
+    assert deliveries == []
+    assert registered_waits.get(record["wait_id"])["state"] == "cancelled"
+    assert _monitor(record["wait_id"]).state == "cancelled"
+
+
+def test_wake_installation_and_cancel_share_the_wait_stripe(tmp_path, monkeypatch):
+    record = _pending(tmp_path, monkeypatch, "wake-stripe")
+    _write_result(record["wait_id"])
+    entered = threading.Event()
+    release = threading.Event()
+    cancelled = threading.Event()
+    original_create = monitors._create_wake
+
+    def paused_create(*args):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_create(*args)
+
+    monkeypatch.setattr(monitors, "_create_wake", paused_create)
+    processor = threading.Thread(
+        target=lambda: registered_waits.process_monitors(
+            now=NOW + timedelta(seconds=1), attach_result=_good_attachment
+        )
+    )
+
+    def cancel_wait():
+        registered_waits.cancel(record["wait_id"], operation_id=str(uuid.uuid4()), actor="worker")
+        cancelled.set()
+
+    processor.start()
+    assert entered.wait(timeout=5)
+    canceller = threading.Thread(target=cancel_wait)
+    canceller.start()
+    serialized = not cancelled.wait(timeout=0.2)
+    release.set()
+    processor.join(timeout=5)
+    canceller.join(timeout=5)
+
+    assert serialized
+    assert not processor.is_alive()
+    assert not canceller.is_alive()
+    assert registered_waits.get(record["wait_id"])["state"] == "cancelled"
+
+
+def test_adapter_capability_stays_dark_without_consumer(monkeypatch):
+    monkeypatch.delenv("CAO_M7_WAIT_MONITOR_CONSUMER_ENABLED")
+    assert registered_waits.capability()["adapter_support"] == []
+
+
+def test_adapter_registration_refuses_without_consumer(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAO_M7_WAIT_MONITOR_CONSUMER_ENABLED")
+    with pytest.raises(registered_waits.RegisteredWaitConflict, match="monitor consumer"):
+        registered_waits.register(
+            RegistrationRequest(
+                operation_id=str(uuid.uuid4()),
+                session_name="dark",
+                project="p",
+                task_id="t",
+                name="dark",
+                description="consumer absent",
+                duration_seconds=60,
+                owner=_owner("dark"),
+                adapter=_adapter(tmp_path / "dark"),
+            ),
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize("failure", ["consumer-absent", "exception", "invalid-receipt"])
+def test_result_attachment_failure_settles_at_registered_deadline(tmp_path, monkeypatch, failure):
+    record = _pending(tmp_path, monkeypatch, "attachment-deadline", duration=1)
+    _write_result(record["wait_id"])
+    if failure == "consumer-absent":
+        attach_result = None
+    elif failure == "invalid-receipt":
+        attach_result = lambda _result: {}
+    else:
+        attach_result = lambda _result: (_ for _ in ()).throw(RuntimeError("bridge down"))
+
+    result = registered_waits.process_monitors(
+        now=NOW + timedelta(seconds=1),
+        attach_result=attach_result,
+    )
+
+    assert result[0]["state"] == "invalid"
+    final = registered_waits.get(record["wait_id"])
+    assert final["outcome"]["reason_code"] == "monitor-attachment-deadline"

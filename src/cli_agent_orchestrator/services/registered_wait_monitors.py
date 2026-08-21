@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -47,6 +48,11 @@ _terminate_pgid = wait_runner._terminate_pgid
 _MESSAGE_NAMESPACE = uuid.UUID("07000000-2000-4700-b7e2-000000000009")
 _WAKE_NAMESPACE = uuid.UUID("07000000-2000-4700-b7e2-000000000008")
 _WAIT_TERMINAL_STATES = (MONITOR_TERMINAL_STATES - {MONITOR_COMPLETED}) | {"resolved"}
+_MONITOR_LOCKS = tuple(threading.RLock() for _ in range(64))
+
+
+def _monitor_lock(wait_id: str) -> threading.RLock:
+    return _MONITOR_LOCKS[hash(wait_id) % len(_MONITOR_LOCKS)]
 
 
 def _monitor_root() -> Path:
@@ -360,6 +366,7 @@ def _ack_wait(wait_row: Any, observed: datetime) -> None:
 def adopt_monitor_evidence(wait_id: str) -> Optional[dict[str, Any]]:
     observed = _now()
     activate: Optional[tuple[Path, str]] = None
+    ready: Optional[dict[str, Any]] = None
     with database.SessionLocal() as db:
         monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
         wait_row = db.get(database.RegisteredWaitModel, wait_id)
@@ -390,22 +397,31 @@ def adopt_monitor_evidence(wait_id: str) -> Optional[dict[str, Any]]:
             db.commit()
             return {"state": MONITOR_RESULT_READY, "result": result}
 
-        if monitor.state != MONITOR_LAUNCH_INTENT:
-            return None
         status, raw_ready = _load_json(paths["ready"])
         ready = _validate_ready(raw_ready, spec) if status == "ok" else None
         if ready is None or not _helper_alive(ready["pid"], ready["start_marker"]):
             return None
-        monitor.helper_pid = ready["pid"]
-        monitor.helper_start_marker = ready["start_marker"]
-        monitor.child_pid = ready.get("child_pid")
-        monitor.child_start_marker = ready.get("child_start_marker")
-        monitor.pgid = ready.get("pgid")
-        monitor.state = MONITOR_ACTIVE
-        monitor.updated_at = _isots(observed)
-        _ack_wait(wait_row, observed)
-        db.commit()
-        activate = (paths["activate"], monitor.request_digest)
+        if monitor.state == MONITOR_ACTIVE:
+            if (
+                ready["pid"] != monitor.helper_pid
+                or ready["start_marker"] != monitor.helper_start_marker
+            ):
+                return None
+            if ready["phase"] == "waiting-for-activation":
+                activate = (paths["activate"], monitor.request_digest)
+        elif monitor.state != MONITOR_LAUNCH_INTENT:
+            return None
+        else:
+            monitor.helper_pid = ready["pid"]
+            monitor.helper_start_marker = ready["start_marker"]
+            monitor.child_pid = ready.get("child_pid")
+            monitor.child_start_marker = ready.get("child_start_marker")
+            monitor.pgid = ready.get("pgid")
+            monitor.state = MONITOR_ACTIVE
+            monitor.updated_at = _isots(observed)
+            _ack_wait(wait_row, observed)
+            db.commit()
+            activate = (paths["activate"], monitor.request_digest)
 
     if activate is not None and not activate[0].exists():
         _write_control(activate[0], "activate", wait_id, activate[1])
@@ -469,15 +485,16 @@ def process_monitors(
     results = []
     for wait_id in ids:
         try:
-            result = _process_one_monitor(
-                wait_id,
-                observed=observed,
-                deliver=deliver,
-                receipt_probe=receipt_probe,
-                attach_result=attach_result,
-                input_held=input_held,
-                ambiguity_grace_seconds=ambiguity_grace_seconds,
-            )
+            with _monitor_lock(wait_id):
+                result = _process_one_monitor(
+                    wait_id,
+                    observed=observed,
+                    deliver=deliver,
+                    receipt_probe=receipt_probe,
+                    attach_result=attach_result,
+                    input_held=input_held,
+                    ambiguity_grace_seconds=ambiguity_grace_seconds,
+                )
         except (OperationalError, SQLAlchemyError) as exc:
             result = _view(wait_id, "unreadable", detail=f"unreadable:store:{exc}")
         if result is not None:
@@ -509,6 +526,29 @@ def _attachment_valid(value: Any, digest: Optional[str]) -> bool:
         all(isinstance(item, str) and item.strip() for item in strings)
         and value.get("digest") == digest
     )
+
+
+def _attachment_retry(
+    db: Any, wait_row: Any, monitor: Any, observed: datetime, detail: str
+) -> dict[str, Any]:
+    if observed < _parse_time(wait_row.deadline_at):
+        return _view(
+            wait_row.wait_id,
+            MONITOR_RESULT_READY,
+            health=HEALTH_UNMONITORED,
+            detail=detail,
+        )
+    _set_terminal(
+        wait_row,
+        monitor,
+        wait_state="invalid",
+        monitor_state=MONITOR_INVALID,
+        reason="monitor-attachment-deadline",
+        detail=detail,
+        observed=observed,
+    )
+    db.commit()
+    return _view(wait_row.wait_id, wait_row.state, health=HEALTH_UNMONITORED, detail=detail)
 
 
 def _create_wake(db: Any, wait_row: Any, monitor: Any, request: dict[str, Any]) -> int:
@@ -624,6 +664,26 @@ def _process_one_monitor(
     ambiguity_grace_seconds: int,
 ) -> Optional[dict[str, Any]]:
     adopt_monitor_evidence(wait_id)
+    pending: Optional[tuple[int, str]] = None
+    with database.SessionLocal() as db:
+        monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
+        wait_row = db.get(database.RegisteredWaitModel, wait_id)
+        if (
+            monitor is not None
+            and wait_row is not None
+            and monitor.state == MONITOR_WAKE_PENDING
+            and monitor.wake_message_id is not None
+        ):
+            pending = (int(monitor.wake_message_id), wait_row.owner_terminal_id)
+    if pending is not None:
+        return _settle_wake(
+            wait_id,
+            pending[0],
+            pending[1],
+            observed,
+            receipt_probe,
+            ambiguity_grace_seconds,
+        )
     with database.SessionLocal() as db:
         monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
         wait_row = db.get(database.RegisteredWaitModel, wait_id)
@@ -679,7 +739,9 @@ def _process_one_monitor(
             return _view(wait_id, monitor.state, health=HEALTH_UNMONITORED, detail=hold)
         if monitor.state == MONITOR_RESULT_READY and monitor.attachment_id is None:
             if attach_result is None:
-                return _view(wait_id, MONITOR_RESULT_READY, health=HEALTH_UNMONITORED)
+                return _attachment_retry(
+                    db, wait_row, monitor, observed, "attachment-consumer-absent"
+                )
             try:
                 attachment = attach_result(
                     {
@@ -690,14 +752,13 @@ def _process_one_monitor(
                         "result_digest": monitor.result_digest,
                     }
                 )
-            except Exception:
-                return _view(wait_id, MONITOR_RESULT_READY, health=HEALTH_UNMONITORED)
+            except Exception as exc:
+                return _attachment_retry(
+                    db, wait_row, monitor, observed, f"attachment-failed:{exc}"
+                )
             if not _attachment_valid(attachment, monitor.result_digest):
-                return _view(
-                    wait_id,
-                    MONITOR_RESULT_READY,
-                    health=HEALTH_UNMONITORED,
-                    detail="attachment-receipt-invalid",
+                return _attachment_retry(
+                    db, wait_row, monitor, observed, "attachment-receipt-invalid"
                 )
             monitor.communication_id = attachment["communication_id"]
             monitor.attachment_id = attachment["attachment_id"]
@@ -726,10 +787,26 @@ def _process_one_monitor(
                 )
                 db.commit()
                 return _view(wait_id, wait_row.state)
-            monitor.wake_message_id = wake_id
-            monitor.wake_pending_since = _isots(observed)
-            monitor.state = MONITOR_WAKE_PENDING
-            monitor.updated_at = _isots(observed)
+            installed = (
+                db.query(database.RegisteredWaitMonitorModel)
+                .filter(
+                    database.RegisteredWaitMonitorModel.wait_id == wait_id,
+                    database.RegisteredWaitMonitorModel.state == MONITOR_RESULT_READY,
+                    database.RegisteredWaitMonitorModel.wake_message_id.is_(None),
+                )
+                .update(
+                    {
+                        database.RegisteredWaitMonitorModel.wake_message_id: wake_id,
+                        database.RegisteredWaitMonitorModel.wake_pending_since: _isots(observed),
+                        database.RegisteredWaitMonitorModel.state: MONITOR_WAKE_PENDING,
+                        database.RegisteredWaitMonitorModel.updated_at: _isots(observed),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if installed != 1:
+                db.rollback()
+                return None
             db.commit()
             created = True
         else:
@@ -768,9 +845,14 @@ def _terminate_bound_group(
         raise unavailable(f"{label} still live after termination")
 
 
-def stop_monitor(wait_id: str, operation_id: str, actor: str) -> dict[str, Any]:
+def stop_monitor(
+    wait_id: str,
+    operation_id: str,
+    actor: str,
+    *,
+    disposition: str = MONITOR_INTERRUPTED,
+) -> dict[str, Any]:
     from cli_agent_orchestrator.services.registered_waits import (
-        RegisteredWaitInvalid,
         RegisteredWaitUnavailable,
     )
 
@@ -778,6 +860,33 @@ def stop_monitor(wait_id: str, operation_id: str, actor: str) -> dict[str, Any]:
         uuid.UUID(operation_id)
     except ValueError as exc:
         raise RegisteredWaitUnavailable(str(exc)) from exc
+    if disposition not in {MONITOR_CANCELLED, MONITOR_INTERRUPTED}:
+        raise RegisteredWaitUnavailable(f"unsupported monitor stop disposition {disposition}")
+    with _monitor_lock(wait_id):
+        with database.SessionLocal() as db:
+            monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
+            wait_row = db.get(database.RegisteredWaitModel, wait_id)
+            wake_id = None
+            if monitor is not None and monitor.wake_message_id is not None:
+                wake_id = int(monitor.wake_message_id)
+            elif wait_row is not None and wait_row.wake_message_id is not None:
+                wake_id = int(wait_row.wake_message_id)
+        if wake_id is None:
+            return _stop_monitor_locked(wait_id, operation_id, actor, disposition)
+        from cli_agent_orchestrator.services.inbox_service import InboxService
+
+        with InboxService._managed_delivery_lock(wake_id):
+            return _stop_monitor_locked(wait_id, operation_id, actor, disposition)
+
+
+def _stop_monitor_locked(
+    wait_id: str, operation_id: str, actor: str, disposition: str
+) -> dict[str, Any]:
+    from cli_agent_orchestrator.services.registered_waits import (
+        RegisteredWaitInvalid,
+        RegisteredWaitUnavailable,
+    )
+
     with database.SessionLocal() as db:
         wait_row = db.get(database.RegisteredWaitModel, wait_id)
         monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
@@ -864,12 +973,17 @@ def stop_monitor(wait_id: str, operation_id: str, actor: str) -> dict[str, Any]:
         _set_terminal(
             wait_row,
             monitor,
-            wait_state="interrupted-by-stop",
-            monitor_state=MONITOR_INTERRUPTED,
-            reason="interrupted-by-stop",
+            wait_state=disposition,
+            monitor_state=disposition,
+            reason=disposition,
             detail=f"operation {operation_id} by {actor}",
             observed=observed,
         )
+        if disposition == MONITOR_CANCELLED:
+            for row in (wait_row, monitor):
+                outcome = json.loads(row.outcome_json)
+                outcome.update(operation_id=operation_id, actor=actor)
+                row.outcome_json = json.dumps(outcome, sort_keys=True)
         db.commit()
         return _stop_result(wait_id, wait_row, monitor)
 

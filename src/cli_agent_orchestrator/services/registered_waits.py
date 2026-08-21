@@ -73,6 +73,7 @@ def _enabled(name: str, default: bool = True) -> bool:
 def capability() -> dict[str, Any]:
     registration = _enabled("CAO_M7_WAIT_REGISTRATION_ENABLED")
     consumer = _enabled("CAO_M7_WAIT_CONSUMER_ENABLED")
+    monitor_consumer = _enabled("CAO_M7_WAIT_MONITOR_CONSUMER_ENABLED", default=False)
     return {
         "schema_version": CAPABILITY_SCHEMA_VERSION,
         "capability": "m7-scheduled-waits",
@@ -85,7 +86,8 @@ def capability() -> dict[str, Any]:
         "reverse_rollback": "disable registration first; consumer drains acknowledged waits",
         "max_round_seconds": MAX_ROUND_SECONDS,
         "ambiguity_grace_seconds": DEFAULT_AMBIGUITY_GRACE_SECONDS,
-        "adapter_support": ["process", "github-actions"],
+        "adapter_support": ["process", "github-actions"] if monitor_consumer else [],
+        "monitor_consumer_attached": monitor_consumer,
         "monitor_health_vocabulary": ["monitored", "monitor-stale", "unmonitored"],
     }
 
@@ -347,6 +349,10 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
         raise RegisteredWaitConflict(
             "new wait registration is disabled; acknowledged waits continue to drain"
         )
+    if request.adapter is not None and not _enabled(
+        "CAO_M7_WAIT_MONITOR_CONSUMER_ENABLED", default=False
+    ):
+        raise RegisteredWaitConflict("adapter registration requires an attached monitor consumer")
     observed = now or _now()
     canonical = request.canonical()
     digest = canonical_sha256(canonical)
@@ -650,8 +656,43 @@ def cancel(
             # For adapter waits, also consider monitor wake
             monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
             monitor_wake = monitor.wake_message_id if monitor is not None else None
+            adapter_monitor = monitor is not None
             # need both ids for fencing
             combined_wake = message_id if message_id is not None else monitor_wake
+            if adapter_monitor and initial.state in TERMINAL_STATES:
+                outcome = json.loads(initial.outcome_json) if initial.outcome_json else None
+                if initial.state == STATE_CANCELLED and outcome:
+                    if (
+                        outcome.get("operation_id") == operation_id
+                        and outcome.get("actor") != actor
+                    ):
+                        raise RegisteredWaitConflict(
+                            f"cancellation operation {operation_id} is a divergent replay"
+                        )
+                result = _record(initial, now=observed)
+                result["adopted"] = True
+                return result
+        if adapter_monitor:
+            from cli_agent_orchestrator.services.registered_wait_monitors import stop_monitor
+
+            try:
+                stop_monitor(
+                    wait_id,
+                    operation_id,
+                    actor,
+                    disposition=STATE_CANCELLED,
+                )
+            except RegisteredWaitUnavailable:
+                raise
+            except Exception as exc:
+                raise RegisteredWaitUnavailable(f"monitor cancel failed: {exc}") from exc
+            with database.SessionLocal() as db:
+                row = _wait_row(db, wait_id)
+                if row is None:
+                    raise RegisteredWaitInvalid(f"unknown wait {wait_id}")
+                result = _record(row, now=observed)
+                result["adopted"] = False
+                return result
         lock: Any = nullcontext()
         if combined_wake is not None:
             from cli_agent_orchestrator.services.inbox_service import InboxService
@@ -659,51 +700,8 @@ def cancel(
             lock = InboxService._managed_delivery_lock(combined_wake)
         with lock, database.SessionLocal() as db:
             row = _wait_row(db, wait_id)
-            monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
             if row is None:
                 raise RegisteredWaitInvalid(f"unknown wait {wait_id}")
-            # check for adapter monitor hard boundary
-            request = None
-            try:
-                request = _request_from_row(row)
-            except Exception:
-                request = {}
-            has_adapter = isinstance(request, dict) and request.get("adapter") is not None
-            if has_adapter and monitor is not None:
-                # If monitor already terminal, respect history
-                if row.state in TERMINAL_STATES or monitor.state in {
-                    "completed",
-                    "invalid",
-                    "interrupted-by-stop",
-                    "cancelled",
-                }:
-                    result = _record(row, now=observed)
-                    result["adopted"] = True
-                    return result
-                # If wake already delivered (either wait or monitor), do not cancel
-                check_ids = [row.wake_message_id, monitor.wake_message_id]
-                for mid in check_ids:
-                    if mid is not None:
-                        msg = _inbox_row(db, mid)
-                        if msg is not None and msg.status == MessageStatus.DELIVERED.value:
-                            return _record(row, now=observed)
-                # For adapter, perform hard Stop fence
-                from cli_agent_orchestrator.services.registered_wait_monitors import stop_monitor
-
-                try:
-                    stop_monitor(wait_id, operation_id, actor)
-                except RegisteredWaitUnavailable:
-                    raise
-                except Exception as exc:
-                    raise RegisteredWaitUnavailable(f"monitor cancel failed: {exc}") from exc
-                # stop_monitor committed in its own session; need fresh read
-                db.expire_all()
-                fresh_row = _wait_row(db, wait_id)
-                result = (
-                    _record(fresh_row, now=observed) if fresh_row else _record(row, now=observed)
-                )
-                result["adopted"] = False
-                return result
             if row.wake_message_id != message_id:
                 # Expiry installed the immutable inbox row between the first
                 # read and lock selection. Retry once through its delivery
@@ -1185,7 +1183,19 @@ def interrupt_session_waits(session_name: str, operation_id: str) -> Sequence[Ma
                 # For adapter, need monitor wake id for fencing
                 message_id = initial.wake_message_id if initial is not None else None
                 monitor_wake = monitor.wake_message_id if monitor is not None else None
+                adapter_monitor = monitor is not None
                 combined = message_id if message_id is not None else monitor_wake
+            if adapter_monitor:
+                from cli_agent_orchestrator.services.registered_wait_monitors import stop_monitor
+
+                try:
+                    result = stop_monitor(wait_id, operation_id, "stop")
+                except RegisteredWaitUnavailable:
+                    raise
+                except Exception as exc:
+                    raise RegisteredWaitUnavailable(f"monitor stop failed: {exc}") from exc
+                results.append({"wait_id": wait_id, "state": result["state"]})
+                continue
             lock: Any = nullcontext()
             if combined is not None:
                 from cli_agent_orchestrator.services.inbox_service import InboxService
@@ -1193,46 +1203,7 @@ def interrupt_session_waits(session_name: str, operation_id: str) -> Sequence[Ma
                 lock = InboxService._managed_delivery_lock(combined)
             with lock, database.SessionLocal() as db:
                 row = _wait_row(db, wait_id)
-                monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
                 if row is None or row.state not in ACTIVE_STATES:
-                    continue
-                # For adapter waits, use hard Stop with pid/marker validation
-                try:
-                    req = _request_from_row(row)
-                except Exception:
-                    req = {}
-                has_adapter = isinstance(req, dict) and req.get("adapter") is not None
-                if has_adapter and monitor is not None:
-                    # If monitor already terminal or wake delivered, don't rewrite
-                    if row.state in TERMINAL_STATES or monitor.state in {
-                        "completed",
-                        "invalid",
-                        "interrupted-by-stop",
-                        "cancelled",
-                    }:
-                        continue
-                    check_ids = [row.wake_message_id, monitor.wake_message_id]
-                    delivered = False
-                    for mid in check_ids:
-                        if mid is not None:
-                            msg = _inbox_row(db, mid)
-                            if msg is not None and msg.status == MessageStatus.DELIVERED.value:
-                                delivered = True
-                                break
-                    if delivered:
-                        continue
-                    # Attempt hard termination
-                    from cli_agent_orchestrator.services.registered_wait_monitors import (
-                        stop_monitor,
-                    )
-
-                    try:
-                        stop_monitor(wait_id, operation_id, "stop")
-                    except RegisteredWaitUnavailable:
-                        raise
-                    except Exception as exc:
-                        raise RegisteredWaitUnavailable(f"monitor stop failed: {exc}") from exc
-                    results.append({"wait_id": row.wait_id, "state": STATE_INTERRUPTED})
                     continue
                 if row.wake_message_id != message_id:
                     # Expiry installed a message while Stop selected the row.

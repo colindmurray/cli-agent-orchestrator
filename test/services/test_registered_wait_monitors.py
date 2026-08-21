@@ -53,6 +53,7 @@ def _isolate_db_and_monitors(tmp_path, monkeypatch):
     monkeypatch.setattr(mon, "CAO_HOME_DIR", tmp_path)
     # Ensure fake marker is set for helper liveness on macOS
     monkeypatch.setenv("CAO_WAIT_RUNNER_FAKE_MARKER", "test-marker")
+    monkeypatch.setenv("CAO_M7_WAIT_MONITOR_CONSUMER_ENABLED", "true")
     yield
     engine.dispose()
 
@@ -552,7 +553,7 @@ def test_stop_variants(tmp_path, monkeypatch):
         assert m.state == "launch-intent"
     stop_op = str(uuid.uuid4())
     res = registered_waits.cancel(rec1["wait_id"], operation_id=stop_op, actor="tester")
-    assert res["state"] == "interrupted-by-stop"
+    assert res["state"] == "cancelled"
     # Stop during process: now with real launch but mocked termination
     op2 = str(uuid.uuid4())
     req2 = RegistrationRequest(
@@ -570,7 +571,7 @@ def test_stop_variants(tmp_path, monkeypatch):
     time.sleep(0.5)  # let helper become running (mocked alive)
     stop_op2 = str(uuid.uuid4())
     res2 = registered_waits.cancel(rec2["wait_id"], operation_id=stop_op2, actor="tester")
-    assert res2["state"] == "interrupted-by-stop"
+    assert res2["state"] == "cancelled"
     # After result-before-attachment: use quick exe, wait for result, then stop before wake
     quick_tmp = tmp_path / "quick"
     quick_tmp.mkdir()
@@ -603,7 +604,7 @@ def test_stop_variants(tmp_path, monkeypatch):
     registered_waits.process_monitors()  # persist result, no attach
     stop_op3 = str(uuid.uuid4())
     res3 = registered_waits.cancel(rec3["wait_id"], operation_id=stop_op3, actor="tester")
-    assert res3["state"] == "interrupted-by-stop"
+    assert res3["state"] == "cancelled"
     # Racing delivery: create wait, get to wake-pending, then try to stop after inbox delivered should not rewrite
     op4 = str(uuid.uuid4())
     req4 = RegistrationRequest(
