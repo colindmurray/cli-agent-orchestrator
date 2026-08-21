@@ -476,3 +476,24 @@ class TestLifecycleVocabularyDrift:
             projection.LIFECYCLE_DEAD,
             projection.LIFECYCLE_UNKNOWN_LIVENESS,
         } == {state.value for state in TerminalLifecycleState}
+
+
+class TestRequestedRouteHonestProjection:
+    """cond-0624: durable requested route, never a footer parse."""
+
+    def test_footer_text_does_not_override_requested_route(self, backend, monkeypatch):
+        panes = backend({"%10": _pane()}).observe_pane_identities()
+        row = _row(
+            assigned_model="real-model",
+            assigned_effort="high",
+            assigned_quota_provider="openai",
+        )
+        monkeypatch.setattr(
+            projection.observer,
+            "observe",
+            lambda _pane_id: (["── Model: fake-model ──"], 0),
+        )
+        monkeypatch.setattr(projection, "_provider_instance", lambda _tid: None)
+        out = projection.project_row(row, panes, vintage="v1")
+        assert out["assigned_model"] == "real-model"
+        assert out["assigned_route_state"] == "present"

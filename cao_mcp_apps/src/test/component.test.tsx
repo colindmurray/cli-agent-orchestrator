@@ -83,6 +83,40 @@ describe("19.2 — active-agents cards with status badges", () => {
   });
 });
 
+describe("requested route metadata", () => {
+  it("separates the axes, qualifies requests, and distinguishes missing evidence", () => {
+    const { rerender } = render(
+      <AgentStatus
+        terminal={terminal({
+          provider: "claude_code",
+          assigned_quota_provider: "anthropic",
+          assigned_route_state: "unreadable",
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("harness-label").textContent).toContain(
+      "claude_code",
+    );
+    expect(screen.getByTestId("ai-provider-label").textContent).toContain(
+      "anthropic",
+    );
+    expect(screen.getByTestId("requested-model").textContent).toContain(
+      "unreadable (requested, not observed)",
+    );
+
+    rerender(
+      <AgentStatus terminal={terminal({ assigned_route_state: "absent" })} />,
+    );
+    expect(screen.getByTestId("ai-provider-label").textContent).toContain(
+      "unavailable",
+    );
+    expect(screen.getByTestId("requested-model").textContent).toContain(
+      "unavailable (requested, not observed)",
+    );
+  });
+});
+
 describe("19.11 — escaped markup (no XSS)", () => {
   const XSS = '<img src=x onerror="window.__pwned=1"><script>alert(1)</script>';
 

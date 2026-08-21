@@ -17,6 +17,7 @@ import type { StatusOption } from './FilterBar'
 import { placeAnnotations, readAnnotations } from '../lib/annotations'
 import { fmtAbs, fmtRel } from '../lib/time'
 import { DISPLAY_STATUS_CONFIG } from '../lib/terminalDisplay'
+import { requestedRouteDisplay } from './TerminalMetadata'
 import {
   activeFilterCount,
   callerVocabulary,
@@ -983,7 +984,8 @@ export function DashboardHome({ onNavigate }: { onNavigate: (tab: string) => voi
                                     {/* Same fallback the modals use: a blank
                                         gap and the word "unknown" are the same
                                         fact, and only one of them says so. */}
-                                    <span className="text-[10px] text-gray-600">{t.provider || 'unknown'}</span>
+                                    <span className="text-[10px] text-gray-600" data-testid="harness-label">Harness: {t.provider || 'unknown'}</span>
+                                    <span className="text-[10px] text-gray-500" data-testid="ai-provider-label">AI provider: {t.assigned_quota_provider || 'unavailable'}</span>
                                   </div>
                                   <div className="flex items-center gap-1 shrink-0">
                                     {/* The complete status evidence and work
@@ -1020,6 +1022,8 @@ export function DashboardHome({ onNavigate }: { onNavigate: (tab: string) => voi
                                       sent {relActive}
                                     </span>
                                   )}
+                                  <span data-testid="requested-model">Model: {requestedRouteDisplay(t.assigned_model, t.assigned_route_state)}</span>
+                                  <span data-testid="requested-effort">Effort: {requestedRouteDisplay(t.assigned_effort, t.assigned_route_state)}</span>
                                 </div>
                                 {/* Quick Send */}
                                 {!sendInputOpen[t.id] ? (

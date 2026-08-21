@@ -90,6 +90,10 @@ def build_dashboard_snapshot(
             "window": t.get("tmux_window", t.get("name")),
             "status": t.get("status"),
             "last_active": _isoformat(t.get("last_active")),
+            "assigned_model": t.get("assigned_model"),
+            "assigned_effort": t.get("assigned_effort"),
+            "assigned_quota_provider": t.get("assigned_quota_provider"),
+            "assigned_route_state": t.get("assigned_route_state"),
         }
         for t in terminals
     ]
@@ -131,6 +135,10 @@ def build_agent_detail_snapshot(
         "agent_profile": terminal.get("agent_profile"),
         "status": terminal.get("status"),
         "last_active": _isoformat(terminal.get("last_active")),
+        "assigned_model": terminal.get("assigned_model"),
+        "assigned_effort": terminal.get("assigned_effort"),
+        "assigned_quota_provider": terminal.get("assigned_quota_provider"),
+        "assigned_route_state": terminal.get("assigned_route_state"),
         "output_tail": output_tail or "",
         "scopes": list(scopes) if scopes else [],
     }

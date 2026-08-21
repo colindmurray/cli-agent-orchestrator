@@ -54,6 +54,10 @@ def test_build_dashboard_snapshot_maps_real_fields() -> None:
             "tmux_window": "developer",
             "provider": "kiro_cli",
             "agent_profile": "developer",
+            "assigned_model": "gpt-5.6-sol",
+            "assigned_effort": "high",
+            "assigned_quota_provider": "openai",
+            "assigned_route_state": "present",
             "last_active": datetime(2024, 1, 1, tzinfo=timezone.utc),
         }
     ]
@@ -66,6 +70,10 @@ def test_build_dashboard_snapshot_maps_real_fields() -> None:
     assert term["session_name"] == "cao-foo"
     assert term["provider"] == "kiro_cli"
     assert term["window"] == "developer"
+    assert term["assigned_model"] == "gpt-5.6-sol"
+    assert term["assigned_effort"] == "high"
+    assert term["assigned_quota_provider"] == "openai"
+    assert term["assigned_route_state"] == "present"
     assert term["last_active"] == "2024-01-01T00:00:00+00:00"
     assert snap["scopes"] == ["cao:read"]
 
@@ -89,11 +97,18 @@ def test_build_agent_detail_snapshot() -> None:
         "provider": "claude_code",
         "agent_profile": "reviewer",
         "status": "idle",
+        "assigned_model": "claude-opus-5",
+        "assigned_effort": "high",
+        "assigned_quota_provider": "anthropic",
+        "assigned_route_state": "present",
     }
     snap = build_agent_detail_snapshot(terminal, scopes=["cao:read"], output_tail="hello")
     assert snap["terminal_id"] == "abcd1234"
     assert snap["session_name"] == "cao-foo"
     assert snap["status"] == "idle"
+    assert snap["assigned_model"] == "claude-opus-5"
+    assert snap["assigned_quota_provider"] == "anthropic"
+    assert snap["assigned_route_state"] == "present"
     assert snap["output_tail"] == "hello"
 
 

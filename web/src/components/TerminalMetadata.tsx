@@ -75,6 +75,15 @@ export function statusSignalText(signal: TerminalStatusSignal): string {
   return [human(signal.state), observed, signal.detail || null].filter(Boolean).join(' · ')
 }
 
+export function requestedRouteDisplay(
+  value: string | null | undefined,
+  state: string | null | undefined,
+): string {
+  if (state === 'unreadable') return 'unreadable (requested, not observed)'
+  if (!value) return 'unavailable (requested, not observed)'
+  return `${value} (requested, not observed)`
+}
+
 export function effectiveStatus(terminal: TerminalMeta, status?: string | null): string {
   return (status ?? terminal.status ?? 'unknown').toUpperCase()
 }
@@ -120,7 +129,10 @@ export function terminalMetadataSections(
   const identity: MetadataEntry[] = [
     { label: 'Terminal', value: terminal.terminal_id || terminal.id },
     { label: 'Profile', value: terminal.agent_profile || 'Not declared' },
-    { label: 'Provider', value: terminal.provider || 'Unknown' },
+    { label: 'Harness', value: terminal.provider || 'Unknown' },
+    { label: 'AI provider', value: terminal.assigned_quota_provider || 'unavailable' },
+    { label: 'Model', value: requestedRouteDisplay(terminal.assigned_model, terminal.assigned_route_state) },
+    { label: 'Effort', value: requestedRouteDisplay(terminal.assigned_effort, terminal.assigned_route_state) },
     { label: 'Protocol', value: terminal.protocol_vintage || 'Unknown' },
     { label: 'Generation', value: terminal.generation || 'Not recorded' },
     { label: 'Callback generation', value: terminal.callback_target_generation || 'Not recorded' },

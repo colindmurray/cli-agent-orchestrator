@@ -144,8 +144,17 @@ class Terminal(BaseModel):
     native_session_id: Optional[str] = Field(
         None, description="The provider-native session running in this pane"
     )
+    assigned_model: Optional[str] = Field(
+        None, description="Requested model (requested, not observed)"
+    )
+    assigned_effort: Optional[str] = Field(
+        None, description="Requested effort (requested, not observed)"
+    )
     assigned_quota_provider: Optional[str] = Field(
         None, description="Canonical quota provider for billing/rate-limit attribution"
+    )
+    assigned_route_state: Optional[Literal["present", "absent", "unreadable"]] = Field(
+        None, description="Whether the durable requested route is present, absent, or unreadable"
     )
     status_confidence: Optional[str] = Field(
         None, description="Confidence of the fused terminal-status observation"

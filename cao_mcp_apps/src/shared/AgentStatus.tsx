@@ -18,6 +18,59 @@ export interface AgentStatusProps {
   isSupervisor?: boolean;
 }
 
+export function requestedRouteDisplay(
+  value: string | null | undefined,
+  state: string | null | undefined,
+): string {
+  if (state === "unreadable") return "unreadable (requested, not observed)";
+  if (!value) return "unavailable (requested, not observed)";
+  return `${value} (requested, not observed)`;
+}
+
+type RequestedRoute = Pick<
+  TerminalView,
+  | "provider"
+  | "assigned_model"
+  | "assigned_effort"
+  | "assigned_quota_provider"
+  | "assigned_route_state"
+>;
+
+export function RequestedRouteEntries({ route }: { route: RequestedRoute }) {
+  return (
+    <>
+      <div>
+        <dt>harness</dt>
+        <dd data-testid="harness-label">{route.provider}</dd>
+      </div>
+      <div>
+        <dt>AI provider</dt>
+        <dd data-testid="ai-provider-label">
+          {route.assigned_quota_provider ?? "unavailable"}
+        </dd>
+      </div>
+      <div>
+        <dt>model</dt>
+        <dd data-testid="requested-model">
+          {requestedRouteDisplay(
+            route.assigned_model,
+            route.assigned_route_state,
+          )}
+        </dd>
+      </div>
+      <div>
+        <dt>effort</dt>
+        <dd data-testid="requested-effort">
+          {requestedRouteDisplay(
+            route.assigned_effort,
+            route.assigned_route_state,
+          )}
+        </dd>
+      </div>
+    </>
+  );
+}
+
 export function AgentStatus({
   terminal,
   onOpen,
@@ -57,10 +110,7 @@ export function AgentStatus({
         </span>
       </div>
       <dl className="cao-card-meta">
-        <div>
-          <dt>provider</dt>
-          <dd>{terminal.provider}</dd>
-        </div>
+        <RequestedRouteEntries route={terminal} />
         <div>
           <dt>session</dt>
           <dd>{terminal.session_name}</dd>

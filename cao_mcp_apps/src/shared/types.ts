@@ -45,6 +45,10 @@ export interface TerminalView {
   window: string | null;
   status: string | null;
   last_active: string | null;
+  assigned_model?: string | null;
+  assigned_effort?: string | null;
+  assigned_quota_provider?: string | null;
+  assigned_route_state?: "present" | "absent" | "unreadable" | null;
 }
 
 /** The pure projection produced by `build_dashboard_snapshot`. */
@@ -64,6 +68,10 @@ export interface AgentDetailSnapshot {
   agent_profile: string | null;
   status: string | null;
   last_active: string | null;
+  assigned_model?: string | null;
+  assigned_effort?: string | null;
+  assigned_quota_provider?: string | null;
+  assigned_route_state?: "present" | "absent" | "unreadable" | null;
   output_tail: string;
   scopes: string[];
 }
