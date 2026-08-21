@@ -1,4 +1,4 @@
-import Graph from 'graphology'
+import Graph, { MultiDirectedGraph } from 'graphology'
 import { circular } from 'graphology-layout'
 import type {
   TrackerGraphNode,
@@ -15,6 +15,28 @@ export interface IssueGraphFilters {
   kinds: string[]
   statuses: string[]
   collapsed: Set<string>
+}
+
+export const ISSUE_GRAPH_NODE_COLORS = {
+  root: '#f9fafb',
+  open: '#38bdf8',
+  active: '#60a5fa',
+  blocked: '#f87171',
+  resolved: '#2dd4bf',
+  terminal: '#6b7280',
+  external: '#fb923c',
+} as const
+
+export type IssueGraphNodeState = keyof typeof ISSUE_GRAPH_NODE_COLORS
+
+export interface IssueGraphVisibility {
+  hiddenNodeStates: ReadonlySet<IssueGraphNodeState>
+  hiddenEdgeKinds: ReadonlySet<string>
+}
+
+const SHOW_ALL_GRAPH_ITEMS: IssueGraphVisibility = {
+  hiddenNodeStates: new Set<IssueGraphNodeState>(),
+  hiddenEdgeKinds: new Set<string>(),
 }
 
 export interface IssueDependencyEdge {
@@ -69,15 +91,28 @@ export interface IssueDependencyPlan {
   hiddenDependencyCount: number
 }
 
-export const ISSUE_GRAPH_NODE_COLORS = {
-  root: '#f9fafb',
-  open: '#38bdf8',
-  active: '#60a5fa',
-  blocked: '#f87171',
-  resolved: '#2dd4bf',
-  terminal: '#6b7280',
-  external: '#fb923c',
-} as const
+export function issueGraphNodeState(
+  issue: TrackerIssue,
+  projection: TrackerGraphProjection,
+  external: ReadonlySet<string>,
+): IssueGraphNodeState {
+  if (issue.key === projection.root.key) return 'root'
+  if (external.has(issue.key)) return 'external'
+  if (issue.status === 'in-progress') return 'active'
+  if (issue.status === 'blocked') return 'blocked'
+  if (issue.status === 'resolved') return 'resolved'
+  if (['closed', 'wontfix', 'duplicate'].includes(issue.status)) return 'terminal'
+  return 'open'
+}
+
+function nodeIsEnabled(
+  issue: TrackerIssue,
+  projection: TrackerGraphProjection,
+  external: ReadonlySet<string>,
+  visibility: IssueGraphVisibility,
+): boolean {
+  return !visibility.hiddenNodeStates.has(issueGraphNodeState(issue, projection, external))
+}
 
 function nodeMatches(issue: TrackerIssue, filters: IssueGraphFilters): boolean {
   const needle = filters.query.trim().toLocaleLowerCase()
@@ -127,16 +162,20 @@ function hierarchyVisibleKeys(
 
 export function visibleIssueGraphKeys(
   projection: TrackerGraphProjection,
-  mode: IssueGraphMode,
   filters: IssueGraphFilters,
+  visibility: IssueGraphVisibility = SHOW_ALL_GRAPH_ITEMS,
 ): Set<string> {
-  if (mode === 'hierarchy') return hierarchyVisibleKeys(projection, filters)
-  if (mode === 'dependencies') {
-    return new Set(buildIssueDependencyPlan(projection, filters).nodes.map(node => node.key))
-  }
-  const visible = new Set<string>([projection.root.key])
-  for (const issue of [...projection.nodes, ...projection.external]) {
+  const external = new Set(projection.external.map(issue => issue.key))
+  const byKey = new Map(
+    [...projection.nodes, ...projection.external].map(issue => [issue.key, issue]),
+  )
+  const visible = hierarchyVisibleKeys(projection, filters)
+  for (const issue of projection.external) {
     if (nodeMatches(issue, filters)) visible.add(issue.key)
+  }
+  for (const key of [...visible]) {
+    const issue = byKey.get(key)
+    if (!issue || !nodeIsEnabled(issue, projection, external, visibility)) visible.delete(key)
   }
   return visible
 }
@@ -280,6 +319,7 @@ function stronglyConnectedComponents(
 export function buildIssueDependencyPlan(
   projection: TrackerGraphProjection,
   filters: IssueGraphFilters,
+  visibility: IssueGraphVisibility = SHOW_ALL_GRAPH_ITEMS,
 ): IssueDependencyPlan {
   const memberKeys = new Set(projection.nodes.map(node => node.key))
   const externalKeys = new Set(projection.external.map(node => node.key))
@@ -287,6 +327,10 @@ export function buildIssueDependencyPlan(
   const byKey = new Map(allIssues.map(issue => [issue.key, issue]))
   const order = new Map(allIssues.map((issue, index) => [issue.key, index]))
   const parents = hierarchyParents(projection)
+  const enabled = (key: string): boolean => {
+    const issue = byKey.get(key)
+    return Boolean(issue && nodeIsEnabled(issue, projection, externalKeys, visibility))
+  }
   const scopeVisible = hierarchyVisibleKeys(projection, {
     query: '',
     kinds: [],
@@ -294,10 +338,13 @@ export function buildIssueDependencyPlan(
     collapsed: filters.collapsed,
   })
   const filteredVisible = hierarchyVisibleKeys(projection, filters)
+  for (const key of [...scopeVisible]) if (!enabled(key)) scopeVisible.delete(key)
+  for (const key of [...filteredVisible]) if (!enabled(key)) filteredVisible.delete(key)
   const activeFilter = Boolean(filters.query.trim() || filters.kinds.length || filters.statuses.length)
 
   const representativeCache = new Map<string, string | null>()
   const representative = (key: string): string | null => {
+    if (!enabled(key)) return null
     if (!memberKeys.has(key)) return byKey.has(key) ? key : null
     const cached = representativeCache.get(key)
     if (cached !== undefined) return cached
@@ -324,7 +371,7 @@ export function buildIssueDependencyPlan(
   let openDependencyCount = 0
   let clearedDependencyCount = 0
   for (const link of projection.links) {
-    if (link.kind !== 'blocks') continue
+    if (link.kind !== 'blocks' || visibility.hiddenEdgeKinds.has('blocks')) continue
     const from = representative(link.from_key)
     const to = representative(link.to_key)
     if (!from || !to) continue
@@ -543,84 +590,23 @@ function nodeColor(
   projection: TrackerGraphProjection,
   external: Set<string>,
 ): string {
-  if (issue.key === projection.root.key) return ISSUE_GRAPH_NODE_COLORS.root
-  if (external.has(issue.key)) return ISSUE_GRAPH_NODE_COLORS.external
-  if (issue.status === 'in-progress') return ISSUE_GRAPH_NODE_COLORS.active
-  if (issue.status === 'blocked') return ISSUE_GRAPH_NODE_COLORS.blocked
-  if (issue.status === 'resolved') return ISSUE_GRAPH_NODE_COLORS.resolved
-  if (['closed', 'wontfix', 'duplicate'].includes(issue.status)) {
-    return ISSUE_GRAPH_NODE_COLORS.terminal
-  }
-  return ISSUE_GRAPH_NODE_COLORS.open
-}
-
-const EDGE_PRIORITY: Record<string, number> = {
-  blocks: 5,
-  'part-of': 4,
-  'caused-by': 3,
-  duplicates: 2,
-  relates: 1,
+  return ISSUE_GRAPH_NODE_COLORS[issueGraphNodeState(issue, projection, external)]
 }
 
 export function buildIssueGraph(
   projection: TrackerGraphProjection,
   mode: IssueGraphMode,
   filters: IssueGraphFilters,
+  visibility: IssueGraphVisibility = SHOW_ALL_GRAPH_ITEMS,
 ): Graph {
-  const graph = new Graph()
-  if (mode === 'dependencies') {
-    const plan = buildIssueDependencyPlan(projection, filters)
-    const external = new Set(projection.external.map(issue => issue.key))
-    for (const node of plan.nodes) {
-      const issue = node.issue
-      graph.addNode(node.key, {
-        label: issue.key,
-        displayLabel: `${issue.key} · ${issue.title}`,
-        title: issue.title,
-        kind: issue.kind,
-        status: issue.status,
-        depth: (issue as TrackerGraphNode).depth ?? null,
-        external: external.has(issue.key),
-        dependencyStage: node.stage,
-        dependencyTrack: node.track,
-        cyclic: node.cyclic,
-        hiddenScopeCount: node.hiddenScopeCount,
-        size: issue.key === projection.root.key ? 13 : node.hiddenScopeCount ? 9 : external.has(issue.key) ? 5 : 7,
-        color: nodeColor(issue, projection, external),
-      })
-    }
-    for (const edge of plan.edges) {
-      if (!graph.hasNode(edge.from) || !graph.hasNode(edge.to)) continue
-      graph.addEdge(edge.from, edge.to, {
-        kind: 'blocks',
-        label: `${edge.cleared ? 'cleared ' : ''}blocks: ${edge.from} → ${edge.to}`,
-        color: edge.cleared ? '#4b5563' : MAP_EDGE_COLORS.blocks,
-        size: edge.cleared ? 1 : 2,
-        cleared: edge.cleared,
-        type: 'arrow',
-      })
-    }
-    let trackOffset = 0
-    for (const track of plan.tracks) {
-      const maxRows = Math.max(1, ...track.stages.map(stage => stage.nodes.length))
-      for (const stage of track.stages) {
-        stage.nodes.forEach((node, index) => {
-          graph.setNodeAttribute(node.key, 'x', node.stage * 5)
-          graph.setNodeAttribute(node.key, 'y', -(trackOffset + index * 3))
-        })
-      }
-      trackOffset += maxRows * 3 + 4
-    }
-    return graph
-  }
-  const visible = visibleIssueGraphKeys(projection, mode, filters)
+  const graph = new MultiDirectedGraph()
+  const visible = visibleIssueGraphKeys(projection, filters, visibility)
   const external = new Set(projection.external.map(issue => issue.key))
-  const allNodes: TrackerIssue[] = mode === 'hierarchy'
-    ? projection.nodes
-    : [...projection.nodes, ...projection.external]
+  const allNodes: TrackerIssue[] = [...projection.nodes, ...projection.external]
 
   for (const issue of allNodes) {
     if (!visible.has(issue.key)) continue
+    const state = issueGraphNodeState(issue, projection, external)
     graph.addNode(issue.key, {
       label: issue.key,
       displayLabel: `${issue.key} · ${issue.title}`,
@@ -629,33 +615,96 @@ export function buildIssueGraph(
       status: issue.status,
       depth: (issue as TrackerGraphNode).depth ?? null,
       external: external.has(issue.key),
+      state,
       size: issue.key === projection.root.key ? 13 : external.has(issue.key) ? 5 : 7,
       color: nodeColor(issue, projection, external),
     })
   }
 
-  const best = new Map<string, TrackerLink>()
-  for (const link of projection.links) {
-    if (mode === 'hierarchy' && link.kind !== 'part-of') continue
-    if (!graph.hasNode(link.from_key) || !graph.hasNode(link.to_key)) continue
-    const pair = JSON.stringify([link.from_key, link.to_key])
-    const existing = best.get(pair)
-    if (!existing || (EDGE_PRIORITY[link.kind] ?? 0) > (EDGE_PRIORITY[existing.kind] ?? 0)) {
-      best.set(pair, link)
-    }
-  }
-  for (const link of best.values()) {
-    graph.addEdge(link.from_key, link.to_key, {
+  const addRawLink = (link: TrackerLink): void => {
+    if (visibility.hiddenEdgeKinds.has(link.kind)) return
+    if (!graph.hasNode(link.from_key) || !graph.hasNode(link.to_key)) return
+    graph.addDirectedEdgeWithKey(`link:${link.id}`, link.from_key, link.to_key, {
       kind: link.kind,
       label: `${link.kind}: ${link.from_key} → ${link.to_key}`,
       color: MAP_EDGE_COLORS[link.kind] ?? MAP_EDGE_COLORS.relates,
       size: link.kind === 'blocks' || link.kind === 'part-of' ? 2 : 1,
+      zIndex: link.kind === 'blocks' ? 3 : link.kind === 'part-of' ? 2 : 1,
       type: 'arrow',
     })
   }
 
+  if (mode === 'dependencies') {
+    const plan = buildIssueDependencyPlan(projection, filters, visibility)
+    for (const edge of plan.edges) {
+      if (!graph.hasNode(edge.from) || !graph.hasNode(edge.to)) continue
+      graph.addDirectedEdgeWithKey(
+        `dependency:${edge.sourceLinkIds.join(':')}:${edge.from}:${edge.to}`,
+        edge.from,
+        edge.to,
+        {
+          kind: 'blocks',
+          label: `${edge.cleared ? 'cleared ' : ''}blocks: ${edge.from} → ${edge.to}`,
+          color: edge.cleared ? '#4b5563' : MAP_EDGE_COLORS.blocks,
+          size: edge.cleared ? 1 : 2,
+          zIndex: 3,
+          cleared: edge.cleared,
+          sourceLinkIds: edge.sourceLinkIds,
+          type: 'arrow',
+        },
+      )
+    }
+    for (const link of projection.links) if (link.kind !== 'blocks') addRawLink(link)
+
+    const positioned = new Set<string>()
+    let trackOffset = 0
+    let graphMaxX = 0
+    for (const track of plan.tracks) {
+      let stageX = 0
+      let maxRows = 1
+      for (const stage of track.stages) {
+        const rowCount = Math.min(7, Math.max(1, Math.ceil(Math.sqrt(stage.nodes.length * 1.5))))
+        const columnCount = Math.ceil(stage.nodes.length / rowCount)
+        maxRows = Math.max(maxRows, rowCount)
+        stage.nodes.forEach((node, index) => {
+          if (!graph.hasNode(node.key)) return
+          const column = Math.floor(index / rowCount)
+          const row = index % rowCount
+          graph.setNodeAttribute(node.key, 'x', stageX + column * 2.8)
+          graph.setNodeAttribute(node.key, 'y', -(trackOffset + row * 2.5))
+          graph.setNodeAttribute(node.key, 'layoutGroup', 'dependency-track')
+          graph.setNodeAttribute(node.key, 'dependencyStage', node.stage)
+          graph.setNodeAttribute(node.key, 'dependencyTrack', node.track)
+          graph.setNodeAttribute(node.key, 'cyclic', node.cyclic)
+          graph.setNodeAttribute(node.key, 'hiddenScopeCount', node.hiddenScopeCount)
+          positioned.add(node.key)
+        })
+        stageX += columnCount * 2.8 + 4
+      }
+      graphMaxX = Math.max(graphMaxX, stageX)
+      trackOffset += maxRows * 2.5 + 5
+    }
+    if (graph.hasNode(projection.root.key) && !positioned.has(projection.root.key)) {
+      graph.setNodeAttribute(projection.root.key, 'x', -5)
+      graph.setNodeAttribute(projection.root.key, 'y', 0)
+      graph.setNodeAttribute(projection.root.key, 'layoutGroup', 'dependency-root')
+      positioned.add(projection.root.key)
+    }
+    const supplemental = graph.nodes().filter(key => !positioned.has(key)).sort()
+    const contextRows = Math.min(7, Math.max(1, Math.ceil(Math.sqrt(supplemental.length * 1.5))))
+    supplemental.forEach((key, index) => {
+      graph.setNodeAttribute(key, 'x', graphMaxX + 4 + Math.floor(index / contextRows) * 2.8)
+      graph.setNodeAttribute(key, 'y', -(index % contextRows) * 2.5)
+      graph.setNodeAttribute(key, 'layoutGroup', 'dependency-context')
+    })
+    return graph
+  }
+
+  for (const link of projection.links) addRawLink(link)
+
   if (mode === 'relationships') {
     circular.assign(graph)
+    graph.forEachNode(key => graph.setNodeAttribute(key, 'layoutGroup', 'relationship-ring'))
   } else {
     assignHierarchyLayout(graph, projection.root.key)
   }
@@ -664,23 +713,38 @@ export function buildIssueGraph(
 
 function assignHierarchyLayout(graph: Graph, preferredRoot: string): void {
   const parents = new Map<string, string[]>()
+  const partOfMembers = new Set<string>()
+  const incidentKinds = new Map<string, Set<string>>()
   graph.forEachEdge((_edge, attributes, source, target) => {
+    const sourceKinds = incidentKinds.get(source) ?? new Set<string>()
+    sourceKinds.add(String(attributes.kind))
+    incidentKinds.set(source, sourceKinds)
+    const targetKinds = incidentKinds.get(target) ?? new Set<string>()
+    targetKinds.add(String(attributes.kind))
+    incidentKinds.set(target, targetKinds)
     if (attributes.kind !== 'part-of') return
+    if (graph.getNodeAttribute(source, 'external') || graph.getNodeAttribute(target, 'external')) return
     const values = parents.get(source) ?? []
     values.push(target)
     parents.set(source, values)
+    partOfMembers.add(source)
+    partOfMembers.add(target)
   })
   for (const values of parents.values()) values.sort()
 
-  // Layout one canonical tree while retaining every graph edge. Multiple
-  // parents remain visible and are reported by the audit; choosing one
-  // deterministic parent here prevents a node receiving incompatible
-  // coordinates.
+  if (graph.hasNode(preferredRoot) && !graph.getNodeAttribute(preferredRoot, 'external')) {
+    partOfMembers.add(preferredRoot)
+  }
+
+  // Layout one canonical scope forest while retaining every relationship as
+  // an overlay. Multiple parents remain visible; choosing one deterministic
+  // parent only decides coordinates.
   const primaryParent = new Map<string, string>()
-  graph.forEachNode(key => {
+  for (const key of partOfMembers) {
     const candidates = parents.get(key) ?? []
-    if (candidates.length) primaryParent.set(key, candidates[0])
-  })
+    const parent = candidates.find(candidate => partOfMembers.has(candidate))
+    if (parent) primaryParent.set(key, parent)
+  }
   const children = new Map<string, string[]>()
   for (const [child, parent] of primaryParent) {
     const values = children.get(parent) ?? []
@@ -689,39 +753,98 @@ function assignHierarchyLayout(graph: Graph, preferredRoot: string): void {
   }
   for (const values of children.values()) values.sort()
 
-  const assigned = new Map<string, number>()
+  const assignedX = new Map<string, number>()
+  const assignedDepth = new Map<string, number>()
   const visiting = new Set<string>()
   let nextLeaf = 0
-  const assign = (key: string): number => {
-    const known = assigned.get(key)
+  const assign = (key: string, depth: number): number => {
+    const known = assignedX.get(key)
     if (known !== undefined) return known
     if (visiting.has(key)) {
       const x = nextLeaf++ * 3
-      assigned.set(key, x)
+      assignedX.set(key, x)
+      assignedDepth.set(key, depth)
       return x
     }
     visiting.add(key)
-    const branch = (children.get(key) ?? []).filter(child => graph.hasNode(child))
-    const childXs = branch.map(assign)
+    assignedDepth.set(key, depth)
+    const branch = (children.get(key) ?? []).filter(child => partOfMembers.has(child))
+    const childXs = branch.map(child => assign(child, depth + 1))
     const x = childXs.length
       ? childXs.reduce((sum, value) => sum + value, 0) / childXs.length
       : nextLeaf++ * 3
     visiting.delete(key)
-    assigned.set(key, x)
+    assignedX.set(key, x)
     return x
   }
 
   const roots = [
-    ...(graph.hasNode(preferredRoot) ? [preferredRoot] : []),
-    ...graph.nodes().filter(key => key !== preferredRoot && !primaryParent.has(key)).sort(),
-    ...graph.nodes().filter(key => key !== preferredRoot).sort(),
+    ...(partOfMembers.has(preferredRoot) ? [preferredRoot] : []),
+    ...[...partOfMembers].filter(key => key !== preferredRoot && !primaryParent.has(key)).sort(),
+    ...[...partOfMembers].filter(key => key !== preferredRoot).sort(),
   ]
-  for (const key of roots) assign(key)
+  for (const key of roots) assign(key, 0)
 
-  const values = [...assigned.values()]
+  const values = [...assignedX.values()]
   const centre = values.length ? (Math.min(...values) + Math.max(...values)) / 2 : 0
-  graph.forEachNode((key, attributes) => {
-    graph.setNodeAttribute(key, 'x', (assigned.get(key) ?? 0) - centre)
-    graph.setNodeAttribute(key, 'y', -Number(attributes.depth ?? 0) * 3)
+  for (const key of partOfMembers) {
+    graph.setNodeAttribute(key, 'x', (assignedX.get(key) ?? 0) - centre)
+    graph.setNodeAttribute(key, 'y', -(assignedDepth.get(key) ?? 0) * 3)
+    graph.setNodeAttribute(key, 'layoutGroup', 'hierarchy-tree')
+  }
+
+  // Non-tree nodes live in context lanes to the right of the scope tree. The
+  // lane follows the strongest relationship that is currently visible, so
+  // toggling an edge kind reorganizes context instead of mixing orphans into
+  // the hierarchy. Fully disconnected nodes get a separate shelf below it.
+  const contextPriority = ['blocks', 'caused-by', 'duplicates', 'relates', 'part-of']
+  const context = graph.nodes().filter(key => !partOfMembers.has(key))
+  const grouped = new Map<string, string[]>()
+  for (const key of context) {
+    const kinds = incidentKinds.get(key) ?? new Set<string>()
+    const kind = contextPriority.find(candidate => kinds.has(candidate)) ?? 'unconnected'
+    const valuesForKind = grouped.get(kind) ?? []
+    valuesForKind.push(key)
+    grouped.set(kind, valuesForKind)
+  }
+  const treeXs = [...partOfMembers].map(key => Number(graph.getNodeAttribute(key, 'x') ?? 0))
+  const treeYs = [...partOfMembers].map(key => Number(graph.getNodeAttribute(key, 'y') ?? 0))
+  const treeMaxX = treeXs.length ? Math.max(...treeXs) : 0
+  const treeMinX = treeXs.length ? Math.min(...treeXs) : 0
+  const treeMinY = treeYs.length ? Math.min(...treeYs) : 0
+  const treeHeight = Math.max(6, Math.abs(treeMinY))
+  const orderedGroups = contextPriority.filter(kind => grouped.has(kind))
+  let nextContextX = treeMaxX + 6
+  orderedGroups.forEach(kind => {
+    const keys = grouped.get(kind)!.map(key => {
+      const anchors: number[] = []
+      graph.forEachEdge(key, (_edge, _attributes, source, target) => {
+        const other = source === key ? target : source
+        if (partOfMembers.has(other)) anchors.push(Number(graph.getNodeAttribute(other, 'y') ?? 0))
+      })
+      const anchorY = anchors.length
+        ? anchors.reduce((sum, value) => sum + value, 0) / anchors.length
+        : treeMinY / 2
+      return { key, anchorY }
+    }).sort((left, right) => right.anchorY - left.anchorY || left.key.localeCompare(right.key))
+    const rowCount = Math.min(7, Math.max(1, Math.ceil(Math.sqrt(keys.length * 1.5))))
+    const columnCount = Math.ceil(keys.length / rowCount)
+    keys.forEach(({ key }, index) => {
+      const column = Math.floor(index / rowCount)
+      const row = index % rowCount
+      const y = rowCount === 1 ? -treeHeight / 2 : -(row / (rowCount - 1)) * treeHeight
+      graph.setNodeAttribute(key, 'x', nextContextX + column * 3.2)
+      graph.setNodeAttribute(key, 'y', y)
+      graph.setNodeAttribute(key, 'layoutGroup', `context:${kind}`)
+    })
+    nextContextX += columnCount * 3.2 + 3
+  })
+
+  const unconnected = (grouped.get('unconnected') ?? []).sort()
+  const shelfColumns = Math.max(1, Math.ceil(Math.sqrt(unconnected.length * 2)))
+  unconnected.forEach((key, index) => {
+    graph.setNodeAttribute(key, 'x', treeMinX + (index % shelfColumns) * 3)
+    graph.setNodeAttribute(key, 'y', treeMinY - 5 - Math.floor(index / shelfColumns) * 2.5)
+    graph.setNodeAttribute(key, 'layoutGroup', 'context:unconnected')
   })
 }

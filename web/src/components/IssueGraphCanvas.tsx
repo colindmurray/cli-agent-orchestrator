@@ -7,6 +7,8 @@ import {
   ISSUE_GRAPH_NODE_COLORS,
   IssueGraphFilters,
   IssueGraphMode,
+  IssueGraphNodeState,
+  IssueGraphVisibility,
 } from '../lib/issueGraph'
 import { MAP_EDGE_COLORS } from '../lib/issueMap'
 
@@ -14,14 +16,20 @@ export function IssueGraphCanvas({
   projection,
   mode,
   filters,
+  visibility,
   selectedKey,
   onSelect,
+  onToggleNodeState,
+  onToggleEdgeKind,
 }: {
   projection: TrackerGraphProjection
   mode: IssueGraphMode
   filters: IssueGraphFilters
+  visibility: IssueGraphVisibility
   selectedKey: string | null
   onSelect: (key: string) => void
+  onToggleNodeState: (state: IssueGraphNodeState) => void
+  onToggleEdgeKind: (kind: string) => void
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const sigmaRef = useRef<Sigma | null>(null)
@@ -35,13 +43,14 @@ export function IssueGraphCanvas({
     sigmaRef.current?.kill()
     sigmaRef.current = null
     if (!containerRef.current) return
-    const graph = buildIssueGraph(projection, mode, filters)
+    const graph = buildIssueGraph(projection, mode, filters, visibility)
     try {
       const sigma = new Sigma(graph, containerRef.current, {
         renderLabels: true,
         labelRenderedSizeThreshold: 4,
         labelColor: { color: '#d1d5db' },
         labelSize: 10,
+        zIndex: true,
         // Sigma's default hover painter draws a pale tooltip behind the label.
         // The dark, high-contrast focus card below is the single hover detail
         // surface for this graph, while the node reducer still highlights it.
@@ -60,7 +69,7 @@ export function IssueGraphCanvas({
     } catch {
       setFailed(true)
     }
-  }, [projection, mode, filters])
+  }, [projection, mode, filters, visibility])
 
   useEffect(() => {
     const sigma = sigmaRef.current as unknown as
@@ -138,22 +147,45 @@ export function IssueGraphCanvas({
           Graph rendering is unavailable in this browser. The structured list below carries the same issues and links.
         </div>
       )}
-      <div data-testid="issue-graph-legend" className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-400">
+      <div data-testid="issue-graph-legend" aria-label="Graph visibility" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[11px] text-gray-400">
         {Object.entries(ISSUE_GRAPH_NODE_COLORS).map(([state, color]) => (
-          <span key={state} className="flex items-center gap-1.5">
+          <button
+            key={state}
+            type="button"
+            aria-pressed={!visibility.hiddenNodeStates.has(state as IssueGraphNodeState)}
+            aria-label={`${visibility.hiddenNodeStates.has(state as IssueGraphNodeState) ? 'Show' : 'Hide'} ${state} nodes`}
+            onClick={() => onToggleNodeState(state as IssueGraphNodeState)}
+            className={`flex items-center gap-1.5 rounded border px-2 py-1 transition ${
+              visibility.hiddenNodeStates.has(state as IssueGraphNodeState)
+                ? 'border-gray-900 bg-gray-950 text-gray-700 line-through'
+                : 'border-gray-800 bg-gray-950/50 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+            }`}
+          >
             <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: color }} />
             {state}
-          </span>
+          </button>
         ))}
         <span className="mx-1 h-4 w-px bg-gray-800" />
-        {Object.entries(MAP_EDGE_COLORS)
-          .filter(([kind]) => mode === 'relationships' || kind === (mode === 'dependencies' ? 'blocks' : 'part-of'))
-          .map(([kind, color]) => (
-            <span key={kind} className="flex items-center gap-1.5">
-              <span className="inline-block w-3.5 border-t-2" style={{ borderColor: color }} />
-              {kind} →
-            </span>
-          ))}
+        {Object.entries(MAP_EDGE_COLORS).map(([kind, color]) => (
+          <button
+            key={kind}
+            type="button"
+            aria-pressed={!visibility.hiddenEdgeKinds.has(kind)}
+            aria-label={`${visibility.hiddenEdgeKinds.has(kind) ? 'Show' : 'Hide'} ${kind} edges`}
+            onClick={() => onToggleEdgeKind(kind)}
+            className={`flex items-center gap-1.5 rounded border px-2 py-1 transition ${
+              visibility.hiddenEdgeKinds.has(kind)
+                ? 'border-gray-900 bg-gray-950 text-gray-700 line-through'
+                : 'border-gray-800 bg-gray-950/50 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+            }`}
+          >
+            <span className="inline-block w-3.5 border-t-2" style={{ borderColor: color }} />
+            {kind} →
+          </button>
+        ))}
+        {mode === 'hierarchy' && (
+          <span className="ml-auto text-[10px] text-gray-600">scope tree · relationship context lanes</span>
+        )}
       </div>
     </div>
   )
