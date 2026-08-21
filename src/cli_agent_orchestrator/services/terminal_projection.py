@@ -34,6 +34,8 @@ import logging
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy.exc import OperationalError
+
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.clients.database import (
     get_terminal_metadata,
@@ -563,7 +565,9 @@ def project_terminal(terminal_id: str) -> Optional[Dict[str, Any]]:
         return project_row(row, panes, vintage="v1", session_paused=_session_paused(row))
     try:
         row = get_terminal_metadata_v2(terminal_id)
-    except Exception as exc:  # pragma: no cover - an uninstalled v2 surface is absent
+    except OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
         logger.debug("v2 terminal lookup unavailable for %s: %s", terminal_id, exc)
         return None
     if row is None:

@@ -262,9 +262,9 @@ class CreateTerminalBody(BaseModel):
 
     Carries the deferred-init message payload OUT of the query string:
     prompt content can be large (URL-length 414 risk) and sensitive (query
-    strings are routinely captured in HTTP access logs and traces). Routing
-    fields (provider, defer_init, etc.) stay as query params; only the
-    message content lives here.
+    strings are routinely captured in HTTP access logs and traces).
+    Endpoint-selection fields (provider, defer_init, etc.) stay as query
+    params. Message content and assigned-route identity fields live here.
     """
 
     initial_message: Optional[str] = None
@@ -1973,6 +1973,9 @@ async def managed_launch_capabilities(
         "zero_task_route_attestation": True,
         "pinned_provider_executable": True,
         "reservation_bound_delivery_id": True,
+        # The reserve/create surfaces persist and echo the selected AI/billing
+        # provider. A conductor must negotiate this before sending the field.
+        "assigned_quota_provider": True,
         "provider_bound_bridge_environment": True,
         # Native GLM is a closed wrapper/inner route envelope.  A conductor
         # must negotiate this exact capability before sending route fields;

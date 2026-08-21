@@ -2295,6 +2295,7 @@ async def create_terminal(
                 caller_id=caller_id,
                 allowed_tools=allowed_tools,
                 shell_command=None,
+                assigned_quota_provider=assigned_quota_provider,
                 status=TerminalStatus.UNKNOWN,
                 last_active=datetime.now(),
             )
@@ -2409,6 +2410,7 @@ async def create_terminal(
             caller_id=caller_id,
             allowed_tools=allowed_tools,
             shell_command=shell_command,
+            assigned_quota_provider=assigned_quota_provider,
             status=initial_status,
             last_active=datetime.now(),
         )

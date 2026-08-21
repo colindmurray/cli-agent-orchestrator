@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
 import pytest
@@ -764,7 +766,9 @@ def test_bind_reconcile_refuses_mismatched_publication(
     assert v2.get(record["reservation_id"])["state"] == "launching"
 
 
-def test_quota_provider_replay_and_legacy_compatibility(isolated_memory_db, worktree, tmp_path):
+def test_quota_provider_replay_and_legacy_compatibility(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
     import json
 
     with pytest.raises(Exception, match="quota_provider"):
@@ -783,13 +787,59 @@ def test_quota_provider_replay_and_legacy_compatibility(isolated_memory_db, work
             .filter_by(reservation_id=legacy.reservation_id)
             .one()
         )
+        terminal_id = row.terminal_id
+        generation = row.generation
         payload = json.loads(row.request_json)
         payload.pop("quota_provider")
         row.request_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         session.commit()
+    database.create_terminal_v2(
+        terminal_id,
+        "cao-test",
+        "worker",
+        "codex",
+        generation=generation,
+    )
     assert v2.reserve(legacy)[1] is False
+    enriched = legacy.model_copy(update={"quota_provider": "zai"})
+    assert v2.reserve(enriched)[1] is False
+    assert v2.reserve(enriched)[1] is False
+    assert v2.get(legacy.reservation_id)["request"]["quota_provider"] == "zai"
+    assert database.get_terminal_metadata_v2(terminal_id)["v2_assigned_quota_provider"] == "zai"
     with pytest.raises(ManagedLaunchConflict):
-        v2.reserve(legacy.model_copy(update={"quota_provider": "zai"}))
+        v2.reserve(enriched.model_copy(update={"quota_provider": "other"}))
+
+    racy = _reserve_request(worktree, tmp_path)
+    v2.reserve(racy)
+    with database.SessionLocal() as session:
+        row = session.get(database.ManagedLaunchV2ReservationModel, racy.reservation_id)
+        payload = json.loads(row.request_json)
+        payload.pop("quota_provider")
+        row.request_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        session.commit()
+
+    def enrich(value):
+        try:
+            v2.reserve(racy.model_copy(update={"quota_provider": value}))
+            return value
+        except ManagedLaunchConflict:
+            return "conflict"
+
+    real_reconcile = v2._reconciled_request_json
+    gate = threading.Barrier(2)
+    waits = iter((True, True))
+
+    def synchronized_reconcile(*args):
+        result = real_reconcile(*args)
+        if next(waits, False):
+            gate.wait()
+        return result
+
+    monkeypatch.setattr(v2, "_reconciled_request_json", synchronized_reconcile)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(enrich, ("bytedance", "zai")))
+    assert outcomes.count("conflict") == 1
+    assert v2.get(racy.reservation_id)["request"]["quota_provider"] in outcomes
 
 
 def test_v2_acp_forwards_quota_provider(isolated_memory_db, worktree, tmp_path, monkeypatch):

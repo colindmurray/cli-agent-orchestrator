@@ -111,3 +111,18 @@ def test_missing_quota_column_is_unreadable(tmp_path, monkeypatch):
     with pytest.raises(Exception, match="assigned_quota_provider"):
         database.get_terminal_metadata("missing")
     engine.dispose()
+
+
+def test_v2_missing_quota_column_is_unreadable_to_projection(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'missing-v2.db'}")
+    database.Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
+    database.create_terminal_v2("missing2", "cao-s", "w-2", "codex", generation="gen-missing-v2")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE managed_launch_v2_terminals DROP COLUMN v2_assigned_quota_provider"
+        )
+    monkeypatch.setattr(terminal_projection, "_observed_panes", lambda: {})
+    with pytest.raises(Exception, match="v2_assigned_quota_provider"):
+        terminal_projection.project_terminal("missing2")
+    engine.dispose()

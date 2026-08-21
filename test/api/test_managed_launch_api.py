@@ -138,6 +138,7 @@ def test_capability_handshake_is_exact_and_versioned(client, monkeypatch):
         "zero_task_route_attestation": True,
         "pinned_provider_executable": True,
         "reservation_bound_delivery_id": True,
+        "assigned_quota_provider": True,
         "provider_bound_bridge_environment": True,
         "bridge_environment_inventory": "names-only-sha256",
         "post_allocation_bridge_failure_finalization": True,

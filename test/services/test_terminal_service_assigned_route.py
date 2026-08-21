@@ -114,6 +114,8 @@ async def test_assigned_route_survives_service_write_restart_and_reconstruction(
         assert manager.create_provider.call_args.kwargs["native_session_id"] == "session-1"
         assert metadata["assigned_quota_provider"] == "openai"
         assert metadata_v2["v2_assigned_quota_provider"] == "bytedance"
+        assert terminal.assigned_quota_provider == "openai"
+        assert terminal_v2.assigned_quota_provider == "bytedance"
         assert projected["assigned_quota_provider"] == "openai"
         assert projected_v2["assigned_quota_provider"] == "bytedance"
         assert provider is manager.create_provider.return_value

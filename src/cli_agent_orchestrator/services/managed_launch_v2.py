@@ -1006,8 +1006,8 @@ _ADDITIVE_REQUEST_KEYS = (
 )
 
 
-def _request_matches(stored_json: str, incoming: dict[str, Any]) -> bool:
-    """Whether a replayed reserve carries the same immutable request.
+def _reconciled_request_json(stored_json: str, incoming: dict[str, Any]) -> Optional[str]:
+    """Return the stored or truthfully quota-enriched request, else ``None``.
 
     An exact byte match is the normal case.  The one accommodation is
     the upgrade boundary: a reservation written before the
@@ -1020,13 +1020,21 @@ def _request_matches(stored_json: str, incoming: dict[str, Any]) -> bool:
     conflicts.
     """
     if stored_json == _canonical_json(incoming):
-        return True
+        return stored_json
     stored = _parse_json(stored_json, None)
     if not isinstance(stored, dict):
-        return False
+        return None
     normalized = dict(stored)
+    quota_enriched = False
     for key in _ADDITIVE_REQUEST_KEYS:
-        if key not in normalized:
+        if key == "quota_provider":
+            incoming_quota = incoming.get(key)
+            if normalized.get(key) is None and incoming_quota is not None:
+                normalized[key] = incoming_quota
+                quota_enriched = True
+            elif key not in normalized and incoming_quota is None:
+                normalized[key] = None
+        elif key not in normalized:
             if key in {"provider_route", "route_envelope"}:
                 # Rows created before route envelopes existed are the
                 # historical Anthropic/default form.  Preserve idempotent
@@ -1038,7 +1046,55 @@ def _request_matches(stored_json: str, incoming: dict[str, Any]) -> bool:
                     normalized[key] = None
             elif incoming.get(key) is None:
                 normalized[key] = None
-    return _canonical_json(normalized) == _canonical_json(incoming)
+    if _canonical_json(normalized) != _canonical_json(incoming):
+        return None
+    return _canonical_json(normalized) if quota_enriched else stored_json
+
+
+def _reconcile_existing_request(db, row: Any, incoming: dict[str, Any]) -> Any:
+    """CAS-enrich one legacy NULL quota without changing any other request byte."""
+    reconciled = _reconciled_request_json(row.request_json, incoming)
+    if reconciled is None:
+        raise ManagedLaunchConflict("reservation_id is already bound to a different request")
+    changed = False
+    if reconciled != row.request_json:
+        updated = (
+            db.query(database.ManagedLaunchV2ReservationModel)
+            .filter(
+                database.ManagedLaunchV2ReservationModel.reservation_id == row.reservation_id,
+                database.ManagedLaunchV2ReservationModel.request_json == row.request_json,
+            )
+            .update(
+                {"request_json": reconciled, "updated_at": _now()},
+                synchronize_session=False,
+            )
+        )
+        if updated != 1:
+            db.rollback()
+            current = _query(db, row.reservation_id)
+            if current is None:
+                raise ManagedLaunchConflict("reservation changed concurrently")
+            return _reconcile_existing_request(db, current, incoming)
+        changed = True
+
+    quota_provider = incoming.get("quota_provider")
+    terminal = (
+        db.query(database.ManagedLaunchV2TerminalModel)
+        .filter(database.ManagedLaunchV2TerminalModel.id == row.terminal_id)
+        .first()
+    )
+    if terminal is not None and quota_provider is not None:
+        if terminal.v2_assigned_quota_provider not in {None, quota_provider}:
+            raise ManagedLaunchConflict(
+                "terminal is already bound to a different assigned quota provider"
+            )
+        if terminal.v2_assigned_quota_provider is None:
+            terminal.v2_assigned_quota_provider = quota_provider
+            changed = True
+    if changed:
+        db.commit()
+        return _query(db, row.reservation_id)
+    return row
 
 
 #: Modes ``launch_reserved`` has a real launch branch for.
@@ -1309,10 +1365,7 @@ def reserve(request: ManagedLaunchV2ReserveRequest) -> tuple[dict[str, Any], boo
         with database.SessionLocal() as db:
             existing = _query(db, request.reservation_id)
             if existing is not None:
-                if not _request_matches(existing.request_json, payload):
-                    raise ManagedLaunchConflict(
-                        "reservation_id is already bound to a different request"
-                    )
+                existing = _reconcile_existing_request(db, existing, payload)
                 # The reserved mode is immutable. A replay that restates
                 # a different mode is refused rather than adopted, so a
                 # reservation can never change branch under a retry.
@@ -1359,8 +1412,9 @@ def reserve(request: ManagedLaunchV2ReserveRequest) -> tuple[dict[str, Any], boo
     except IntegrityError:
         with database.SessionLocal() as db:
             existing = _query(db, request.reservation_id)
-            if existing is None or not _request_matches(existing.request_json, payload):
+            if existing is None:
                 raise ManagedLaunchConflict("concurrent reservation conflict")
+            existing = _reconcile_existing_request(db, existing, payload)
             return _row_dict(existing), False
     except Exception as exc:  # noqa: BLE001 - fail closed at the store boundary
         raise ManagedLaunchUnavailable(f"managed-launch v2 reservation failed: {exc}") from exc

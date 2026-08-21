@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -1656,7 +1657,7 @@ def test_stop_barrier_refuses_managed_operation_before_status_or_bridge(
         )
 
 
-def test_quota_provider_replay_and_legacy_compatibility(tmp_path, isolated_memory_db):
+def test_quota_provider_replay_and_legacy_compatibility(tmp_path, isolated_memory_db, monkeypatch):
     from cli_agent_orchestrator.clients import database
 
     with pytest.raises(Exception, match="quota_provider"):
@@ -1675,13 +1676,59 @@ def test_quota_provider_replay_and_legacy_compatibility(tmp_path, isolated_memor
             .filter_by(reservation_id=legacy.reservation_id)
             .one()
         )
+        terminal_id = row.terminal_id
+        generation = row.generation
         payload = json.loads(row.request_json)
         payload.pop("quota_provider")
         row.request_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         session.commit()
+    database.create_terminal(
+        terminal_id,
+        "cao-test",
+        "worker",
+        "codex",
+        generation=generation,
+    )
     assert managed_launch.reserve(legacy)[1] is False
+    enriched = legacy.model_copy(update={"quota_provider": "claude"})
+    assert managed_launch.reserve(enriched)[1] is False
+    assert managed_launch.reserve(enriched)[1] is False
+    assert managed_launch.get(legacy.reservation_id)["request"]["quota_provider"] == "claude"
+    assert database.get_terminal_metadata(terminal_id)["assigned_quota_provider"] == "claude"
     with pytest.raises(managed_launch.ManagedLaunchConflict):
-        managed_launch.reserve(legacy.model_copy(update={"quota_provider": "claude"}))
+        managed_launch.reserve(enriched.model_copy(update={"quota_provider": "zai"}))
+
+    racy = _reserve_request(tmp_path)
+    managed_launch.reserve(racy)
+    with database.SessionLocal() as session:
+        row = session.get(database.ManagedLaunchReservationModel, racy.reservation_id)
+        payload = json.loads(row.request_json)
+        payload.pop("quota_provider")
+        row.request_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        session.commit()
+
+    def enrich(value):
+        try:
+            managed_launch.reserve(racy.model_copy(update={"quota_provider": value}))
+            return value
+        except managed_launch.ManagedLaunchConflict:
+            return "conflict"
+
+    real_reconcile = managed_launch._reconciled_request_json
+    gate = threading.Barrier(2)
+    waits = iter((True, True))
+
+    def synchronized_reconcile(*args):
+        result = real_reconcile(*args)
+        if next(waits, False):
+            gate.wait()
+        return result
+
+    monkeypatch.setattr(managed_launch, "_reconciled_request_json", synchronized_reconcile)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(enrich, ("openai", "zai")))
+    assert outcomes.count("conflict") == 1
+    assert managed_launch.get(racy.reservation_id)["request"]["quota_provider"] in outcomes
 
 
 def test_launch_forwards_quota_provider(isolated_memory_db, tmp_path, monkeypatch):
