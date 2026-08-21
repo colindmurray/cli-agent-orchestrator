@@ -32,6 +32,22 @@ class OwnerBody(BaseModel):
     restore_contract_digest: Optional[str] = None
 
 
+class AdapterBody(BaseModel):
+    kind: str
+    executable: Optional[str] = None
+    executable_sha256: Optional[str] = None
+    cwd: Optional[str] = None
+    argv: Optional[list[str]] = None
+    repository: Optional[str] = None
+    run_id: Optional[int] = None
+    run_attempt: Optional[int] = None
+    workflow_id: Optional[int] = None
+    head_sha: Optional[str] = None
+    ref: Optional[str] = None
+
+    model_config = {"extra": "forbid"}
+
+
 class RegisterBody(BaseModel):
     operation_id: str
     session_name: str
@@ -42,6 +58,7 @@ class RegisterBody(BaseModel):
     duration_seconds: int = Field(gt=0, le=registered_waits.MAX_ROUND_SECONDS)
     estimated_seconds: Optional[int] = Field(default=None, gt=0)
     owner: OwnerBody
+    adapter: Optional[AdapterBody] = None
 
 
 class CancelBody(BaseModel):
@@ -88,6 +105,7 @@ async def wait_capabilities(_: Any = _READ) -> dict[str, Any]:
 async def register_wait(body: RegisterBody, _: Any = _WRITE) -> dict[str, Any]:
     def _register() -> dict[str, Any]:
         owner = wait_admission.WaitOwner(**body.owner.model_dump())
+        adapter = body.adapter.model_dump(exclude_none=True) if body.adapter else None
         return registered_waits.register(
             registered_waits.RegistrationRequest(
                 operation_id=body.operation_id,
@@ -99,6 +117,7 @@ async def register_wait(body: RegisterBody, _: Any = _WRITE) -> dict[str, Any]:
                 duration_seconds=body.duration_seconds,
                 estimated_seconds=body.estimated_seconds,
                 owner=owner,
+                adapter=adapter,
             )
         )
 
