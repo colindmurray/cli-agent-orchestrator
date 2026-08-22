@@ -1,0 +1,177 @@
+{
+  "communications": [
+    {
+      "authored_at": "2026-08-20T09:15:00.000004Z",
+      "authored_by_id": "golden-terminal",
+      "authored_by_type": "worker",
+      "body": {
+        "attachment_id": "21aa3404-a8c7-4c33-84cd-a7dda37b8de6",
+        "blob_id": "b9c7aebec74c4e343a5eaa2a898558d37e21ab93051b1dd4c15d60b37affb410",
+        "byte_size": 148,
+        "capture_kind": "inline-message",
+        "content_state": "present",
+        "display_name": "body",
+        "document_id": "08da6759-7969-4ba5-8c76-387da86d0efc",
+        "media_type": "text/markdown",
+        "redaction_applied": null,
+        "role": "body",
+        "sha256": "b9c7aebec74c4e343a5eaa2a898558d37e21ab93051b1dd4c15d60b37affb410"
+      },
+      "communication_id": "5a0d1c04-7a21-4e6f-8a30-000000000004",
+      "delivery_state": "intent",
+      "documents": [],
+      "goal_version": null,
+      "kind": "report",
+      "lane_id": null,
+      "project_id": "golden-project",
+      "recorded_at": "2026-08-22T05:12:43.354914Z",
+      "report_scope": "final",
+      "request_key": "golden:message-report:0004",
+      "session_id": null,
+      "superseded_by": null,
+      "supersedes_communication_id": null,
+      "task_occurrence_id": "occ-golden-0001",
+      "title": "Golden final report (message-only)",
+      "visibility": "project"
+    },
+    {
+      "authored_at": "2026-08-20T09:10:00.000003Z",
+      "authored_by_id": "golden-terminal",
+      "authored_by_type": "worker",
+      "body": {
+        "attachment_id": "e400446a-6ac8-4997-acc3-910b3f327010",
+        "blob_id": "a87b10b18a7eaf17a142013221145ad0a8a48df18f3e851eada44bb9cf0cf82e",
+        "byte_size": 171,
+        "capture_kind": "file-snapshot",
+        "content_state": "present",
+        "display_name": "report.md",
+        "document_id": "34119c17-d997-4047-a277-86236c02603c",
+        "media_type": "text/markdown",
+        "provenance": {
+          "resolved_path": "/private/var/folders/1p/q35nt92x2_s69k1bvg1dcw2m0000gn/T/catalog-fixture-build-8_hen3yk/golden-project/runs/final-report.md"
+        },
+        "redaction_applied": null,
+        "role": "body",
+        "sha256": "a87b10b18a7eaf17a142013221145ad0a8a48df18f3e851eada44bb9cf0cf82e"
+      },
+      "communication_id": "5a0d1c03-7a21-4e6f-8a30-000000000003",
+      "delivery_state": "intent",
+      "documents": [],
+      "goal_version": null,
+      "kind": "report",
+      "lane_id": null,
+      "project_id": "golden-project",
+      "recorded_at": "2026-08-22T05:12:43.354618Z",
+      "report_scope": "final",
+      "request_key": "golden:final-report:0003",
+      "session_id": "session-golden-lane",
+      "superseded_by": null,
+      "supersedes_communication_id": null,
+      "task_occurrence_id": "occ-golden-0001",
+      "title": "Golden final report: fixture complete",
+      "visibility": "project"
+    },
+    {
+      "authored_at": "2026-08-20T09:05:00.000002Z",
+      "authored_by_id": "golden-terminal",
+      "authored_by_type": "worker",
+      "body": {
+        "attachment_id": "2810e124-fb16-4604-b432-833feefbaa27",
+        "blob_id": "a53bfccd183947adbf58f122358c5b4dbe3359a480de6addc89d7a9e53bcdb23",
+        "byte_size": 138,
+        "capture_kind": "inline-message",
+        "content_state": "present",
+        "display_name": "body",
+        "document_id": "0768ef71-9394-4179-8aa5-d5859e97b9d8",
+        "media_type": "text/markdown",
+        "redaction_applied": null,
+        "role": "body",
+        "sha256": "a53bfccd183947adbf58f122358c5b4dbe3359a480de6addc89d7a9e53bcdb23"
+      },
+      "communication_id": "5a0d1c02-7a21-4e6f-8a30-000000000002",
+      "delivery_state": "intent",
+      "documents": [],
+      "goal_version": null,
+      "kind": "checkpoint",
+      "lane_id": null,
+      "project_id": "golden-project",
+      "recorded_at": "2026-08-22T05:12:43.354364Z",
+      "report_scope": "intermediate",
+      "request_key": "golden:checkpoint:0002",
+      "session_id": null,
+      "superseded_by": null,
+      "supersedes_communication_id": null,
+      "task_occurrence_id": "occ-golden-0001",
+      "title": "Golden checkpoint one: capture verified",
+      "visibility": "project"
+    },
+    {
+      "authored_at": "2026-08-20T09:00:00.000001Z",
+      "authored_by_id": "conductor",
+      "authored_by_type": "supervisor",
+      "body": {
+        "attachment_id": "eb42b171-e525-4215-b2fa-7c4071023841",
+        "blob_id": "c4ec433a1768213c54625604596b6a09157db8de0cfeae46af3ed1c1d89579d5",
+        "byte_size": 360,
+        "capture_kind": "inline-message",
+        "content_state": "present",
+        "display_name": "body",
+        "document_id": "005a7a5f-0333-439c-a020-e0df7a141d19",
+        "media_type": "text/markdown",
+        "redaction_applied": null,
+        "role": "body",
+        "sha256": "c4ec433a1768213c54625604596b6a09157db8de0cfeae46af3ed1c1d89579d5"
+      },
+      "communication_id": "5a0d1c01-7a21-4e6f-8a30-000000000001",
+      "delivery_state": "intent",
+      "documents": [],
+      "goal_version": 1,
+      "kind": "assignment",
+      "lane_id": null,
+      "project_id": "golden-project",
+      "recorded_at": "2026-08-22T05:12:43.353766Z",
+      "report_scope": null,
+      "request_key": "golden:assignment:0001",
+      "session_id": null,
+      "superseded_by": null,
+      "supersedes_communication_id": null,
+      "task_occurrence_id": "occ-golden-0001",
+      "title": "Golden assignment: ship the catalog fixture",
+      "visibility": "project"
+    }
+  ],
+  "content_objects": {
+    "a53bfccd183947adbf58f122358c5b4dbe3359a480de6addc89d7a9e53bcdb23": {
+      "byte_size": 138,
+      "content_state": "present",
+      "sha256": "a53bfccd183947adbf58f122358c5b4dbe3359a480de6addc89d7a9e53bcdb23"
+    },
+    "a87b10b18a7eaf17a142013221145ad0a8a48df18f3e851eada44bb9cf0cf82e": {
+      "byte_size": 171,
+      "content_state": "present",
+      "sha256": "a87b10b18a7eaf17a142013221145ad0a8a48df18f3e851eada44bb9cf0cf82e"
+    },
+    "b9c7aebec74c4e343a5eaa2a898558d37e21ab93051b1dd4c15d60b37affb410": {
+      "byte_size": 148,
+      "content_state": "present",
+      "sha256": "b9c7aebec74c4e343a5eaa2a898558d37e21ab93051b1dd4c15d60b37affb410"
+    },
+    "c4ec433a1768213c54625604596b6a09157db8de0cfeae46af3ed1c1d89579d5": {
+      "byte_size": 360,
+      "content_state": "present",
+      "sha256": "c4ec433a1768213c54625604596b6a09157db8de0cfeae46af3ed1c1d89579d5"
+    }
+  },
+  "envelope": {
+    "communications_count": 4,
+    "content_object_prefix": "communications/content/",
+    "content_objects_count": 4,
+    "coverage": "complete",
+    "produced_at": "2026-08-22T05:12:43Z",
+    "producer": "cao-conductor-catalog-projection",
+    "producer_version": 1,
+    "project": "golden-project",
+    "valid_until": "2026-08-22T05:12:43Z"
+  },
+  "schema": "cao-communications-index-v1"
+}

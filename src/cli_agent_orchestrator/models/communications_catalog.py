@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class QuarantineInfo(BaseModel):
@@ -52,6 +52,10 @@ class CommunicationListItem(BaseModel):
     session_id: Optional[str] = None
     lane_id: Optional[str] = None
     task_occurrence_id: Optional[str] = None
+    # The producer copies this verbatim from its store, where it is an
+    # integer version counter — the golden fixture carries `1`, which the
+    # synthetic-index tests never exercised. Normalised to str at this one
+    # ingest point so every downstream consumer sees a single spelling.
     goal_version: Optional[str] = None
     kind: Optional[str] = None
     report_scope: Optional[str] = None
@@ -67,6 +71,13 @@ class CommunicationListItem(BaseModel):
     superseded_by: Optional[str] = None
     body: Optional[DocumentEntry] = None
     documents: List[DocumentEntry] = []
+
+    @field_validator("goal_version", mode="before")
+    @classmethod
+    def _stringify_goal_version(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return value
+        return str(value)
 
 
 class CatalogReason(BaseModel):

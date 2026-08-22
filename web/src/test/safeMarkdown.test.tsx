@@ -240,6 +240,120 @@ describe('budgets fail visibly', () => {
   })
 })
 
+describe('the counting pass is bounded work', () => {
+  // cond-0502: the budget check used to parse the whole document in one call,
+  // so a marker-dense document under the byte budget spent ~59 s (512 KiB) —
+  // or ~0.9 s for the 64 KiB fixture below — inside the counting parse before
+  // the node rail tripped: a silent hang, not the visible failure §10
+  // requires. The check now parses capped chunks and checks the rail between
+  // chunks, so the remaining bytes are never parsed once the rail trips.
+  const denseEmphasis = '*a* '.repeat((64 * 1024) / 4)
+
+  it('a marker-dense document reaches its visible verdict in bounded time', () => {
+    expect(new TextEncoder().encode(denseEmphasis).length).toBeLessThan(MAX_MARKDOWN_RENDER_BYTES)
+    const t0 = performance.now()
+    expect(markdownBudgetBreach(denseEmphasis)).toBe('nodes')
+    const elapsed = performance.now() - t0
+    // The property under test is BOUNDED VISIBLE FAILURE against the ~59 s
+    // monolithic hang, not a latency SLA: measured ~88 ms locally and
+    // 338.9 ms on the shared CI runner, so a 5 s bound keeps ~70× of proof
+    // that the monolithic parse is gone while leaving an order of magnitude
+    // of runner-noise headroom — reverting still goes red by two minutes'
+    // worth of timeout long before 5 s matters.
+    expect(elapsed).toBeLessThan(5000)
+  })
+
+  it('that verdict is visible through the component, not a silent hang', () => {
+    render(<SafeContentView content={denseEmphasis} mediaType="text/markdown" downloadBase="doc" />)
+    const notice = screen.getByTestId('markdown-render-budget')
+    expect(notice).toHaveTextContent('Too complex to render')
+    expect(screen.queryByTestId('md-rendered')).toBeNull()
+  })
+
+  it('legitimate documents keep their admissions', () => {
+    // Table density is what makes these heavy: ~250 nodes/KiB means a table
+    // document near 48 KiB trips the NODE RAIL itself (both before and after
+    // this change), so the admitted table class sits at 24 KiB. Prose and
+    // fenced code are pinned at their design-discussion sizes.
+    const table = ['| alpha | beta | gamma |', '| --- | --- | --- |',
+      ...Array.from({ length: 40 }, (_, i) => `| r${i}a | r${i}b | r${i}c |`)].join('\n')
+    const tables = (table + '\n\n').repeat(Math.ceil((24 * 1024) / (table.length + 2))).slice(0, 24 * 1024)
+    const words = 'lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor'.split(' ')
+    const sentence = Array.from({ length: 100 }, (_, i) => words[i % words.length]).join(' ')
+    const prose = Array.from({ length: 700 }, () => sentence).join('\n\n').slice(0, 400 * 1024)
+    const fence = ['```ts', 'function f(x: number): number {', '  return x * 2 + 1;', '}', '```'].join('\n')
+    const fences = (fence + '\n\n').repeat(Math.ceil((200 * 1024) / (fence.length + 2))).slice(0, 200 * 1024)
+    for (const [name, doc] of [['tables', tables], ['prose', prose], ['fences', fences]] as const) {
+      expect(new TextEncoder().encode(doc).length, name).toBeLessThanOrEqual(MAX_MARKDOWN_RENDER_BYTES)
+      expect(markdownBudgetBreach(doc), name).toBeNull()
+    }
+  })
+
+  it('a wide table cut into fragments keeps counting its cells', () => {
+    // Reviewer repro (cond-0502 repair cycle 1): one header + delimiter
+    // above five ~5,000-character rows of small cells counts 25,014 nodes
+    // monolithic. Fragments cut out of that block once lost their
+    // header/delimiter context, so each detached row parsed as a ~3-node
+    // paragraph — about 40 nodes counted, the rail bypassed, and the render
+    // freeze this check exists to prevent recreated inside the renderer.
+    // The cutter now re-attaches the block's own header + delimiter to
+    // every fragment, so the cells keep counting and the rail trips.
+    const header = '| col one | col two |'
+    const delimiter = '| --- | --- |'
+    const wideRow = '| x'.repeat(1600) // ≈4.8 KB, ~3,200 cells' worth of structure
+    const doc = [header, delimiter, ...Array.from({ length: 5 }, () => wideRow)].join('\n')
+    expect(new TextEncoder().encode(doc).length).toBeLessThan(MAX_MARKDOWN_RENDER_BYTES)
+    expect(markdownBudgetBreach(doc)).toBe('nodes')
+  })
+
+  it('a many-row table of normal-length rows stays admitted through fragment cuts', () => {
+    // The same re-attachment must not flip legitimate tables: ~300 normal
+    // rows form one ~19 KiB block — well over the module's chunk cap, so it
+    // IS fragmented — yet every fragment keeps its rows counting as table
+    // structure and the total sits far under the rail, exactly as the one
+    // monolithic parse counted it.
+    const doc = [
+      '| a | b | c |',
+      '| --- | --- | --- |',
+      ...Array.from({ length: 300 }, (_, i) => `| r${i} | value ${i} | note ${i} |`),
+    ].join('\n')
+    expect(new TextEncoder().encode(doc).length).toBeGreaterThan(2 * 4096)
+    expect(markdownBudgetBreach(doc)).toBeNull()
+  })
+
+  it('many tiny blocks stay admitted far from the rail', () => {
+    // Every blank-line-delimited block parses as its own document and adds
+    // one root node: 2,000 one-word paragraphs count 6,000 chunked vs
+    // 4,001 monolithic — an inflation of one node per block with the same
+    // verdict here, far from the rail. Near the rail that bias can refuse
+    // a document one monolithic parse would admit; the module header
+    // discloses that arithmetic deliberately rather than pinning it here,
+    // where any exact boundary would break on unrelated count changes.
+    const doc = Array.from({ length: 2000 }, (_, i) => `w${i}`).join('\n\n')
+    expect(markdownBudgetBreach(doc)).toBeNull()
+  })
+
+  it('constructs spanning chunk boundaries still count as one document', () => {
+    // A loose list spans blank lines: chunked counting sees several short
+    // lists where the renderer sees one, and the estimate must stay
+    // rail-honest — admitted here, where the monolithic count is also far
+    // under the rail.
+    const looseList = Array.from({ length: 400 }, (_, i) => `- item ${i} text`).join('\n\n')
+    expect(markdownBudgetBreach(looseList)).toBeNull()
+    // An unclosed fence swallows every blank line below it into one code
+    // block; split per blank line it becomes several small fences, which is
+    // the disclosed wrapper-node estimate, never a rail-scale shift.
+    const unclosedFence = '```ts\n' + Array.from({ length: 400 }, (_, i) => `let x${i} = ${i}`).join('\n\n')
+    expect(markdownBudgetBreach(unclosedFence)).toBeNull()
+    // A single line over the chunk cap is hard-sliced mid-line. An emphasis
+    // run cut at the slice point degrades to literal text in both pieces, so
+    // the summed count stays within a couple of nodes of the monolithic one;
+    // the dense variant of the same shape trips the rail above.
+    const longLine = 'word **bold** '.repeat(Math.ceil((16 * 1024) / 14)).slice(0, 16 * 1024)
+    expect(markdownBudgetBreach(longLine)).toBeNull()
+  })
+})
+
 describe('plain text stays literal', () => {
   it('Markdown-looking characters in text/plain render as text', () => {
     const content = '# not a heading\n\n**not bold** [not a link](https://example.com)\n\n- not\n- a\n- list'
