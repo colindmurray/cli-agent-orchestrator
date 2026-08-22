@@ -887,7 +887,8 @@ def _published_terminal_facts(terminal_id: Optional[str]) -> dict[str, Any]:
     except Exception as exc:
         logger.debug(
             "terminal projection underivable for %s; publishing unknown facts: %s",
-            terminal_id, exc,
+            terminal_id,
+            exc,
         )
         return published
     if not projected:
