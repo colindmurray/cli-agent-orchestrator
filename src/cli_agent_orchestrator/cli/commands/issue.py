@@ -310,6 +310,11 @@ def issue():
 @click.option("--expected-outcome", default=None)
 @click.option("--actual-outcome", default=None)
 @click.option("--evidence", default=None, help="absolute path to a log or run dir")
+@click.option(
+    "--observed-revision",
+    default=None,
+    help="commit/tag/build at which the reported behavior was observed",
+)
 @click.option("--favorite", is_flag=True, help="show this item prominently on project Home")
 @click.option("--key", default=None, help="explicit issue key (migration only)")
 @click.option(
@@ -343,6 +348,7 @@ def issue_file(
     expected_outcome,
     actual_outcome,
     evidence,
+    observed_revision,
     favorite,
     key,
     force,
@@ -378,6 +384,7 @@ def issue_file(
             expected_outcome=expected_outcome,
             actual_outcome=actual_outcome,
             evidence=evidence,
+            observed_revision=observed_revision,
             session_name=session_name,
             terminal_id=os.environ.get("CAO_TERMINAL_ID"),
             source_path=cwd or os.getcwd(),
@@ -503,6 +510,7 @@ def issue_show(issue_key, as_json):
             "expected_outcome",
             "actual_outcome",
             "evidence",
+            "observed_revision",
             "resolution",
             "duplicate_of",
         ):
@@ -530,7 +538,8 @@ def issue_show(issue_key, as_json):
             click.echo(_link_line(link, row["key"]))
         for comment in row["comments"]:
             click.echo("")
-            click.echo(f"  --- {comment['author'] or 'unknown'} at {comment['created_at']}")
+            flag = " [important]" if comment.get("important") else ""
+            click.echo(f"  --- {comment['author'] or 'unknown'} at {comment['created_at']}{flag}")
             click.echo(f"  {comment['body']}")
 
     _emit(row, as_json, render)
@@ -569,6 +578,11 @@ def issue_show(issue_key, as_json):
 @click.option("--expected-outcome", default=None)
 @click.option("--actual-outcome", default=None)
 @click.option("--evidence", default=None)
+@click.option(
+    "--observed-revision",
+    default=None,
+    help="commit/tag/build at which the reported behavior was observed (empty clears)",
+)
 @click.option("--resolution", default=None)
 @click.option("--duplicate-of", default=None)
 @click.option(
@@ -693,8 +707,9 @@ def issue_close(issue_key, resolution, final_status, actor, as_json):
 @click.option("--body", default=None)
 @click.option("--body-file", type=click.Path(exists=True), default=None)
 @click.option("--author", default=None)
+@click.option("--important", is_flag=True, help="flag this comment as high-signal now")
 @click.option("--json", "as_json", is_flag=True)
-def issue_comment(issue_key, body, body_file, author, as_json):
+def issue_comment(issue_key, body, body_file, author, important, as_json):
     """Add a comment."""
     if body_file:
         with open(body_file, "r", encoding="utf-8") as handle:
@@ -703,10 +718,46 @@ def issue_comment(issue_key, body, body_file, author, as_json):
         click.echo("a comment needs --body or --body-file", err=True)
         sys.exit(1)
     try:
-        row = tracker.add_comment(issue_key, body=body, author=author)
+        row = tracker.add_comment(issue_key, body=body, author=author, important=bool(important))
     except TrackerError as exc:
         _fail(exc)
     _emit(row, as_json, lambda r: click.echo(f"comment {r['id']} on {r['issue_key']}"))
+
+
+@issue.command(name="comment-importance")
+@click.argument("issue_key")
+@click.argument("comment_id", type=int)
+@click.argument("weight", type=click.Choice(["important", "routine"]))
+@click.option(
+    "--actor",
+    default=None,
+    help="who is making this change (recorded in the audit trail)",
+)
+@click.option("--json", "as_json", is_flag=True)
+def issue_comment_importance(issue_key, comment_id, weight, actor, as_json):
+    """Set (important) or clear (routine) a comment's high-signal flag.
+
+    Idempotent: re-applying the current weight changes nothing. Every actual
+    change writes one audit event and bumps the issue's updated_at.
+    """
+    try:
+        row = tracker.set_comment_importance(
+            issue_key,
+            comment_id,
+            important=weight == "important",
+            actor=actor or os.environ.get("CAO_TERMINAL_ID"),
+        )
+    except TrackerError as exc:
+        _fail(exc)
+
+    def render(row):
+        state = "important" if row["important"] else "routine"
+        if row["changed"]:
+            click.echo(f"comment {row['id']} on {row['issue_key']} -> {state}")
+        else:
+            click.echo(f"comment {row['id']} on {row['issue_key']} already {state}")
+
+    _emit(row, as_json, render)
 
 
 @issue.command(name="link")

@@ -1672,6 +1672,7 @@ function ItemDetail({
           expected_outcome: row.expected_outcome ?? '',
           actual_outcome: row.actual_outcome ?? '',
           evidence: row.evidence ?? '',
+          observed_revision: row.observed_revision ?? '',
           resolution: row.resolution ?? '',
         })
         setLabelValues(row.labels)
@@ -1839,6 +1840,22 @@ function ItemDetail({
     }
   }
 
+  // Reversible importance toggle: one PATCH per click, server-side idempotent,
+  // so a double-click cannot double-record the transition.
+  const toggleCommentImportance = async (commentId: number, important: boolean) => {
+    try {
+      if (isFeature) {
+        await api.setTrackerFeatureCommentImportance(issueKey, commentId, important)
+      } else {
+        await api.setTrackerCommentImportance(issueKey, commentId, important)
+      }
+      await load()
+      await onChanged()
+    } catch (err) {
+      showSnackbar({ type: 'error', message: errorText(err) })
+    }
+  }
+
   const addLink = async () => {
     if (!linkTo.trim()) return
     try {
@@ -1934,9 +1951,11 @@ function ItemDetail({
   )
 
   // Free-form evidence fields stay text inputs; reusable vocabulary fields use
-  // searchable, creatable pickers below.
+  // searchable, creatable pickers below. observed_revision is bug-only: a
+  // revision at which behavior was observed has no meaning for feature asks.
   const editableFields: Array<{ field: keyof TrackerIssue; label: string; mono?: boolean; hideWhenEmpty?: boolean }> = [
     { field: 'failing_command' as keyof TrackerIssue, label: 'Failing command', mono: true, hideWhenEmpty: !isBug },
+    { field: 'observed_revision' as keyof TrackerIssue, label: 'Observed revision', mono: true, hideWhenEmpty: !isBug },
     { field: 'evidence' as keyof TrackerIssue, label: 'Evidence', mono: true },
   ].filter(f => !(f.hideWhenEmpty && !draft[f.field as string] && !issue[f.field]))
 
@@ -2381,8 +2400,20 @@ function ItemDetail({
 
       <div className="space-y-2">
         {(issue.comments ?? []).map(c => (
-          <div key={c.id} className="rounded bg-gray-900/60 border border-gray-800 px-3 py-2">
-            <div className="text-[11px] text-gray-600">{c.author ?? 'unknown'} · {shortDate(c.created_at)}</div>
+          <div key={c.id} className={`rounded bg-gray-900/60 border px-3 py-2 ${c.important ? 'border-amber-600/40' : 'border-gray-800'}`}>
+            <div className="flex items-center justify-between gap-2 text-[11px] text-gray-600">
+              <span>{c.author ?? 'unknown'} · {shortDate(c.created_at)}</span>
+              <button
+                onClick={() => toggleCommentImportance(c.id, !c.important)}
+                aria-label={c.important ? `Mark comment ${c.id} routine` : `Mark comment ${c.id} important`}
+                aria-pressed={c.important}
+                title={c.important ? 'Marked important — click to mark routine' : 'Mark as important (high-signal for understanding this issue)'}
+                className={`flex items-center gap-1 rounded px-1.5 py-0.5 ${c.important ? 'text-amber-300' : 'text-gray-600 hover:text-amber-300'}`}
+              >
+                <Star size={11} fill={c.important ? 'currentColor' : 'none'} />
+                {c.important && <span>important</span>}
+              </button>
+            </div>
             <div className="text-xs text-gray-300 whitespace-pre-wrap mt-1">{c.body}</div>
           </div>
         ))}

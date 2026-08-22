@@ -429,6 +429,39 @@ class TestIssueRoutes:
         assert response.status_code == 400
 
 
+class TestObservedRevisionRoutes:
+    def test_filing_with_an_observed_revision_round_trips(self, client, project):
+        created = client.post(
+            "/tracker/issues",
+            json={
+                "project_id": "cao-system",
+                "title": "a defect",
+                "observed_revision": "v1.2.3",
+                "force": True,
+            },
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["observed_revision"] == "v1.2.3"
+        assert (
+            client.get(f"/tracker/issues/{created.json()['key']}").json()["observed_revision"]
+            == "v1.2.3"
+        )
+
+    def test_the_observed_revision_is_optional_and_defaults_to_null(self, client, project):
+        issue = _issue(client)
+        assert issue["observed_revision"] is None
+
+    def test_the_observed_revision_is_patchable_and_clearable(self, client, project):
+        issue = _issue(client)
+        moved = client.patch(
+            f"/tracker/issues/{issue['key']}", json={"observed_revision": "abc1234"}
+        )
+        assert moved.status_code == 200
+        assert moved.json()["observed_revision"] == "abc1234"
+        cleared = client.patch(f"/tracker/issues/{issue['key']}", json={"observed_revision": ""})
+        assert cleared.json()["observed_revision"] is None
+
+
 class TestPatchSemantics:
     def test_an_absent_field_is_untouched(self, client, project):
         issue = _issue(client, assignee="terra", severity="P2")
@@ -471,11 +504,104 @@ class TestCommentsAndLinksRoutes:
         )
         detail = client.get(f"/tracker/issues/{issue['key']}").json()
         assert [c["body"] for c in detail["comments"]] == ["reproduced"]
+        assert [c["important"] for c in detail["comments"]] == [False]
 
     def test_an_empty_comment_is_400(self, client, project):
         issue = _issue(client)
         response = client.post(f"/tracker/issues/{issue['key']}/comments", json={"body": "  "})
         assert response.status_code == 400
+
+    def test_a_comment_can_be_created_important(self, client, project):
+        issue = _issue(client)
+        created = client.post(
+            f"/tracker/issues/{issue['key']}/comments",
+            json={"body": "root cause", "important": True},
+        )
+        assert created.status_code == 201
+        detail = client.get(f"/tracker/issues/{issue['key']}").json()
+        assert detail["comments"][0]["important"] is True
+
+    def test_comment_importance_set_clear_and_retry(self, client, project):
+        issue = _issue(client)
+        comment = client.post(
+            f"/tracker/issues/{issue['key']}/comments", json={"body": "note"}
+        ).json()
+        url = f"/tracker/issues/{issue['key']}/comments/{comment['id']}"
+
+        set_response = client.patch(url, json={"important": True, "actor": "colin"})
+        assert set_response.status_code == 200
+        assert set_response.json()["changed"] is True
+
+        retry = client.patch(url, json={"important": True})
+        assert retry.status_code == 200
+        assert retry.json()["changed"] is False
+
+        cleared = client.patch(url, json={"important": False, "actor": "colin"})
+        assert cleared.json()["changed"] is True
+
+        events = [
+            e
+            for e in client.get(f"/tracker/issues/{issue['key']}").json()["events"]
+            if e["kind"] == "comment-field"
+        ]
+        assert [(e["field"], e["old_value"], e["new_value"], e["actor"]) for e in events] == [
+            ("important", "false", "true", "colin"),
+            ("important", "true", "false", "colin"),
+        ]
+
+    def test_importance_patch_on_an_unknown_comment_is_404(self, client, project):
+        issue = _issue(client)
+        response = client.patch(
+            f"/tracker/issues/{issue['key']}/comments/9999", json={"important": True}
+        )
+        assert response.status_code == 404
+
+    def test_deleting_a_comment_records_the_audit_and_bumps_the_parent(self, client, project):
+        import time as _time
+
+        issue = _issue(client)
+        before = client.get(f"/tracker/issues/{issue['key']}").json()
+        comment = client.post(
+            f"/tracker/issues/{issue['key']}/comments", json={"body": "soon gone"}
+        ).json()
+        # A distinct clock tick so the bump is observable even within one second.
+        _time.sleep(0.01)
+
+        response = client.delete(
+            f"/tracker/issues/{issue['key']}/comments/{comment['id']}?actor=colin"
+        )
+        assert response.status_code == 200
+
+        after = client.get(f"/tracker/issues/{issue['key']}").json()
+        assert after["comments"] == []
+        assert after["updated_at"] > before["updated_at"]
+        deletions = [e for e in after["events"] if e["kind"] == "comment-deleted"]
+        assert len(deletions) == 1
+        assert deletions[0]["old_value"] == "soon gone"
+        assert deletions[0]["new_value"] == str(comment["id"])
+        assert deletions[0]["actor"] == "colin"
+
+    def test_feature_comment_surfaces_share_the_importance_contract(self, client, project):
+        created = client.post(
+            "/tracker/features",
+            json={"project_id": "cao-system", "title": "a feature"},
+        )
+        assert created.status_code == 201
+        feature_key = created.json()["key"]
+        comment = client.post(
+            f"/tracker/features/{feature_key}/comments",
+            json={"body": "note", "important": True},
+        ).json()
+        assert comment["important"] is True
+
+        patched = client.patch(
+            f"/tracker/features/{feature_key}/comments/{comment['id']}",
+            json={"important": False},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["changed"] is True
+        detail = client.get(f"/tracker/features/{feature_key}").json()
+        assert detail["comments"][0]["important"] is False
 
     def test_a_link_round_trips_and_can_be_removed(self, client, project):
         a, b = _issue(client, title="a"), _issue(client, title="b")
