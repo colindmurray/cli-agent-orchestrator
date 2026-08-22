@@ -105,6 +105,18 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
             "rollout_sha256": "a" * 64,
             "detached_before_launch": True,
             "exit_proof": {"reaped": True, "exit_status": -15},
+            # The real mint proves a fresh process adopts the thread it
+            # created; bind requires that proof rather than a version lookup.
+            "resume_adoption_proof": {
+                "schema": bootstrap.RESUME_ADOPTION_SCHEMA,
+                "method": bootstrap.RESUME_METHOD,
+                "adopted_session_id": SESSION,
+                "adopted_in_fresh_process": True,
+                "reported_session_id": SESSION,
+                "ephemeral": False,
+                "sent_no_turn": True,
+                "exit_status": 0,
+            },
         }
 
     async def create_terminal(**kwargs):

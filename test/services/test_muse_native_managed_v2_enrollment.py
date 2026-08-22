@@ -64,6 +64,7 @@ from cli_agent_orchestrator.services import (
 from cli_agent_orchestrator.services import native_pane_input as npi
 from cli_agent_orchestrator.services import (
     native_tui_launch,
+    provider_contracts,
     terminal_service,
 )
 from cli_agent_orchestrator.services.managed_launch import ManagedLaunchConflict
@@ -270,7 +271,9 @@ def test_muse_capability_payload_is_truthful(monkeypatch):
     assert block["id_source"] == "provider_status_discovered"
     assert block["readiness_receipt_kind"] == "muse-native-status-idle"
     assert block["executable"] == "muse"
-    assert "0.1.0" in block["supported_versions"]
+    # Nothing quarantined: Muse runs whatever is installed.
+    assert block["quarantined_versions"] == []
+    assert block["pinned_version"] == provider_contracts.VERSION_LATEST
     assert block["profile_carrier_proof"] == muse_native_launch.PROOF_PROBED
     assert block["profile_carrier_inner_sha256"] == MUSE_INNER_SHA256
     assert block["profile_carrier_reason"] == ""

@@ -29,6 +29,7 @@ from cli_agent_orchestrator.models.managed_launch_v2 import (
     ManagedLaunchV2BindRequest,
     ManagedLaunchV2ReserveRequest,
 )
+from cli_agent_orchestrator.services import codex_native_bootstrap
 from cli_agent_orchestrator.services import execution_mode as em
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
 from cli_agent_orchestrator.services import native_attachment, native_tui_launch, run_manifest
@@ -133,6 +134,14 @@ def _ready_bridge_state(record, monkeypatch):
         "effort": record["request"]["expected_effort"],
         "working_directory": record["working_directory"],
     }
+    if record["provider"] == "codex":
+        receipt["native_resume_adoption"] = {
+            "schema": codex_native_bootstrap.RESUME_ADOPTION_SCHEMA,
+            "method": "thread/resume",
+            "adopted_session_id": SESSION_ID,
+            "adopted_in_fresh_process": True,
+            "sent_no_turn": True,
+        }
     # A native generation has no provider transcript to digest; the argv
     # that started its pane is the evidence that stands in its place.
     if native:

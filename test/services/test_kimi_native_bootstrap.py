@@ -19,7 +19,7 @@ from typing import Any, Mapping
 import pytest
 
 from cli_agent_orchestrator.services import kimi_native_bootstrap as boot
-from cli_agent_orchestrator.services import native_attachment
+from cli_agent_orchestrator.services import native_attachment, provider_contracts
 
 PINNED_VERSION_BANNER = "kimi 0.29.0"
 SESSION_ID = "session_9f2c41ab"
@@ -301,11 +301,28 @@ def test_a_malformed_digest_is_refused_before_the_file_is_read(pinned_binary):
 
 
 def test_strict_version_drift_refuses_before_any_provider_io(pinned_binary, monkeypatch):
+    """An open rollback holds back everything but the build it names.
+
+    The quarantine is empty at rest, so a rollback is two things together: the
+    strict override and the known-good build. Setting only the override refuses
+    every build, which the seam reports as the misconfiguration it is.
+    """
     transport = FakeAcp()
     monkeypatch.setenv("CAO_PROVIDER_VERSION_ENFORCEMENT_KIMI", "strict")
+    monkeypatch.setitem(provider_contracts.SUPPORTED_VERSIONS, "kimi", ("0.36.1",))
 
     with pytest.raises(boot.KimiBootstrapInvalid, match="version drift"):
         _mint(pinned_binary, transport, version_output="kimi 0.28.0")
+
+    assert transport.calls == []
+
+
+def test_strict_without_a_named_build_refuses_and_says_so(pinned_binary, monkeypatch):
+    transport = FakeAcp()
+    monkeypatch.setenv("CAO_PROVIDER_VERSION_ENFORCEMENT_KIMI", "strict")
+
+    with pytest.raises(boot.KimiBootstrapInvalid, match="no build is quarantined"):
+        _mint(pinned_binary, transport, version_output="kimi 0.36.1")
 
     assert transport.calls == []
 

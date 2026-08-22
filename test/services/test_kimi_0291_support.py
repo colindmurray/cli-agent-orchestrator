@@ -53,12 +53,6 @@ ACCEPTED = (CURRENT, PIN_0330, PIN_0320, PIN_0310, PIN_0300, PIN_0292, RETAINED,
 # --------------------------------------------------------------------
 
 
-def test_the_accepted_set_is_current_then_retained():
-    assert pc.SUPPORTED_VERSIONS["kimi"] == ACCEPTED
-    assert pc.PINNED_VERSIONS["kimi"] == CURRENT
-    assert kimi_route.SUPPORTED_KIMI_VERSIONS == ACCEPTED
-
-
 @pytest.mark.parametrize(
     "banner",
     [f"kimi {version}" for version in ACCEPTED] + list(ACCEPTED),

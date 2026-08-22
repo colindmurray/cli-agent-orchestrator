@@ -1133,10 +1133,28 @@ class TestCodexRouteAttestationAdmitsTheStageProvenBuild:
         assert receipt["no_task_admitted"] is True
         assert receipt["provider_route_receipt"]["codex_version"] == "codex-cli 0.146.0"
 
-    def test_codex_0148_still_refuses_at_the_public_seam(self, tmp_path, monkeypatch):
-        self._patch_codex_attestor(monkeypatch, "codex-cli 0.148.0\n", tmp_path)
+    def test_a_build_on_no_list_attests_at_the_public_seam(self, tmp_path, monkeypatch):
+        """Capability comes from the exchange, not from the version string.
 
-        with pytest.raises(managed_launch.ManagedLaunchConflict, match="unsupported Codex version"):
+        The probe validates every response, the trust resolution, and the
+        protected config as it runs, so a build nobody has listed either
+        honours the contract or fails on the contract.
+        """
+        self._patch_codex_attestor(monkeypatch, "codex-cli 0.999.0\n", tmp_path)
+
+        receipt = managed_launch.attest_route(
+            _attest_request(tmp_path, "codex", trusted_project_root=str(tmp_path))
+        )
+        assert receipt["no_task_admitted"] is True
+        assert receipt["provider_route_receipt"]["codex_version"] == "codex-cli 0.999.0"
+
+    def test_an_unreadable_version_still_refuses_at_the_public_seam(self, tmp_path, monkeypatch):
+        """Unreadable and unlisted are different answers; only one refuses."""
+        self._patch_codex_attestor(monkeypatch, "codex-cli unknown-build\n", tmp_path)
+
+        with pytest.raises(
+            managed_launch.ManagedLaunchConflict, match="semver-shaped Codex version"
+        ):
             managed_launch.attest_route(
                 _attest_request(tmp_path, "codex", trusted_project_root=str(tmp_path))
             )

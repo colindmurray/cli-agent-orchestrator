@@ -64,7 +64,7 @@ def _expected_native_tui_providers():
     def version_facts(executable):
         return {
             "pinned_version": contracts.PINNED_VERSIONS[executable],
-            "supported_versions": list(contracts.SUPPORTED_VERSIONS[executable]),
+            "quarantined_versions": list(contracts.SUPPORTED_VERSIONS[executable]),
             "version_enforcement": contracts.version_enforcement_mode(executable),
         }
 

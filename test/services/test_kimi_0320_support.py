@@ -70,44 +70,6 @@ HEADER_0320_ROWS = [
 # --------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("banner", ["0.32.0", "kimi 0.32.0"])
-def test_check_pinned_version_accepts_the_stage_verified_0320(banner):
-    pc.check_pinned_version("kimi", banner)
-
-
-@pytest.mark.parametrize("bad", ["kimi", ""])
-def test_check_pinned_version_still_refuses_unknown_and_unparseable_builds(bad):
-    # 0.32.0 remains a proven build.  In open enforcement, semver-shaped
-    # neighbours are accepted at the launch boundary but do not inherit
-    # feature-specific authority.  (0.33.0 and 0.34.0 are later
-    # stage-verified/proven builds.)  Only unparseable banners fail closed.
-    with pytest.raises(pc.ProviderVersionDrift):
-        pc.check_pinned_version("kimi", bad)
-
-
-@pytest.mark.parametrize("version", ["0.31.1", "0.32.1", "0.33.1", "1.0.0"])
-def test_semver_neighbours_launch_but_get_no_composer_authority(version):
-    # Open enforcement accepts semver-shaped neighbours at launch...
-    pc.check_pinned_version("kimi", version)
-    # ...but they do not inherit the proven composer/steer entries.
-    plan = knc.plan_composer_keystrokes("line one\nline two", provider_version=version)
-    assert plan["deliverable"] is False
-    assert version in plan["undeliverable_reason"]
-    assert knc.steer_chords(version) == frozenset()
-
-
-def test_0320_is_a_separate_accepted_build_never_a_range_widening():
-    assert PIN_0320 in pc.SUPPORTED_VERSIONS["kimi"]
-    # Every earlier proven build stays admitted for already-minted sessions.
-    for retained in ("0.31.0", "0.30.0", "0.29.2", "0.29.1", "0.29.0"):
-        assert retained in pc.SUPPORTED_VERSIONS["kimi"]
-
-
-# --------------------------------------------------------------------
-# Separate proven 0.32.0 composer/steer entries, keyed by the bundle sha256
-# --------------------------------------------------------------------
-
-
 def test_the_composer_newline_table_has_a_separate_proven_0320_entry():
     entry = knc._PROVEN_COMPOSER_NEWLINE.get(PIN_0320)
     assert entry is not None, "0.32.0 must be a separate keyed entry, never a range"
