@@ -1368,6 +1368,121 @@ def _admit_session_creation(session_name: str) -> str:
     return canonical
 
 
+def _teardown_launch_facts(terminal_id: str, generation: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The durable launch facts a teardown-time restore contract needs.
+
+    Only the managed-launch reservations record the canonical working
+    directory and trusted project root durably.  An unmanaged launch
+    resolved those facts at launch and never persisted them, and the pane
+    that could report them is already dead by the time teardown retires
+    the roster — so ``None`` is the truthful "cannot publish here" answer
+    for everything except a managed incarnation, never a fabricated path.
+    """
+    from cli_agent_orchestrator.clients import database
+
+    with database.SessionLocal() as session:
+        v2 = session.query(database.ManagedLaunchV2ReservationModel).filter(
+            database.ManagedLaunchV2ReservationModel.terminal_id == terminal_id
+        )
+        if generation is not None:
+            v2 = v2.filter(database.ManagedLaunchV2ReservationModel.generation == generation)
+        v2_row = v2.one_or_none()
+        if v2_row is not None:
+            return {
+                "working_directory": v2_row.working_directory,
+                "trusted_project_root": v2_row.trusted_project_root,
+            }
+        v1 = session.query(database.ManagedLaunchReservationModel).filter(
+            database.ManagedLaunchReservationModel.terminal_id == terminal_id
+        )
+        if generation is not None:
+            v1 = v1.filter(database.ManagedLaunchReservationModel.generation == generation)
+        v1_row = v1.one_or_none()
+        if v1_row is not None:
+            return {
+                "working_directory": v1_row.working_directory,
+                "trusted_project_root": v1_row.trusted_project_root,
+            }
+    return None
+
+
+def _retire_incarnation_dormant(terminal_id: str, generation: Optional[str]) -> bool:
+    """Publish the restore contract and retire through the dormant transition.
+
+    Returns False when a contract cannot truthfully be published at this
+    seam — no roster incarnation, an identity-pending lineage, an
+    incarnation retired before this seam existed (it stays contract-free),
+    or no durably recorded launch facts — so the caller degrades to the
+    ordinary contract-free retirement.  Provider facts teardown cannot
+    truthfully supply (model, effort, executable, profile/provider-home
+    material) are recorded as typed ``unavailable`` facts, never inferred;
+    roster facts all come from the authoritative roster rows themselves.
+    Errors propagate to the caller's best-effort wrapper.
+    """
+    from cli_agent_orchestrator.services import restore_contract, stable_agent_roster
+
+    incarnation = stable_agent_roster.get_incarnation_by_terminal(terminal_id, generation)
+    if incarnation is None:
+        return False
+    source_terminal = incarnation["terminal_id"]
+    source_generation = incarnation["generation"]
+    if incarnation["disposition"] == stable_agent_roster.INCARNATION_RETIRED and (
+        restore_contract.get_contract_by_incarnation(source_terminal, source_generation) is None
+    ):
+        # Retired before this seam existed: replay convergence applies only
+        # to a crash between publish and transition (contract present).
+        return False
+    lineage_id = incarnation.get("lineage_id")
+    if lineage_id is None:
+        return False
+    agent = stable_agent_roster.get_agent(incarnation["agent_id"])
+    lineage = agent.get("current_lineage") or {}
+    if lineage.get("lineage_id") != lineage_id:
+        return False
+    facts = _teardown_launch_facts(source_terminal, source_generation)
+    if facts is None:
+        return False
+    metadata = _get_terminal_metadata_any(terminal_id)
+    contract = restore_contract.RestoreContract(
+        agent_id=incarnation["agent_id"],
+        lineage_id=lineage_id,
+        terminal_id=source_terminal,
+        generation=source_generation,
+        native_session_id=lineage.get("native_session_id"),
+        harness=lineage["harness"],
+        provider=(metadata or {}).get("provider"),
+        route_provenance=lineage.get("route_provenance"),
+        execution_mode=incarnation.get("execution_mode"),
+        model=restore_contract.ContractFact.unavailable(
+            "the observed/assigned model was not durably recorded at launch"
+        ),
+        effort=restore_contract.ContractFact.unavailable(
+            "the observed/assigned effort was not durably recorded at launch"
+        ),
+        working_directory=facts["working_directory"],
+        trusted_project_root=facts["trusted_project_root"],
+        executable=restore_contract.ContractFact.unavailable(
+            "the exact resolved executable identity was not durably recorded at launch"
+        ),
+        profile_material=restore_contract.ContractFact.unavailable(
+            "profile material references were not durably recorded at launch"
+        ),
+        provider_home_facts=restore_contract.ContractFact.unavailable(
+            "provider-home carrier facts were not durably recorded at launch"
+        ),
+    )
+    record = restore_contract.publish_contract(contract)
+    stable_agent_roster.transition_dormant(
+        terminal_id=source_terminal,
+        generation=source_generation,
+        agent_id=incarnation["agent_id"],
+        lineage_id=lineage_id,
+        contract_digest=record["contract_digest"],
+        reason="terminal teardown",
+    )
+    return True
+
+
 def _roster_retire_incarnation_best_effort(terminal_id: str, generation: Optional[str]) -> None:
     """Roster teardown retirement: best-effort and never raised.
 
@@ -1375,7 +1490,24 @@ def _roster_retire_incarnation_best_effort(terminal_id: str, generation: Optiona
     here (missing record, unreadable store) must not block cleanup — Stop
     is best-effort for every roster.  The stable agent and its history
     survive regardless; the audit reports anything left un-retired.
+
+    When the incarnation's launch facts are durably recorded (managed
+    reservations), retirement first publishes the immutable restore
+    contract and retires through the roster's dormant transition, so the
+    stable agent stays exactly resurrectable on its preserved native
+    session.  Every failure — no durable launch facts, a refused publish,
+    a refused transition — degrades to the ordinary contract-free
+    retirement: the agent is then not resurrectable, which is the state
+    of every agent retired before this seam existed, and teardown is
+    never blocked by it.
     """
+    try:
+        if _retire_incarnation_dormant(terminal_id, generation):
+            return
+    except Exception as e:  # noqa: BLE001 - teardown must never be blocked
+        logger.warning(
+            f"Failed to publish restore contract / dormant transition for {terminal_id}: {e}"
+        )
     try:
         from cli_agent_orchestrator.services import stable_agent_roster
 
