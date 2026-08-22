@@ -1,0 +1,422 @@
+"""Dark COND-0230 M10-C Codex route-observation adapter tests (capability only).
+
+``CodexRouteObserver`` drives the merged ``route_observation`` stage machine
+end to end for one identity-bound ``/status`` control against a fake pane
+surface — no real tmux, no real provider.  The M10 capability stays dark: the
+stage-machine ``enabled()`` gate is untouched (still ``False``) and nothing
+here observes a live provider surface, issues pane input against a live pane,
+or delivers a wake.
+
+The four required effect stages stay distinct in the journal exactly as the
+stage machine orders them: pre-probe intent (first-CAS authorizes the one
+``/status``), provider-surface observation, pre-close intent, close proof.
+The Codex surface is non-modal: no ``Escape`` is ever issued and the close
+proof encodes ``composer-restored`` / ``not-restored`` / ``indeterminate``
+honestly, never a fabricated second ``Escape``.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+
+import pytest
+
+from cli_agent_orchestrator.clients import database
+from cli_agent_orchestrator.models.inbox import MessageStatus
+from cli_agent_orchestrator.services import route_observation as ro
+from cli_agent_orchestrator.services import route_observation_codex as roc
+
+ARTIFACT = "a" * 64
+SESSION_ID = "4f5f46c7-b660-4f6f-a144-d2c6dceccf95"
+CODEX_PINNED_VERSION = "0.147.0"
+
+
+def _request(
+    operation_id=None,
+    *,
+    target_terminal_id="term-target",
+    target_generation="gen-target",
+    native_session_id=SESSION_ID,
+    provider="codex",
+    provider_version=CODEX_PINNED_VERSION,
+    provider_artifact_sha256=ARTIFACT,
+    requester_terminal_id="term-requester",
+    requester_generation="gen-requester",
+):
+    return ro.RouteObservationRequest(
+        operation_id=operation_id or str(uuid.uuid4()),
+        target_terminal_id=target_terminal_id,
+        target_generation=target_generation,
+        native_session_id=native_session_id,
+        provider=provider,
+        provider_version=provider_version,
+        provider_artifact_sha256=provider_artifact_sha256,
+        requester_terminal_id=requester_terminal_id,
+        requester_generation=requester_generation,
+    )
+
+
+def codex_panel_rows(
+    session_id: str = SESSION_ID,
+    *,
+    model: str = "gpt-5.4-codex",
+    effort: str | None = "high",
+    version: str = CODEX_PINNED_VERSION,
+) -> list[str]:
+    """The pinned Codex status panel: brand header, Session row, Model row.
+
+    ``model=None`` omits the Model row entirely (a full-width panel that
+    still lacks it is truncated/different, never a positive observation).
+    """
+    rows = [f">_ OpenAI Codex (v{version})", f"Session: {session_id}"]
+    if model is not None:
+        value = model + (f" (reasoning {effort})" if effort else "")
+        rows.append(f"Model: {value}")
+    rows.append("cwd: /Users/x/repo")
+    return rows
+
+
+class FakeCodexPaneSurface:
+    """A fake Codex pane surface: canned screen, configured width/verdicts.
+
+    Records every status command and every key event so the tests can prove
+    at-most-once ``/status`` and the absence of any ``Escape`` on the
+    non-modal surface.
+    """
+
+    def __init__(
+        self,
+        *,
+        rows: list[str],
+        pane_width: int | None = 100,
+        submission_proven: bool = True,
+        composer_restored: bool | None = True,
+    ) -> None:
+        self._rows = list(rows)
+        self._pane_width = pane_width
+        self._submission_proven = submission_proven
+        self._composer_restored = composer_restored
+        self.status_commands_sent = 0
+        self.key_events: list[str] = []
+
+    @property
+    def pane_id(self) -> str:
+        return "%7"
+
+    def capture_screen(self) -> list[str]:
+        return list(self._rows)
+
+    def pane_width(self) -> int | None:
+        return self._pane_width
+
+    def send_status_command(self) -> bool:
+        self.status_commands_sent += 1
+        return self._submission_proven
+
+    def composer_restored(self) -> bool | None:
+        return self._composer_restored
+
+    def send_key(self, keystroke: str) -> None:
+        self.key_events.append(keystroke)
+
+
+@pytest.fixture(autouse=True)
+def _db(isolated_memory_db):
+    return isolated_memory_db
+
+
+# ---------------------------------------------------------------------------
+# the capability stays dark
+# ---------------------------------------------------------------------------
+
+
+class TestDisabled:
+    def test_the_stage_machine_capability_is_statelessly_disabled(self):
+        assert ro.enabled() is False
+
+    def test_the_adapter_delegates_the_dark_gate_and_does_not_flip_it(self):
+        assert roc.enabled() is ro.enabled()
+        assert ro.enabled() is False
+
+
+# ---------------------------------------------------------------------------
+# positive path end to end
+# ---------------------------------------------------------------------------
+
+
+class TestPositivePath:
+    def test_end_to_end_observed_closed_mints_the_receipt_and_wake(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        observer = roc.CodexRouteObserver(surface=surface)
+        outcome = observer.observe(request)
+
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["terminal"] is True
+        assert outcome["replayed"] is False
+        assert outcome["disposition"] == roc.DISPOSITION_DELIVERED
+        assert outcome["receipt_digest"]
+        # the one /status was issued exactly once and no Escape ever was.
+        assert surface.status_commands_sent == 1
+        assert surface.key_events == []
+
+        record = ro.get(request.operation_id)
+        assert record["state"] == ro.RESULT_OBSERVED_CLOSED
+        for field in ro.STAGE_FACT_FIELDS:
+            assert record[field] is not None, field
+
+        # the observed route facts with provider-native provenance
+        observation = outcome["observation"]
+        assert observation["observed_state"] == "observed"
+        assert observation["session_id"] == request.native_session_id
+        assert observation["correlated"] is True
+        assert observation["model"] == "gpt-5.4-codex"
+        assert observation["effort"] == "high"
+        assert observation["evidence_sha256"]
+
+        # the close proof is honest about the non-modal surface
+        close_proof = outcome["close_proof"]
+        assert close_proof["close_action"] == "none"
+        assert close_proof["outcome"] == "composer-restored"
+
+        # the positive receipt is derived from the persisted facts
+        receipt = outcome["receipt"]
+        assert receipt["schema"] == ro.RECEIPT_SCHEMA
+        assert receipt["kind"] == ro.RESULT_OBSERVED_CLOSED
+        assert receipt["operation_id"] == request.operation_id
+        assert receipt["request_digest"] == request.request_digest()
+        assert receipt["observation"] == observation
+        assert receipt["close_proof"] == close_proof
+
+        # the atomic exact-requester wake claim
+        assert outcome["wake"]["operation_id"] == request.operation_id
+        assert outcome["wake"]["result_kind"] == ro.RESULT_OBSERVED_CLOSED
+        with database.SessionLocal() as session:
+            inbox = (
+                session.query(database.InboxModel)
+                .filter(database.InboxModel.id == outcome["inbox_message_id"])
+                .one()
+            )
+        assert inbox.receiver_id == request.requester_terminal_id
+        assert inbox.expected_receiver_generation == request.requester_generation
+        assert inbox.sender_id == request.target_terminal_id
+        assert inbox.status == MessageStatus.PENDING.value
+
+    def test_a_bare_model_row_records_no_effort(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(effort=None))
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["observation"]["model"] == "gpt-5.4-codex"
+        assert outcome["observation"]["effort"] is None
+
+
+# ---------------------------------------------------------------------------
+# zero-effect refusal and response-loss replay
+# ---------------------------------------------------------------------------
+
+
+class TestZeroEffectAndResponseLossReplay:
+    def test_an_exact_retry_replays_without_a_second_status_or_wake(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        observer = roc.CodexRouteObserver(surface=surface)
+        first = observer.observe(request)
+        second = observer.observe(request)
+
+        assert surface.status_commands_sent == 1
+        assert second["replayed"] is True
+        assert second["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert second["receipt_digest"] == first["receipt_digest"]
+        assert second["inbox_message_id"] == first["inbox_message_id"]
+        with database.SessionLocal() as session:
+            assert session.query(database.InboxModel).count() == 1
+
+    def test_response_loss_replay_via_get_returns_the_stored_result(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        observer = roc.CodexRouteObserver(surface=surface)
+        outcome = observer.observe(request)
+
+        stored = observer.read_result(request.operation_id)
+        assert stored["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert stored["receipt_digest"] == outcome["receipt_digest"]
+        assert stored["inbox_message_id"] == outcome["inbox_message_id"]
+        # the machine's own read seam agrees
+        assert ro.get(request.operation_id)["receipt_digest"] == outcome["receipt_digest"]
+
+    def test_a_losing_operation_replays_the_zero_effect_refusal(self, _db):
+        winner = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        observer = roc.CodexRouteObserver(surface=surface)
+        # the winner holds the exact tuple, still requested.
+        ro.claim(winner)
+        loser = _request(target_terminal_id=winner.target_terminal_id)
+        first = observer.observe(loser)
+        second = observer.observe(loser)
+
+        assert first["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert first["terminal"] is True
+        assert first["replayed"] is False
+        assert first["receipt_digest"] is None
+        # an exact retry replays the immutable refusal, never a re-decision.
+        assert second["replayed"] is True
+        assert second["inbox_message_id"] == first["inbox_message_id"]
+        # the loser never typed /status and its requester still gets its own
+        # deterministic zero-effect wake.
+        assert surface.status_commands_sent == 0
+        assert first["wake"]["result_kind"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+
+
+# ---------------------------------------------------------------------------
+# stale-requester disposition on generation drift
+# ---------------------------------------------------------------------------
+
+
+class TestStaleRequester:
+    def test_generation_drift_records_requester_stale_with_zero_input(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        observer = roc.CodexRouteObserver(
+            surface=surface,
+            requester_generation_probe=lambda terminal_id: "gen-drifted",
+        )
+        outcome = observer.observe(request)
+
+        assert surface.status_commands_sent == 0
+        assert surface.key_events == []
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_REQUESTER_STALE
+        assert outcome["receipt_digest"] is None
+
+        record = ro.get(request.operation_id)
+        event = json.loads(record["final_event_json"])
+        assert event["disposition"] == roc.DISPOSITION_REQUESTER_STALE
+        assert event["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+
+        # the immutable wake is still claimed with the exact captured requester
+        assert outcome["wake"]["result_kind"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        with database.SessionLocal() as session:
+            inbox = (
+                session.query(database.InboxModel)
+                .filter(database.InboxModel.id == outcome["inbox_message_id"])
+                .one()
+            )
+        assert inbox.receiver_id == request.requester_terminal_id
+        assert inbox.expected_receiver_generation == request.requester_generation
+
+
+# ---------------------------------------------------------------------------
+# ambiguous-after-possible-effect handling on the non-modal surface
+# ---------------------------------------------------------------------------
+
+
+class TestAmbiguousAfterPossibleEffect:
+    def test_an_unparseable_panel_terminates_ambiguous(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=["> not a status panel", "garbage"])
+        observer = roc.CodexRouteObserver(surface=surface)
+        outcome = observer.observe(request)
+
+        assert surface.status_commands_sent == 1
+        assert surface.key_events == []
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["terminal"] is True
+        assert outcome["receipt_digest"] is None
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        # the composer did return; the panel itself was unparseable, which is
+        # what makes the observation inconclusive and the result ambiguous.
+        assert outcome["close_proof"]["outcome"] == "composer-restored"
+
+    def test_an_unproven_submission_is_ambiguous(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), submission_proven=False)
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert outcome["observation"]["reason"] == "submission-unproven"
+
+    def test_a_positive_observation_with_an_indeterminate_close_is_ambiguous(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), composer_restored=None)
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["observed_state"] == "observed"
+        assert outcome["close_proof"]["outcome"] == "indeterminate"
+        assert outcome["receipt_digest"] is None
+        assert surface.key_events == []
+
+    def test_a_positive_observation_with_a_not_restored_composer_is_ambiguous(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), composer_restored=False)
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["close_proof"]["outcome"] == "not-restored"
+        assert outcome["receipt_digest"] is None
+
+    def test_a_transport_failure_is_a_possible_effect_and_terminates_ambiguous(self, _db):
+        request = _request()
+        surface = _RaisingSendSurface(rows=codex_panel_rows())
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert outcome["observation"]["reason"] == "send-failed"
+        assert surface.status_commands_sent == 1
+
+
+class _RaisingSendSurface(FakeCodexPaneSurface):
+    def send_status_command(self) -> bool:
+        self.status_commands_sent += 1
+        raise RuntimeError("tmux refused the write")
+
+
+# ---------------------------------------------------------------------------
+# the pinned render floors are respected when asserting observed state
+# ---------------------------------------------------------------------------
+
+
+class TestRenderFloor:
+    def test_width_below_the_session_floor_cannot_assert_identity(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), pane_width=70)
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert outcome["observation"]["reason"] == "render-floor-session"
+
+    def test_width_between_the_floors_asserts_session_but_not_model(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), pane_width=80)
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert outcome["observation"]["reason"] == "render-floor-model"
+        assert outcome["observation"]["session_id"] == request.native_session_id
+        assert outcome["observation"]["model"] is None
+        assert outcome["observation"]["effort"] is None
+
+    def test_a_malformed_model_reasoning_suffix_is_not_positive(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(model="gpt-5.4-codex (reasoning turbo)", effort=None)
+        )
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["reason"] == "model-row-unparsed"
+
+
+# ---------------------------------------------------------------------------
+# the observation is correlated to the exact target
+# ---------------------------------------------------------------------------
+
+
+class TestTargetCorrelation:
+    def test_a_mismatched_session_is_not_a_positive_observation(self, _db):
+        request = _request(native_session_id="3f3f9a1c-0000-4000-8000-0000000000aa")
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(session_id=SESSION_ID))
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert outcome["observation"]["reason"] == "target-mismatch"
+        assert outcome["observation"]["correlated"] is False
