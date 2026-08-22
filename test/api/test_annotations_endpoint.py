@@ -9,7 +9,9 @@ added back without noticing.
 Every test points the reader at a scratch directory by patching
 ``annotations.annotation_root``. That function is the test seam and not an
 operator knob — ``test_the_location_is_not_configurable_from_the_environment``
-pins that no environment variable moves it.
+pins that no CAO or conductor knob moves it, while
+``test_xdg_state_home_resolves_like_the_producer`` pins that the one
+environment input is the producer's own resolution rule.
 """
 
 import json
@@ -118,31 +120,52 @@ class TestFixedLocation:
         assert route.dependant.body_params == []
 
     def test_the_location_is_not_configurable_from_the_environment(self, monkeypatch):
-        """No environment variable relocates the conductor's directory.
+        """No CAO or conductor knob relocates the conductor's directory.
 
         ``CAO_STATE_ROOT`` deliberately does not apply: it relocates *CAO's*
         state, and this directory belongs to the conductor, whose own producer
-        resolves it with no override.
+        resolves it with no override. ``XDG_STATE_HOME`` is not in this list
+        because it is part of the producer's resolution rule itself and is
+        pinned by its own test below.
         """
         for name in (
             "CAO_STATE_ROOT",
             "CAO_ANNOTATIONS_ROOT",
             "CONDUCTOR_STATE_ROOT",
-            "XDG_STATE_HOME",
         ):
             monkeypatch.setenv(name, "/tmp/attacker-controlled")
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        assert annotations.annotation_root() == os.path.expanduser("~/.local/state/cao-conductor")
+
+    def test_xdg_state_home_resolves_like_the_producer(self, tmp_path, monkeypatch):
+        """The producer writes under ``$XDG_STATE_HOME/cao-conductor`` when the
+        variable is set; the reader must land on the identical directory."""
+        state = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+        assert annotations.annotation_root() == os.path.join(str(state), "cao-conductor")
+
+    def test_unset_xdg_state_home_restores_the_default_root(self, monkeypatch):
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        assert annotations.annotation_root() == os.path.expanduser("~/.local/state/cao-conductor")
+
+    def test_empty_xdg_state_home_falls_back_to_the_default_root(self, monkeypatch):
+        """The shared ``or`` idiom treats ``''`` as unset, on both sides of the
+        seam. Pinned so a future ``in os.environ`` refactor cannot split it."""
+        monkeypatch.setenv("XDG_STATE_HOME", "")
         assert annotations.annotation_root() == os.path.expanduser("~/.local/state/cao-conductor")
 
     def test_the_one_environment_input_is_the_process_own_home(self, monkeypatch):
         """Stated explicitly rather than by tautology.
 
-        ``expanduser`` does read ``HOME``, so "consults no environment
-        variable" was too strong a claim to leave in a docstring unexamined.
-        The honest property is narrower and is what the producer relies on: the
-        path is resolved relative to the SERVER PROCESS'S OWN home directory,
-        exactly as the conductor's sentinel resolves it, and no CAO or
-        conductor configuration knob moves it off that.
+        With ``XDG_STATE_HOME`` unset, ``expanduser`` reads ``HOME``, so "no
+        environment input" would be too strong a claim to leave in a docstring
+        unexamined. The honest property is narrower and is what the producer
+        relies on: the path is resolved from the SERVER PROCESS'S OWN
+        environment — ``XDG_STATE_HOME``, then ``HOME`` — exactly as the
+        conductor resolves it, and no CAO or conductor configuration knob
+        moves it off that.
         """
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
         monkeypatch.setenv("HOME", "/var/empty/pretend-home")
         assert annotations.annotation_root() == "/var/empty/pretend-home/.local/state/cao-conductor"
 

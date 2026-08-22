@@ -10,7 +10,7 @@ The three endpoints read the conductor's published projection:
 * ``GET /communications/{communication_id}`` — one communication with body content;
 * ``GET /communications/attachments/{attachment_id}`` — one attachment with content.
 
-All detail responses carry ``Cache-Control: no-store``.  The service never
+All responses carry ``Cache-Control: no-store``.  The service never
 accepts a ``path``, ``root``, or ``project_dir`` parameter, never turns an
 identifier into a filename, and verifies digests before serving bytes.
 """
@@ -80,8 +80,9 @@ async def list_communications(
 ) -> CommunicationsListResponse:
     """Bounded metadata for one task occurrence's communications.
 
-    The response never contains document bodies.  ``cursor`` is an opaque
-    keyset over the publisher's total order
+    The response never contains document bodies and is served
+    ``Cache-Control: no-store`` like the detail routes.  ``cursor`` is an
+    opaque keyset over the publisher's total order
     ``recorded_at DESC, communication_id``; offsets are not used because the
     index is republished.
     """
@@ -89,7 +90,10 @@ async def list_communications(
         payload = await asyncio.to_thread(catalog.list_communications, task_occurrence_id, cursor)
     except CommunicationsCatalogError as exc:
         raise _http(exc)
-    return CommunicationsListResponse(**payload)
+    return JSONResponse(
+        content=CommunicationsListResponse(**payload).model_dump(by_alias=True),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/communications/{communication_id}", dependencies=[Depends(_refuse_path_params)])
