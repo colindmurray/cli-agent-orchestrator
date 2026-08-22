@@ -48,6 +48,7 @@ from cli_agent_orchestrator.clients.database import (
     TrackerProjectModel,
     TrackerScopeModel,
 )
+from cli_agent_orchestrator.services.tracker_filters import StructuredFilters
 
 logger = logging.getLogger(__name__)
 
@@ -1284,6 +1285,7 @@ def list_issues(
     label: Optional[Sequence[str] | str] = None,
     without_label: Optional[Sequence[str] | str] = None,
     unlabeled: bool = False,
+    observed_revision: Optional[Sequence[str] | str] = None,
     query: Optional[str] = None,
     open_only: bool = False,
     limit: int = 100,
@@ -1302,57 +1304,42 @@ def list_issues(
 
     ``unlabeled`` selects issues with an empty label set. It composes with
     every other filter.
+
+    ``observed_revision`` is the exact-match revision filter (one or more
+    values, OR within the family), shared with ranked search through the
+    structured-filter builder so the two surfaces cannot drift.
+
+    Filter families are expressed once in ``services.tracker_filters``; this
+    path keeps its own ordering, substring query, and pagination semantics.
     """
     limit = max(1, min(int(limit or 100), 500))
     offset = max(0, int(offset or 0))
+    if project_id:
+        # Validate before family construction to keep today's earliest-error
+        # order (an invalid project id is reported ahead of filter refusals).
+        validated_project_id = _validate_slug(project_id)
+    else:
+        validated_project_id = None
+    families = StructuredFilters(
+        kinds=() if kind in (None, "all") else (kind,),
+        statuses=tuple(status or ()),
+        severities=tuple(severity or ()),
+        components=(component,) if component else (),
+        observed_revisions=_repeatable_values(observed_revision),
+        labels=_repeatable_values(label),
+        without_labels=_repeatable_values(without_label),
+        assignee=assignee,
+        reporter=reporter,
+        open_only=open_only,
+        unlabeled=unlabeled,
+    ).validated()
 
     with SessionLocal() as db:
         q = db.query(TrackerIssueModel)
-        if kind is not None:
-            if kind == "all":
-                pass
-            else:
-                _validate_kind(kind)
-                q = q.filter(TrackerIssueModel.kind == kind)
-        else:
-            # kind=None means all kinds (explicit generic surface)
-            pass
-        if project_id:
-            q = q.filter(TrackerIssueModel.project_id == _validate_slug(project_id))
-        if status:
-            wanted = [_validate_choice(s, STATUSES, "status") for s in status]
-            q = q.filter(TrackerIssueModel.status.in_(wanted))
-        if open_only:
-            q = q.filter(TrackerIssueModel.status.notin_(tuple(TERMINAL_STATUSES)))
-        if severity:
-            wanted_sev = [_validate_choice(s, SEVERITIES, "severity") for s in severity]
-            q = q.filter(TrackerIssueModel.severity.in_(wanted_sev))
-        if component:
-            q = q.filter(TrackerIssueModel.component == component)
-        if assignee:
-            q = q.filter(TrackerIssueModel.assignee == assignee)
-        if reporter:
-            q = q.filter(TrackerIssueModel.reporter == reporter)
-        if label:
-            # Repeated labels compose as AND: selecting `wayfinder:task` and
-            # `initiative:alpha` means issues carrying both. Each comparison is
-            # exact inside the JSON array; quoted boundaries stop `ui` matching
-            # `ui-polish`, and LIKE metacharacters remain literal label text.
-            wanted_labels = [label] if isinstance(label, str) else list(label)
-            for raw_label in normalise_labels(wanted_labels):
-                needle = raw_label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                q = q.filter(TrackerIssueModel.labels.like(f'%"{needle}"%', escape="\\"))
-        if without_label:
-            excluded_labels = (
-                [without_label] if isinstance(without_label, str) else list(without_label)
-            )
-            for raw_label in normalise_labels(excluded_labels):
-                needle = raw_label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                q = q.filter(~TrackerIssueModel.labels.like(f'%"{needle}"%', escape="\\"))
-        if unlabeled:
-            # The stored value is always a JSON array ("[]" when empty), so an
-            # exact comparison is the whole rule — no LIKE, no ambiguity.
-            q = q.filter(TrackerIssueModel.labels == "[]")
+        if validated_project_id:
+            q = q.filter(TrackerIssueModel.project_id == validated_project_id)
+        for condition in families.orm_conditions():
+            q = q.filter(condition)
         if query:
             needle = f"%{query.strip()}%"
             q = q.filter(
@@ -1377,6 +1364,15 @@ def list_issues(
         }
 
 
+def _repeatable_values(value: Optional[Sequence[str] | str]) -> Tuple[str, ...]:
+    """Normalize a scalar-or-sequence parameter into a tuple of strings."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(str(item) for item in value)
+
+
 def list_features(
     *,
     project_id: Optional[str] = None,
@@ -1388,6 +1384,7 @@ def list_features(
     label: Optional[str] = None,
     without_label: Optional[Sequence[str] | str] = None,
     unlabeled: bool = False,
+    observed_revision: Optional[Sequence[str] | str] = None,
     query: Optional[str] = None,
     open_only: bool = False,
     limit: int = 100,
@@ -1405,6 +1402,7 @@ def list_features(
         label=label,
         without_label=without_label,
         unlabeled=unlabeled,
+        observed_revision=observed_revision,
         query=query,
         open_only=open_only,
         limit=limit,
