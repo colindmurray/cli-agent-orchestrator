@@ -9,7 +9,7 @@ import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple, cast
 
 from sqlalchemy import (
     Boolean,
@@ -411,6 +411,11 @@ class TrackerIssueModel(Base):
     terminal_id = Column(String, nullable=True)
     source_path = Column(Text, nullable=True)
     duplicate_of = Column(String, nullable=True)
+    # An opaque revision (commit, tag, release, build) at which the reported
+    # behavior was directly observed. Recorded only when the caller actually
+    # knows the value; never inferred from source_path, a filing worktree, or
+    # any current checkout state.
+    observed_revision = Column(String, nullable=True)
     # "cli" | "api" | "dashboard" | "migration"
     origin = Column(String, nullable=False, default="api", server_default="api")
     kind = Column(String, nullable=False, default="bug", server_default="bug", index=True)
@@ -421,7 +426,14 @@ class TrackerIssueModel(Base):
 
 
 class TrackerCommentModel(Base):
-    """A comment on an issue."""
+    """A comment on an issue.
+
+    ``important`` is a reversible Boolean weight, not an ordering and not a
+    severity: false means ordinary/routine, true means an operator or agent
+    deliberately flagged the comment as high-signal for understanding the
+    issue. The CHECK keeps the column a strict 0/1 domain in both the
+    ``create_all`` and migrated shapes.
+    """
 
     __tablename__ = "tracker_issue_comments"
 
@@ -429,7 +441,15 @@ class TrackerCommentModel(Base):
     issue_key = Column(String, nullable=False, index=True)
     author = Column(String, nullable=True)
     body = Column(Text, nullable=False)
+    important = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
     created_at = Column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (CheckConstraint("important IN (0, 1)", name="ck_tracker_comment_important"),)
 
 
 class TrackerEventModel(Base):
@@ -445,7 +465,8 @@ class TrackerEventModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     issue_key = Column(String, nullable=False, index=True)
     actor = Column(String, nullable=True)
-    # "created" | "field" | "comment" | "link" | "unlink"
+    # "created" | "field" | "comment" | "comment-field" | "comment-deleted"
+    # | "link" | "unlink"
     kind = Column(String, nullable=False)
     field = Column(String, nullable=True)
     old_value = Column(Text, nullable=True)
@@ -2423,6 +2444,204 @@ def _migrate_tracker_planning_columns() -> None:
         raise RuntimeError(f"tracker planning-field migration failed: {exc}") from exc
 
 
+class TrackerSchemaMigrationError(RuntimeError):
+    """The tracker tables exist in a shape the observed-columns migration cannot repair.
+
+    Raised instead of log-and-continue because a half-installed column set
+    makes every later reader disagree with the store about what a row carries.
+    The migration rolls its transaction back before this propagates, so a
+    refusal always leaves the prior schema intact and recoverable through the
+    ordinary backup/migration-repair path.
+    """
+
+    def __init__(self, message: str, *, table: Optional[str] = None):
+        super().__init__(message)
+        self.table = table
+
+
+#: Column definitions for the observed-columns migration. The CHECK travels
+#: with the ALTER so migrated stores enforce the same 0/1 domain that the ORM
+#: ``create_all`` shape enforces through ``ck_tracker_comment_important``.
+_OBSERVED_REVISION_COLUMN_DEF = "TEXT NULL"
+_IMPORTANT_COLUMN_DEF = "BOOLEAN NOT NULL DEFAULT 0 CHECK (important IN (0, 1))"
+
+_TEXT_AFFINITY_TYPES = frozenset({"TEXT", "VARCHAR"})
+_BOOLEAN_AFFINITY_TYPES = frozenset({"BOOLEAN", "BOOL", "INTEGER", "INT", "TINYINT"})
+
+
+def _tracker_table_columns(raw: Any, table: str) -> Optional[Dict[str, Dict[str, Any]]]:
+    """One table's PRAGMA columns keyed by name, or None when it does not exist."""
+    rows = raw.execute(f"PRAGMA table_info({table})").fetchall()
+    if not rows:
+        return None
+    return {
+        row[1]: {
+            # PRAGMA rows: (cid, name, type, notnull, dflt_value, pk). The type
+            # is upper-cased so TEXT/VARCHAR spellings compare by affinity.
+            "type": str(row[2] or "").upper(),
+            "notnull": int(row[3]),
+            "default": row[4],
+        }
+        for row in rows
+    }
+
+
+def _tracker_table_sql(raw: Any, table: str) -> str:
+    """The CREATE TABLE statement SQLite recorded for ``table`` (empty if absent)."""
+    row = raw.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return str(row[0] or "") if row is not None else ""
+
+
+def _validate_or_add_column(
+    raw: Any,
+    *,
+    table: str,
+    column: str,
+    columns: Dict[str, Dict[str, Any]],
+    required_columns: Tuple[str, ...],
+    definition: str,
+    compatible_types: FrozenSet[str],
+    require_nullable: bool,
+    existing_shape_must_match: Optional[Tuple[str, str]] = None,
+) -> None:
+    """Validate one existing column's shape or add it with ``definition``.
+
+    Absence means the store predates the column: add it. Presence with an
+    incompatible type/nullability/default is a typed refusal — trusting only
+    the column NAME would let a semantically different shape pass as migrated.
+
+    ``existing_shape_must_match`` names a table whose recorded CREATE SQL must
+    contain a regex (compiled case-insensitively) when the column already
+    exists: the ADD COLUMN path writes the constraint inline, so only the
+    pre-existing path can lack it.
+    """
+    for needed in required_columns:
+        if needed not in columns:
+            raise TrackerSchemaMigrationError(
+                f"{table} table is malformed: missing expected column {needed}",
+                table=table,
+            )
+    present = columns.get(column)
+    if present is None:
+        raw.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        return
+    if present["type"] not in compatible_types:
+        raise TrackerSchemaMigrationError(
+            f"{table}.{column} has incompatible type {present['type'] or 'NONE'}; "
+            f"expected one of {sorted(compatible_types)}",
+            table=table,
+        )
+    if require_nullable and present["notnull"]:
+        raise TrackerSchemaMigrationError(
+            f"{table}.{column} must be nullable but is NOT NULL", table=table
+        )
+    if not require_nullable and not present["notnull"]:
+        raise TrackerSchemaMigrationError(
+            f"{table}.{column} must be NOT NULL but is nullable", table=table
+        )
+    expected_default = None if require_nullable else "0"
+    # PRAGMA dflt_value preserves the literal as written: metadata create_all
+    # renders DEFAULT '0' (quoted string), the ALTER spells DEFAULT 0
+    # (numeric). Both store 0, so compare quote-stripped.
+    actual_default = str(present["default"]) if present["default"] is not None else None
+    if actual_default is not None:
+        if (
+            len(actual_default) >= 2
+            and actual_default[0] == actual_default[-1]
+            and actual_default[0] in "'\""
+        ):
+            actual_default = actual_default[1:-1]
+    if actual_default != expected_default:
+        raise TrackerSchemaMigrationError(
+            f"{table}.{column} has incompatible default {actual_default!r}; "
+            f"expected {expected_default!r}",
+            table=table,
+        )
+    # Checked last: the ADD COLUMN path writes the constraint inline, so only
+    # a pre-existing column can lack it, and the more specific diagnoses above
+    # name their own defect first.
+    if existing_shape_must_match is not None:
+        import re as _re
+
+        pattern, label = existing_shape_must_match
+        table_sql = _tracker_table_sql(raw, table)
+        if not _re.search(pattern, table_sql, _re.IGNORECASE):
+            raise TrackerSchemaMigrationError(
+                f"{table}.{column} exists without its {label}; the stored domain "
+                "cannot be proven equivalent to the canonical shape",
+                table=table,
+            )
+
+
+def _migrate_tracker_observed_revision_columns(target_engine: Optional[Any] = None) -> None:
+    """Add ``observed_revision`` (issues) and ``important`` (comments), idempotently.
+
+    Both tracker schema entry points (``ensure_tracker_schema`` for the CLI and
+    ``init_db`` for the API) call this ONE injectable raw migration; tests may
+    point it at their own engine instead of the module global.
+
+    It takes the write lock with ``BEGIN IMMEDIATE`` BEFORE validating shape
+    and holds that transaction through both ALTERs, so a concurrent writer can
+    never land between validation and installation. An incompatible prior
+    column shape raises :class:`TrackerSchemaMigrationError` after rolling the
+    transaction back — never a logged-and-continued partial migration.
+    """
+    target = target_engine if target_engine is not None else engine
+    raw = target.raw_connection()
+    try:
+        raw.execute("BEGIN IMMEDIATE")
+        try:
+            issues = _tracker_table_columns(raw, "tracker_issues")
+            comments = _tracker_table_columns(raw, "tracker_issue_comments")
+            if issues is None and comments is None:
+                # Neither tracker table exists yet: a fresh store whose schema
+                # creation belongs to metadata create_all, not to this migration.
+                raw.commit()
+                return
+            if issues is not None:
+                _validate_or_add_column(
+                    raw,
+                    table="tracker_issues",
+                    column="observed_revision",
+                    columns=issues,
+                    required_columns=("key", "project_id"),
+                    definition=_OBSERVED_REVISION_COLUMN_DEF,
+                    compatible_types=_TEXT_AFFINITY_TYPES,
+                    require_nullable=True,
+                )
+            if comments is not None:
+                _validate_or_add_column(
+                    raw,
+                    table="tracker_issue_comments",
+                    column="important",
+                    columns=comments,
+                    required_columns=("issue_key", "body"),
+                    definition=_IMPORTANT_COLUMN_DEF,
+                    compatible_types=_BOOLEAN_AFFINITY_TYPES,
+                    require_nullable=False,
+                    # A pre-existing column without the 0/1 CHECK is a
+                    # different shape even if name/type/default agree: refuse
+                    # rather than bless an unenforced domain.
+                    existing_shape_must_match=(
+                        r"important\s+IN\s*\(\s*0\s*,\s*1\s*\)",
+                        "important IN (0, 1) CHECK constraint",
+                    ),
+                )
+            raw.commit()
+        except TrackerSchemaMigrationError:
+            raw.rollback()
+            raise
+        except Exception as exc:
+            raw.rollback()
+            raise TrackerSchemaMigrationError(
+                f"tracker observed-columns migration failed: {exc}"
+            ) from exc
+    finally:
+        raw.close()
+
+
 def ensure_tracker_schema() -> None:
     """Create the issue-tracker tables if they are absent.
 
@@ -2432,7 +2651,8 @@ def ensure_tracker_schema() -> None:
     command died with a raw SQLAlchemy traceback about a missing table.
 
     Deliberately narrower than ``init_db``: it creates these six tables and
-    runs no migrations. ``init_db`` includes a gated migration that can refuse
+    runs the shared tracker column migrations. ``init_db`` includes gated
+    migrations that can refuse
     to proceed, and an issue is filed exactly when something else is already
     broken — "cannot record the defect because an unrelated schema gate
     refused" is the worst possible time for that refusal.
@@ -2445,6 +2665,7 @@ def ensure_tracker_schema() -> None:
     _migrate_tracker_reproduction_steps_column()
     _migrate_tracker_work_context_columns()
     _migrate_tracker_planning_columns()
+    _migrate_tracker_observed_revision_columns()
 
 
 def _ensure_db_dir() -> None:
@@ -2498,6 +2719,7 @@ def init_db() -> None:
     _migrate_tracker_reproduction_steps_column()
     _migrate_tracker_work_context_columns()
     _migrate_tracker_planning_columns()
+    _migrate_tracker_observed_revision_columns()
     _migrate_terminals_schema()
     inbox_schema_ready = _migrate_callback_recovery_inbox_schema()
     _migrate_callback_recovery_schema(inbox_schema_ready=inbox_schema_ready)

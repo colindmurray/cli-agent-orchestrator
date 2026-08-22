@@ -129,6 +129,7 @@ class IssueCreateBody(StrictBody):
     expected_outcome: Optional[str] = None
     actual_outcome: Optional[str] = None
     evidence: Optional[str] = None
+    observed_revision: Optional[str] = None
     session_name: Optional[str] = None
     terminal_id: Optional[str] = None
     source_path: Optional[str] = None
@@ -174,6 +175,7 @@ class IssueUpdateBody(StrictBody):
     expected_outcome: Optional[str] = None
     actual_outcome: Optional[str] = None
     evidence: Optional[str] = None
+    observed_revision: Optional[str] = None
     resolution: Optional[str] = None
     duplicate_of: Optional[str] = None
     kind: Optional[str] = None
@@ -242,6 +244,15 @@ class FeatureUpdateBody(StrictBody):
 class CommentBody(StrictBody):
     body: str
     author: Optional[str] = None
+    # Optional at creation; defaults to ordinary/routine weight.
+    important: bool = False
+
+
+class CommentImportanceBody(StrictBody):
+    """PATCH body for the one reversible importance update surface."""
+
+    important: bool
+    actor: Optional[str] = None
 
 
 class LinkBody(StrictBody):
@@ -581,6 +592,7 @@ async def create_issue(
             expected_outcome=body.expected_outcome,
             actual_outcome=body.actual_outcome,
             evidence=body.evidence,
+            observed_revision=body.observed_revision,
             session_name=body.session_name,
             terminal_id=body.terminal_id,
             source_path=body.source_path,
@@ -657,7 +669,28 @@ async def add_comment(
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
-        return tracker.add_comment(issue_key, body=body.body, author=body.author)
+        return tracker.add_comment(
+            issue_key, body=body.body, author=body.author, important=body.important
+        )
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.patch("/tracker/issues/{issue_key}/comments/{comment_id}")
+async def set_comment_importance(
+    issue_key: str,
+    comment_id: int,
+    body: CommentImportanceBody,
+    _scopes: List[str] = _WRITE,
+) -> Dict[str, Any]:
+    """Set or clear a comment's ``important`` flag (idempotent and reversible)."""
+    try:
+        return tracker.set_comment_importance(
+            issue_key,
+            comment_id,
+            important=body.important,
+            actor=body.actor,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
@@ -666,10 +699,11 @@ async def add_comment(
 async def delete_comment(
     issue_key: str,
     comment_id: int,
+    actor: Optional[str] = Query(None),
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
-        return tracker.delete_comment(issue_key, comment_id)
+        return tracker.delete_comment(issue_key, comment_id, actor=actor)
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
@@ -957,7 +991,29 @@ async def add_feature_comment(
     try:
         existing = tracker.get_issue(feature_key)
         _assert_feature(existing)
-        return tracker.add_comment(feature_key, body=body.body, author=body.author)
+        return tracker.add_comment(
+            feature_key, body=body.body, author=body.author, important=body.important
+        )
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.patch("/tracker/features/{feature_key}/comments/{comment_id}")
+async def set_feature_comment_importance(
+    feature_key: str,
+    comment_id: int,
+    body: CommentImportanceBody,
+    _scopes: List[str] = _WRITE,
+) -> Dict[str, Any]:
+    try:
+        existing = tracker.get_issue(feature_key)
+        _assert_feature(existing)
+        return tracker.set_comment_importance(
+            feature_key,
+            comment_id,
+            important=body.important,
+            actor=body.actor,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
@@ -966,12 +1022,13 @@ async def add_feature_comment(
 async def delete_feature_comment(
     feature_key: str,
     comment_id: int,
+    actor: Optional[str] = Query(None),
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
         existing = tracker.get_issue(feature_key)
         _assert_feature(existing)
-        return tracker.delete_comment(feature_key, comment_id)
+        return tracker.delete_comment(feature_key, comment_id, actor=actor)
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 

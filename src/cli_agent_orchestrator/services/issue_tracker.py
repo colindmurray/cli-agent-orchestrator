@@ -118,6 +118,7 @@ _EDITABLE_FIELDS: Tuple[str, ...] = (
     "expected_outcome",
     "actual_outcome",
     "evidence",
+    "observed_revision",
     "resolution",
     "duplicate_of",
     "labels",
@@ -945,6 +946,7 @@ def _issue_row(row: TrackerIssueModel) -> Dict[str, Any]:
         "expected_outcome": row.expected_outcome,
         "actual_outcome": row.actual_outcome,
         "evidence": row.evidence,
+        "observed_revision": row.observed_revision,
         "resolution": row.resolution,
         "session_name": row.session_name,
         "terminal_id": row.terminal_id,
@@ -1002,6 +1004,7 @@ def create_issue(
     expected_outcome: Optional[str] = None,
     actual_outcome: Optional[str] = None,
     evidence: Optional[str] = None,
+    observed_revision: Optional[str] = None,
     session_name: Optional[str] = None,
     terminal_id: Optional[str] = None,
     source_path: Optional[str] = None,
@@ -1034,6 +1037,11 @@ def create_issue(
     status = _validate_choice(status, STATUSES, "status")
     severity = _validate_choice(severity, SEVERITIES, "severity")
     kind = _validate_kind(kind)
+    # An opaque revision string recorded verbatim when the caller knows it.
+    # Never inferred from source_path, the filing worktree, or a checkout.
+    observed_revision = str(observed_revision or "").strip() or None
+    if observed_revision and len(observed_revision) > MAX_BODY:
+        raise TrackerError("invalid", f"observed_revision too long (max {MAX_BODY} chars)")
     if status == "duplicate":
         raise TrackerError(
             "invalid",
@@ -1131,6 +1139,7 @@ def create_issue(
             expected_outcome=(expected_outcome or None),
             actual_outcome=(actual_outcome or None),
             evidence=(evidence or None),
+            observed_revision=observed_revision,
             session_name=(session_name or None),
             terminal_id=(terminal_id or None),
             source_path=(source_path or None),
@@ -1231,6 +1240,7 @@ def get_issue(key: str) -> Dict[str, Any]:
                 "id": c.id,
                 "author": c.author,
                 "body": c.body,
+                "important": bool(getattr(c, "important", False)),
                 "created_at": _iso(c.created_at),
             }
             for c in db.query(TrackerCommentModel)
@@ -1421,6 +1431,11 @@ def _apply_order(q: Any, order: str) -> Any:
 class _UpdateRaceLost(Exception):
     """The guarded write matched no row: a concurrent edit landed between this
     transaction's read and its write."""
+
+
+class _ImportanceRaceLost(Exception):
+    """A concurrent importance setter flipped the flag between this
+    transaction's read of it and its guarded write."""
 
 
 def update_issue(
@@ -1763,6 +1778,12 @@ def _coerce_field(row: TrackerIssueModel, field: str, raw: Any, *, db: Any) -> T
         if len(text) > MAX_BODY:
             raise TrackerError("invalid", f"{field} too long (max {MAX_BODY} chars)")
         return getattr(row, field), (text if text.strip() else None)
+    if field == "observed_revision":
+        # An empty string is an explicit clear, like the other free-text fields.
+        text = str(raw).strip()
+        if len(text) > MAX_BODY:
+            raise TrackerError("invalid", f"observed_revision too long (max {MAX_BODY} chars)")
+        return row.observed_revision, (text or None)
     if field == "duplicate_of":
         text = str(raw).strip().lower()
         if not text:
@@ -1798,8 +1819,19 @@ def delete_issue(key: str) -> Dict[str, Any]:
         return {"key": key, "deleted": True}
 
 
-def add_comment(key: str, *, body: str, author: Optional[str] = None) -> Dict[str, Any]:
-    """Append a comment and record it in the audit trail."""
+def add_comment(
+    key: str,
+    *,
+    body: str,
+    author: Optional[str] = None,
+    important: bool = False,
+) -> Dict[str, Any]:
+    """Append a comment and record it in the audit trail.
+
+    ``important`` defaults to false (ordinary/routine weight); a caller that
+    already knows a comment is high-signal may file it flagged. The flag is
+    reversible afterwards through :func:`set_comment_importance`.
+    """
     key = str(key or "").strip().lower()
     text = str(body or "").strip()
     if not text:
@@ -1811,7 +1843,9 @@ def add_comment(key: str, *, body: str, author: Optional[str] = None) -> Dict[st
         if row is None:
             raise TrackerError("not-found", f"no such issue: {key}")
         now = _utcnow()
-        comment = TrackerCommentModel(issue_key=key, author=author, body=text, created_at=now)
+        comment = TrackerCommentModel(
+            issue_key=key, author=author, body=text, important=bool(important), created_at=now
+        )
         db.add(comment)
         db.add(
             TrackerEventModel(
@@ -1826,19 +1860,144 @@ def add_comment(key: str, *, body: str, author: Optional[str] = None) -> Dict[st
             "issue_key": key,
             "author": comment.author,
             "body": comment.body,
+            "important": bool(comment.important),
             "created_at": _iso(comment.created_at),
         }
 
 
-def delete_comment(key: str, comment_id: int) -> Dict[str, Any]:
+def set_comment_importance(
+    key: str,
+    comment_id: int,
+    *,
+    important: bool,
+    actor: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Set or clear a comment's ``important`` flag idempotently.
+
+    The row change is applied by ONE conditional UPDATE guarded on the value
+    this transaction read (``WHERE important <> :new``), and only the setter
+    whose UPDATE actually changed the row appends the ``comment-field`` audit
+    event and bumps the parent issue's ``updated_at`` — all in one
+    transaction. A same-value retry writes nothing at all, and when two
+    concurrent setters race to flip the same direction SQLite serialises them:
+    the loser's guard matches zero rows, so exactly one transition is ever
+    recorded.
+    """
+    key = str(key or "").strip().lower()
+    important = bool(important)
+    attempts = 8
+    for attempt in range(attempts):
+        try:
+            with SessionLocal() as db:
+                comment = db.get(TrackerCommentModel, int(comment_id))
+                if comment is None or comment.issue_key != key:
+                    raise TrackerError("not-found", f"no comment {comment_id} on {key}")
+                current = bool(comment.important)
+                if current == important:
+                    # Same-value retry: no row change, no event, no bump.
+                    return _comment_payload(comment)
+                now = _utcnow()
+                written = (
+                    db.query(TrackerCommentModel)
+                    .filter(
+                        TrackerCommentModel.id == int(comment_id),
+                        # The design's conditional guard (``WHERE important <>
+                        # :new_value``): applies only when the stored value still
+                        # differs, so a superseded setter's UPDATE matches zero
+                        # rows instead of double-recording an established
+                        # transition.
+                        TrackerCommentModel.important != important,
+                    )
+                    .update({"important": important}, synchronize_session=False)
+                )
+                if written != 1:
+                    raise _ImportanceRaceLost()
+                parent = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
+                db.add(
+                    TrackerEventModel(
+                        issue_key=key,
+                        actor=actor,
+                        kind="comment-field",
+                        field="important",
+                        old_value=_as_text(current),
+                        new_value=_as_text(important),
+                        created_at=now,
+                    )
+                )
+                if parent is not None:
+                    parent.updated_at = now
+                db.commit()
+                return {
+                    "id": int(comment_id),
+                    "issue_key": key,
+                    "important": important,
+                    "changed": True,
+                    "updated_at": _iso(parent.updated_at) if parent is not None else None,
+                }
+        except _ImportanceRaceLost:
+            # Another setter flipped the flag between our read and write. The
+            # next attempt re-reads: if it converged to the requested value
+            # this converges to the same-value response, otherwise it retries.
+            time.sleep(0.005 * (attempt + 1))
+        except OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            time.sleep(0.005 * (attempt + 1))
+    raise TrackerError(
+        "conflict",
+        f"comment {comment_id} importance could not be set after {attempts} " "attempts; retry it",
+    )
+
+
+def _comment_payload(comment: TrackerCommentModel) -> Dict[str, Any]:
+    """Serialize one comment row for API responses."""
+    return {
+        "id": comment.id,
+        "issue_key": comment.issue_key,
+        "author": comment.author,
+        "body": comment.body,
+        "important": bool(comment.important),
+        "changed": False,
+        "created_at": _iso(comment.created_at),
+    }
+
+
+def delete_comment(key: str, comment_id: int, *, actor: Optional[str] = None) -> Dict[str, Any]:
+    """Delete a comment, recording the deletion before the row is removed.
+
+    The deletion event (carrying the removed body excerpt) and the parent
+    timestamp bump are written in the SAME transaction as the row removal, so
+    the audit trail can never disagree with the table about what happened.
+    """
     key = str(key or "").strip().lower()
     with SessionLocal() as db:
-        row = db.get(TrackerCommentModel, int(comment_id))
-        if row is None or row.issue_key != key:
+        comment = db.get(TrackerCommentModel, int(comment_id))
+        if comment is None or comment.issue_key != key:
             raise TrackerError("not-found", f"no comment {comment_id} on {key}")
-        db.delete(row)
+        parent = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
+        now = _utcnow()
+        db.add(
+            TrackerEventModel(
+                issue_key=key,
+                actor=actor,
+                kind="comment-deleted",
+                field=None,
+                old_value=str(comment.body)[:200],
+                new_value=str(int(comment_id)),
+                created_at=now,
+            )
+        )
+        if parent is not None:
+            parent.updated_at = now
+        db.delete(comment)
         db.commit()
-        return {"id": int(comment_id), "deleted": True}
+        return {
+            "id": int(comment_id),
+            "issue_key": key,
+            "deleted": True,
+            "updated_at": _iso(parent.updated_at) if parent is not None else None,
+        }
 
 
 def add_link(

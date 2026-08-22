@@ -714,3 +714,124 @@ class TestListDiscoveryFlags:
         assert sorted(i["title"] for i in everything["issues"]) == ["a defect", "a wish"]
         features = json.loads(run(runner, issue_cli.issue, "list", "--kind", "feature", "--json"))
         assert [i["title"] for i in features["issues"]] == ["a wish"]
+
+
+class TestObservedRevisionAndImportance:
+    """cond-0636 CLI surfaces: observed_revision on file/edit and the
+    reversible comment-importance command."""
+
+    @pytest.fixture(autouse=True)
+    def project(self, runner, repo):
+        run(
+            runner,
+            issue_cli.project,
+            "create",
+            "CAO System",
+            "--id",
+            "cao-system",
+            "--prefix",
+            "cond",
+            "--path",
+            str(repo),
+        )
+
+    def test_file_records_an_observed_revision(self, runner, repo):
+        run(
+            runner,
+            issue_cli.issue,
+            "file",
+            "--title",
+            "a defect",
+            "--project",
+            "cao-system",
+            "--observed-revision",
+            "v1.2.3",
+        )
+        out = run(runner, issue_cli.issue, "show", "cond-0001")
+        assert "v1.2.3" in out
+
+    def test_edit_updates_and_clears_the_observed_revision(self, runner, repo):
+        run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
+        run(
+            runner,
+            issue_cli.issue,
+            "edit",
+            "cond-0001",
+            "--observed-revision",
+            "abc1234",
+            "--actor",
+            "colin",
+        )
+        detail = json.loads(run(runner, issue_cli.issue, "show", "cond-0001", "--json"))
+        assert detail["observed_revision"] == "abc1234"
+        run(runner, issue_cli.issue, "edit", "cond-0001", "--observed-revision", "")
+        detail = json.loads(run(runner, issue_cli.issue, "show", "cond-0001", "--json"))
+        assert detail["observed_revision"] is None
+
+    def test_comment_accepts_important_at_creation(self, runner, repo):
+        run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
+        run(
+            runner,
+            issue_cli.issue,
+            "comment",
+            "cond-0001",
+            "--body",
+            "root cause",
+            "--important",
+        )
+        detail = json.loads(run(runner, issue_cli.issue, "show", "cond-0001", "--json"))
+        assert [c["important"] for c in detail["comments"]] == [True]
+
+    def test_show_marks_important_comments_in_prose_output(self, runner, repo):
+        run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
+        run(runner, issue_cli.issue, "comment", "cond-0001", "--body", "root cause", "--important")
+        run(runner, issue_cli.issue, "comment", "cond-0001", "--body", "ordinary chatter")
+        out = run(runner, issue_cli.issue, "show", "cond-0001")
+        assert out.count("[important]") == 1
+
+    def test_importance_set_and_clear_round_trip(self, runner, repo):
+        run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
+        run(runner, issue_cli.issue, "comment", "cond-0001", "--body", "note")
+
+        out = run(runner, issue_cli.issue, "comment-importance", "cond-0001", "1", "important")
+        assert "-> important" in out
+        out = run(runner, issue_cli.issue, "comment-importance", "cond-0001", "1", "routine")
+        assert "-> routine" in out
+
+    def test_a_same_value_retry_reports_it_changed_nothing(self, runner, repo):
+        run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
+        run(runner, issue_cli.issue, "comment", "cond-0001", "--body", "note")
+        run(runner, issue_cli.issue, "comment-importance", "cond-0001", "1", "important")
+        out = run(runner, issue_cli.issue, "comment-importance", "cond-0001", "1", "important")
+        assert "already important" in out
+
+    def test_importance_json_is_parseable(self, runner, repo):
+        run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
+        run(runner, issue_cli.issue, "comment", "cond-0001", "--body", "note")
+        payload = json.loads(
+            run(
+                runner,
+                issue_cli.issue,
+                "comment-importance",
+                "cond-0001",
+                "1",
+                "important",
+                "--json",
+            )
+        )
+        assert payload["changed"] is True
+        assert payload["important"] is True
+
+    def test_importance_on_an_unknown_comment_refuses(self, runner, repo):
+        run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
+        result = runner.invoke(
+            issue_cli.issue, ["comment-importance", "cond-0001", "99", "important"]
+        )
+        assert result.exit_code != 0
+
+    def test_an_invalid_weight_word_is_rejected_by_the_parser(self, runner, repo):
+        run(runner, issue_cli.issue, "file", "--title", "a defect", "--project", "cao-system")
+        result = runner.invoke(
+            issue_cli.issue, ["comment-importance", "cond-0001", "1", "critical"]
+        )
+        assert result.exit_code != 0

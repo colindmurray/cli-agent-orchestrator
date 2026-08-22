@@ -1691,3 +1691,261 @@ class TestHierarchyAudit:
         assert got["bounds"]["truncated"] is True
         assert got["bounds"]["live_children_beyond_bound"] == [parent["key"]]
         assert got["frontier"] == []
+
+
+class TestObservedRevision:
+    """observed_revision records the revision a reporter actually observed.
+
+    It is optional, opaque, caller-supplied text — never inferred from the
+    filing site, a worktree, or a branch name, because an invented revision
+    looks authoritative while being fiction.
+    """
+
+    def test_filing_records_the_observed_revision(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", observed_revision="v1.2.3")
+        assert issue["observed_revision"] == "v1.2.3"
+
+    def test_a_revision_is_optional(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        assert issue["observed_revision"] is None
+
+    def test_an_empty_revision_stores_null_not_empty_string(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", observed_revision="  ")
+        assert issue["observed_revision"] is None
+
+    def test_the_revision_is_never_inferred_from_the_filing_site(self, cao_system):
+        issue = tracker.create_issue(
+            project_id="cao-system",
+            title="a",
+            session_name="cao-p1-closure",
+            source_path=str(cao_system["fork"]),
+        )
+        assert issue["observed_revision"] is None
+
+    def test_a_revision_is_editable_and_clearable(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", observed_revision="v1.2.3")
+        moved = tracker.update_issue(issue["key"], observed_revision="abc1234")
+        assert moved["observed_revision"] == "abc1234"
+        cleared = tracker.update_issue(issue["key"], observed_revision="")
+        assert cleared["observed_revision"] is None
+
+    def test_a_same_value_revision_edit_writes_no_event(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a", observed_revision="v1.2.3")
+        tracker.update_issue(issue["key"], observed_revision="v1.2.3")
+        assert not [
+            e
+            for e in tracker.get_issue(issue["key"])["events"]
+            if e["field"] == "observed_revision"
+        ]
+
+    def test_a_changed_revision_leaves_one_audit_event(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        tracker.update_issue(issue["key"], observed_revision="v1.2.3")
+        events = [
+            e
+            for e in tracker.get_issue(issue["key"])["events"]
+            if e["kind"] == "field" and e["field"] == "observed_revision"
+        ]
+        assert len(events) == 1
+        assert (events[0]["old_value"], events[0]["new_value"]) == (None, "v1.2.3")
+
+
+class TestCommentImportance:
+    """The important flag is reversible Boolean weight on one comment.
+
+    Every actual change writes exactly one append-only ``comment-field`` event
+    and bumps the parent's ``updated_at`` in the same transaction; a retry that
+    would not change anything writes nothing at all.
+    """
+
+    def test_comments_default_to_routine_weight(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="note")
+        assert comment["important"] is False
+        assert tracker.get_issue(issue["key"])["comments"][0]["important"] is False
+
+    def test_creation_accepts_important_true(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="root cause", important=True)
+        assert comment["important"] is True
+
+    def test_setting_importance_changes_the_row_and_audits_it(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="note", author="colin")
+        result = tracker.set_comment_importance(
+            issue["key"], comment["id"], important=True, actor="colin"
+        )
+        assert result["changed"] is True
+        detail = tracker.get_issue(issue["key"])
+        assert detail["comments"][0]["important"] is True
+        events = [e for e in detail["events"] if e["kind"] == "comment-field"]
+        assert len(events) == 1
+        assert events[0]["actor"] == "colin"
+        assert events[0]["field"] == "important"
+        assert (events[0]["old_value"], events[0]["new_value"]) == ("false", "true")
+
+    def test_a_change_bumps_the_parent_timestamp(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="note")
+        before = tracker.get_issue(issue["key"])["updated_at"]
+        result = tracker.set_comment_importance(issue["key"], comment["id"], important=True)
+        assert result["updated_at"] is not None
+        assert result["updated_at"] != before
+        assert tracker.get_issue(issue["key"])["updated_at"] == result["updated_at"]
+
+    def test_a_same_value_retry_writes_nothing(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="note")
+        tracker.set_comment_importance(issue["key"], comment["id"], important=True)
+        before = tracker.get_issue(issue["key"])
+        result = tracker.set_comment_importance(issue["key"], comment["id"], important=True)
+        after = tracker.get_issue(issue["key"])
+        assert result["changed"] is False
+        assert len([e for e in after["events"] if e["kind"] == "comment-field"]) == 1
+        assert after["updated_at"] == before["updated_at"]
+
+    def test_importance_is_reversible_both_ways_twice(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="note")
+        cid = comment["id"]
+        for final, expected_events in ((True, 1), (False, 2), (True, 3), (False, 4)):
+            tracker.set_comment_importance(issue["key"], cid, important=final)
+            detail = tracker.get_issue(issue["key"])
+            assert detail["comments"][0]["important"] is final
+            events = [e for e in detail["events"] if e["kind"] == "comment-field"]
+            assert len(events) == expected_events
+            assert (events[-1]["old_value"], events[-1]["new_value"]) == (
+                "false" if final else "true",
+                "true" if final else "false",
+            )
+
+    def test_an_unknown_comment_is_refused_without_writing(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        with pytest.raises(TrackerError) as exc:
+            tracker.set_comment_importance(issue["key"], 9999, important=True)
+        assert exc.value.code == "not-found"
+
+    def test_a_comment_id_from_another_issue_is_refused(self, cao_system):
+        a = tracker.create_issue(project_id="cao-system", title="a")
+        b = tracker.create_issue(project_id="cao-system", title="b")
+        comment = tracker.add_comment(a["key"], body="on a")
+        with pytest.raises(TrackerError) as exc:
+            tracker.set_comment_importance(b["key"], comment["id"], important=True)
+        assert exc.value.code == "not-found"
+
+
+class TestCommentImportanceConcurrency:
+    """Only the setter whose guarded UPDATE changes the row may record it."""
+
+    def test_interleaved_transactions_produce_exactly_one_transition(self, cao_system, monkeypatch):
+        import threading
+
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="note")
+        barrier = threading.Barrier(2)
+        real_utcnow = tracker._utcnow
+
+        def synced_utcnow():
+            # Both setters have read the flag and passed the same-value check;
+            # release them into the write together.
+            result = real_utcnow()
+            barrier.wait(timeout=5)
+            return result
+
+        monkeypatch.setattr(tracker, "_utcnow", synced_utcnow)
+        outcomes = []
+
+        def setter():
+            outcomes.append(
+                tracker.set_comment_importance(issue["key"], comment["id"], important=True)
+            )
+
+        threads = [threading.Thread(target=setter) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+            assert not t.is_alive(), "an importance setter deadlocked"
+
+        changed = [o for o in outcomes if o["changed"]]
+        assert len(changed) == 1
+        detail = tracker.get_issue(issue["key"])
+        assert detail["comments"][0]["important"] is True
+        events = [e for e in detail["events"] if e["kind"] == "comment-field"]
+        assert len(events) == 1
+        assert (events[0]["old_value"], events[0]["new_value"]) == ("false", "true")
+
+    def test_a_stale_premise_write_matches_zero_rows(self, cao_system):
+        """The conditional guard turns a lost race into a no-match, not a second event.
+
+        Setter A reads ``important=false`` and is suspended; setter B completes
+        the flip; A resumes and applies the same guarded UPDATE still believing
+        the stored value differs from its target. The guard must match zero
+        rows so A cannot record the transition B already recorded.
+        """
+        from sqlalchemy.orm import sessionmaker as _sessionmaker
+
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="note")
+
+        stale_session = _sessionmaker(bind=tracker.SessionLocal.kw["bind"])()
+        stale_read = stale_session.get(tracker.TrackerCommentModel, comment["id"])
+        assert bool(stale_read.important) is False
+
+        won = tracker.set_comment_importance(issue["key"], comment["id"], important=True)
+        assert won["changed"] is True
+
+        written = (
+            stale_session.query(tracker.TrackerCommentModel)
+            .filter(
+                tracker.TrackerCommentModel.id == comment["id"],
+                tracker.TrackerCommentModel.important != True,  # noqa: E712 - A's stale premise
+            )
+            .update({"important": True}, synchronize_session=False)
+        )
+        assert written == 0
+        stale_session.rollback()
+        stale_session.close()
+
+        detail = tracker.get_issue(issue["key"])
+        events = [e for e in detail["events"] if e["kind"] == "comment-field"]
+        assert len(events) == 1
+
+
+class TestCommentDeletionAudit:
+    """Deleting a comment leaves the audit trail and timestamp consistent."""
+
+    def test_deletion_writes_an_event_and_bumps_the_parent(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="soon gone", author="colin")
+        before = tracker.get_issue(issue["key"])["updated_at"]
+        result = tracker.delete_comment(issue["key"], comment["id"], actor="colin")
+        assert result["deleted"] is True
+        detail = tracker.get_issue(issue["key"])
+        assert detail["comments"] == []
+        assert detail["updated_at"] != before
+        deletions = [e for e in detail["events"] if e["kind"] == "comment-deleted"]
+        assert len(deletions) == 1
+        assert deletions[0]["actor"] == "colin"
+        assert deletions[0]["old_value"] == "soon gone"
+        assert deletions[0]["new_value"] == str(comment["id"])
+
+    def test_deletion_is_atomic_with_its_audit_record(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        comment = tracker.add_comment(issue["key"], body="note")
+        tracker.delete_comment(issue["key"], comment["id"])
+        events = tracker.get_issue(issue["key"])["events"]
+        kinds = [e["kind"] for e in events]
+        # The deletion event exists even though the commented-on row is gone.
+        assert kinds.count("comment-deleted") == 1
+        assert kinds.count("comment") == 1
+
+    def test_deleting_an_unknown_comment_writes_nothing(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        before = tracker.get_issue(issue["key"])
+        with pytest.raises(TrackerError) as exc:
+            tracker.delete_comment(issue["key"], 9999)
+        assert exc.value.code == "not-found"
+        after = tracker.get_issue(issue["key"])
+        assert after["updated_at"] == before["updated_at"]
+        assert not [e for e in after["events"] if e["kind"] == "comment-deleted"]

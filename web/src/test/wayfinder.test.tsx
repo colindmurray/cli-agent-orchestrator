@@ -105,6 +105,7 @@ function issue(over: Record<string, unknown>): TrackerIssue {
     expected_outcome: null,
     actual_outcome: null,
     evidence: null,
+    observed_revision: null,
     resolution: null,
     session_name: null,
     terminal_id: null,
