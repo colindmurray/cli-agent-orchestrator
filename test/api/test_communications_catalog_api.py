@@ -158,9 +158,26 @@ class TestFixedLocation:
             "CAO_STATE_ROOT",
             "CAO_COMMUNICATIONS_ROOT",
             "CONDUCTOR_STATE_ROOT",
-            "XDG_STATE_HOME",
         ):
             monkeypatch.setenv(name, "/tmp/attacker-controlled")
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        assert catalog.catalog_root() == os.path.expanduser("~/.local/state/cao-conductor")
+
+    def test_xdg_state_home_resolves_like_the_producer(self, tmp_path, monkeypatch):
+        """The producer writes under ``$XDG_STATE_HOME/cao-conductor`` when the
+        variable is set; the reader must land on the identical directory."""
+        state = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+        assert catalog.catalog_root() == os.path.join(str(state), "cao-conductor")
+
+    def test_unset_xdg_state_home_restores_the_default_root(self, monkeypatch):
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        assert catalog.catalog_root() == os.path.expanduser("~/.local/state/cao-conductor")
+
+    def test_empty_xdg_state_home_falls_back_to_the_default_root(self, monkeypatch):
+        """The shared ``or`` idiom treats ``''`` as unset, on both sides of the
+        seam. Pinned so a future ``in os.environ`` refactor cannot split it."""
+        monkeypatch.setenv("XDG_STATE_HOME", "")
         assert catalog.catalog_root() == os.path.expanduser("~/.local/state/cao-conductor")
 
     @pytest.mark.parametrize("param_name", ["path", "root", "project_dir"])
@@ -197,6 +214,7 @@ class TestListEndpoint:
 
         response = client.get("/communications?task_occurrence_id=t1")
         assert response.status_code == 200
+        assert response.headers.get("cache-control") == "no-store"
         payload = response.json()
         assert payload["schema"] == "cao-communications-index-v1"
         assert payload["coverage"] == "complete"
@@ -406,6 +424,25 @@ class TestDetailEndpoint:
         assert payload["content"] == "the-body"
         assert payload["reason"] is None
 
+    def test_content_is_served_from_the_xdg_state_home_root(self, client, tmp_path):
+        """Producer parity end to end, with no patched root.
+
+        ``XDG_STATE_HOME`` is set BEFORE the fixture is built and
+        ``catalog_root`` is left unpatched, so the route must resolve through
+        the environment exactly as the producer's writer would have.
+        """
+        state = tmp_path / "state"
+        root = os.path.join(str(state), "cao-conductor")
+        body = _doc("att-1", b"xdg-body")
+        comm = _comm("c1", "t1", "2026-08-18T00:00:00Z", body=body)
+        with patch.dict(os.environ, {"XDG_STATE_HOME": str(state)}):
+            _publish(root, "project", [comm], blobs={body["blob_id"]: b"xdg-body"})
+            response = client.get("/communications/c1")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["content"] == "xdg-body"
+        assert payload["reason"] is None
+
     def test_unknown_communication_id_returns_404_with_bounded_reason(self, client, root):
         _publish(root, "project", [_comm("c1", "t1", "2026-08-18T00:00:00Z")])
         response = client.get("/communications/unknown")
@@ -588,6 +625,20 @@ class TestReasonCodes:
         payload = response.json()
         assert payload["content"] is None
         assert payload["reason"] == "content-missing"
+
+    def test_content_size_mismatch_is_named_before_the_hash(self, client, root):
+        """A torn blob disagrees on LENGTH first; the conductor names that
+        state ``content-size-mismatch`` and this reader must not conflate it
+        with a hash disagreement."""
+        body = _doc("att-1", b"the-body")
+        comm = _comm("c1", "t1", "2026-08-18T00:00:00Z", body=body)
+        _publish(root, "project", [comm], blobs={body["blob_id"]: b"torn"})
+
+        response = client.get("/communications/c1")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["content"] is None
+        assert payload["reason"] == "content-size-mismatch"
 
     def test_content_unreadable_reports_reason(self, client, root):
         # Bytes that pass digest checks but are not valid UTF-8 hit the

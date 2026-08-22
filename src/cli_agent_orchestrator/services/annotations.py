@@ -38,13 +38,14 @@ every field is already safe to display, and the conductor owns the projection
 from work item to annotation.
 
 WHAT "FIXED LOCATION" MEANS HERE. ``annotation_root()`` takes no argument, reads
-no request state, consults no environment variable, and is not reachable from
-the route's signature — the route has no parameters at all. ``CAO_STATE_ROOT``
-deliberately does NOT move it: that knob relocates *CAO's* state, and this
-directory belongs to the conductor, which resolves it as
-``~/.local/state/cao-conductor`` in ``plugin/conductor_sentinel/sentinel.py``
-(``STATE_ROOT_DEFAULT``) with no override of its own. Tests reach it by
-patching this module's function, which is a test seam and not an operator knob.
+no request state, and is not reachable from the route's signature — the route
+has no parameters at all. ``CAO_STATE_ROOT`` deliberately does NOT move it:
+that knob relocates *CAO's* state, and this directory belongs to the
+conductor, which resolves its own state root as ``<base>/cao-conductor`` where
+the base is ``XDG_STATE_HOME`` or ``~/.local/state`` — the identical rule this
+reader applies, with the environment read at server-process level like
+``HOME``, never from a request. Tests reach it by patching this module's
+function, which is a test seam and not an operator knob.
 
 FAILURE POSTURE. Every failure degrades to *fewer annotations*, never to an
 error: a missing root, an unreadable root, a malformed document, an oversized
@@ -158,17 +159,20 @@ _SAFE_SOURCE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01
 def annotation_root() -> str:
     """The fixed, non-configurable, conductor-owned annotation root.
 
-    No parameter, no request state, and no CAO or conductor configuration
-    variable — in particular ``CAO_STATE_ROOT`` does not move it. The path is
-    resolved relative to the server process's own home directory, exactly as
-    the producer resolves it, so ``expanduser`` reading ``HOME`` is the one
-    environment input and it is the same input on both sides of the seam.
+    No parameter and no request state, and no CAO or conductor configuration
+    variable — in particular ``CAO_STATE_ROOT`` does not move it. The base
+    directory is resolved exactly as the producer resolves it: the same input
+    on both sides of the seam reads ``XDG_STATE_HOME`` when set, otherwise
+    ``~/.local/state`` under the server process's own home directory. Those
+    are server-process environment inputs like ``HOME`` and are never read
+    from a request.
 
     The route that calls this takes no arguments, so there is no path for
     caller input to reach a filesystem operation — the property §9.5 asks for,
     obtained by construction rather than by sanitising.
     """
-    return os.path.expanduser("~/.local/state/cao-conductor")
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "cao-conductor")
 
 
 def _bounded(value: Any, limit: int = MAX_STRING) -> Optional[str]:

@@ -76,6 +76,7 @@ REASON_OUTSIDE_ROOT = "outside-root"
 REASON_PROJECT_LIMIT = "project-limit"
 REASON_IDENTIFIER_INVALID = "identifier-invalid"
 REASON_CONTENT_DIGEST_MISMATCH = "content-digest-mismatch"
+REASON_CONTENT_SIZE_MISMATCH = "content-size-mismatch"
 REASON_CONTENT_MISSING = "content-missing"
 REASON_CONTENT_QUARANTINED = "content-quarantined"
 REASON_CONTENT_UNREADABLE = "content-unreadable"
@@ -108,11 +109,17 @@ class CommunicationsCatalogUnavailable(CommunicationsCatalogError):
 def catalog_root() -> str:
     """The fixed, non-configurable, conductor-owned catalog root.
 
-    No parameter, no request state, and no CAO or conductor configuration
-    variable.  ``CAO_STATE_ROOT`` deliberately does not move it: that knob
-    relocates *CAO's* state, and this directory belongs to the conductor.
+    No parameter and no request state.  The base directory is resolved exactly
+    as the conductor producer resolves its state root — ``XDG_STATE_HOME``
+    when set, otherwise ``~/.local/state`` under the server process's own
+    ``HOME`` — so the same input on both sides of the seam lands on the same
+    directory.  Like ``HOME``, ``XDG_STATE_HOME`` is a server-process
+    environment input and is never read from a request.  ``CAO_STATE_ROOT``
+    deliberately does not move it: that knob relocates *CAO's* state, and this
+    directory belongs to the conductor.
     """
-    return os.path.expanduser("~/.local/state/cao-conductor")
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "cao-conductor")
 
 
 def _require_identifier(value: Any, *, field: str) -> str:
@@ -414,7 +421,9 @@ def _read_content_bytes(
     if len(payload) > MAX_CONTENT_BYTES:
         return None, REASON_OVERSIZE
     if len(payload) != expected_size:
-        return None, REASON_CONTENT_DIGEST_MISMATCH
+        # A torn blob disagrees on LENGTH before it can disagree on hash, and
+        # the conductor's own vocabulary names that state distinctly.
+        return None, REASON_CONTENT_SIZE_MISMATCH
 
     digest = hashlib.sha256(payload).hexdigest()
     if digest != blob_id:
