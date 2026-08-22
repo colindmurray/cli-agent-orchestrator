@@ -1,0 +1,15 @@
+{
+  "access_mode": "read-only (sqlite URI mode=ro); live DB never written",
+  "counts": {
+    "comments": 955,
+    "issues": 685,
+    "links": 524,
+    "projects": 3
+  },
+  "export_sha256": "40511acc98497b1391695e9fe1d2025d54c395656d0f1e4c3b589e87fd25465e",
+  "exported_at": "2026-08-22T03:06:39.871656+00:00",
+  "redactions": 3,
+  "snapshot_id": "snap-40511acc9849",
+  "source_db": "/Users/colin/.aws/cli-agent-orchestrator/db/cli-agent-orchestrator.db",
+  "source_db_size_bytes": 6041600
+}
