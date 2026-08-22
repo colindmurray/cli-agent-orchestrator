@@ -240,10 +240,12 @@ _TITLE_OR_COMPONENT_CHANGED = "(OLD.title IS NOT NEW.title OR OLD.component IS N
 def _build_trigger_statements() -> Dict[str, str]:
     """The canonical CREATE TRIGGER text for the seven §8 triggers."""
 
+    # project_id is deliberately absent: no writer moves an issue between
+    # projects, the document vocabulary does not index it, and listing it
+    # would make a project_id-only edit rewrite text that did not change.
     issue_update_of_columns = ", ".join(
         (
             "key",
-            "project_id",
             "title",
             "body",
             "status",
@@ -347,6 +349,14 @@ def _build_trigger_statements() -> Dict[str, str]:
         f"  {_insert_comment_document_from_row('NEW', 'NEW.issue_key', _CLOCK_READ)};\n"
         f"  {comment_row_dirty_upsert};\nEND"
     )
+    # An update replaces the existing document: FTS5 has no rowid UPSERT, so
+    # the old document must be deleted before the rewrite inserts.
+    comment_update_body = (
+        f"  {_CLOCK_ADVANCE};\n"
+        f"  DELETE FROM {COMMENT_FTS_TABLE} WHERE rowid = NEW.id;\n"
+        f"  {_insert_comment_document_from_row('NEW', 'NEW.issue_key', _CLOCK_READ)};\n"
+        f"  {comment_row_dirty_upsert};\nEND"
+    )
 
     comment_insert = (
         f"CREATE TRIGGER IF NOT EXISTS {TRIGGER_NAMES[3]}\n"
@@ -356,15 +366,19 @@ def _build_trigger_statements() -> Dict[str, str]:
     comment_content_update = (
         f"CREATE TRIGGER IF NOT EXISTS {TRIGGER_NAMES[4]}\n"
         "AFTER UPDATE OF author, body ON tracker_issue_comments\nBEGIN\n"
-        f"{comment_insert_body}"
+        f"{comment_update_body}"
     )
 
     # Importance is a live ranking boost joined from the source row, never
     # indexed text and never a re-embedding reason: its trigger advances the
     # shared clock so freshness observers see the touch, and nothing else.
+    # The WHEN guard keeps one UPDATE statement at exactly one clock tick:
+    # a combined author/body+important write already fires the content
+    # trigger, so the importance trigger steps aside for that row.
     comment_importance_update = (
         f"CREATE TRIGGER IF NOT EXISTS {TRIGGER_NAMES[5]}\n"
-        "AFTER UPDATE OF important ON tracker_issue_comments\nBEGIN\n"
+        "AFTER UPDATE OF important ON tracker_issue_comments\n"
+        "WHEN OLD.body IS NEW.body AND OLD.author IS NEW.author\nBEGIN\n"
         f"  {_CLOCK_ADVANCE};\n"
         "END"
     )
@@ -564,12 +578,14 @@ _FTS_TABLES: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-def _table_columns(raw: Any, table: str) -> Optional[Dict[str, Tuple[int, int, int]]]:
-    """PRAGMA columns keyed by name as ``(notnull, dflt-is-null, pk)``, or None."""
+def _table_columns(raw: Any, table: str) -> Optional[Dict[str, Tuple[str, int, int]]]:
+    """PRAGMA columns keyed by name as ``(declared-type, notnull, pk)``, or None."""
     rows = raw.execute(f"PRAGMA table_info({table})").fetchall()
     if not rows:
         return None
-    return {row[1]: (int(row[3]), row[4] is None, int(row[5])) for row in rows}
+    # PRAGMA rows: (cid, name, type, notnull, dflt_value, pk). The type is
+    # upper-cased so spellings compare by declared affinity.
+    return {row[1]: (str(row[2] or "").upper(), int(row[3]), int(row[5])) for row in rows}
 
 
 def _stored_sql(raw: Any, name: str) -> Optional[str]:
@@ -611,7 +627,7 @@ def ensure_derived_tables(raw: Any) -> None:
 
 def _column_shape_mismatches(
     table: str,
-    actual: Dict[str, Tuple[int, int, int]],
+    actual: Dict[str, Tuple[str, int, int]],
     expected: Dict[str, Tuple[str, int, int]],
 ) -> List[str]:
     mismatches: List[str] = []
@@ -620,8 +636,14 @@ def _column_shape_mismatches(
         if found is None:
             mismatches.append(f"missing column {column}")
             continue
-        found_notnull, _dflt_null, found_pk = found
-        if found_notnull != notnull or found_pk != pk:
+        found_type, found_notnull, found_pk = found
+        # Declared type is part of the shape: a same-named column with a
+        # different affinity stores and compares differently.
+        if found_type != declared_type:
+            mismatches.append(
+                f"column {column} is declared {found_type or 'NONE'}; " f"expected {declared_type}"
+            )
+        elif found_notnull != notnull or found_pk != pk:
             mismatches.append(
                 f"column {column} has (notnull={found_notnull}, pk={found_pk}); "
                 f"expected (notnull={notnull}, pk={pk})"
