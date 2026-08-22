@@ -257,9 +257,10 @@ def _parse_model_row(normalized: Sequence[str]) -> tuple[Optional[str], Optional
     """``(model, effort)`` from the exact ``Model:`` row, or ``(None, None)``.
 
     An optional exact `` (reasoning <effort>)`` suffix is split off into the
-    effort; any other parenthetical stays part of the model.  A second Model
-    row, or a suffix carrying an unknown effort, is refused rather than
-    guessed.
+    effort; any other complete parenthetical stays part of the model.  A second
+    Model row, a suffix carrying an unknown effort, or a value cut off
+    mid-parenthetical at the pane edge is refused rather than guessed: a
+    truncated value is a truncated capture, never a bare model.
     """
     model_rows = [row for row in normalized if row.lstrip().startswith("Model:")]
     if not model_rows:
@@ -269,6 +270,11 @@ def _parse_model_row(normalized: Sequence[str]) -> tuple[Optional[str], Optional
     value = model_rows[0].split(":", 1)[1].strip()
     match = _REASONING_SUFFIX.fullmatch(value)
     if match is None:
+        if value.count("(") > value.count(")"):
+            raise nsr.PanelParseError(
+                "the Codex status Model row is truncated mid-parenthetical; refusing "
+                "to report a half-rendered value as the model"
+            )
         return value, None
     model, effort = match.group(1).strip(), match.group(2).strip()
     if not effort or effort not in _CODEX_EFFORT_VOCABULARY:
@@ -579,27 +585,49 @@ class CodexRouteObserver:
     def _stale_requester_outcome(
         self, request: ro.RouteObservationRequest, *, db: Any = None
     ) -> dict[str, Any]:
-        """The zero-input terminal for a drifted requester, whichever is honest.
+        """The zero-input terminal for a drifted requester, sealing the facts.
 
-        A fresh operation with no effect fact terminates ``zero-effect-refusal``.
-        A partially-journaled operation (a prior run already committed an effect
-        intent — a possible effect) can no longer be a zero-effect refusal, so it
-        terminates ``ambiguous-after-possible-effect``; the requester-stale
-        disposition wins over any stage-conflict the later stages would raise.
+        The result is always the one the durable facts already prove —
+        requester-stale is only the disposition, carried in the final event,
+        never a reason to misreport the evidence:
+
+        - no effect fact: ``zero-effect-refusal`` (zero input, nothing happened);
+        - all four stage facts durable and positively resolved: the fact-derived
+          ``observed-closed`` is sealed and the receipt is minted;
+        - otherwise (a genuinely partial journal, or positive facts but an
+          unproven close): ``ambiguous-after-possible-effect``.
+
+        The disposition wins over any stage-conflict the later stages would
+        raise: this terminal is completed directly, never by walking further
+        stages.
         """
         stored = ro.get(request.operation_id, db=db)
-        has_effect_intent = bool(stored is not None and stored["pre_probe_intent_json"] is not None)
-        result = (
-            ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
-            if has_effect_intent
-            else ro.RESULT_ZERO_EFFECT_REFUSAL
-        )
+        observation: Optional[dict[str, Any]] = None
+        close_proof: Optional[dict[str, Any]] = None
+        if stored is None or stored["pre_probe_intent_json"] is None:
+            result = ro.RESULT_ZERO_EFFECT_REFUSAL
+        else:
+            if stored["observation_json"] is not None:
+                observation = json.loads(stored["observation_json"])
+            if stored["close_proof_json"] is not None:
+                close_proof = json.loads(stored["close_proof_json"])
+            # the machine's ordering invariant makes a present close proof imply
+            # all four ordered stage facts.
+            if (
+                close_proof is not None
+                and observation is not None
+                and observation.get("observed_state") == "observed"
+                and close_proof.get("outcome") == CLOSE_COMPOSER_RESTORED
+            ):
+                result = ro.RESULT_OBSERVED_CLOSED
+            else:
+                result = ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
         final_event = _final_event(
             request,
             result=result,
             disposition=DISPOSITION_REQUESTER_STALE,
-            observation=None,
-            close_proof=None,
+            observation=observation,
+            close_proof=close_proof,
         )
         terminal = ro.complete(request, result=result, final_event=final_event, db=db)
         return self._build_outcome(

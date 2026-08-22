@@ -341,6 +341,70 @@ class TestStaleRequester:
         assert event["disposition"] == roc.DISPOSITION_REQUESTER_STALE
         assert event["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
 
+    def test_stale_requester_on_a_fully_journaled_operation_seals_the_observed_receipt(self, _db):
+        """P1 (round 2): a stale requester must never discard a provable
+        observed-closed receipt.  When all four stage facts are durable and
+        positively resolved, the fact-derived result is sealed (receipt
+        minted) and requester-stale is carried as the disposition — ambiguous
+        is only truthful when the evidence is genuinely indeterminate."""
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        # a prior run journaled the complete positive proof chain: pre-probe,
+        # a correlated positive observation, pre-close, and a composer-restored
+        # close proof — all four facts durable, no terminal commit yet.
+        ro.claim(request)
+        ro.pre_probe(request, intent={"kind": "pre-probe-intent", "surface": "codex-status-v1"})
+        ro.record_observation(
+            request,
+            observation={
+                "kind": "provider-surface",
+                "observation_kind": "codex-status-v1",
+                "observed_state": "observed",
+                "session_id": request.native_session_id,
+                "correlated": True,
+                "model": "gpt-5.4-codex",
+                "effort": "high",
+                "observed_at": "2026-08-16T00:00:00Z",
+            },
+        )
+        ro.pre_close(request, intent={"kind": "pre-close-intent", "modal": False, "close": "none"})
+        ro.record_close_proof(
+            request,
+            proof={
+                "kind": "owned-close",
+                "surface": "non-modal",
+                "close_action": "none",
+                "outcome": "composer-restored",
+                "closed_at": "2026-08-16T00:00:01Z",
+            },
+        )
+        stored = ro.get(request.operation_id)
+        assert stored["state"] == ro.STATE_REQUESTED
+        for field in ro.STAGE_FACT_FIELDS:
+            assert stored[field] is not None, field
+
+        observer = roc.CodexRouteObserver(
+            surface=surface,
+            requester_generation_probe=lambda terminal_id: "gen-drifted",
+        )
+        outcome = observer.observe(request)
+
+        assert surface.status_commands_sent == 0
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["terminal"] is True
+        assert outcome["disposition"] == roc.DISPOSITION_REQUESTER_STALE
+        assert outcome["receipt_digest"]
+        record = ro.get(request.operation_id)
+        assert record["state"] == ro.RESULT_OBSERVED_CLOSED
+        event = json.loads(record["final_event_json"])
+        assert event["disposition"] == roc.DISPOSITION_REQUESTER_STALE
+        assert event["result"] == ro.RESULT_OBSERVED_CLOSED
+        receipt = json.loads(record["receipt_json"])
+        assert receipt["kind"] == ro.RESULT_OBSERVED_CLOSED
+        assert receipt["observation"]["observed_state"] == "observed"
+        assert receipt["close_proof"]["outcome"] == "composer-restored"
+        assert outcome["wake"]["result_kind"] == ro.RESULT_OBSERVED_CLOSED
+
 
 # ---------------------------------------------------------------------------
 # ambiguous-after-possible-effect handling on the non-modal surface
@@ -439,6 +503,23 @@ class TestRenderFloor:
         outcome = roc.CodexRouteObserver(surface=surface).observe(request)
         assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
         assert outcome["observation"]["reason"] == "model-row-unparsed"
+
+    def test_a_truncated_model_row_at_full_width_is_not_reported_observed(self, _db):
+        """P2 (round 2): a known width is not enough — the Model row's own
+        content must be complete.  A value cut mid-parenthetical at a width
+        that should have rendered it fully is a truncated capture, and the
+        closed effort parse fails closed rather than reporting a half token."""
+        request = _request()
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(model="gpt-5.4-codex (reasoning h", effort=None),
+            pane_width=roc.MODEL_RENDER_FLOOR_COLUMNS,
+        )
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert outcome["observation"]["reason"] == "model-row-unparsed"
+        assert outcome["observation"]["model"] is None
+        assert outcome["observation"]["effort"] is None
 
     def test_a_truncated_model_row_with_unknown_width_is_not_reported_observed(self, _db):
         """P3: the Model row is asserted only when the pane width proves it
