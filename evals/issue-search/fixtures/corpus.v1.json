@@ -1,0 +1,336 @@
+{
+  "fixture_schema_version": 1,
+  "fixture_version": 1,
+  "snapshot_id": "snap-40511acc9849",
+  "description": "Issue-search relevance fixture (cond-0633, design section 16.1). Every case is grounded in snapshot snap-40511acc9849; duplicate-pair labels use only relations the snapshot itself records as confirmed duplicates, and every pair was read and verified by a human-lane reviewer before inclusion. Queries derived verbatim from corpus text carry derivation=verbatim or derivation=comment; natural-language paraphrases carry derivation=paraphrase and are deliberately worded to avoid copying distinctive issue strings.",
+  "cases": [
+    {
+      "id": "exact-command-deploy-dry-run-bounce",
+      "class": "exact-command",
+      "query": "conduct deploy --dry-run --bounce",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0376", "cond-0087"],
+        "acceptable": ["cond-0116", "cond-0138", "cond-0318", "cond-0335", "cond-0387"],
+        "hard_negatives": ["cond-0045", "cond-0079", "cond-0081", "cond-0083", "cond-0139", "cond-0159", "cond-0161"]
+      },
+      "notes": "The live open report (cond-0376) and the canonical closed report (cond-0087) are the targets; the duplicate cluster and the separately-fixed cond-0387 are acceptable. Other bounce failure modes (stdout capture, daemon-log marker reuse, launchd race, foreign log misattribution) are related-but-distinct hard negatives.",
+      "provenance": {"issue_keys": ["cond-0376", "cond-0087", "cond-0116", "cond-0138", "cond-0318", "cond-0335", "cond-0387"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "exact-error-bounce-receipt-wrapped",
+      "class": "exact-error",
+      "query": "guarded bounce returned no verified activation receipt",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0087"],
+        "acceptable": ["cond-0116", "cond-0138", "cond-0318", "cond-0335", "cond-0376", "cond-0387"],
+        "hard_negatives": ["cond-0081", "cond-0083", "cond-0139", "cond-0159"]
+      },
+      "notes": "Baseline-hostile: in the canonical issue cond-0087 the phrase is line-wrapped inside the stored body ('activation\\nreceipt'), so a literal %substring% ILIKE cannot match it there. The fragment does occur unwrapped in the cluster siblings and in both revision-stamped reports. Exercises the tokenization weakness design section 10.3 lane 3 exists for.",
+      "provenance": {"issue_keys": ["cond-0087", "cond-0116", "cond-0138", "cond-0318", "cond-0335", "cond-0376", "cond-0387"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "exact-command-review-history-full-invocation",
+      "class": "exact-command",
+      "query": "conduct review history --project cao-final-gate --pr 35",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0150"],
+        "acceptable": ["cond-0136", "cond-0137", "cond-0144", "cond-0182", "cond-0226", "cond-0245", "cond-0268", "cond-0279", "cond-0333"],
+        "hard_negatives": []
+      },
+      "notes": "Canonical review-history issue plus its nine confirmed duplicates. The test is whether the canonical target is findable inside a tight near-identical duplicate cluster.",
+      "provenance": {"issue_keys": ["cond-0150", "cond-0136", "cond-0137", "cond-0144", "cond-0182", "cond-0226", "cond-0245", "cond-0268", "cond-0279", "cond-0333"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "exact-symbol-terminal-input-blocked-error",
+      "class": "exact-symbol",
+      "query": "TerminalInputBlockedError",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0035"],
+        "acceptable": [],
+        "hard_negatives": ["cond-0034"]
+      },
+      "notes": "Symbol unique to cond-0035's body. cond-0034 is the adjacent steer-input journaling defect (crash window) and must not outrank the symbol's owner.",
+      "provenance": {"issue_keys": ["cond-0035", "cond-0034"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "exact-symbol-codex-mcp-pin-preflight",
+      "class": "exact-symbol",
+      "query": "_codex_mcp_pin_preflight",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0036"],
+        "acceptable": [],
+        "hard_negatives": ["cond-0011"]
+      },
+      "notes": "Underscored symbol. Legacy SQL LIKE treats each underscore as a single-char wildcard, so the baseline matches loosely; a correct exact lane should pin the owning issue. cond-0011 is the unrelated codex profile defect.",
+      "provenance": {"issue_keys": ["cond-0036", "cond-0011"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "exact-path-deploy-module",
+      "class": "exact-path",
+      "query": "conduct/commands/deploy.py",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0387"],
+        "acceptable": ["cond-0311", "cond-0331"],
+        "hard_negatives": ["cond-0469"]
+      },
+      "notes": "Path fingerprint. cond-0387's resolution cites the exact fix site (conduct/commands/deploy.py:3121); cond-0311/cond-0331 are deploy/cutover defects citing the same module. cond-0469 merely mentions the path in an unrelated retained-v1 inventory defect and must not outrank the deploy issues.",
+      "provenance": {"issue_keys": ["cond-0387", "cond-0311", "cond-0331", "cond-0469"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "nl-paraphrase-worker-conduct-skill",
+      "class": "nl-paraphrase",
+      "query": "spawned agent fails to load its behaviour guidance document at startup",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0145"],
+        "acceptable": ["cond-0025", "cond-0088"],
+        "hard_negatives": []
+      },
+      "notes": "Paraphrase of the worker-conduct-skill-unreadable cluster; deliberately shares almost no surface tokens with the issues.",
+      "provenance": {"issue_keys": ["cond-0145", "cond-0025", "cond-0088"], "snapshot_id": "snap-40511acc9849", "derivation": "paraphrase"}
+    },
+    {
+      "id": "nl-paraphrase-indeterminate-wait-triggers",
+      "class": "nl-paraphrase",
+      "query": "supervisor stays parked forever after a worker finishes because nothing wakes it up",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0213"],
+        "acceptable": ["cond-0236", "cond-0237", "cond-0267"],
+        "hard_negatives": []
+      },
+      "notes": "Paraphrase of the registered-trigger/wake-gap family.",
+      "provenance": {"issue_keys": ["cond-0213", "cond-0236", "cond-0237", "cond-0267"], "snapshot_id": "snap-40511acc9849", "derivation": "paraphrase"}
+    },
+    {
+      "id": "nl-paraphrase-launch-domain-attestation",
+      "class": "nl-paraphrase",
+      "query": "first-use domain proof refuses because no prior record exists and the error suggests running the same proof again",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0091"],
+        "acceptable": ["cond-0185", "cond-0232", "cond-0261"],
+        "hard_negatives": []
+      },
+      "notes": "Paraphrase of the launch-domain attestation self-recommendation cluster.",
+      "provenance": {"issue_keys": ["cond-0091", "cond-0185", "cond-0232", "cond-0261"], "snapshot_id": "snap-40511acc9849", "derivation": "paraphrase"}
+    },
+    {
+      "id": "nl-paraphrase-collect-base-binding",
+      "class": "nl-paraphrase",
+      "query": "collection rejects a finished pull request because its target branch was corrected to a different integration base",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0094"],
+        "acceptable": ["cond-0188"],
+        "hard_negatives": []
+      },
+      "notes": "Paraphrase of the immutable collect base binding defect.",
+      "provenance": {"issue_keys": ["cond-0094", "cond-0188"], "snapshot_id": "snap-40511acc9849", "derivation": "paraphrase"}
+    },
+    {
+      "id": "nl-paraphrase-unstick-op-id-limit",
+      "class": "nl-paraphrase",
+      "query": "recovery command silently refuses long operation identifiers above an undocumented length cap",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0264"],
+        "acceptable": ["cond-0275"],
+        "hard_negatives": []
+      },
+      "notes": "Paraphrase of the 55-character unstick operation-id limit.",
+      "provenance": {"issue_keys": ["cond-0264", "cond-0275"], "snapshot_id": "snap-40511acc9849", "derivation": "paraphrase"}
+    },
+    {
+      "id": "nl-paraphrase-doctor-stale-logs",
+      "class": "nl-paraphrase",
+      "query": "health check passes by matching an old log file left by the previous installation",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0001"],
+        "acceptable": [],
+        "hard_negatives": []
+      },
+      "notes": "Paraphrase of the doctor stale-log satisfaction defect; target is a terminal (closed) issue, exercising terminal-candidate retrieval.",
+      "provenance": {"issue_keys": ["cond-0001"], "snapshot_id": "snap-40511acc9849", "derivation": "paraphrase"}
+    },
+    {
+      "id": "dup-pair-bounce-family",
+      "class": "duplicate-pair",
+      "query": "guarded bounce falsely fails activation-receipt gate",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0087"],
+        "acceptable": ["cond-0116", "cond-0138", "cond-0318", "cond-0335", "cond-0387"],
+        "hard_negatives": ["cond-0081", "cond-0083"]
+      },
+      "notes": "Query is the duplicate's own wording (cond-0335 title). Confirmed relation: cond-0335 duplicate_of cond-0087 in the snapshot. The canonical target must be reachable from the duplicate's phrasing.",
+      "provenance": {"issue_keys": ["cond-0335", "cond-0087"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "dup-pair-review-history",
+      "class": "duplicate-pair",
+      "query": "documented review-history query is not installed",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0150"],
+        "acceptable": ["cond-0136", "cond-0137", "cond-0144", "cond-0182", "cond-0226", "cond-0245", "cond-0268", "cond-0279", "cond-0333"],
+        "hard_negatives": []
+      },
+      "notes": "Query is duplicate cond-0136's title; confirmed relation cond-0136 duplicate_of cond-0150. Canonical must surface from the duplicate's phrasing.",
+      "provenance": {"issue_keys": ["cond-0136", "cond-0150"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "dup-pair-wake-gap",
+      "class": "duplicate-pair",
+      "query": "callback adjudication ends before successor dispatch and leaves no wake",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0213"],
+        "acceptable": ["cond-0236", "cond-0237", "cond-0267"],
+        "hard_negatives": []
+      },
+      "notes": "Query is duplicate cond-0237's title; confirmed relation cond-0237 duplicate_of cond-0213.",
+      "provenance": {"issue_keys": ["cond-0237", "cond-0213"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "comment-only-important-disposition",
+      "class": "comment-only",
+      "query": "Patch or pin compatible pyte behavior and add a StatusMonitor-level regression",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0049"],
+        "acceptable": [],
+        "hard_negatives": []
+      },
+      "notes": "Decision-bearing (important-role) comment: the disposition verdict exists only in a progress comment, in no issue field. The legacy lane cannot search comments at all, so this measures the comment-document lane's reason to exist. comment_role=important per design section 6.2 semantics.",
+      "comment_role": "important",
+      "provenance": {"issue_keys": ["cond-0049"], "snapshot_id": "snap-40511acc9849", "derivation": "comment"}
+    },
+    {
+      "id": "comment-only-routine-progress",
+      "class": "comment-only",
+      "query": "failed-job rerun completed green",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0230"],
+        "acceptable": [],
+        "hard_negatives": []
+      },
+      "notes": "Routine progress comment (rerun report) matching only in comment text; comment_role=routine. An ordinary comment hit should rank below an important one under issue-level fusion once lanes exist.",
+      "comment_role": "routine",
+      "provenance": {"issue_keys": ["cond-0230"], "snapshot_id": "snap-40511acc9849", "derivation": "comment"}
+    },
+    {
+      "id": "comment-only-error-fragment",
+      "class": "comment-only",
+      "query": "argument command: invalid choice: review",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0150"],
+        "acceptable": [],
+        "hard_negatives": []
+      },
+      "notes": "CLI error fragment captured only inside an evidence comment on the canonical review-history issue.",
+      "comment_role": "important",
+      "provenance": {"issue_keys": ["cond-0150"], "snapshot_id": "snap-40511acc9849", "derivation": "comment"}
+    },
+    {
+      "id": "status-mix-open-and-terminal-bounce",
+      "class": "status-mix",
+      "query": "activation receipt",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0376", "cond-0087"],
+        "acceptable": ["cond-0116", "cond-0138", "cond-0318", "cond-0335", "cond-0387", "cond-0081", "cond-0083", "cond-0161"],
+        "hard_negatives": []
+      },
+      "notes": "Two-token contiguous phrase matching the bounce family across statuses: the top-10 must contain at least one OPEN and at least one TERMINAL relevant candidate, because searches cover open and terminal issues (design section 16.1). The open_terminal_mix metric is only computed for status-mix cases.",
+      "provenance": {"issue_keys": ["cond-0376", "cond-0087"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "project-scope-aegix-onboarding",
+      "class": "project-scope",
+      "query": "code intelligence and issue-triage guidance for repository agents",
+      "scope": {"tracker_projects": ["aegix"]},
+      "expected": {
+        "primary": ["aegix-0001"],
+        "acceptable": [],
+        "hard_negatives": ["dnd-0001"]
+      },
+      "notes": "aegix-0001 and dnd-0001 are near-identical onboarding issues in different tracker projects; a natural hard-negative pair. Scoped to aegix, the quest-scheduler twin must not appear.",
+      "provenance": {"issue_keys": ["aegix-0001", "dnd-0001"], "snapshot_id": "snap-40511acc9849", "derivation": "paraphrase"}
+    },
+    {
+      "id": "project-scope-quest-scheduler-onboarding",
+      "class": "project-scope",
+      "query": "code intelligence and issue-triage guidance for repository agents",
+      "scope": {"tracker_projects": ["quest-scheduler"]},
+      "expected": {
+        "primary": ["dnd-0001"],
+        "acceptable": [],
+        "hard_negatives": ["aegix-0001"]
+      },
+      "notes": "Mirror of the aegix scope case.",
+      "provenance": {"issue_keys": ["dnd-0001", "aegix-0001"], "snapshot_id": "snap-40511acc9849", "derivation": "paraphrase"}
+    },
+    {
+      "id": "all-projects-code-intelligence-onboarding",
+      "query": "code intelligence and issue-triage guidance for repository agents",
+      "class": "all-projects-scope",
+      "scope": {"all_projects": true},
+      "expected": {
+        "primary": ["aegix-0001", "dnd-0001"],
+        "acceptable": [],
+        "hard_negatives": []
+      },
+      "notes": "Installation-wide retrieval (explicit opt-in, design section 10.1): both onboarding issues are relevant.",
+      "provenance": {"issue_keys": ["aegix-0001", "dnd-0001"], "snapshot_id": "snap-40511acc9849", "derivation": "paraphrase"}
+    },
+    {
+      "id": "subtree-scope-relevance-harness",
+      "class": "subtree-scope",
+      "query": "relevance fixture and metrics harness",
+      "scope": {"tracker_projects": ["cao-system"], "subtree_roots": ["cond-0628"]},
+      "expected": {
+        "primary": ["cond-0633"],
+        "acceptable": [],
+        "hard_negatives": ["cond-0634"]
+      },
+      "notes": "Subtree root cond-0628 closure (cond-0628, cond-0633..cond-0635, cond-0683) constrains the ranked request (design section 10.1). cond-0634 is the sibling code-grounding lane and must not outrank the relevance-fixture issue.",
+      "provenance": {"issue_keys": ["cond-0633", "cond-0634"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "stale-revision-d7d871ff-report",
+      "class": "stale-revision",
+      "query": "d7d871ffcb68ca877066bb5f886f486129dd69a6",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0387"],
+        "acceptable": [],
+        "hard_negatives": []
+      },
+      "notes": "Observed-revision fingerprint: the installed conductor head cited in cond-0387's reproduction. The report matching the queried revision is the expected result, not the same-defect reports filed against other revisions.",
+      "provenance": {"issue_keys": ["cond-0387"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    },
+    {
+      "id": "stale-revision-3fcde77a-report",
+      "class": "stale-revision",
+      "query": "3fcde77ad6be6bcecf1f61fd8e62bd808a290a68",
+      "scope": {"tracker_projects": ["cao-system"]},
+      "expected": {
+        "primary": ["cond-0376"],
+        "acceptable": [],
+        "hard_negatives": []
+      },
+      "notes": "The other side of the stale-revision pair: the live open report cites conductor head 3fcde77a; the closed reports cite different revisions.",
+      "provenance": {"issue_keys": ["cond-0376"], "snapshot_id": "snap-40511acc9849", "derivation": "verbatim"}
+    }
+  ]
+}

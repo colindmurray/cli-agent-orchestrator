@@ -1,0 +1,23 @@
+{
+  "baseline_schema_version": 1,
+  "fixture_version": 1,
+  "lane": "legacy-substring",
+  "lanes": {
+    "legacy-substring": {
+      "metrics": {
+        "cases": 25,
+        "hard_negative_above_first_hit_rate": 0.04,
+        "hard_negative_case_rate": 0.04,
+        "hard_negative_load_at_10": 1,
+        "hard_negative_load_at_5": 1,
+        "mrr": 0.5,
+        "mrr_primary": 0.293333,
+        "recall_at_10": 0.305882,
+        "recall_at_5": 0.258824,
+        "semantic_coverage": null
+      }
+    }
+  },
+  "note": "Recorded legacy %substring% baseline for the M0.1 fixture. Deterministic rank-derived metrics only; wall-clock performance is informational and never gated.",
+  "snapshot_id": "snap-40511acc9849"
+}
