@@ -230,6 +230,26 @@ def test_failed_publish_never_blocks_teardown(isolated_memory_db, workdir, monke
     assert agent["current_incarnation"]["disposition"] == roster.INCARNATION_RETIRED
 
 
+def test_failed_transition_never_blocks_teardown(isolated_memory_db, workdir, monkeypatch):
+    """A transition_dormant failure after a successful publish degrades to
+    the plain retirement: teardown is never blocked, and the contract that
+    was already published survives for a later exact resume."""
+    bind = _bind_worker()
+    _terminal_row()
+    _reserve_v1(workdir)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("roster store down")
+
+    monkeypatch.setattr(roster, "transition_dormant", _boom)
+
+    ts._roster_retire_incarnation_best_effort(_TERMINAL_ID, _GENERATION)
+
+    assert rc.get_contract_by_incarnation(_TERMINAL_ID, _GENERATION) is not None
+    agent = roster.get_agent(bind["agent"]["agent_id"])
+    assert agent["current_incarnation"]["disposition"] == roster.INCARNATION_RETIRED
+
+
 def test_incarnation_retired_before_this_seam_stays_contract_free(isolated_memory_db, workdir):
     """An agent retired before the publish seam existed has no contract and
     never gains one through a later teardown replay: it degrades to today's
