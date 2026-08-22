@@ -1282,6 +1282,10 @@ def attest_route(request: ManagedLaunchRouteAttestRequest) -> dict[str, Any]:
         KimiRouteProbeError,
         attest_kimi_route,
     )
+    from cli_agent_orchestrator.services.muse_route import (
+        MuseRouteProbeError,
+        attest_muse_route,
+    )
 
     worktree = os.path.realpath(request.working_directory)
     if worktree != request.working_directory or not os.path.isdir(worktree):
@@ -1323,6 +1327,21 @@ def attest_route(request: ManagedLaunchRouteAttestRequest) -> dict[str, Any]:
             )
         except ClaudeRouteProbeError as exc:
             raise ManagedLaunchConflict(str(exc)) from exc
+    elif request.provider == "muse_cli":
+        # The reserve path refuses trusted_project_root for every non-Codex
+        # provider (managed_launch_v2), and the Muse launch consumes none, so
+        # the attestation surface answers identically rather than accepting a
+        # field the launch would ignore.
+        if request.trusted_project_root is not None:
+            raise ManagedLaunchConflict("trusted_project_root is valid only for provider=codex")
+        try:
+            provider_receipt = attest_muse_route(
+                worktree,
+                expected_model=request.expected_model,
+                expected_effort=request.expected_effort,
+            )
+        except MuseRouteProbeError as exc:
+            raise ManagedLaunchConflict(str(exc)) from exc
     else:
         # Unreachable through the typed request, which is the point: the
         # branch exists so that widening the Literal without adding an
@@ -1343,12 +1362,12 @@ def attest_route(request: ManagedLaunchRouteAttestRequest) -> dict[str, Any]:
         # domain* being attested — "the route that failed, and is now being
         # checked, was this model at this effort" — and are never a claim
         # that a provider resolved to them. The distinction matters because
-        # the two providers answer it differently: Kimi's nested receipt
-        # reports a genuinely observed model/effort, while Claude has no
-        # pre-turn resolution surface at all and states its own as
+        # the providers answer it differently: Kimi's nested receipt
+        # reports a genuinely observed model/effort, while Claude and Muse
+        # have no pre-turn resolution surface at all and state their own as
         # requested-only with observed values explicitly null. A reader that
-        # took these outer keys as resolution would therefore read a Claude
-        # attestation as proving something no probe looked at. Provider-
+        # took these outer keys as resolution would therefore read those
+        # attestations as proving something no probe looked at. Provider-
         # observed facts live in ``provider_route_receipt`` and nowhere else.
         "model": request.expected_model,
         "effort": request.expected_effort,
