@@ -287,6 +287,50 @@ describe('the counting pass is bounded work', () => {
     }
   })
 
+  it('a wide table cut into fragments keeps counting its cells', () => {
+    // Reviewer repro (cond-0502 repair cycle 1): one header + delimiter
+    // above five ~5,000-character rows of small cells counts 25,014 nodes
+    // monolithic. Fragments cut out of that block once lost their
+    // header/delimiter context, so each detached row parsed as a ~3-node
+    // paragraph — about 40 nodes counted, the rail bypassed, and the render
+    // freeze this check exists to prevent recreated inside the renderer.
+    // The cutter now re-attaches the block's own header + delimiter to
+    // every fragment, so the cells keep counting and the rail trips.
+    const header = '| col one | col two |'
+    const delimiter = '| --- | --- |'
+    const wideRow = '| x'.repeat(1600) // ≈4.8 KB, ~3,200 cells' worth of structure
+    const doc = [header, delimiter, ...Array.from({ length: 5 }, () => wideRow)].join('\n')
+    expect(new TextEncoder().encode(doc).length).toBeLessThan(MAX_MARKDOWN_RENDER_BYTES)
+    expect(markdownBudgetBreach(doc)).toBe('nodes')
+  })
+
+  it('a many-row table of normal-length rows stays admitted through fragment cuts', () => {
+    // The same re-attachment must not flip legitimate tables: ~300 normal
+    // rows form one ~19 KiB block — well over the module's chunk cap, so it
+    // IS fragmented — yet every fragment keeps its rows counting as table
+    // structure and the total sits far under the rail, exactly as the one
+    // monolithic parse counted it.
+    const doc = [
+      '| a | b | c |',
+      '| --- | --- | --- |',
+      ...Array.from({ length: 300 }, (_, i) => `| r${i} | value ${i} | note ${i} |`),
+    ].join('\n')
+    expect(new TextEncoder().encode(doc).length).toBeGreaterThan(2 * 4096)
+    expect(markdownBudgetBreach(doc)).toBeNull()
+  })
+
+  it('many tiny blocks stay admitted far from the rail', () => {
+    // Every blank-line-delimited block parses as its own document and adds
+    // one root node: 2,000 one-word paragraphs count 6,000 chunked vs
+    // 4,001 monolithic — an inflation of one node per block with the same
+    // verdict here, far from the rail. Near the rail that bias can refuse
+    // a document one monolithic parse would admit; the module header
+    // discloses that arithmetic deliberately rather than pinning it here,
+    // where any exact boundary would break on unrelated count changes.
+    const doc = Array.from({ length: 2000 }, (_, i) => `w${i}`).join('\n\n')
+    expect(markdownBudgetBreach(doc)).toBeNull()
+  })
+
   it('constructs spanning chunk boundaries still count as one document', () => {
     // A loose list spans blank lines: chunked counting sees several short
     // lists where the renderer sees one, and the estimate must stay

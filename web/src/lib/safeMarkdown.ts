@@ -20,12 +20,17 @@
 //     instead of hanging the UI inside one monolithic parse of the whole
 //     document (measured on this build: 512 KiB of dense emphasis ≈ 59 s
 //     monolithic; the same shape trips the rail in well under 100 ms when
-//     chunked). Chunk-boundary counting is an ESTIMATE for constructs that
-//     span blank lines or oversized lines — loose lists, unclosed fences,
-//     very long paragraphs — because splitting such a construct shifts a
-//     wrapper node or two per split point, never a rail-scale amount. The
-//     byte ceiling is an owner decision (design §13.3), revisited from
-//     measured usage rather than loosened here.
+//     chunked). The chunked count is an ESTIMATE of the monolithic tree,
+//     biased conservative: every blank-line-delimited block parses as its
+//     own document and adds one root node, so many tiny blocks inflate the
+//     count by up to one node per block (4,999 one-word paragraphs count
+//     14,997 chunked vs 9,999 monolithic — a document near the rail can be
+//     refused that one monolithic parse would admit), and fragments cut
+//     out of a table block re-attach the block's header and delimiter rows
+//     so detached rows keep counting their cells. A mid-line slice through
+//     any other construct shifts the count only by that construct's own
+//     nodes. The byte ceiling is an owner decision (design §13.3),
+//     revisited from measured usage rather than loosened here.
 
 import { unified } from 'unified'
 import remarkParse from 'remark-parse'
@@ -105,10 +110,20 @@ const MAX_COUNTING_CHUNK_BYTES = 4096
 /**
  * The pieces the counting pass parses one at a time: blank-line-delimited
  * blocks, with any block over the cap cut again at line ends — and a single
- * line over the cap hard-sliced mid-line. A hard slice can split an inline
- * construct (an emphasis run becomes two partial runs), which shifts the
- * node count by that construct's own nodes; that is the estimate the header
- * discloses, and it is bounded by the split frequency, not by document size.
+ * line over the cap hard-sliced mid-line.
+ *
+ * A block whose second line is a GFM delimiter row is a table: its rows
+ * count as table structure ONLY while a header + delimiter pair sits above
+ * them, so every fragment cut out of such a block re-attaches the block's
+ * own first two lines. Without this, a detached row parses as a ~3-node
+ * paragraph instead of its row+cell subtree, and a wide-table document
+ * counts 40 nodes where the monolithic parse counts 25,014 (measured) —
+ * bypassing the rail and recreating inside the renderer the freeze the
+ * bounded check exists to prevent. With it, each fragment keeps counting
+ * its cells and pays only the small fixed cost of the re-attached pair,
+ * so table drift is conservative. Other mid-line slices can split an
+ * inline construct, which shifts the count by that construct's own nodes;
+ * both drifts are bounded by split frequency, never by document size.
  */
 function countingChunks(content: string): string[] {
   const chunks: string[] = []
@@ -118,14 +133,31 @@ function countingChunks(content: string): string[] {
       chunks.push(block)
       continue
     }
+    const lines = block.split('\n')
+    // Delimiter-row shape: spaces, pipes, colons, and dashes only, with at
+    // least one dash (the lookahead). Loose on purpose — mistaking a
+    // thematic break for a delimiter row merely adds a harmless two-line
+    // prefix to fragments.
+    const contextHead =
+      lines.length >= 2 && /^ *(?=[|: -]*-)[|: -]*\r?$/.test(lines[1])
+        ? `${lines[0]}\n${lines[1]}`
+        : ''
+    const tableContext = contextHead ? `${contextHead}\n` : ''
+    const pushFragment = (piece: string) => {
+      // The block's own first fragment already carries its header +
+      // delimiter (it may end exactly at the delimiter's newline); every
+      // later fragment starts at a row boundary or mid-cell and needs the
+      // pair re-attached.
+      chunks.push(!tableContext || piece.startsWith(contextHead) ? piece : tableContext + piece)
+    }
     let rest = block
     while (rest.length > MAX_COUNTING_CHUNK_BYTES) {
       const newline = rest.lastIndexOf('\n', MAX_COUNTING_CHUNK_BYTES)
       const cut = newline > 0 ? newline : MAX_COUNTING_CHUNK_BYTES
-      chunks.push(rest.slice(0, cut))
+      pushFragment(rest.slice(0, cut))
       rest = rest.slice(cut).replace(/^\n/, '')
     }
-    if (rest) chunks.push(rest)
+    if (rest) pushFragment(rest)
   }
   return chunks
 }
