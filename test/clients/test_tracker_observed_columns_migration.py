@@ -155,6 +155,28 @@ class TestIncompatibleShapes:
         with pytest.raises(TrackerSchemaMigrationError):
             _migrate_tracker_observed_revision_columns(engine)
 
+    def test_an_existing_important_column_without_the_check_is_refused(self, engine):
+        """Name/type/default agreeing is not enough: without the 0/1 CHECK the
+        stored domain is unenforced, which is a different shape."""
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE tracker_issue_comments ("
+                    "id INTEGER PRIMARY KEY, issue_key TEXT NOT NULL, "
+                    "body TEXT NOT NULL, important BOOLEAN NOT NULL DEFAULT 0)"
+                )
+            )
+        with pytest.raises(TrackerSchemaMigrationError) as exc:
+            _migrate_tracker_observed_revision_columns(engine)
+        assert "CHECK constraint" in str(exc.value)
+
+    def test_the_migrated_column_satisfies_its_own_check_validation(self, engine):
+        """The ADD COLUMN path writes the CHECK inline, so an interrupted store
+        that already migrated comments passes re-validation on the next run."""
+        _create_legacy_store(engine)
+        _migrate_tracker_observed_revision_columns(engine)
+        _migrate_tracker_observed_revision_columns(engine)  # idempotent re-entry
+
     def test_a_not_null_observed_revision_is_refused(self, engine):
         with engine.begin() as conn:
             conn.execute(
@@ -196,29 +218,33 @@ class TestIncompatibleShapes:
 
     def test_a_refusal_leaves_no_partial_state_behind(self, engine):
         """Both tables are touched inside one transaction: a refusal on one must
-        roll back the other's ALTER too."""
+        roll back the other's ALTER too.
+
+        The fixture puts the incompatible shape on the COMMENTS table so the
+        issues ALTER has already succeeded when validation refuses — the
+        rollback must remove that committed-in-transaction ALTER as well.
+        """
         with engine.begin() as conn:
             conn.execute(
                 text(
                     "CREATE TABLE tracker_issues ("
                     "id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, "
-                    "project_id TEXT NOT NULL, title TEXT NOT NULL, "
-                    "observed_revision INTEGER NULL)"
+                    "project_id TEXT NOT NULL, title TEXT NOT NULL)"
                 )
             )
             conn.execute(
                 text(
                     "CREATE TABLE tracker_issue_comments ("
                     "id INTEGER PRIMARY KEY, issue_key TEXT NOT NULL, "
-                    "author TEXT, body TEXT NOT NULL)"
+                    "author TEXT, body TEXT NOT NULL, important BOOLEAN NOT NULL DEFAULT 0)"
                 )
             )
         with pytest.raises(TrackerSchemaMigrationError):
             _migrate_tracker_observed_revision_columns(engine)
-        # The comments ALTER ran after the issues validation failed shape —
-        # neither store may carry the change.
-        assert "observed_revision" in _columns(engine, "tracker_issues")
-        assert "important" not in _columns(engine, "tracker_issue_comments")
+        # The issues ALTER ran before the comments validation refused — the
+        # rollback must have removed it.
+        assert "observed_revision" not in _columns(engine, "tracker_issues")
+        assert "important" in _columns(engine, "tracker_issue_comments")
 
 
 class TestFreshAndInjectedEngines:

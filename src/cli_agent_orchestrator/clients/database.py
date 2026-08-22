@@ -465,7 +465,8 @@ class TrackerEventModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     issue_key = Column(String, nullable=False, index=True)
     actor = Column(String, nullable=True)
-    # "created" | "field" | "comment" | "link" | "unlink"
+    # "created" | "field" | "comment" | "comment-field" | "comment-deleted"
+    # | "link" | "unlink"
     kind = Column(String, nullable=False)
     field = Column(String, nullable=True)
     old_value = Column(Text, nullable=True)
@@ -2485,6 +2486,14 @@ def _tracker_table_columns(raw: Any, table: str) -> Optional[Dict[str, Dict[str,
     }
 
 
+def _tracker_table_sql(raw: Any, table: str) -> str:
+    """The CREATE TABLE statement SQLite recorded for ``table`` (empty if absent)."""
+    row = raw.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return str(row[0] or "") if row is not None else ""
+
+
 def _validate_or_add_column(
     raw: Any,
     *,
@@ -2495,12 +2504,18 @@ def _validate_or_add_column(
     definition: str,
     compatible_types: FrozenSet[str],
     require_nullable: bool,
+    existing_shape_must_match: Optional[Tuple[str, str]] = None,
 ) -> None:
     """Validate one existing column's shape or add it with ``definition``.
 
     Absence means the store predates the column: add it. Presence with an
     incompatible type/nullability/default is a typed refusal — trusting only
     the column NAME would let a semantically different shape pass as migrated.
+
+    ``existing_shape_must_match`` names a table whose recorded CREATE SQL must
+    contain a regex (compiled case-insensitively) when the column already
+    exists: the ADD COLUMN path writes the constraint inline, so only the
+    pre-existing path can lack it.
     """
     for needed in required_columns:
         if needed not in columns:
@@ -2544,6 +2559,20 @@ def _validate_or_add_column(
             f"expected {expected_default!r}",
             table=table,
         )
+    # Checked last: the ADD COLUMN path writes the constraint inline, so only
+    # a pre-existing column can lack it, and the more specific diagnoses above
+    # name their own defect first.
+    if existing_shape_must_match is not None:
+        import re as _re
+
+        pattern, label = existing_shape_must_match
+        table_sql = _tracker_table_sql(raw, table)
+        if not _re.search(pattern, table_sql, _re.IGNORECASE):
+            raise TrackerSchemaMigrationError(
+                f"{table}.{column} exists without its {label}; the stored domain "
+                "cannot be proven equivalent to the canonical shape",
+                table=table,
+            )
 
 
 def _migrate_tracker_observed_revision_columns(target_engine: Optional[Any] = None) -> None:
@@ -2592,6 +2621,13 @@ def _migrate_tracker_observed_revision_columns(target_engine: Optional[Any] = No
                     definition=_IMPORTANT_COLUMN_DEF,
                     compatible_types=_BOOLEAN_AFFINITY_TYPES,
                     require_nullable=False,
+                    # A pre-existing column without the 0/1 CHECK is a
+                    # different shape even if name/type/default agree: refuse
+                    # rather than bless an unenforced domain.
+                    existing_shape_must_match=(
+                        r"important\s+IN\s*\(\s*0\s*,\s*1\s*\)",
+                        "important IN (0, 1) CHECK constraint",
+                    ),
                 )
             raw.commit()
         except TrackerSchemaMigrationError:

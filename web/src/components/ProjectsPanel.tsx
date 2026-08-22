@@ -1951,11 +1951,11 @@ function ItemDetail({
   )
 
   // Free-form evidence fields stay text inputs; reusable vocabulary fields use
-  // searchable, creatable pickers below. observed_revision is bug-only: a
-  // revision at which behavior was observed has no meaning for feature asks.
+  // searchable, creatable pickers below. observed_revision is available on
+  // every kind: any item can cite where its reported behavior was observed.
   const editableFields: Array<{ field: keyof TrackerIssue; label: string; mono?: boolean; hideWhenEmpty?: boolean }> = [
     { field: 'failing_command' as keyof TrackerIssue, label: 'Failing command', mono: true, hideWhenEmpty: !isBug },
-    { field: 'observed_revision' as keyof TrackerIssue, label: 'Observed revision', mono: true, hideWhenEmpty: !isBug },
+    { field: 'observed_revision' as keyof TrackerIssue, label: 'Observed revision', mono: true },
     { field: 'evidence' as keyof TrackerIssue, label: 'Evidence', mono: true },
   ].filter(f => !(f.hideWhenEmpty && !draft[f.field as string] && !issue[f.field]))
 

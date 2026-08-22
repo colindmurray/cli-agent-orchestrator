@@ -1015,6 +1015,17 @@ export interface TrackerComment {
   created_at: string | null
 }
 
+/** Response of the importance PATCH: the transition outcome, not a comment row.
+ * `updated_at` is the parent issue's bumped timestamp and is present only on a
+ * changed write. */
+export interface TrackerCommentImportanceResult {
+  id: number
+  issue_key: string
+  important: boolean
+  changed: boolean
+  updated_at?: string | null
+}
+
 export interface TrackerEvent {
   id: number
   actor: string | null
@@ -1757,7 +1768,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   setTrackerCommentImportance: (key: string, commentId: number, important: boolean) =>
-    fetchJSON<TrackerComment & { changed: boolean }>(
+    fetchJSON<TrackerCommentImportanceResult>(
       `/tracker/issues/${encodeURIComponent(key)}/comments/${commentId}`,
       {
         method: 'PATCH',
@@ -1806,7 +1817,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   setTrackerFeatureCommentImportance: (key: string, commentId: number, important: boolean) =>
-    fetchJSON<TrackerComment & { changed: boolean }>(
+    fetchJSON<TrackerCommentImportanceResult>(
       `/tracker/features/${encodeURIComponent(key)}/comments/${commentId}`,
       {
         method: 'PATCH',
