@@ -864,10 +864,12 @@ def _published_terminal_facts(terminal_id: Optional[str]) -> dict[str, Any]:
     belongs; raising here would instead fail a whole reservation response
     on one unreadable peer surface.
 
-    A store that cannot answer at all — missing table or column, locked or
-    corrupt database, surfacing as ``OperationalError`` — is a different
+    A store that cannot answer — schema drift such as a missing column, or
+    a locked database surfacing as ``OperationalError`` — is a different
     observation and propagates: the surface exists and cannot be read is a
-    typed unavailability, never unknown-by-default.
+    typed unavailability, never unknown-by-default. (A missing v2 table
+    never reaches this clause: the projection layer resolves it as vacuity
+    before any query against the table can fail.)
 
     Read through the projection so this surface and the human views cannot
     drift: one authority for what a terminal's lifecycle is, rather than a
@@ -882,7 +884,11 @@ def _published_terminal_facts(terminal_id: Optional[str]) -> dict[str, Any]:
         projected = terminal_projection.project_terminal(terminal_id)
     except OperationalError:
         raise
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "terminal projection underivable for %s; publishing unknown facts: %s",
+            terminal_id, exc,
+        )
         return published
     if not projected:
         return published
