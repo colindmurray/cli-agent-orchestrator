@@ -67,6 +67,20 @@ otel = [
     "opentelemetry-sdk>=1.27.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.27.0",
 ]
+# Opt-in local semantic search runtime (services/embedding_adapter.py +
+# services/search_engine_factory.py). Base installs stay light and every
+# entry point degrades to a typed runtime-missing capability answer when
+# this extra is absent. Versions implement the measured v1 decision recorded
+# in the M0.3 runtime report (sentence-transformers/all-MiniLM-L6-v2 on a
+# sentence-transformers 6.x CPU stack; torch and transformers arrive as its
+# dependencies and their exact versions are bound per-generation by
+# `prepare`). sqlite-vec is pre-1.0 with freely changing semantics, so it is
+# pinned EXACTLY to the measured release, matching the vec_version() pin the
+# search connection factory enforces at open time.
+search = [
+    "sentence-transformers>=6.0.0,<7.0.0",
+    "sqlite-vec==0.1.9",
+]
 
 [project.scripts]
 "cao" = "cli_agent_orchestrator.cli.main:cli"
