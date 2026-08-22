@@ -306,6 +306,41 @@ class TestStaleRequester:
         assert inbox.receiver_id == request.requester_terminal_id
         assert inbox.expected_receiver_generation == request.requester_generation
 
+    def test_stale_requester_on_a_partially_journaled_operation_terminates_ambiguous(self, _db):
+        """P2: a stale requester on an operation that already committed effect
+        facts must not raise a later-stage conflict.  The requester-stale
+        disposition wins and the operation terminates
+        ambiguous-after-possible-effect with zero input."""
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        # a prior run journaled the pre-probe intent and the observation (a
+        # possible effect) before the requester generation drifted.
+        ro.claim(request)
+        ro.pre_probe(request, intent={"kind": "pre-probe-intent", "surface": "codex-status-v1"})
+        ro.record_observation(
+            request,
+            observation={
+                "kind": "provider-surface",
+                "observed_state": "observed",
+                "observed_at": "2026-08-16T00:00:00Z",
+            },
+        )
+        observer = roc.CodexRouteObserver(
+            surface=surface,
+            requester_generation_probe=lambda terminal_id: "gen-drifted",
+        )
+        outcome = observer.observe(request)
+
+        assert surface.status_commands_sent == 0
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["terminal"] is True
+        assert outcome["disposition"] == roc.DISPOSITION_REQUESTER_STALE
+        assert outcome["receipt_digest"] is None
+        record = ro.get(request.operation_id)
+        event = json.loads(record["final_event_json"])
+        assert event["disposition"] == roc.DISPOSITION_REQUESTER_STALE
+        assert event["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+
 
 # ---------------------------------------------------------------------------
 # ambiguous-after-possible-effect handling on the non-modal surface
@@ -405,6 +440,25 @@ class TestRenderFloor:
         assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
         assert outcome["observation"]["reason"] == "model-row-unparsed"
 
+    def test_a_truncated_model_row_with_unknown_width_is_not_reported_observed(self, _db):
+        """P3: the Model row is asserted only when the pane width proves it
+        rendered.  With an unknown/stale width, a truncated Model value must
+        not be reported observed — row presence alone never proves the row."""
+        request = _request()
+        rows = [
+            ">_ OpenAI Codex (v0.147.0)",
+            f"Session: {SESSION_ID}",
+            "Model: gpt-5.4-codex (reasoning h",  # truncated at the pane edge
+            "cwd: /Users/x/repo",
+        ]
+        surface = FakeCodexPaneSurface(rows=rows, pane_width=None)
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert outcome["observation"]["reason"] == "render-floor-model"
+        assert outcome["observation"]["model"] is None
+        assert outcome["observation"]["effort"] is None
+
 
 # ---------------------------------------------------------------------------
 # the observation is correlated to the exact target
@@ -420,3 +474,82 @@ class TestTargetCorrelation:
         assert outcome["observation"]["observed_state"] == "inconclusive"
         assert outcome["observation"]["reason"] == "target-mismatch"
         assert outcome["observation"]["correlated"] is False
+
+
+# ---------------------------------------------------------------------------
+# crash-retry recovery: an exact retry reconciles with durable stage facts
+# ---------------------------------------------------------------------------
+
+
+class TestCrashRetryRecovery:
+    def test_crash_after_observation_commit_recovers_on_exact_retry(self, _db, monkeypatch):
+        """P1: a crash after the observation committed must not strand the
+        operation nonterminal.  The retry reconciles with the durable
+        observation bytes instead of re-deriving fresh ones (which the
+        machine's identical-bytes replay CAS would refuse)."""
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        observer = roc.CodexRouteObserver(surface=surface)
+        calls = {"count": 0}
+        original = roc.ro.record_close_proof
+
+        def crashing_close_proof(req, *, proof, db=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("simulated crash after the observation commit")
+            return original(req, proof=proof, db=db)
+
+        monkeypatch.setattr(roc.ro, "record_close_proof", crashing_close_proof)
+
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            observer.observe(request)
+
+        # the observation is durably committed and the operation is nonterminal
+        stored = ro.get(request.operation_id)
+        assert stored["state"] == ro.STATE_REQUESTED
+        assert stored["observation_json"] is not None
+        assert stored["close_proof_json"] is None
+
+        # an exact retry reconciles with the durable observation instead of
+        # re-deriving fresh bytes and conflicting on the changed-fact CAS.
+        outcome = observer.observe(request)
+        assert surface.status_commands_sent == 1
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["terminal"] is True
+        assert outcome["replayed"] is False
+        assert outcome["receipt_digest"]
+        # the receipt embeds the durable (run-1) observation, not a re-derivation
+        assert outcome["observation"]["observed_state"] == "observed"
+        assert outcome["observation"]["session_id"] == request.native_session_id
+
+    def test_crash_after_close_proof_commit_recovers_on_exact_retry(self, _db, monkeypatch):
+        """P1: a crash after the close proof committed (before the terminal
+        commit) must recover on an exact retry by reusing both durable facts."""
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        observer = roc.CodexRouteObserver(surface=surface)
+        calls = {"count": 0}
+        original = roc.ro.complete
+
+        def crashing_complete(req, *, result, final_event, db=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("simulated crash after the close proof commit")
+            return original(req, result=result, final_event=final_event, db=db)
+
+        monkeypatch.setattr(roc.ro, "complete", crashing_complete)
+
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            observer.observe(request)
+
+        stored = ro.get(request.operation_id)
+        assert stored["state"] == ro.STATE_REQUESTED
+        for field in ro.STAGE_FACT_FIELDS:
+            assert stored[field] is not None, field
+
+        outcome = observer.observe(request)
+        assert surface.status_commands_sent == 1
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["terminal"] is True
+        assert outcome["receipt_digest"]
+        assert outcome["inbox_message_id"] is not None

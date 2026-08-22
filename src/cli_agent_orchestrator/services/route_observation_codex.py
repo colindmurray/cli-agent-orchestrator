@@ -238,11 +238,14 @@ class RealCodexPaneSurface:
 def _render_floor(pane_width: Optional[int]) -> dict[str, Any]:
     """Which rows a pane of this width can have rendered.
 
-    ``None`` (unknown) asserts no floor: the parser then relies on the rows
-    the capture literally renders.
+    The Model value is never asserted from row presence alone: the Model row
+    (which carries the reasoning effort) renders only at or above the 87-column
+    floor, so an unknown/stale width proves nothing about a truncated Model
+    value and the model is not asserted.  The Session row keeps its literal
+    capture because a truncated session fails the canonical-UUID validation.
     """
     if pane_width is None:
-        return {"width": None, "session_assertable": True, "model_assertable": True}
+        return {"width": None, "session_assertable": True, "model_assertable": False}
     return {
         "width": pane_width,
         "session_assertable": pane_width >= SESSION_RENDER_FLOOR_COLUMNS,
@@ -535,25 +538,7 @@ class CodexRouteObserver:
 
         disposition = DISPOSITION_DELIVERED
         if not self._requester_is_current(request):
-            final_event = _final_event(
-                request,
-                result=ro.RESULT_ZERO_EFFECT_REFUSAL,
-                disposition=DISPOSITION_REQUESTER_STALE,
-                observation=None,
-                close_proof=None,
-            )
-            terminal = ro.complete(
-                request,
-                result=ro.RESULT_ZERO_EFFECT_REFUSAL,
-                final_event=final_event,
-                db=db,
-            )
-            return self._build_outcome(
-                request,
-                terminal,
-                disposition=DISPOSITION_REQUESTER_STALE,
-                db=db,
-            )
+            return self._stale_requester_outcome(request, db=db)
 
         probe = ro.pre_probe(
             request,
@@ -561,46 +546,16 @@ class CodexRouteObserver:
             db=db,
         )
         newly_authorized = probe.get("authorized") is True
-        send_failed = False
-        submission_proven = True
-        if newly_authorized:
-            try:
-                submission_proven = bool(self._surface.send_status_command())
-            except Exception:  # noqa: BLE001 - a refused write is a possible effect
-                send_failed = True
+        stored = ro.get(request.operation_id, db=db)
+        observation = self._reconcile_observation(
+            request, stored=stored, newly_authorized=newly_authorized, db=db
+        )
+        close_proof = self._reconcile_close_proof(request, stored=stored, db=db)
 
-        if send_failed:
-            observation = _inconclusive_observation(request, reason="send-failed")
-        elif not submission_proven:
-            observation = _inconclusive_observation(request, reason="submission-unproven")
-        else:
-            try:
-                rows = self._surface.capture_screen()
-            except Exception:  # noqa: BLE001 - an unreadable pane is not a panel
-                rows = []
-            parsed = parse_codex_route_panel(
-                rows,
-                pinned_version=request.provider_version,
-                pane_width=self._surface.pane_width(),
-            )
-            observation = _observation_from_parse(request, parsed)
-        ro.record_observation(request, observation=observation, db=db)
-
-        ro.pre_close(request, intent=_pre_close_intent(), db=db)
-        try:
-            restored = self._surface.composer_restored()
-        except Exception:  # noqa: BLE001 - an unprovable close is indeterminate
-            restored = None
-        if restored is True:
-            close_outcome = CLOSE_COMPOSER_RESTORED
-        elif restored is False:
-            close_outcome = CLOSE_NOT_RESTORED
-        else:
-            close_outcome = CLOSE_INDETERMINATE
-        close_proof = _close_proof(close_outcome)
-        ro.record_close_proof(request, proof=close_proof, db=db)
-
-        if observation["observed_state"] == "observed" and close_outcome == CLOSE_COMPOSER_RESTORED:
+        if (
+            observation["observed_state"] == "observed"
+            and close_proof["outcome"] == CLOSE_COMPOSER_RESTORED
+        ):
             result = ro.RESULT_OBSERVED_CLOSED
         else:
             result = ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
@@ -620,6 +575,120 @@ class CodexRouteObserver:
             observation=observation,
             close_proof=close_proof,
         )
+
+    def _stale_requester_outcome(
+        self, request: ro.RouteObservationRequest, *, db: Any = None
+    ) -> dict[str, Any]:
+        """The zero-input terminal for a drifted requester, whichever is honest.
+
+        A fresh operation with no effect fact terminates ``zero-effect-refusal``.
+        A partially-journaled operation (a prior run already committed an effect
+        intent — a possible effect) can no longer be a zero-effect refusal, so it
+        terminates ``ambiguous-after-possible-effect``; the requester-stale
+        disposition wins over any stage-conflict the later stages would raise.
+        """
+        stored = ro.get(request.operation_id, db=db)
+        has_effect_intent = bool(stored is not None and stored["pre_probe_intent_json"] is not None)
+        result = (
+            ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+            if has_effect_intent
+            else ro.RESULT_ZERO_EFFECT_REFUSAL
+        )
+        final_event = _final_event(
+            request,
+            result=result,
+            disposition=DISPOSITION_REQUESTER_STALE,
+            observation=None,
+            close_proof=None,
+        )
+        terminal = ro.complete(request, result=result, final_event=final_event, db=db)
+        return self._build_outcome(
+            request,
+            terminal,
+            disposition=DISPOSITION_REQUESTER_STALE,
+            db=db,
+        )
+
+    def _reconcile_observation(
+        self,
+        request: ro.RouteObservationRequest,
+        *,
+        stored: Optional[dict[str, Any]],
+        newly_authorized: bool,
+        db: Any = None,
+    ) -> dict[str, Any]:
+        """The observation stage fact, reconciled with the durable journal.
+
+        A prior run that durably committed the observation (a crash between
+        stages) is continued by reusing its exact stored bytes — the machine's
+        identical-bytes replay CAS never sees self-manufactured fresh bytes.
+        Only an uncommitted observation is derived and recorded.
+        """
+        if stored is not None and stored["observation_json"] is not None:
+            observation: dict[str, Any] = json.loads(stored["observation_json"])
+            return observation
+        observation = self._derive_observation(request, newly_authorized=newly_authorized)
+        ro.record_observation(request, observation=observation, db=db)
+        return observation
+
+    def _derive_observation(
+        self, request: ro.RouteObservationRequest, *, newly_authorized: bool
+    ) -> dict[str, Any]:
+        """Capture the pane and build the observation fact (or a possible-effect
+        inconclusive when the one authorized probe did not produce a panel)."""
+        send_failed = False
+        submission_proven = True
+        if newly_authorized:
+            try:
+                submission_proven = bool(self._surface.send_status_command())
+            except Exception:  # noqa: BLE001 - a refused write is a possible effect
+                send_failed = True
+        if send_failed:
+            return _inconclusive_observation(request, reason="send-failed")
+        if not submission_proven:
+            return _inconclusive_observation(request, reason="submission-unproven")
+        try:
+            rows = self._surface.capture_screen()
+        except Exception:  # noqa: BLE001 - an unreadable pane is not a panel
+            rows = []
+        parsed = parse_codex_route_panel(
+            rows,
+            pinned_version=request.provider_version,
+            pane_width=self._surface.pane_width(),
+        )
+        return _observation_from_parse(request, parsed)
+
+    def _reconcile_close_proof(
+        self,
+        request: ro.RouteObservationRequest,
+        *,
+        stored: Optional[dict[str, Any]],
+        db: Any = None,
+    ) -> dict[str, Any]:
+        """The close-proof stage fact, reconciled with the durable journal.
+
+        A crash after the close proof committed (before the terminal commit) is
+        continued by reusing its exact stored bytes; only an uncommitted proof
+        is derived and recorded.  The non-modal surface never issues a second
+        ``Escape``.
+        """
+        if stored is not None and stored["close_proof_json"] is not None:
+            close_proof: dict[str, Any] = json.loads(stored["close_proof_json"])
+            return close_proof
+        ro.pre_close(request, intent=_pre_close_intent(), db=db)
+        try:
+            restored = self._surface.composer_restored()
+        except Exception:  # noqa: BLE001 - an unprovable close is indeterminate
+            restored = None
+        if restored is True:
+            close_outcome = CLOSE_COMPOSER_RESTORED
+        elif restored is False:
+            close_outcome = CLOSE_NOT_RESTORED
+        else:
+            close_outcome = CLOSE_INDETERMINATE
+        close_proof = _close_proof(close_outcome)
+        ro.record_close_proof(request, proof=close_proof, db=db)
+        return close_proof
 
     def read_result(self, operation_id: str, *, db: Any = None) -> Optional[dict[str, Any]]:
         """The stored terminal result for one operation, or None.
