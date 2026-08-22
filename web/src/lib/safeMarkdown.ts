@@ -13,12 +13,19 @@
 //   * images are replaced with a non-fetching placeholder;
 //   * byte and node budgets make an over-budget document FAIL VISIBLY rather
 //     than silently truncate. They bound the SIZE of the content admitted and
-//     the NODE COUNT of the tree handed to the renderer — they do NOT bound
-//     parse time. A marker-dense document under the byte budget can still
-//     spend a long time inside the counting parse before the node rail trips
-//     (measured on this build: 512 KiB of dense emphasis ≈ 62 s), so a
-//     no-hang property is NOT claimed. The byte ceiling is an owner decision
-//     (design §13.3), revisited from measured usage rather than loosened here.
+//     the NODE COUNT of the tree handed to the renderer. The budget CHECK is
+//     itself bounded work (cond-0502): the counting pass parses the document
+//     in small capped chunks and checks the node rail after each chunk, so a
+//     marker-dense document trips the rail after milliseconds-to-tens-of-ms
+//     instead of hanging the UI inside one monolithic parse of the whole
+//     document (measured on this build: 512 KiB of dense emphasis ≈ 59 s
+//     monolithic; the same shape trips the rail in well under 100 ms when
+//     chunked). Chunk-boundary counting is an ESTIMATE for constructs that
+//     span blank lines or oversized lines — loose lists, unclosed fences,
+//     very long paragraphs — because splitting such a construct shifts a
+//     wrapper node or two per split point, never a rail-scale amount. The
+//     byte ceiling is an owner decision (design §13.3), revisited from
+//     measured usage rather than loosened here.
 
 import { unified } from 'unified'
 import remarkParse from 'remark-parse'
@@ -88,17 +95,54 @@ export type MarkdownBudgetBreach = 'bytes' | 'nodes'
 // would render; the async `run` transforms are not needed to count nodes.
 const countingProcessor = unified().use(remarkParse).use(remarkGfm)
 
+// Chunk cap for the counting parse. Parse cost on marker-dense input grows
+// superlinearly in document size (measured on this build: dense emphasis
+// costs ~12 ms at 4 KiB, ~62 ms at 16 KiB, ~941 ms at 64 KiB), so small
+// chunks are what bound the check's worst case; the rail is checked after
+// every chunk and the remaining bytes are never parsed once it trips.
+const MAX_COUNTING_CHUNK_BYTES = 4096
+
+/**
+ * The pieces the counting pass parses one at a time: blank-line-delimited
+ * blocks, with any block over the cap cut again at line ends — and a single
+ * line over the cap hard-sliced mid-line. A hard slice can split an inline
+ * construct (an emphasis run becomes two partial runs), which shifts the
+ * node count by that construct's own nodes; that is the estimate the header
+ * discloses, and it is bounded by the split frequency, not by document size.
+ */
+function countingChunks(content: string): string[] {
+  const chunks: string[] = []
+  for (const block of content.split(/\n[ \t]*\n/)) {
+    if (!block) continue
+    if (block.length <= MAX_COUNTING_CHUNK_BYTES) {
+      chunks.push(block)
+      continue
+    }
+    let rest = block
+    while (rest.length > MAX_COUNTING_CHUNK_BYTES) {
+      const newline = rest.lastIndexOf('\n', MAX_COUNTING_CHUNK_BYTES)
+      const cut = newline > 0 ? newline : MAX_COUNTING_CHUNK_BYTES
+      chunks.push(rest.slice(0, cut))
+      rest = rest.slice(cut).replace(/^\n/, '')
+    }
+    if (rest) chunks.push(rest)
+  }
+  return chunks
+}
+
 /**
  * The budget check, run BEFORE react-markdown sees the content.
  *
- * A parse failure here is reported as a breach: the alternative is handing
- * the same input to the renderer and hoping its failure mode is prettier.
- * Failing visibly is the design's whole point (§10).
+ * Bounded work, not just bounded trees: each chunk is parsed and counted on
+ * its own and the rail is checked between chunks, so the verdict for a
+ * pathological document arrives after only the first few kilobytes have been
+ * parsed. A parse failure here is reported as a breach: the alternative is
+ * handing the same input to the renderer and hoping its failure mode is
+ * prettier. Failing visibly is the design's whole point (§10).
  */
 export function markdownBudgetBreach(content: string): MarkdownBudgetBreach | null {
   if (new TextEncoder().encode(content).length > MAX_MARKDOWN_RENDER_BYTES) return 'bytes'
   try {
-    const tree = countingProcessor.parse(content)
     let nodes = 0
     const walk = (node: { children?: unknown[] }) => {
       nodes += 1
@@ -107,8 +151,11 @@ export function markdownBudgetBreach(content: string): MarkdownBudgetBreach | nu
         for (const child of node.children) walk(child as { children?: unknown[] })
       }
     }
-    walk(tree as unknown as { children?: unknown[] })
-    return nodes > MAX_MARKDOWN_NODES ? 'nodes' : null
+    for (const chunk of countingChunks(content)) {
+      walk(countingProcessor.parse(chunk) as unknown as { children?: unknown[] })
+      if (nodes > MAX_MARKDOWN_NODES) return 'nodes'
+    }
+    return null
   } catch {
     return 'nodes'
   }

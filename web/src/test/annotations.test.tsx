@@ -701,6 +701,18 @@ describe('the renderer holds no conductor vocabulary either', () => {
     return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
   }
 
+  // A kind comparison in BOTH spellings. The dot form alone was defeated once
+  // (cond-0504): an implementation agent rewrote `a.kind === 'x'` as
+  // `a['kind'] === 'x'`, passed the guard, and left the module appearing
+  // covered while the branch stayed live. The quote character is captured and
+  // backreferenced so `['kind']` and `["kind"]` are both caught and a mixed
+  // quote cannot end the match early.
+  const KIND_COMPARISON = /\bkind\s*[=!]==|\[\s*(['"])kind\1\s*\]\s*[=!]==/
+  // The switch scan reads its whole parenthesised expression, so plain `kind`
+  // already reaches the bracket spelling; the explicit bracket arm pins that
+  // against a future narrowing of the pattern back to dot-only.
+  const KIND_SWITCH = /switch\s*\([^)]*kind[^)]*\)|switch\s*\(\s*\[\s*(['"])kind\1\s*\]/
+
   it.each(MODULES)('%s names no conductor term outside its comments', (_name, text) => {
     const source = stripComments(text)
     const offenders = CONDUCTOR_TERMS.filter(term => source.includes(term))
@@ -709,8 +721,8 @@ describe('the renderer holds no conductor vocabulary either', () => {
 
   it.each(MODULES)('%s branches on no kind and keeps no kind allowlist', (_name, text) => {
     const source = stripComments(text)
-    expect(source).not.toMatch(/kind\s*[=!]==/)
-    expect(source).not.toMatch(/switch\s*\([^)]*kind[^)]*\)/)
+    expect(source).not.toMatch(KIND_COMPARISON)
+    expect(source).not.toMatch(KIND_SWITCH)
     for (const forbidden of [
       'KNOWN_KINDS',
       'SUPPORTED_KINDS',
@@ -734,6 +746,12 @@ describe('the renderer holds no conductor vocabulary either', () => {
     const planted = stripComments("const x = 'human-gate'\nif (a.kind === 'x') {}")
     expect(CONDUCTOR_TERMS.filter(term => planted.includes(term))).toEqual(['human-gate'])
     expect(planted).toMatch(/kind\s*[=!]==/)
+    // cond-0504 non-vacuity: every NEW spelling is proven caught by a planted
+    // string carrying no dot-form fallback, so reverting the bracket arm goes
+    // red here rather than staying hidden behind the dot form.
+    expect(stripComments("if (a['kind'] === 'x') {}")).toMatch(KIND_COMPARISON)
+    expect(stripComments(`if (a["kind"] !== 'report') {}`)).toMatch(KIND_COMPARISON)
+    expect(stripComments("switch (a['kind']) {}")).toMatch(KIND_SWITCH)
   })
 
   it('the widened guard catches this feature\'s vocabulary, in every covered module', () => {
