@@ -1,0 +1,4101 @@
+{
+  "aggregate": {
+    "case_repo_count": 29,
+    "fallback_escape_rate_micro": 0.9736842105263158,
+    "file_recall_macro": {
+      "10": 0.4695402298850575,
+      "20": 0.5672413793103448,
+      "5": 0.314367816091954
+    },
+    "skipped_target_rate": 0.014084507042253521,
+    "symbol_recall_macro": {
+      "10": 0.7651515151515151,
+      "20": 0.8484848484848485,
+      "5": 0.5
+    }
+  },
+  "cases": [
+    {
+      "case_id": "cond-0209",
+      "case_types": [
+        "cross-repository",
+        "data-flow"
+      ],
+      "expected_file_count": 2,
+      "expected_symbol_count": 0,
+      "fallback_escape_rate": null,
+      "fallback_escapes": [],
+      "file_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 0.5
+      },
+      "issue_title": "native session attachments are never released, so every provider session is permanently unresumable",
+      "missed_files": [],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [],
+        "identifiers": [
+          "LIVE",
+          "NativeAttachmentConflict",
+          "ZERO",
+          "mark_ambiguous",
+          "native_attachment",
+          "native_session_attachments",
+          "native_tui_launch"
+        ],
+        "prose": [
+          "native",
+          "session",
+          "attachments",
+          "never",
+          "released",
+          "every"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "d691f8062983693a616c5ff490cd27e4d199aa1a",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": null,
+        "20": null,
+        "5": null
+      },
+      "top_files": [
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 60.267752
+        },
+        {
+          "path": "test/services/test_native_tui_launch.py",
+          "score": 57.956493
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/native_attachment.py",
+          "score": 49.958312
+        },
+        {
+          "path": "test/services/test_native_attachment.py",
+          "score": 48.005722
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_native_launch.py",
+          "score": 45.233486
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/database.py",
+          "score": 44.656485
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_execution_mode.py",
+          "score": 43.094092
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/native_tui_launch.py",
+          "score": 42.356056
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 40.541225
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/control_input_service.py",
+          "score": 38.76797
+        },
+        {
+          "path": "test/services/test_codex_native_control.py",
+          "score": 37.400879
+        },
+        {
+          "path": "docs/issues/native-tui-interaction-console/design.md",
+          "score": 37.214883
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/kimi_native_control.py",
+          "score": 36.742639
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 36.093065
+        },
+        {
+          "path": "test/services/test_native_control_identity_projection.py",
+          "score": 35.575332
+        },
+        {
+          "path": "test/services/test_native_readiness_and_claude_route.py",
+          "score": 34.419446
+        },
+        {
+          "path": "test/services/test_control_input_service.py",
+          "score": 32.646368
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/claude_native_control.py",
+          "score": 32.31991
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/codex_native_control.py",
+          "score": 32.120238
+        },
+        {
+          "path": "test/services/test_claude_native_control.py",
+          "score": 31.67772
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0209",
+      "case_types": [
+        "cross-repository",
+        "data-flow"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 3,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/commands/issue.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/lib/issues.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/lib/caoapi.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "symbol",
+          "target": "_file_to_tracker"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "symbol",
+          "target": "resolve_tracker_project"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "symbol",
+          "target": "file_issue"
+        }
+      ],
+      "file_recall": {
+        "10": 0.0,
+        "20": 0.0,
+        "5": 0.0
+      },
+      "issue_title": "native session attachments are never released, so every provider session is permanently unresumable",
+      "missed_files": [
+        "conduct/commands/issue.py",
+        "conduct/lib/issues.py",
+        "conduct/lib/caoapi.py"
+      ],
+      "missed_symbols": [
+        "_file_to_tracker",
+        "resolve_tracker_project",
+        "file_issue"
+      ],
+      "queries": {
+        "exact": [],
+        "identifiers": [
+          "LIVE",
+          "NativeAttachmentConflict",
+          "ZERO",
+          "mark_ambiguous",
+          "native_attachment",
+          "native_session_attachments",
+          "native_tui_launch"
+        ],
+        "prose": [
+          "native",
+          "session",
+          "attachments",
+          "never",
+          "released",
+          "every"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "e1e308bff8003deaa35c2c1e1874ab5bf6878b4e",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 0.0,
+        "20": 0.0,
+        "5": 0.0
+      },
+      "top_files": [
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 48.901136
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-26-cond0132-reboot-reincarnation-design.md",
+          "score": 47.387996
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 40.003066
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 36.999539
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 35.399261
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 33.379052
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 32.689377
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 32.314656
+        },
+        {
+          "path": "plugin/conductor_sentinel/_workstate.py",
+          "score": 32.083878
+        },
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 30.931139
+        },
+        {
+          "path": "conduct/lib/workstate.py",
+          "score": 30.568554
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-03-cond0303-successor-policy-root-design.md",
+          "score": 30.371609
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-27-final-p1-activation.md",
+          "score": 28.291135
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-26-cond0132-recovery-prerequisite-lane-design.md",
+          "score": 27.439399
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-01-work-state-projection-design.md",
+          "score": 25.527683
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 24.747865
+        },
+        {
+          "path": "tests/test_steer.py",
+          "score": 24.600378
+        },
+        {
+          "path": "conduct/commands/collect.py",
+          "score": 24.43339
+        },
+        {
+          "path": "plugin/conductor_sentinel/refusal_recovery.py",
+          "score": 24.033337
+        },
+        {
+          "path": "conduct/lib/execution_mode.py",
+          "score": 23.909706
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0072",
+      "case_types": [
+        "cross-repository",
+        "data-flow"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 3,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "src/cli_agent_orchestrator/services/inbox_service.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.0,
+        "20": 0.6666666666666666,
+        "5": 0.0
+      },
+      "issue_title": "delivered inbox row can remain outside the model turn",
+      "missed_files": [
+        "src/cli_agent_orchestrator/services/inbox_service.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "status=delivered",
+          "delivered",
+          "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+          "1e8f8af",
+          "pending -> terminal_queued -> submitted",
+          "submitted",
+          "9eb0b208c9560e13bff112b62f7aa0d81b2fbfed",
+          "InterstitialRecovery._worker_completed"
+        ],
+        "identifiers": [
+          "message_id",
+          "submitted_receipt",
+          "InterstitialRecovery",
+          "POST",
+          "consumed_receipt",
+          "terminal_queued"
+        ],
+        "prose": [
+          "delivered",
+          "inbox",
+          "row",
+          "remain",
+          "outside",
+          "model"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "ea594ee588602392eabd21b3e4c63ded54dbf664",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 0.6666666666666666,
+        "20": 1.0,
+        "5": 0.3333333333333333
+      },
+      "top_files": [
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_provider_bridge.py",
+          "score": 59.819762
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 57.998894
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 55.70738
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 48.352506
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/claude_native_control.py",
+          "score": 43.704979
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/kimi_native_control.py",
+          "score": 41.980622
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch.py",
+          "score": 37.455869
+        },
+        {
+          "path": "test/services/test_claude_native_control.py",
+          "score": 35.881496
+        },
+        {
+          "path": "src/cli_agent_orchestrator/mcp_server/server.py",
+          "score": 33.014055
+        },
+        {
+          "path": "test/services/test_control_input_journal.py",
+          "score": 32.264173
+        },
+        {
+          "path": "test/services/test_kimi_native_control.py",
+          "score": 31.536589
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/delivery_journal.py",
+          "score": 30.153631
+        },
+        {
+          "path": "src/cli_agent_orchestrator/constants.py",
+          "score": 29.68003
+        },
+        {
+          "path": "test/services/test_managed_launch.py",
+          "score": 28.323886
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/database.py",
+          "score": 27.900772
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/control_input_service.py",
+          "score": 27.0
+        },
+        {
+          "path": "test/e2e/test_supervisor_orchestration.py",
+          "score": 26.954196
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/control_input_journal.py",
+          "score": 26.264663
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_native_admission.py",
+          "score": 25.194603
+        },
+        {
+          "path": "test/e2e/test_assign.py",
+          "score": 24.732167
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0072",
+      "case_types": [
+        "cross-repository",
+        "data-flow"
+      ],
+      "expected_file_count": 2,
+      "expected_symbol_count": 0,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "plugin/conductor_sentinel/refusal_recovery.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.5,
+        "20": 0.5,
+        "5": 0.5
+      },
+      "issue_title": "delivered inbox row can remain outside the model turn",
+      "missed_files": [
+        "plugin/conductor_sentinel/refusal_recovery.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "status=delivered",
+          "delivered",
+          "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+          "1e8f8af",
+          "pending -> terminal_queued -> submitted",
+          "submitted",
+          "9eb0b208c9560e13bff112b62f7aa0d81b2fbfed",
+          "InterstitialRecovery._worker_completed"
+        ],
+        "identifiers": [
+          "message_id",
+          "submitted_receipt",
+          "InterstitialRecovery",
+          "POST",
+          "consumed_receipt",
+          "terminal_queued"
+        ],
+        "prose": [
+          "delivered",
+          "inbox",
+          "row",
+          "remain",
+          "outside",
+          "model"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "a4b64cea625debe127004e3986276e9b1822f23b",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": null,
+        "20": null,
+        "5": null
+      },
+      "top_files": [
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 122.247102
+        },
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 102.718007
+        },
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 96.355042
+        },
+        {
+          "path": "tests/test_report.py",
+          "score": 80.488329
+        },
+        {
+          "path": "conduct/commands/report.py",
+          "score": 73.524008
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 67.856522
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 61.562784
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-27-final-p1-activation.md",
+          "score": 59.084518
+        },
+        {
+          "path": "tests/fake_cao.py",
+          "score": 56.745768
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 55.002798
+        },
+        {
+          "path": "plugin/tests/test_interstitial_recovery.py",
+          "score": 54.296701
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 51.294046
+        },
+        {
+          "path": "plugin/conductor_sentinel/interstitial_recovery.py",
+          "score": 46.31713
+        },
+        {
+          "path": "docs/fork/control-input-contract.md",
+          "score": 44.938596
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 44.41215
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 37.6797
+        },
+        {
+          "path": "tests/test_continue_round.py",
+          "score": 36.617525
+        },
+        {
+          "path": "tests/test_copy_mode_outcomes.py",
+          "score": 33.917069
+        },
+        {
+          "path": "conduct/lib/caoapi.py",
+          "score": 33.815283
+        },
+        {
+          "path": "scripts/control_input_acceptance.py",
+          "score": 33.264992
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0107",
+      "case_types": [
+        "cross-repository"
+      ],
+      "expected_file_count": 4,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "src/cli_agent_orchestrator/models/managed_launch_v2.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "src/cli_agent_orchestrator/services/vintage_migration.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.5,
+        "20": 0.5,
+        "5": 0.25
+      },
+      "issue_title": "native v2 preflight failure loses its cause and cannot be recovered",
+      "missed_files": [
+        "src/cli_agent_orchestrator/models/managed_launch_v2.py",
+        "src/cli_agent_orchestrator/services/vintage_migration.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "0.29.1",
+          "0.29.0",
+          "finally",
+          "TERM",
+          "KILL",
+          "0.29.2",
+          "final-gate-pr37-k27-p0p1-review",
+          "fe5beca3"
+        ],
+        "identifiers": [
+          "KILL",
+          "TERM",
+          "preflight_blocked"
+        ],
+        "prose": [
+          "native",
+          "v",
+          "preflight",
+          "failure",
+          "loses",
+          "cause"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "a2ddd2b6d56f769f557c9b62b62a796c66edee49",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 0.0
+      },
+      "top_files": [
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 74.336677
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 65.079689
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_provider_bridge.py",
+          "score": 63.061538
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/script_runner.py",
+          "score": 62.834518
+        },
+        {
+          "path": "test/services/test_script_runner.py",
+          "score": 59.604293
+        },
+        {
+          "path": "src/cli_agent_orchestrator/mcp_server/server.py",
+          "score": 56.219449
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/kimi_native_bootstrap.py",
+          "score": 52.954347
+        },
+        {
+          "path": "test/services/test_native_tui_launch.py",
+          "score": 49.342009
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 46.28024
+        },
+        {
+          "path": "test/services/test_terminal_service_full.py",
+          "score": 46.253958
+        },
+        {
+          "path": "test/fixtures/cao_server.py",
+          "score": 45.829447
+        },
+        {
+          "path": "test/api/test_control_input_endpoint.py",
+          "score": 45.822605
+        },
+        {
+          "path": "src/cli_agent_orchestrator/constants.py",
+          "score": 45.342665
+        },
+        {
+          "path": "test/api/test_run_step_env_guard.py",
+          "score": 43.902092
+        },
+        {
+          "path": "test/providers/test_claude_code_unit.py",
+          "score": 42.972531
+        },
+        {
+          "path": "test/services/test_kimi_native_control.py",
+          "score": 42.717676
+        },
+        {
+          "path": "test/services/test_control_input_journal.py",
+          "score": 42.595016
+        },
+        {
+          "path": "skills/cao-provider/references/lessons-learnt.md",
+          "score": 40.78136
+        },
+        {
+          "path": "src/cli_agent_orchestrator/skills/cao-provider/references/lessons-learnt.md",
+          "score": 40.78136
+        },
+        {
+          "path": "src/cli_agent_orchestrator/providers/kimi_cli.py",
+          "score": 40.515145
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0107",
+      "case_types": [
+        "cross-repository"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/lib/caoapi.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.3333333333333333,
+        "20": 0.6666666666666666,
+        "5": 0.3333333333333333
+      },
+      "issue_title": "native v2 preflight failure loses its cause and cannot be recovered",
+      "missed_files": [
+        "conduct/lib/caoapi.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "0.29.1",
+          "0.29.0",
+          "finally",
+          "TERM",
+          "KILL",
+          "0.29.2",
+          "final-gate-pr37-k27-p0p1-review",
+          "fe5beca3"
+        ],
+        "identifiers": [
+          "KILL",
+          "TERM",
+          "preflight_blocked"
+        ],
+        "prose": [
+          "native",
+          "v",
+          "preflight",
+          "failure",
+          "loses",
+          "cause"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "7453e2110b1629e4a0f1726a6cee5182688c7938",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "top_files": [
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 101.461794
+        },
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 93.073176
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 70.590568
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 53.194756
+        },
+        {
+          "path": "docs/recon/cao-agent-profiles.md",
+          "score": 52.131512
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 48.663142
+        },
+        {
+          "path": "conduct/commands/deploy.py",
+          "score": 47.742602
+        },
+        {
+          "path": "tests/fake_cao.py",
+          "score": 47.259644
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 39.986556
+        },
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 39.951285
+        },
+        {
+          "path": "docs/recon/v1-carryover.md",
+          "score": 38.371777
+        },
+        {
+          "path": "scripts/control_input_acceptance.py",
+          "score": 36.824677
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 36.072677
+        },
+        {
+          "path": "conduct/lib/spawn_delivery.py",
+          "score": 33.906538
+        },
+        {
+          "path": "tests/test_deploy.py",
+          "score": 33.669771
+        },
+        {
+          "path": "tests/test_surfaces.py",
+          "score": 31.804953
+        },
+        {
+          "path": "conduct/lib/native_session_ledger.py",
+          "score": 29.149747
+        },
+        {
+          "path": "docs/recon/cao-http-api.md",
+          "score": 28.828809
+        },
+        {
+          "path": "tests/test_report.py",
+          "score": 27.843676
+        },
+        {
+          "path": "conduct/commands/provision.py",
+          "score": 27.392317
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0173",
+      "case_types": [
+        "cross-repository"
+      ],
+      "expected_file_count": 1,
+      "expected_symbol_count": 0,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "src/cli_agent_orchestrator/models/terminal.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.0,
+        "20": 0.0,
+        "5": 0.0
+      },
+      "issue_title": "abandoned pre-terminal journals re-alert every recovery timeout forever",
+      "missed_files": [
+        "src/cli_agent_orchestrator/models/terminal.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "precutover-opus-native-v1",
+          "manifest.json",
+          "conduct spawn --recover",
+          "cleaned",
+          "recovered run has no manifest to finalize",
+          "live-compact-claude-v3",
+          "bound",
+          "terminal-non-adoptable"
+        ],
+        "identifiers": [
+          "DELETE",
+          "OpenClaw"
+        ],
+        "prose": [
+          "abandoned",
+          "pre",
+          "terminal",
+          "journals",
+          "re",
+          "alert"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "4d244d1b4ed4bfd7d93f1e8f5cbe1509b3b10e2f",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": null,
+        "20": null,
+        "5": null
+      },
+      "top_files": [
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 71.546083
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 57.038867
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 54.340118
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/control_input_service.py",
+          "score": 50.579321
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch.py",
+          "score": 49.685872
+        },
+        {
+          "path": "test/services/test_terminal_service_full.py",
+          "score": 45.305485
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_provider_bridge.py",
+          "score": 44.777148
+        },
+        {
+          "path": "test/services/test_v2_cleanup_contract.py",
+          "score": 43.631315
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_native_admission.py",
+          "score": 40.986102
+        },
+        {
+          "path": "test/services/test_v2_recovery_surface.py",
+          "score": 40.817078
+        },
+        {
+          "path": "test/services/test_control_input_service.py",
+          "score": 40.598619
+        },
+        {
+          "path": "test/services/test_native_control_identity_projection.py",
+          "score": 40.092507
+        },
+        {
+          "path": "test/api/test_api_endpoints.py",
+          "score": 39.736408
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/tmux.py",
+          "score": 39.624729
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/workflow_service.py",
+          "score": 39.002507
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/database.py",
+          "score": 38.669868
+        },
+        {
+          "path": "test/services/test_control_input_journal.py",
+          "score": 38.364139
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/control_input_journal.py",
+          "score": 38.216414
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_execution_mode.py",
+          "score": 37.811477
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/inbox_service.py",
+          "score": 37.678399
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0173",
+      "case_types": [
+        "cross-repository"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 1,
+      "fallback_escape_rate": null,
+      "fallback_escapes": [],
+      "file_recall": {
+        "10": 0.6666666666666666,
+        "20": 1.0,
+        "5": 0.3333333333333333
+      },
+      "issue_title": "abandoned pre-terminal journals re-alert every recovery timeout forever",
+      "missed_files": [],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "precutover-opus-native-v1",
+          "manifest.json",
+          "conduct spawn --recover",
+          "cleaned",
+          "recovered run has no manifest to finalize",
+          "live-compact-claude-v3",
+          "bound",
+          "terminal-non-adoptable"
+        ],
+        "identifiers": [
+          "DELETE",
+          "OpenClaw"
+        ],
+        "prose": [
+          "abandoned",
+          "pre",
+          "terminal",
+          "journals",
+          "re",
+          "alert"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "446b978bcc88ee660e10aa0764b5b6df1f4bbdf9",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "top_files": [
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 97.861606
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 83.373096
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 80.492694
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 74.699691
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 72.160804
+        },
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 69.153115
+        },
+        {
+          "path": "tests/fake_cao.py",
+          "score": 67.427007
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 66.359363
+        },
+        {
+          "path": "conduct/commands/collect.py",
+          "score": 63.603913
+        },
+        {
+          "path": "plugin/conductor_sentinel/refusal_recovery.py",
+          "score": 54.099689
+        },
+        {
+          "path": "plugin/conductor_sentinel/interstitial_recovery.py",
+          "score": 52.939411
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 51.213212
+        },
+        {
+          "path": "plugin/tests/test_interstitial_recovery.py",
+          "score": 49.060213
+        },
+        {
+          "path": "conduct/lib/spawn_delivery.py",
+          "score": 48.027678
+        },
+        {
+          "path": "tests/test_spawn_delivery.py",
+          "score": 42.314511
+        },
+        {
+          "path": "conduct/commands/deploy.py",
+          "score": 41.676037
+        },
+        {
+          "path": "conduct/lib/caoapi.py",
+          "score": 40.765834
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-26-cond0132-reboot-reincarnation-design.md",
+          "score": 40.405762
+        },
+        {
+          "path": "conduct/lib/native_session_ledger.py",
+          "score": 40.387338
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-26-cond0132-recovery-prerequisite-lane-design.md",
+          "score": 40.340757
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0462",
+      "case_types": [
+        "stack-trace",
+        "vague-prose"
+      ],
+      "expected_file_count": 1,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": null,
+      "fallback_escapes": [],
+      "file_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "issue_title": "successor dispose crashes on missing source occurrence digest",
+      "missed_files": [],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [],
+        "identifiers": [
+          "COND",
+          "KeyError",
+          "source_occurrence_sha256"
+        ],
+        "prose": [
+          "successor",
+          "dispose",
+          "crashes",
+          "missing",
+          "source",
+          "occurrence"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "da389a60a55525e35b568b5e631abca236829da7",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "top_files": [
+        {
+          "path": "tests/test_spawn.py",
+          "score": 57.976944
+        },
+        {
+          "path": "conduct/commands/_successor.py",
+          "score": 57.966135
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-03-cond0303-successor-policy-root-design.md",
+          "score": 52.413518
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 46.559378
+        },
+        {
+          "path": "conduct/lib/successor_policy_registry.py",
+          "score": 41.686011
+        },
+        {
+          "path": "tests/test_successor_custody.py",
+          "score": 39.612188
+        },
+        {
+          "path": "tests/test_successor_policy_registry.py",
+          "score": 36.860632
+        },
+        {
+          "path": "plugin/conductor_sentinel/_workstate.py",
+          "score": 33.719976
+        },
+        {
+          "path": "conduct/lib/workstate.py",
+          "score": 33.633411
+        },
+        {
+          "path": "conduct/lib/shims.py",
+          "score": 28.833681
+        },
+        {
+          "path": "conduct/commands/deploy.py",
+          "score": 27.738831
+        },
+        {
+          "path": "conduct/commands/continue_round.py",
+          "score": 27.147205
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 27.028877
+        },
+        {
+          "path": "tests/test_retained_successor_move.py",
+          "score": 26.268834
+        },
+        {
+          "path": "conduct/lib/artifact_authority.py",
+          "score": 26.06777
+        },
+        {
+          "path": "conduct/commands/checkpoint.py",
+          "score": 25.981149
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 25.795177
+        },
+        {
+          "path": "conduct/commands/collect.py",
+          "score": 25.776562
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 25.761915
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-15-cond0402-fresh-successor-custody-transfer.md",
+          "score": 24.81017
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0549",
+      "case_types": [
+        "stack-trace",
+        "data-flow"
+      ],
+      "expected_file_count": 4,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/lib/retained_track.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/lib/state.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.25,
+        "20": 0.5,
+        "5": 0.25
+      },
+      "issue_title": "report-on-behalf tears down a worker without releasing its leases and claims",
+      "missed_files": [
+        "conduct/lib/retained_track.py",
+        "conduct/lib/state.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [],
+        "identifiers": [
+          "DELETE",
+          "report_on_behalf"
+        ],
+        "prose": [
+          "report",
+          "behalf",
+          "tears",
+          "down",
+          "worker",
+          "releasing"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "46dd1fbf43f232d448948e8a3e715f2d36cc84d7",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 0.5,
+        "20": 1.0,
+        "5": 0.5
+      },
+      "top_files": [
+        {
+          "path": "tests/test_report_on_behalf.py",
+          "score": 38.273327
+        },
+        {
+          "path": "conduct/commands/report_on_behalf.py",
+          "score": 34.269565
+        },
+        {
+          "path": "conduct/commands/collect.py",
+          "score": 32.534341
+        },
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 32.062369
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 31.224562
+        },
+        {
+          "path": "tests/test_collect.py",
+          "score": 28.410716
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 28.052402
+        },
+        {
+          "path": "tests/test_goal_store.py",
+          "score": 26.822163
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 21.549845
+        },
+        {
+          "path": "tests/test_surfaces.py",
+          "score": 21.427313
+        },
+        {
+          "path": "tests/test_retire.py",
+          "score": 21.095067
+        },
+        {
+          "path": "conduct/commands/retire.py",
+          "score": 21.070121
+        },
+        {
+          "path": "conduct/lib/goal_store.py",
+          "score": 21.0426
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 20.829029
+        },
+        {
+          "path": "plugin/conductor_sentinel/_workstate.py",
+          "score": 20.617869
+        },
+        {
+          "path": "conduct/lib/workstate.py",
+          "score": 20.476746
+        },
+        {
+          "path": "docs/shakedown-runbook.md",
+          "score": 20.287352
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 20.13643
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 19.021674
+        },
+        {
+          "path": "tests/test_workstate.py",
+          "score": 18.985931
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0055",
+      "case_types": [
+        "stack-trace",
+        "vague-prose"
+      ],
+      "expected_file_count": 2,
+      "expected_symbol_count": 0,
+      "fallback_escape_rate": null,
+      "fallback_escapes": [],
+      "file_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "issue_title": "Codex safety interstitial wedges unattended terminals",
+      "missed_files": [],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "350c2c19",
+          "/Users/colin/.aws/cli-agent-orchestrator/logs/terminal/350c2c19.log",
+          "fix/long-run-readiness",
+          "interstitial_recovery",
+          "plugin/tests/test_interstitial_recovery.py",
+          "GET /terminals/{id}/user-prompt",
+          "{prompt_id, text, choices[]}",
+          "POST /terminals/{id}/user-prompt/answer"
+        ],
+        "identifiers": [
+          "BLOCKED",
+          "JOURNAL",
+          "OPEN",
+          "POST",
+          "answer_user_prompt",
+          "interstitial_recovery",
+          "prompt_id",
+          "test_interstitial_recovery",
+          "waiting_user_answer"
+        ],
+        "prose": [
+          "codex",
+          "safety",
+          "interstitial",
+          "wedges",
+          "unattended",
+          "terminals"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "d783c1fc24d1c54ae2d0e2025bc43a1a3632fefb",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": null,
+        "20": null,
+        "5": null
+      },
+      "top_files": [
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 98.29474
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 95.327068
+        },
+        {
+          "path": "plugin/conductor_sentinel/interstitial_recovery.py",
+          "score": 66.531449
+        },
+        {
+          "path": "plugin/tests/test_interstitial_recovery.py",
+          "score": 62.497233
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 47.903721
+        },
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 25.299208
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 24.228819
+        },
+        {
+          "path": "docs/shakedown-runbook.md",
+          "score": 17.924813
+        },
+        {
+          "path": "docs/recon/cao-http-api.md",
+          "score": 16.829029
+        },
+        {
+          "path": "tests/fake_cao.py",
+          "score": 16.720672
+        },
+        {
+          "path": "conduct/lib/caoapi.py",
+          "score": 13.784635
+        },
+        {
+          "path": "docs/BUILD_PLAN.md",
+          "score": 12.199672
+        },
+        {
+          "path": "tests/test_steer.py",
+          "score": 12.0
+        },
+        {
+          "path": "tests/test_up.py",
+          "score": 9.643856
+        },
+        {
+          "path": "docs/recon/cao-agent-profiles.md",
+          "score": 9.584963
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-20-cao-conductor-design.md",
+          "score": 8.807355
+        },
+        {
+          "path": "conduct/commands/steer.py",
+          "score": 8.643856
+        },
+        {
+          "path": "conduct/lib/issues.py",
+          "score": 8.643856
+        },
+        {
+          "path": "profiles/supervisor-terra.md",
+          "score": 8.584963
+        },
+        {
+          "path": "profiles/supervisor.md",
+          "score": 8.584963
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0464",
+      "case_types": [
+        "stack-trace"
+      ],
+      "expected_file_count": 2,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "test/conftest.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "test/fixtures/cao_server.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "symbol",
+          "target": "CaoServer"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "symbol",
+          "target": "_subprocess_env"
+        }
+      ],
+      "file_recall": {
+        "10": 0.0,
+        "20": 0.0,
+        "5": 0.0
+      },
+      "issue_title": "Local test runs read the operator real settings.json, so a local suite total is meaningless and machine-dependent",
+      "missed_files": [
+        "test/conftest.py",
+        "test/fixtures/cao_server.py"
+      ],
+      "missed_symbols": [
+        "CaoServer",
+        "_subprocess_env"
+      ],
+      "queries": {
+        "exact": [
+          "settings.json",
+          "MemoryDisabledError: memory subsystem is disabled. Set memory.enabled=true in settings.json to re-enable",
+          "1cfa6c04",
+          "402 failed, 10107 passed, 9 errors",
+          "4 failed, 10508 passed",
+          "CAO_SETTINGS",
+          "not e2e",
+          "did I break anything"
+        ],
+        "identifiers": [
+          "COOPERATIVE",
+          "DEFECT",
+          "DIRECTION",
+          "FAILURE",
+          "GUIDANCE",
+          "INTERIM",
+          "MATTERS",
+          "MEASURED",
+          "MemoryDisabledError",
+          "OPERATOR"
+        ],
+        "prose": [
+          "local",
+          "test",
+          "runs",
+          "read",
+          "operator",
+          "real"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "4b62d8b65ac2bf7bb58c7a5993008875e31948e7",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 0.0,
+        "20": 0.0,
+        "5": 0.0
+      },
+      "top_files": [
+        {
+          "path": "docs/issues/native-tui-interaction-console/design.md",
+          "score": 41.288414
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 40.317379
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_provider_bridge.py",
+          "score": 38.017624
+        },
+        {
+          "path": "test/services/test_exact_executor.py",
+          "score": 37.611779
+        },
+        {
+          "path": "test/services/test_restore_contract.py",
+          "score": 36.670266
+        },
+        {
+          "path": "test/providers/test_claude_code_unit.py",
+          "score": 32.920894
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/memory_service.py",
+          "score": 31.929258
+        },
+        {
+          "path": "docs/configuration.md",
+          "score": 31.754242
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 30.06242
+        },
+        {
+          "path": "src/cli_agent_orchestrator/constants.py",
+          "score": 29.999648
+        },
+        {
+          "path": "test/services/test_operation_journal.py",
+          "score": 29.009916
+        },
+        {
+          "path": "test/services/test_native_attachment_recovery.py",
+          "score": 28.191599
+        },
+        {
+          "path": "test/services/test_control_input_service.py",
+          "score": 27.666701
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/native_attachment_recovery.py",
+          "score": 26.941231
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 26.180103
+        },
+        {
+          "path": "test/services/test_native_status_repair.py",
+          "score": 26.040819
+        },
+        {
+          "path": "test/services/test_fifo_reader.py",
+          "score": 26.000308
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/database.py",
+          "score": 25.858175
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_native_launch.py",
+          "score": 25.837882
+        },
+        {
+          "path": "test/services/test_memory_enabled_flag.py",
+          "score": 25.70044
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0093",
+      "case_types": [
+        "exact-technical"
+      ],
+      "expected_file_count": 2,
+      "expected_symbol_count": 3,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "src/cli_agent_orchestrator/services/codex_trust.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.5,
+        "20": 0.5,
+        "5": 0.0
+      },
+      "issue_title": "managed Codex launches blocked by stale audited CLI pin",
+      "missed_files": [
+        "src/cli_agent_orchestrator/services/codex_trust.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "c6ae0374",
+          "c50ec4a1-a2f3-4103-b12f-6f61ca118da1",
+          "codex --version",
+          "codex-cli 0.145.0",
+          "codex_trust.SUPPORTED_CODEX_VERSION",
+          "0.144.6",
+          "never-submitted",
+          "a316bd5f418f83b9a85a84e814272e5042e69f836a162822144e8dfbf5e0815a"
+        ],
+        "identifiers": [
+          "codex_trust"
+        ],
+        "prose": [
+          "managed",
+          "codex",
+          "launches",
+          "blocked",
+          "stale",
+          "audited"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "be4ee7d47862bcaadbe77028e1d353d71ef90fba",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "top_files": [
+        {
+          "path": "test/services/test_managed_launch.py",
+          "score": 30.793197
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_provider_bridge.py",
+          "score": 30.413991
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch.py",
+          "score": 29.135709
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 21.129283
+        },
+        {
+          "path": "test/services/test_managed_launch_v2.py",
+          "score": 14.491853
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 14.049849
+        },
+        {
+          "path": "test/services/test_managed_provider_bridge.py",
+          "score": 13.807355
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 13.724514
+        },
+        {
+          "path": "test/services/test_terminal_service_full.py",
+          "score": 13.436712
+        },
+        {
+          "path": "docs/managed-launch-protocol.md",
+          "score": 13.321928
+        },
+        {
+          "path": "test/services/test_recovery_contracts.py",
+          "score": 12.807355
+        },
+        {
+          "path": "test/services/test_codex_trust.py",
+          "score": 12.459432
+        },
+        {
+          "path": "docs/codex-cli.md",
+          "score": 12.209453
+        },
+        {
+          "path": "examples/codex-basic/README.md",
+          "score": 12.169925
+        },
+        {
+          "path": "src/cli_agent_orchestrator/providers/kimi_cli.py",
+          "score": 11.076816
+        },
+        {
+          "path": "test/api/test_companion_surfaces.py",
+          "score": 11.0
+        },
+        {
+          "path": "test/api/test_recovery_api.py",
+          "score": 10.945444
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/herdr_inbox_service.py",
+          "score": 9.61471
+        },
+        {
+          "path": "test/providers/test_codex_provider_unit.py",
+          "score": 9.531381
+        },
+        {
+          "path": "src/cli_agent_orchestrator/providers/codex.py",
+          "score": 9.087463
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0312",
+      "case_types": [
+        "exact-technical"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 1,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "src/cli_agent_orchestrator/services/kimi_native_launch.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.6666666666666666,
+        "20": 0.6666666666666666,
+        "5": 0.3333333333333333
+      },
+      "issue_title": "Kimi 0.31 process-title rewrite defeats exact-session admission proof",
+      "missed_files": [
+        "src/cli_agent_orchestrator/services/kimi_native_launch.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "3a699241e5f208c48e2d2d6909d3199702507620",
+          "2b27bbaf36c291e43c37ecedb99a01bf73e63ec1",
+          "%47",
+          "session_84a67fa5-3aab-4d84-9693-49343fd924a6",
+          "kimi-code",
+          "native_tui_launch._verify_bound_session_and_cwd",
+          "--session <id>",
+          "pane_argv_does_not_resume_bound_session"
+        ],
+        "identifiers": [
+          "COND",
+          "native_tui_launch",
+          "pane_argv_does_not_resume_bound_session",
+          "session_84a67fa5"
+        ],
+        "prose": [
+          "kimi",
+          "process",
+          "title",
+          "rewrite",
+          "defeats",
+          "exact"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "54d1ce116b5e4c8a64074e3633c319402ae43b01",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 0.0
+      },
+      "top_files": [
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 43.598122
+        },
+        {
+          "path": "test/e2e/test_native_tui_provider_acceptance.py",
+          "score": 34.697402
+        },
+        {
+          "path": "test/services/test_native_tui_launch.py",
+          "score": 34.568669
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/control_input_service.py",
+          "score": 31.737168
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_provider_bridge.py",
+          "score": 30.722406
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/native_tui_launch.py",
+          "score": 29.164598
+        },
+        {
+          "path": "test/services/test_managed_provider_bridge.py",
+          "score": 27.835455
+        },
+        {
+          "path": "docs/issues/native-tui-interaction-console/design.md",
+          "score": 27.579994
+        },
+        {
+          "path": "test/services/test_native_control_identity_projection.py",
+          "score": 25.934797
+        },
+        {
+          "path": "test/services/test_control_input_service.py",
+          "score": 25.460328
+        },
+        {
+          "path": "test/services/test_provider_default_effort.py",
+          "score": 25.104722
+        },
+        {
+          "path": "test/services/test_managed_launch.py",
+          "score": 25.013454
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/native_pane_input.py",
+          "score": 24.913918
+        },
+        {
+          "path": "test/services/test_native_readiness_and_claude_route.py",
+          "score": 24.562242
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_native_launch.py",
+          "score": 23.67772
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/kimi_native_bootstrap.py",
+          "score": 23.45706
+        },
+        {
+          "path": "test/services/test_inbox_service.py",
+          "score": 21.916812
+        },
+        {
+          "path": "test/e2e/test_operator_message_live.py",
+          "score": 21.738092
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/tmux.py",
+          "score": 21.478122
+        },
+        {
+          "path": "test/e2e/test_interactive_streaming_live.py",
+          "score": 21.186733
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0343",
+      "case_types": [
+        "exact-technical"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 1,
+      "fallback_escape_rate": null,
+      "fallback_escapes": [],
+      "file_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 0.6666666666666666
+      },
+      "issue_title": "the fire-marshal incident-store lock has no stale recovery; one crashed writer blocks every future report",
+      "missed_files": [],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "4a19f6c5578395ca",
+          "conduct/lib/marshal_incidents.py",
+          "lock_path",
+          "grep -n lock",
+          "conduct marshal report",
+          "open_incident",
+          "update_incident",
+          "fire-marshal/incidents.json.lock"
+        ],
+        "identifiers": [
+          "STORE",
+          "lock_path",
+          "marshal_incidents",
+          "open_incident",
+          "prior_incidents",
+          "update_incident"
+        ],
+        "prose": [
+          "fire",
+          "marshal",
+          "incident",
+          "store",
+          "lock",
+          "stale"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "f48ab5fd109fb0a72cf6bae05e4a690e23d94613",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "top_files": [
+        {
+          "path": "conduct/commands/marshal.py",
+          "score": 80.23614
+        },
+        {
+          "path": "tests/test_marshal_incidents.py",
+          "score": 77.967987
+        },
+        {
+          "path": "conduct/lib/marshal_incidents.py",
+          "score": 75.264072
+        },
+        {
+          "path": "tests/test_marshal_command.py",
+          "score": 61.138427
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 43.729027
+        },
+        {
+          "path": "conduct/lib/spec_drift_queue.py",
+          "score": 41.403097
+        },
+        {
+          "path": "scripts/fire-marshal.sh",
+          "score": 37.056911
+        },
+        {
+          "path": "conduct/lib/marshal_evidence.py",
+          "score": 35.78745
+        },
+        {
+          "path": "conduct/lib/review_waves.py",
+          "score": 35.423422
+        },
+        {
+          "path": "docs/fire-marshal/playbook.md",
+          "score": 33.250493
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 33.007211
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 32.792206
+        },
+        {
+          "path": "conduct/commands/checkpoint.py",
+          "score": 32.446413
+        },
+        {
+          "path": "conduct/commands/collect.py",
+          "score": 31.645814
+        },
+        {
+          "path": "plugin/tests/test_interstitial_recovery.py",
+          "score": 31.278449
+        },
+        {
+          "path": "conduct/commands/_successor.py",
+          "score": 31.224021
+        },
+        {
+          "path": "conduct/commands/continue_round.py",
+          "score": 30.956154
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-06-fire-marshal-deadlock-recovery-design.md",
+          "score": 29.813781
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 29.513869
+        },
+        {
+          "path": "conduct/lib/spawn_delivery.py",
+          "score": 29.158432
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0097",
+      "case_types": [
+        "exact-technical"
+      ],
+      "expected_file_count": 1,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": null,
+      "fallback_escapes": [],
+      "file_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 0.0
+      },
+      "issue_title": "Sentinel drops a queued recovery event while the event lock is held",
+      "missed_files": [],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "plugin/tests",
+          "plugin/",
+          "conductor_sentinel",
+          "conduct",
+          "test_held_event_lock_liveness_with_recovery_events_queued"
+        ],
+        "identifiers": [
+          "conductor_sentinel",
+          "test_held_event_lock_liveness_with_recovery_events_queued"
+        ],
+        "prose": [
+          "sentinel",
+          "drops",
+          "queued",
+          "recovery",
+          "event",
+          "lock"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "2d67357037476d1bf61d086914439552246cc5a6",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 0.0
+      },
+      "top_files": [
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 100.332788
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 99.092008
+        },
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 84.489009
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 82.762955
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-27-final-p1-activation.md",
+          "score": 68.163998
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 61.443657
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 52.901198
+        },
+        {
+          "path": "conduct/commands/deploy.py",
+          "score": 52.6797
+        },
+        {
+          "path": "plugin/tests/test_interstitial_recovery.py",
+          "score": 50.101494
+        },
+        {
+          "path": "docs/recon/cao-plugin-system.md",
+          "score": 49.395865
+        },
+        {
+          "path": "conduct/commands/doctor.py",
+          "score": 48.550178
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 48.026082
+        },
+        {
+          "path": "tests/test_deploy.py",
+          "score": 46.669944
+        },
+        {
+          "path": "plugin/tests/test_model_turn_receipt.py",
+          "score": 45.264346
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 45.133882
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-20-cao-conductor-design.md",
+          "score": 43.424553
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 41.19883
+        },
+        {
+          "path": "conduct/lib/sourcechain.py",
+          "score": 39.584317
+        },
+        {
+          "path": "plugin/tests/test_event_mirror.py",
+          "score": 37.779565
+        },
+        {
+          "path": "docs/shakedown-runbook.md",
+          "score": 37.168256
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0386",
+      "case_types": [
+        "exact-technical",
+        "data-flow"
+      ],
+      "expected_file_count": 1,
+      "expected_symbol_count": 0,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "cao_mcp_apps/.husky/pre-push"
+        }
+      ],
+      "file_recall": {
+        "10": 0.0,
+        "20": 0.0,
+        "5": 0.0
+      },
+      "issue_title": "pre-push hook leaks Git environment and commits fixtures onto source branch",
+      "missed_files": [
+        "cao_mcp_apps/.husky/pre-push"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [],
+        "identifiers": [],
+        "prose": [
+          "pre",
+          "push",
+          "hook",
+          "leaks",
+          "git",
+          "environment"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "68f3efa511f97acf7cdee9b7a4b84734b427c28f",
+      "skipped_files": [
+        {
+          "path": "cao_mcp_apps/.husky/pre-push",
+          "reason": "hidden"
+        }
+      ],
+      "symbol_recall": {
+        "10": null,
+        "20": null,
+        "5": null
+      },
+      "top_files": [
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 22.006074
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 18.212496
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_provider_bridge.py",
+          "score": 17.489973
+        },
+        {
+          "path": "docs/issues/native-tui-interaction-console/design.md",
+          "score": 15.124121
+        },
+        {
+          "path": "test/services/test_native_readiness_and_claude_route.py",
+          "score": 14.60733
+        },
+        {
+          "path": "cao_mcp_apps/package-lock.json",
+          "score": 14.246741
+        },
+        {
+          "path": "test/services/test_muse_native_managed_v2_enrollment.py",
+          "score": 13.894818
+        },
+        {
+          "path": "src/cli_agent_orchestrator/providers/kimi_cli.py",
+          "score": 13.430453
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 12.870365
+        },
+        {
+          "path": "README.md",
+          "score": 12.754888
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_native_launch.py",
+          "score": 12.661778
+        },
+        {
+          "path": "web/package-lock.json",
+          "score": 12.481799
+        },
+        {
+          "path": "test/services/test_claude_native_adapter.py",
+          "score": 12.103288
+        },
+        {
+          "path": "web/src/lib/streaming.ts",
+          "score": 11.906891
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/issue_tracker.py",
+          "score": 11.67772
+        },
+        {
+          "path": "src/cli_agent_orchestrator/providers/claude_code.py",
+          "score": 11.629357
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/memory_service.py",
+          "score": 11.60733
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/database.py",
+          "score": 11.588715
+        },
+        {
+          "path": "web/src/lib/macroNotation.ts",
+          "score": 11.491853
+        },
+        {
+          "path": "skills/cao-plugin/SKILL.md",
+          "score": 11.430453
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0012",
+      "case_types": [
+        "vague-prose"
+      ],
+      "expected_file_count": 1,
+      "expected_symbol_count": 3,
+      "fallback_escape_rate": 0.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": false,
+          "kind": "symbol",
+          "target": "task_classes"
+        }
+      ],
+      "file_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "issue_title": "Sentinel ignores spec-writer idle timeout and raises false deadman",
+      "missed_files": [],
+      "missed_symbols": [
+        "task_classes"
+      ],
+      "queries": {
+        "exact": [],
+        "identifiers": [
+          "deadman_minutes"
+        ],
+        "prose": [
+          "sentinel",
+          "ignores",
+          "spec",
+          "writer",
+          "idle",
+          "timeout"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "d2c907553320d94948e36f3cf08bf9bd5bc94a7f",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 0.6666666666666666,
+        "20": 0.6666666666666666,
+        "5": 0.6666666666666666
+      },
+      "top_files": [
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 18.457637
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-20-cao-conductor-design.md",
+          "score": 18.366322
+        },
+        {
+          "path": "policy-templates/human-gated/policy.md",
+          "score": 17.965784
+        },
+        {
+          "path": "conduct/lib/sentinelcfg.py",
+          "score": 17.68825
+        },
+        {
+          "path": "policy-templates/heavy-review/policy.md",
+          "score": 17.491853
+        },
+        {
+          "path": "policy-templates/light-review/policy.md",
+          "score": 17.491853
+        },
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 16.906891
+        },
+        {
+          "path": "docs/shakedown-runbook.md",
+          "score": 14.640245
+        },
+        {
+          "path": "docs/recon/cao-plugin-system.md",
+          "score": 14.092757
+        },
+        {
+          "path": "plugin/tests/test_config.py",
+          "score": 13.754888
+        },
+        {
+          "path": "tests/test_sentinelcfg.py",
+          "score": 13.491853
+        },
+        {
+          "path": "profiles/supervisor-terra.md",
+          "score": 11.392317
+        },
+        {
+          "path": "docs/recon/cao-http-api.md",
+          "score": 11.169925
+        },
+        {
+          "path": "profiles/supervisor.md",
+          "score": 10.78136
+        },
+        {
+          "path": "conduct/commands/up.py",
+          "score": 9.169925
+        },
+        {
+          "path": "docs/recon/v1-carryover.md",
+          "score": 9.169925
+        },
+        {
+          "path": "tests/test_policy.py",
+          "score": 9.169925
+        },
+        {
+          "path": "plugin/tests/test_timer.py",
+          "score": 9.0
+        },
+        {
+          "path": "docs/BUILD_PLAN.md",
+          "score": 8.643856
+        },
+        {
+          "path": "docs/recon/cao-agent-profiles.md",
+          "score": 8.392317
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0253",
+      "case_types": [
+        "vague-prose"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/lib/retirement.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/commands/status.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.3333333333333333,
+        "20": 0.3333333333333333,
+        "5": 0.0
+      },
+      "issue_title": "Final collection deletes quality-critical worker before callback route finality",
+      "missed_files": [
+        "conduct/lib/retirement.py",
+        "conduct/commands/status.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "2026-08-05T01:32:25Z",
+          "/Users/colin/Projects/cao-conductor-worktrees/p1-closure-campaign/.conductor/JOURNAL.md",
+          "unknown/not-yet-reconciled",
+          "superseded-unaccepted"
+        ],
+        "identifiers": [
+          "COND",
+          "JOURNAL"
+        ],
+        "prose": [
+          "final",
+          "collection",
+          "deletes",
+          "quality",
+          "critical",
+          "worker"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "27504f654c238f84c748a730ac5b16604044ecf7",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 0.5,
+        "20": 1.0,
+        "5": 0.0
+      },
+      "top_files": [
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 49.368169
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-04-cond0253-administrative-retirement-design.md",
+          "score": 46.392317
+        },
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 42.827787
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-03-cond0303-successor-policy-root-design.md",
+          "score": 42.576816
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 39.064524
+        },
+        {
+          "path": "tests/test_retire.py",
+          "score": 37.501695
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 34.309386
+        },
+        {
+          "path": "conduct/commands/retire.py",
+          "score": 33.013454
+        },
+        {
+          "path": "plugin/conductor_sentinel/_workstate.py",
+          "score": 31.587151
+        },
+        {
+          "path": "conduct/lib/workstate.py",
+          "score": 31.070697
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-01-work-state-projection-design.md",
+          "score": 29.670767
+        },
+        {
+          "path": "tests/test_workstate.py",
+          "score": 29.016721
+        },
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 28.664593
+        },
+        {
+          "path": "conduct/commands/report.py",
+          "score": 27.714246
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 27.396237
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 27.170086
+        },
+        {
+          "path": "conduct/lib/spawn_delivery.py",
+          "score": 24.61471
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 24.581966
+        },
+        {
+          "path": "conduct/commands/collect.py",
+          "score": 24.105909
+        },
+        {
+          "path": "tests/test_surfaces.py",
+          "score": 23.038748
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0071",
+      "case_types": [
+        "vague-prose"
+      ],
+      "expected_file_count": 1,
+      "expected_symbol_count": 0,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/commands/retire.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.0,
+        "20": 0.0,
+        "5": 0.0
+      },
+      "issue_title": "active Kimi terminal remains falsely idle",
+      "missed_files": [
+        "conduct/commands/retire.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "self-heal-pr-a-fix-w8-boundary-w9",
+          "45f30e69",
+          "plugin/conductor_sentinel/_receipts.py",
+          "interstitial_recovery.py",
+          "GET /terminals/45f30e69",
+          "status=\"idle\"",
+          "last_active=\"2026-07-21T16:17:34.988935\"",
+          "report_device_status(private=True)"
+        ],
+        "identifiers": [
+          "last_active",
+          "COMPLETED",
+          "IDLE",
+          "TypeError",
+          "conductor_sentinel",
+          "interstitial_recovery",
+          "report_device_status"
+        ],
+        "prose": [
+          "active",
+          "kimi",
+          "terminal",
+          "remains",
+          "falsely",
+          "idle"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "f8819321ad1fcb110c38063afcb3634efbaccc51",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": null,
+        "20": null,
+        "5": null
+      },
+      "top_files": [
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 83.897771
+        },
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 72.872168
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 43.276965
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 41.646165
+        },
+        {
+          "path": "tests/test_report.py",
+          "score": 41.356452
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 40.636861
+        },
+        {
+          "path": "plugin/tests/test_interstitial_recovery.py",
+          "score": 39.071169
+        },
+        {
+          "path": "tests/test_collect_v2.py",
+          "score": 33.873276
+        },
+        {
+          "path": "tests/test_retire.py",
+          "score": 32.940283
+        },
+        {
+          "path": "docs/recon/cao-plugin-system.md",
+          "score": 32.002815
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-01-work-state-projection-design.md",
+          "score": 31.351698
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-27-final-p1-activation.md",
+          "score": 31.199212
+        },
+        {
+          "path": "tests/test_retained_successor_move.py",
+          "score": 30.355265
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 29.399495
+        },
+        {
+          "path": "docs/recon/cao-http-api.md",
+          "score": 28.18534
+        },
+        {
+          "path": "plugin/tests/test_timer.py",
+          "score": 26.913708
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 26.403545
+        },
+        {
+          "path": "plugin/conductor_sentinel/_workstate.py",
+          "score": 26.398744
+        },
+        {
+          "path": "plugin/tests/test_model_turn_receipt.py",
+          "score": 25.621136
+        },
+        {
+          "path": "tests/test_campaign_registry.py",
+          "score": 24.57347
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0131",
+      "case_types": [
+        "data-flow",
+        "exact-technical"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "src/cli_agent_orchestrator/clients/tmux.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "src/cli_agent_orchestrator/services/control_input_contract.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.3333333333333333,
+        "20": 0.3333333333333333,
+        "5": 0.0
+      },
+      "issue_title": "managed native terminal panels discard mouse-wheel input",
+      "missed_files": [
+        "src/cli_agent_orchestrator/clients/tmux.py",
+        "src/cli_agent_orchestrator/services/control_input_contract.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "ESC [ < 64 ; 76 ; 16 M",
+          "96ecef1ba3efa591e69b84416d791ebde151f31f",
+          "terminal_ws._forward_input",
+          "19e46c65",
+          "bb5d2426733df8e6992b264991eb4e97c4b16a2c",
+          "e64c9a86d27418f89745f1ddeae6fed68332927c",
+          "cao-p1-opus-review-recovery-v4",
+          "cao-p1-opus-review-recovery-v5"
+        ],
+        "identifiers": [
+          "WebSocket",
+          "terminal_ws"
+        ],
+        "prose": [
+          "managed",
+          "native",
+          "terminal",
+          "panels",
+          "discard",
+          "mouse"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "4d244d1b4ed4bfd7d93f1e8f5cbe1509b3b10e2f",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 0.0
+      },
+      "top_files": [
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 38.194404
+        },
+        {
+          "path": "web/src/test/terminalView.test.tsx",
+          "score": 28.955037
+        },
+        {
+          "path": "test/api/test_terminals.py",
+          "score": 28.708599
+        },
+        {
+          "path": "web/src/components/TerminalView.tsx",
+          "score": 27.731319
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 27.167773
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 26.722699
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/database.py",
+          "score": 23.500935
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/control_input_service.py",
+          "score": 23.125435
+        },
+        {
+          "path": "test/services/test_inbox_service.py",
+          "score": 23.06777
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch.py",
+          "score": 21.961269
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_provider_bridge.py",
+          "score": 21.713279
+        },
+        {
+          "path": "test/services/test_native_control_identity_projection.py",
+          "score": 21.269346
+        },
+        {
+          "path": "test/services/test_control_input_service.py",
+          "score": 20.321576
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/inbox_service.py",
+          "score": 19.817533
+        },
+        {
+          "path": "test/services/test_managed_launch.py",
+          "score": 19.300496
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_execution_mode.py",
+          "score": 19.131857
+        },
+        {
+          "path": "test/services/test_terminal_service_full.py",
+          "score": 18.750027
+        },
+        {
+          "path": "test/services/test_native_readiness_and_claude_route.py",
+          "score": 18.562242
+        },
+        {
+          "path": "test/services/test_managed_launch_v2_native_launch.py",
+          "score": 18.246741
+        },
+        {
+          "path": "test/services/test_identity_upgrade_and_publication.py",
+          "score": 17.951285
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0270",
+      "case_types": [
+        "history-dependent"
+      ],
+      "expected_file_count": 2,
+      "expected_symbol_count": 0,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "skills/plan-epoch-synchronization/SKILL.md"
+        }
+      ],
+      "file_recall": {
+        "10": 0.5,
+        "20": 0.5,
+        "5": 0.5
+      },
+      "issue_title": "COND-0266 barrier fix does not migrate existing epoch gaps",
+      "missed_files": [
+        "skills/plan-epoch-synchronization/SKILL.md"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [],
+        "identifiers": [
+          "COND",
+          "planned_unbound_conflicts",
+          "required_tracks"
+        ],
+        "prose": [
+          "cond",
+          "barrier",
+          "fix",
+          "migrate",
+          "existing",
+          "epoch"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "4333ead68d14e9faf6353f20a8ae8c3b6922f718",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": null,
+        "20": null,
+        "5": null
+      },
+      "top_files": [
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 34.002782
+        },
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 33.871016
+        },
+        {
+          "path": "conduct/lib/campaign_registry.py",
+          "score": 33.120096
+        },
+        {
+          "path": "tests/test_campaign_registry.py",
+          "score": 31.230684
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 27.006129
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 25.427509
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-26-cond0132-recovery-prerequisite-lane-design.md",
+          "score": 25.068293
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-27-final-p1-activation.md",
+          "score": 24.945638
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 24.155767
+        },
+        {
+          "path": "conduct/commands/steer.py",
+          "score": 23.744834
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 23.455327
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 22.981032
+        },
+        {
+          "path": "conduct/lib/shims.py",
+          "score": 22.75864
+        },
+        {
+          "path": "OPEN_ISSUES.md",
+          "score": 22.296468
+        },
+        {
+          "path": "tests/test_steer.py",
+          "score": 21.181152
+        },
+        {
+          "path": "conduct/commands/deploy.py",
+          "score": 21.11959
+        },
+        {
+          "path": "tests/test_track_skill_commands.py",
+          "score": 20.4476
+        },
+        {
+          "path": "docs/campaign-role-event-skill-system.md",
+          "score": 19.550747
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-26-cond0132-reboot-reincarnation-design.md",
+          "score": 18.910643
+        },
+        {
+          "path": "tests/test_session_env.py",
+          "score": 18.825754
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0414",
+      "case_types": [
+        "history-dependent"
+      ],
+      "expected_file_count": 1,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/commands/reconcile_report_identity.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "symbol",
+          "target": "_extract_alternate_identity"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "symbol",
+          "target": "_read_reconciliation_record"
+        }
+      ],
+      "file_recall": {
+        "10": 0.0,
+        "20": 0.0,
+        "5": 0.0
+      },
+      "issue_title": "deployed report-identity reconciler cannot consume preserved PR121 alternate evidence",
+      "missed_files": [
+        "conduct/commands/reconcile_report_identity.py"
+      ],
+      "missed_symbols": [
+        "_extract_alternate_identity",
+        "_read_reconciliation_record"
+      ],
+      "queries": {
+        "exact": [],
+        "identifiers": [
+          "PR121",
+          "COND",
+          "task_id",
+          "task_sha256"
+        ],
+        "prose": [
+          "deployed",
+          "report",
+          "identity",
+          "reconciler",
+          "consume",
+          "preserved"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "924b38dc7facda0a7516808fe0460bc8875722b3",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 0.0,
+        "20": 0.0,
+        "5": 0.0
+      },
+      "top_files": [
+        {
+          "path": "tests/test_spawn.py",
+          "score": 62.149874
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 59.83502
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-03-cond0303-successor-policy-root-design.md",
+          "score": 57.607837
+        },
+        {
+          "path": "conduct/commands/_successor.py",
+          "score": 50.149222
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 49.685579
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 49.636318
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 48.711566
+        },
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 44.567744
+        },
+        {
+          "path": "plugin/conductor_sentinel/_workstate.py",
+          "score": 42.522851
+        },
+        {
+          "path": "conduct/lib/workstate.py",
+          "score": 42.272978
+        },
+        {
+          "path": "plugin/conductor_sentinel/sentinel.py",
+          "score": 41.88495
+        },
+        {
+          "path": "conduct/commands/collect.py",
+          "score": 40.230387
+        },
+        {
+          "path": "conduct/lib/state.py",
+          "score": 39.901463
+        },
+        {
+          "path": "conduct/commands/report.py",
+          "score": 37.98308
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-01-work-state-projection-design.md",
+          "score": 36.679453
+        },
+        {
+          "path": "conduct/commands/continue_round.py",
+          "score": 36.646986
+        },
+        {
+          "path": "tests/test_retained_successor_move.py",
+          "score": 35.445815
+        },
+        {
+          "path": "tests/test_successor_custody.py",
+          "score": 35.403744
+        },
+        {
+          "path": "tests/test_retire.py",
+          "score": 34.545
+        },
+        {
+          "path": "tests/test_workstate.py",
+          "score": 34.023722
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0050",
+      "case_types": [
+        "history-dependent"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": null,
+      "fallback_escapes": [],
+      "file_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "issue_title": "session-env clear fails open and resurrects stale routing",
+      "missed_files": [],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "a81853fa547788b97775af9fa377bc25e6a1643e",
+          "set_session_env({})",
+          "clear_session_env",
+          "SessionEnvStoreError",
+          "removed"
+        ],
+        "identifiers": [
+          "SessionEnvStoreError",
+          "clear_session_env",
+          "set_session_env"
+        ],
+        "prose": [
+          "session",
+          "env",
+          "clear",
+          "fails",
+          "open",
+          "resurrects"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "a81853fa547788b97775af9fa377bc25e6a1643e",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "top_files": [
+        {
+          "path": "test/services/test_session_env.py",
+          "score": 78.621865
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/session_env.py",
+          "score": 73.091
+        },
+        {
+          "path": "test/services/test_terminal_service_full.py",
+          "score": 39.952411
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 35.504128
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/session_service.py",
+          "score": 23.392317
+        },
+        {
+          "path": "src/cli_agent_orchestrator/providers/cursor_cli.py",
+          "score": 23.33985
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 23.068652
+        },
+        {
+          "path": "src/cli_agent_orchestrator/backends/herdr_backend.py",
+          "score": 23.011926
+        },
+        {
+          "path": "test/providers/test_kimi_cli_unit.py",
+          "score": 22.214319
+        },
+        {
+          "path": "test/providers/test_kiro_cli_unit.py",
+          "score": 21.562242
+        },
+        {
+          "path": "test/api/test_terminals.py",
+          "score": 20.355076
+        },
+        {
+          "path": "test/providers/test_codex_provider_unit.py",
+          "score": 19.769838
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/herdr_inbox_service.py",
+          "score": 19.357552
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/memory_service.py",
+          "score": 19.278449
+        },
+        {
+          "path": "test/backends/test_herdr_inbox_service.py",
+          "score": 18.951285
+        },
+        {
+          "path": "test/backends/test_herdr_backend.py",
+          "score": 18.236687
+        },
+        {
+          "path": "src/cli_agent_orchestrator/mcp_server/server.py",
+          "score": 18.088788
+        },
+        {
+          "path": "src/cli_agent_orchestrator/providers/codex.py",
+          "score": 17.985842
+        },
+        {
+          "path": "test/providers/test_cursor_cli_unit.py",
+          "score": 17.714246
+        },
+        {
+          "path": "test/api/test_session_env_lifespan.py",
+          "score": 17.562242
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0067",
+      "case_types": [
+        "history-dependent"
+      ],
+      "expected_file_count": 2,
+      "expected_symbol_count": 3,
+      "fallback_escape_rate": null,
+      "fallback_escapes": [],
+      "file_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "issue_title": "failed session-env preclear cleanup destroys colliding terminal",
+      "missed_files": [],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "8e46d8912c0033d7b8a6ce5097ec5773dc108587",
+          "create_terminal"
+        ],
+        "identifiers": [
+          "FIFO",
+          "create_terminal"
+        ],
+        "prose": [
+          "failed",
+          "session",
+          "env",
+          "preclear",
+          "cleanup",
+          "destroys"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "8e46d8912c0033d7b8a6ce5097ec5773dc108587",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "top_files": [
+        {
+          "path": "test/services/test_terminal_service_full.py",
+          "score": 67.04605
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 50.077949
+        },
+        {
+          "path": "test/services/test_plugin_event_emission.py",
+          "score": 49.001877
+        },
+        {
+          "path": "test/services/test_terminal_service_coverage.py",
+          "score": 48.635115
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 46.400759
+        },
+        {
+          "path": "test/api/test_terminals.py",
+          "score": 41.579449
+        },
+        {
+          "path": "test/api/test_api_endpoints.py",
+          "score": 37.226189
+        },
+        {
+          "path": "src/cli_agent_orchestrator/mcp_server/server.py",
+          "score": 37.020357
+        },
+        {
+          "path": "test/services/test_session_service.py",
+          "score": 36.915879
+        },
+        {
+          "path": "test/mcp_server/test_assign.py",
+          "score": 36.654035
+        },
+        {
+          "path": "test/services/test_flow_service.py",
+          "score": 34.997598
+        },
+        {
+          "path": "test/services/test_terminal_service_inbox_registration.py",
+          "score": 34.459432
+        },
+        {
+          "path": "test/clients/test_database.py",
+          "score": 31.706172
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/session_service.py",
+          "score": 30.392317
+        },
+        {
+          "path": "test/e2e/test_allowed_tools.py",
+          "score": 30.376024
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/agent_step.py",
+          "score": 29.516531
+        },
+        {
+          "path": "test/e2e/test_assign.py",
+          "score": 28.101494
+        },
+        {
+          "path": "test/plugins/builtin/test_kiro_cli_memory.py",
+          "score": 27.732167
+        },
+        {
+          "path": "test/plugins/builtin/test_claude_code_memory.py",
+          "score": 27.516531
+        },
+        {
+          "path": "test/plugins/builtin/test_codex_memory.py",
+          "score": 27.516531
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0550",
+      "case_types": [
+        "data-flow"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "src/cli_agent_orchestrator/providers/manager.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.0,
+        "20": 0.6666666666666666,
+        "5": 0.0
+      },
+      "issue_title": "A rebuilt on-demand provider silently loses its pinned route",
+      "missed_files": [
+        "src/cli_agent_orchestrator/providers/manager.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "model",
+          "effort"
+        ],
+        "identifiers": [
+          "expected_effort",
+          "expected_model"
+        ],
+        "prose": [
+          "rebuilt",
+          "demand",
+          "provider",
+          "silently",
+          "loses",
+          "pinned"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "7e7b2d1bbb1511b65222a7d8a74d2228fca41235",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 0.5,
+        "20": 1.0,
+        "5": 0.5
+      },
+      "top_files": [
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+          "score": 91.206744
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/provider_contracts.py",
+          "score": 77.172951
+        },
+        {
+          "path": "test/services/test_native_readiness_and_claude_route.py",
+          "score": 73.601409
+        },
+        {
+          "path": "test/services/test_provider_default_effort.py",
+          "score": 72.287469
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 69.265551
+        },
+        {
+          "path": "test/services/test_managed_launch.py",
+          "score": 69.070429
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_provider_bridge.py",
+          "score": 67.981159
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/exact_executor.py",
+          "score": 67.024233
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/managed_launch.py",
+          "score": 65.483026
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/unmanaged_native_identity.py",
+          "score": 63.636333
+        },
+        {
+          "path": "test/services/test_muse_native_managed_v2_enrollment.py",
+          "score": 61.408356
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 60.536118
+        },
+        {
+          "path": "test/services/test_codex_argv_composer.py",
+          "score": 59.687594
+        },
+        {
+          "path": "test/services/test_exact_executor.py",
+          "score": 58.202663
+        },
+        {
+          "path": "test/e2e/test_native_tui_provider_acceptance.py",
+          "score": 57.274966
+        },
+        {
+          "path": "src/cli_agent_orchestrator/providers/codex.py",
+          "score": 57.079586
+        },
+        {
+          "path": "test/services/test_unmanaged_native_identity.py",
+          "score": 56.897636
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/kimi_route.py",
+          "score": 55.680682
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/database.py",
+          "score": 55.555026
+        },
+        {
+          "path": "test/services/test_recovery_contracts.py",
+          "score": 55.343033
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0422",
+      "case_types": [
+        "data-flow"
+      ],
+      "expected_file_count": 3,
+      "expected_symbol_count": 2,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "tests/fake_cao.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.3333333333333333,
+        "20": 0.6666666666666666,
+        "5": 0.0
+      },
+      "issue_title": "conduct continue records a retained round delivered without provider-native submission proof",
+      "missed_files": [
+        "tests/fake_cao.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "conduct continue",
+          "delivery.status = \"delivered\"",
+          "cond-0388-report-chain-reconciliation-fix-deepseek-r3",
+          "9fb2b974",
+          "claude_code",
+          "deepseek-v4-flash",
+          "retained-track.json",
+          "evidence"
+        ],
+        "identifiers": [
+          "record_delivery",
+          "POST",
+          "instruction_sha256",
+          "client_error",
+          "deadman_rearmed_at",
+          "get_message_turn_receipt",
+          "send_inbox",
+          "COMPLETE",
+          "CaoApiError",
+          "attempted_at"
+        ],
+        "prose": [
+          "conduct",
+          "continue",
+          "records",
+          "retained",
+          "round",
+          "delivered"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "b8ce04be10b0c101c5301995d27e7850a2410438",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 0.0
+      },
+      "top_files": [
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 118.707377
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-03-cond0303-successor-policy-root-design.md",
+          "score": 98.075018
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 92.536815
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 91.546804
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 91.351097
+        },
+        {
+          "path": "conduct/commands/continue_round.py",
+          "score": 86.648526
+        },
+        {
+          "path": "conduct/commands/report.py",
+          "score": 84.638706
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 79.661407
+        },
+        {
+          "path": "conduct/lib/retained_track.py",
+          "score": 69.78393
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 64.355051
+        },
+        {
+          "path": "tests/test_report.py",
+          "score": 63.926441
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 61.401442
+        },
+        {
+          "path": "docs/orchestration-defaults.md",
+          "score": 58.681461
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-27-final-p1-activation.md",
+          "score": 58.230464
+        },
+        {
+          "path": "plugin/conductor_sentinel/_workstate.py",
+          "score": 58.177847
+        },
+        {
+          "path": "conduct/lib/workstate.py",
+          "score": 57.033098
+        },
+        {
+          "path": "tests/test_retained_successor_move.py",
+          "score": 55.324258
+        },
+        {
+          "path": "tests/test_continue_round.py",
+          "score": 54.19694
+        },
+        {
+          "path": "plugin/conductor_sentinel/model_turn_lookup.py",
+          "score": 53.890371
+        },
+        {
+          "path": "tests/test_retained_track.py",
+          "score": 53.873629
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0303",
+      "case_types": [
+        "data-flow",
+        "history-dependent"
+      ],
+      "expected_file_count": 5,
+      "expected_symbol_count": 1,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/lib/successor_policy_registry.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/commands/_successor.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/lib/ledger.py"
+        },
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "conduct/commands/continue_round.py"
+        }
+      ],
+      "file_recall": {
+        "10": 0.2,
+        "20": 0.2,
+        "5": 0.2
+      },
+      "issue_title": "Fresh successor cannot bind campaign routing over historical worktree policy",
+      "missed_files": [
+        "conduct/lib/successor_policy_registry.py",
+        "conduct/commands/_successor.py",
+        "conduct/lib/ledger.py",
+        "conduct/commands/continue_round.py"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [],
+        "identifiers": [
+          "claude_code"
+        ],
+        "prose": [
+          "fresh",
+          "successor",
+          "bind",
+          "campaign",
+          "routing",
+          "historical"
+        ]
+      },
+      "repo": "cao-conductor",
+      "search_sha": "4ce481479e2ffb4e7b05fd6e735f9e4b581321dd",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "top_files": [
+        {
+          "path": "docs/superpowers/specs/2026-08-03-cond0303-successor-policy-root-design.md",
+          "score": 49.79983
+        },
+        {
+          "path": "conduct/commands/spawn.py",
+          "score": 43.988585
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "score": 39.646874
+        },
+        {
+          "path": "CLOSED_ISSUES.md",
+          "score": 36.620215
+        },
+        {
+          "path": "tests/test_retained_successor_move.py",
+          "score": 32.122644
+        },
+        {
+          "path": "tests/test_successor_policy.py",
+          "score": 30.762392
+        },
+        {
+          "path": "conduct/lib/successor_policy.py",
+          "score": 30.528027
+        },
+        {
+          "path": "tests/test_surfaces.py",
+          "score": 29.767628
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-21-self-heal-long-run-readiness-design.md",
+          "score": 26.875125
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-pre-chess-orchestration-lifecycle-design.md",
+          "score": 26.423329
+        },
+        {
+          "path": "conduct/lib/routing.py",
+          "score": 24.451211
+        },
+        {
+          "path": "tests/test_campaign_registry.py",
+          "score": 24.064164
+        },
+        {
+          "path": "docs/orchestration-defaults.md",
+          "score": 23.514221
+        },
+        {
+          "path": "docs/operating-guide.md",
+          "score": 22.629357
+        },
+        {
+          "path": "conduct/lib/campaign_registry.py",
+          "score": 21.855258
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-26-cond0132-recovery-prerequisite-lane-design.md",
+          "score": 21.779565
+        },
+        {
+          "path": "docs/superpowers/specs/2026-08-01-work-state-projection-design.md",
+          "score": 21.534789
+        },
+        {
+          "path": "plugin/tests/test_work_state_duty.py",
+          "score": 21.455327
+        },
+        {
+          "path": "docs/superpowers/specs/2026-07-23-control-plane-recovery-design.md",
+          "score": 21.333155
+        },
+        {
+          "path": "plugin/conductor_sentinel/_workstate.py",
+          "score": 21.314026
+        }
+      ]
+    },
+    {
+      "case_id": "cond-0242",
+      "case_types": [
+        "exact-technical",
+        "data-flow"
+      ],
+      "expected_file_count": 4,
+      "expected_symbol_count": 3,
+      "fallback_escape_rate": 1.0,
+      "fallback_escapes": [
+        {
+          "fallback_rescued": true,
+          "kind": "file",
+          "target": "docs/configuration.md"
+        }
+      ],
+      "file_recall": {
+        "10": 0.5,
+        "20": 0.75,
+        "5": 0.25
+      },
+      "issue_title": "FIFO liveness libtmux parse storm starves CAO event loop",
+      "missed_files": [
+        "docs/configuration.md"
+      ],
+      "missed_symbols": [],
+      "queries": {
+        "exact": [
+          "cao-server",
+          "127.0.0.1:9889",
+          "b731946f5a12ee7ea76e90c5f9bf955038933b91",
+          "e703dd3218ec7365a04dd4606bee5e891805fd58",
+          "Terminal metadata not found",
+          "GET /terminals/7864d54f",
+          "lsof",
+          "tmux list-sessions"
+        ],
+        "identifiers": [
+          "FIFO",
+          "get_history",
+          "ValueError",
+          "fifo_reader",
+          "cao_2026",
+          "fetch_objs",
+          "parse_output",
+          "terminal_service",
+          "tmux_backend"
+        ],
+        "prose": [
+          "fifo",
+          "liveness",
+          "libtmux",
+          "parse",
+          "storm",
+          "starves"
+        ]
+      },
+      "repo": "cao",
+      "search_sha": "e703dd3218ec7365a04dd4606bee5e891805fd58",
+      "skipped_files": [],
+      "symbol_recall": {
+        "10": 1.0,
+        "20": 1.0,
+        "5": 1.0
+      },
+      "top_files": [
+        {
+          "path": "test/services/test_terminal_service_full.py",
+          "score": 65.287552
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+          "score": 54.621974
+        },
+        {
+          "path": "src/cli_agent_orchestrator/api/main.py",
+          "score": 52.178309
+        },
+        {
+          "path": "test/services/test_fifo_reader.py",
+          "score": 38.246708
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/fifo_reader.py",
+          "score": 30.951626
+        },
+        {
+          "path": "src/cli_agent_orchestrator/constants.py",
+          "score": 27.054573
+        },
+        {
+          "path": "src/cli_agent_orchestrator/mcp_server/server.py",
+          "score": 25.346877
+        },
+        {
+          "path": "test/services/test_terminal_service_coverage.py",
+          "score": 25.169925
+        },
+        {
+          "path": "test/api/test_api_endpoints.py",
+          "score": 24.902569
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/flow_service.py",
+          "score": 24.754888
+        },
+        {
+          "path": "docs/knowledge-graph-viewing.md",
+          "score": 24.422065
+        },
+        {
+          "path": "test/providers/test_claude_code_unit.py",
+          "score": 23.258566
+        },
+        {
+          "path": "test/clients/test_tmux_client.py",
+          "score": 22.985842
+        },
+        {
+          "path": "src/cli_agent_orchestrator/utils/terminal.py",
+          "score": 22.813781
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/database.py",
+          "score": 21.807355
+        },
+        {
+          "path": "test/services/test_plugin_event_emission.py",
+          "score": 21.740729
+        },
+        {
+          "path": "test/services/test_identity_upgrade_and_publication.py",
+          "score": 20.872675
+        },
+        {
+          "path": "src/cli_agent_orchestrator/services/memory_service.py",
+          "score": 20.666779
+        },
+        {
+          "path": "test/services/test_inbox_service.py",
+          "score": 20.258566
+        },
+        {
+          "path": "src/cli_agent_orchestrator/clients/tmux.py",
+          "score": 20.109178
+        }
+      ]
+    }
+  ],
+  "fixture": "/Users/colin/Projects/worktrees/cli-agent-orchestrator/lane-cond0634-grounding-fixture/evals/code-grounding/fixtures/cases.json",
+  "fixture_sha256": "b053c45be8352696482ea8086a281daa87f3c3e86663d2ed26d2291612cc6a04",
+  "repo_sources": {
+    "cao": "/Users/colin/Projects/cli-agent-orchestrator",
+    "cao-conductor": "/Users/colin/Projects/cao-conductor"
+  },
+  "report_version": 1,
+  "rg_version": "ripgrep 15.2.0"
+}

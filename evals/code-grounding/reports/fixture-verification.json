@@ -1,0 +1,1648 @@
+{
+  "checks": [
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0209",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/issue.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0209",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/issues.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0209",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/caoapi.py"
+    },
+    {
+      "case": "cond-0209",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 2,
+      "repo": "cao-conductor",
+      "target": "_file_to_tracker"
+    },
+    {
+      "case": "cond-0209",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao-conductor",
+      "target": "resolve_tracker_project"
+    },
+    {
+      "case": "cond-0209",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 2,
+      "repo": "cao-conductor",
+      "target": "file_issue"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0209",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/native_attachment.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0209",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/terminal_service.py"
+    },
+    {
+      "actual_statuses": [
+        "A"
+      ],
+      "case": "cond-0209",
+      "exists_at_search_sha": false,
+      "expected_status": "A",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/api/attachments.py"
+    },
+    {
+      "actual_statuses": [
+        "A"
+      ],
+      "case": "cond-0209",
+      "exists_at_search_sha": false,
+      "expected_status": "A",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/native_attachment_recovery.py"
+    },
+    {
+      "actual_statuses": [
+        "A",
+        "M"
+      ],
+      "case": "cond-0072",
+      "exists_at_search_sha": false,
+      "expected_status": "A",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "plugin/conductor_sentinel/model_turn_receipt_contract.py"
+    },
+    {
+      "actual_statuses": [
+        "A",
+        "M"
+      ],
+      "case": "cond-0072",
+      "exists_at_search_sha": false,
+      "expected_status": "A",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "plugin/conductor_sentinel/model_turn_lookup.py"
+    },
+    {
+      "actual_statuses": [
+        "M",
+        "M"
+      ],
+      "case": "cond-0072",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "plugin/conductor_sentinel/refusal_recovery.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0072",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/report.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0072",
+      "exists_at_search_sha": false,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/retire.py"
+    },
+    {
+      "case": "cond-0072",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "ModelTurnVerifier"
+    },
+    {
+      "case": "cond-0072",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "_reconcile_processing"
+    },
+    {
+      "case": "cond-0072",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "_finalization_turn_finality"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0072",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/control_input_journal.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0072",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/control_input_service.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0072",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/inbox_service.py"
+    },
+    {
+      "actual_statuses": [
+        "A"
+      ],
+      "case": "cond-0072",
+      "exists_at_search_sha": false,
+      "expected_status": "A",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/wake_receipts.py"
+    },
+    {
+      "case": "cond-0072",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 6,
+      "repo": "cao",
+      "target": "deliver_control_input"
+    },
+    {
+      "case": "cond-0072",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 4,
+      "repo": "cao",
+      "target": "_native_composer_preflight"
+    },
+    {
+      "case": "cond-0072",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 15,
+      "repo": "cao",
+      "target": "control_input_request_digest"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0107",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/spawn.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0107",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/spawn_delivery.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0107",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/caoapi.py"
+    },
+    {
+      "case": "cond-0107",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 4,
+      "repo": "cao-conductor",
+      "target": "_complete_launch_failed_bridge"
+    },
+    {
+      "case": "cond-0107",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao-conductor",
+      "target": "_forfeit_stale_breaker"
+    },
+    {
+      "case": "cond-0107",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "cleanup_managed_generation_v2"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0107",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/managed_launch_v2.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0107",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/models/managed_launch_v2.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0107",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/api/main.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0107",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/vintage_migration.py"
+    },
+    {
+      "case": "cond-0107",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 2,
+      "repo": "cao",
+      "target": "_validate_readiness_for_bind"
+    },
+    {
+      "case": "cond-0107",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 10,
+      "repo": "cao",
+      "target": "_mark_preflight_blocked"
+    },
+    {
+      "case": "cond-0107",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao",
+      "target": "ManagedLaunchV2CleanupRequest"
+    },
+    {
+      "actual_statuses": [
+        "A"
+      ],
+      "case": "cond-0173",
+      "exists_at_search_sha": false,
+      "expected_status": "A",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "plugin/conductor_sentinel/_dedupe.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0173",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "plugin/conductor_sentinel/sentinel.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0173",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/spawn_delivery.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0173",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/spawn.py"
+    },
+    {
+      "case": "cond-0173",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "_alert_recovery_failure"
+    },
+    {
+      "case": "cond-0173",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 4,
+      "repo": "cao-conductor",
+      "target": "_finalize_recovered_run"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0173",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/models/terminal.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0462",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/_successor.py"
+    },
+    {
+      "actual_statuses": [
+        "A"
+      ],
+      "case": "cond-0462",
+      "exists_at_search_sha": false,
+      "expected_status": "A",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "tests/test_dispose_commit.py"
+    },
+    {
+      "case": "cond-0462",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao-conductor",
+      "target": "dispose_claim"
+    },
+    {
+      "case": "cond-0462",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao-conductor",
+      "target": "_journal_binding"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0549",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/report_on_behalf.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0549",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/retained_track.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0549",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/workstate.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0549",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/state.py"
+    },
+    {
+      "case": "cond-0549",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 2,
+      "repo": "cao-conductor",
+      "target": "_pr_custody_equivalent"
+    },
+    {
+      "case": "cond-0549",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 6,
+      "repo": "cao-conductor",
+      "target": "run_retirement"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0055",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "plugin/conductor_sentinel/interstitial_recovery.py"
+    },
+    {
+      "actual_statuses": [
+        "A"
+      ],
+      "case": "cond-0055",
+      "exists_at_search_sha": false,
+      "expected_status": "A",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "plugin/conductor_sentinel/refusal_recovery.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0055",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "plugin/conductor_sentinel/sentinel.py"
+    },
+    {
+      "case": "cond-0055",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "RefusalBoundary"
+    },
+    {
+      "case": "cond-0055",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "RefusalBoundaryUnavailable"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0464",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "test/conftest.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0464",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "test/fixtures/cao_server.py"
+    },
+    {
+      "case": "cond-0464",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 50,
+      "repo": "cao",
+      "target": "CaoServer"
+    },
+    {
+      "case": "cond-0464",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 4,
+      "repo": "cao",
+      "target": "_subprocess_env"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0093",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/codex_trust.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0093",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "docs/managed-launch-protocol.md"
+    },
+    {
+      "case": "cond-0093",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 5,
+      "repo": "cao",
+      "target": "SUPPORTED_CODEX_VERSION"
+    },
+    {
+      "case": "cond-0093",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 6,
+      "repo": "cao",
+      "target": "attest_trusted_project"
+    },
+    {
+      "case": "cond-0093",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 25,
+      "repo": "cao",
+      "target": "CodexTrustProbeError"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0312",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/kimi_native_launch.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0312",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/native_tui_launch.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0312",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/managed_launch_v2.py"
+    },
+    {
+      "case": "cond-0312",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao",
+      "target": "_verify_bound_session_and_cwd"
+    },
+    {
+      "case": "cond-0312",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao",
+      "target": "RenderedSessionProof"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0343",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/marshal_incidents.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0343",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/marshal.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0343",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "scripts/fire-marshal.sh"
+    },
+    {
+      "case": "cond-0343",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "IncidentStoreUnwritable"
+    },
+    {
+      "case": "cond-0343",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 11,
+      "repo": "cao-conductor",
+      "target": "_now_utc"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0097",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "plugin/tests/test_interstitial_recovery.py"
+    },
+    {
+      "case": "cond-0097",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 5,
+      "repo": "cao-conductor",
+      "target": "refusal_get_fn"
+    },
+    {
+      "case": "cond-0097",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 10,
+      "repo": "cao-conductor",
+      "target": "EVENTS_FILENAME"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0386",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "cao_mcp_apps/.husky/pre-push"
+    },
+    {
+      "actual_statuses": [
+        "A"
+      ],
+      "case": "cond-0386",
+      "exists_at_search_sha": false,
+      "expected_status": "A",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "test/ext_apps/test_pre_push_env_isolation.py"
+    },
+    {
+      "case": "cond-0386",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao",
+      "target": "--local-env-vars"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0012",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/sentinelcfg.py"
+    },
+    {
+      "case": "cond-0012",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 81,
+      "repo": "cao-conductor",
+      "target": "build"
+    },
+    {
+      "case": "cond-0012",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 40,
+      "repo": "cao-conductor",
+      "target": "deadman_minutes"
+    },
+    {
+      "case": "cond-0012",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 5,
+      "repo": "cao-conductor",
+      "target": "task_classes"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0253",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/retirement.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0253",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/retire.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0253",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/status.py"
+    },
+    {
+      "case": "cond-0253",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao-conductor",
+      "target": "run_retirement"
+    },
+    {
+      "case": "cond-0253",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao-conductor",
+      "target": "seals_equivalent"
+    },
+    {
+      "case": "cond-0253",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "observe_delete"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0071",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/retire.py"
+    },
+    {
+      "case": "cond-0071",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "mark_turn_quiesced"
+    },
+    {
+      "case": "cond-0071",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "_install_terminal_heartbeat"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0131",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/clients/tmux.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0131",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/control_input_contract.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0131",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/control_input_service.py"
+    },
+    {
+      "case": "cond-0131",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao",
+      "target": "_deliver_under_lease"
+    },
+    {
+      "case": "cond-0131",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 61,
+      "repo": "cao",
+      "target": "send_literal"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0270",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/campaign_registry.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0270",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "skills/plan-epoch-synchronization/SKILL.md"
+    },
+    {
+      "case": "cond-0270",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "legacy_migration_assessment"
+    },
+    {
+      "case": "cond-0270",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "_apply_legacy_migration"
+    },
+    {
+      "actual_statuses": [
+        "M",
+        "M"
+      ],
+      "case": "cond-0414",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/reconcile_report_identity.py"
+    },
+    {
+      "case": "cond-0414",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao-conductor",
+      "target": "_extract_alternate_identity"
+    },
+    {
+      "case": "cond-0414",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 1,
+      "repo": "cao-conductor",
+      "target": "_read_reconciliation_record"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0050",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/session_env.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0050",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/session_service.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0050",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/terminal_service.py"
+    },
+    {
+      "case": "cond-0050",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 19,
+      "repo": "cao",
+      "target": "clear_session_env"
+    },
+    {
+      "case": "cond-0050",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 46,
+      "repo": "cao",
+      "target": "delete_session"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0067",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/terminal_service.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0067",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "test/services/test_terminal_service_full.py"
+    },
+    {
+      "case": "cond-0067",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 368,
+      "repo": "cao",
+      "target": "create_terminal"
+    },
+    {
+      "case": "cond-0067",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 53,
+      "repo": "cao",
+      "target": "clear_session_env"
+    },
+    {
+      "case": "cond-0067",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 48,
+      "repo": "cao",
+      "target": "generate_terminal_id"
+    },
+    {
+      "actual_statuses": [
+        "M",
+        "M"
+      ],
+      "case": "cond-0550",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/providers/manager.py"
+    },
+    {
+      "actual_statuses": [
+        "M",
+        "M"
+      ],
+      "case": "cond-0550",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/clients/database.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0550",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/terminal_service.py"
+    },
+    {
+      "case": "cond-0550",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 46,
+      "repo": "cao",
+      "target": "ProviderManager"
+    },
+    {
+      "case": "cond-0550",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 38,
+      "repo": "cao",
+      "target": "assigned_route"
+    },
+    {
+      "case": "cond-0550",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao",
+      "target": "TerminalAssignedRouteIncompleteError"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0422",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/continue_round.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0422",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "tests/fake_cao.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0422",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "tests/test_continue_round.py"
+    },
+    {
+      "case": "cond-0422",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 3,
+      "repo": "cao-conductor",
+      "target": "get_message_turn_receipt"
+    },
+    {
+      "case": "cond-0422",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 4,
+      "repo": "cao-conductor",
+      "target": "_idle_round_pointer"
+    },
+    {
+      "case": "cond-0422",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "SUBMISSION_CONFIRM_SECONDS"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0303",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/successor_policy_registry.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0303",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/_successor.py"
+    },
+    {
+      "actual_statuses": [
+        "M",
+        "M"
+      ],
+      "case": "cond-0303",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/spawn.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0303",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/lib/ledger.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0303",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao-conductor",
+      "target": "conduct/commands/continue_round.py"
+    },
+    {
+      "case": "cond-0303",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 2,
+      "repo": "cao-conductor",
+      "target": "claim_source"
+    },
+    {
+      "case": "cond-0303",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "create_locked"
+    },
+    {
+      "case": "cond-0303",
+      "kind": "symbol",
+      "note": "introduced by the fix; excluded from baseline recall denominators",
+      "ok": null,
+      "origin": "introduced",
+      "pre_fix_grep_hits": 0,
+      "repo": "cao-conductor",
+      "target": "_attach_generation_binding"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0242",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/services/fifo_reader.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0242",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/clients/tmux.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0242",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "src/cli_agent_orchestrator/constants.py"
+    },
+    {
+      "actual_statuses": [
+        "M"
+      ],
+      "case": "cond-0242",
+      "exists_at_search_sha": true,
+      "expected_status": "M",
+      "kind": "file",
+      "ok": true,
+      "repo": "cao",
+      "target": "docs/configuration.md"
+    },
+    {
+      "case": "cond-0242",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 19,
+      "repo": "cao",
+      "target": "FifoManager"
+    },
+    {
+      "case": "cond-0242",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 41,
+      "repo": "cao",
+      "target": "_check_pipe_liveness"
+    },
+    {
+      "case": "cond-0242",
+      "kind": "symbol",
+      "note": null,
+      "ok": true,
+      "origin": "preexisting",
+      "pre_fix_grep_hits": 246,
+      "repo": "cao",
+      "target": "get_history"
+    }
+  ],
+  "failures": [],
+  "fixture_sha256": "b053c45be8352696482ea8086a281daa87f3c3e86663d2ed26d2291612cc6a04",
+  "method": "Manual diff inspection at pinned SHAs (sampling) plus mechanical confirmation: file status via git diff --name-status on the fix range, existence via cat-file at search_sha, symbol pre-fix presence via git grep -c -F at search_sha.",
+  "sampled_at": "2026-08-22T03:30:18+00:00",
+  "sampled_by": "lane D (opencode:laneD-cond0634)"
+}
