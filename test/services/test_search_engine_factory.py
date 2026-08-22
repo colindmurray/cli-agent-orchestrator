@@ -107,8 +107,7 @@ def test_scalar_distance_knn_over_ordinary_blob_table(tmp_path):
     query = _blob((0.95, 0.05, 0.0, 0.0))
     with open_search_connection(db_path=db) as handle:
         ranked = handle.connection.execute(
-            "SELECT id, vec_distance_cosine(embedding, :q) AS d "
-            "FROM docs ORDER BY d",
+            "SELECT id, vec_distance_cosine(embedding, :q) AS d " "FROM docs ORDER BY d",
             {"q": query},
         ).fetchall()
     # Row 1 points almost exactly where the query points; row 3 is close;

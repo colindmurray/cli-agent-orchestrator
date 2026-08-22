@@ -125,9 +125,7 @@ def test_prepare_writes_generation_ready_metadata(tmp_path):
     downloader = FakeDownloader()
     record = _prepare(tmp_path, downloader)
 
-    assert downloader.calls == [
-        {"repo_id": adapter.MODEL_ID, "revision": adapter.MODEL_REVISION}
-    ]
+    assert downloader.calls == [{"repo_id": adapter.MODEL_ID, "revision": adapter.MODEL_REVISION}]
     # Every §9.4 record required before semantic enable:
     assert record["model_id"] == adapter.MODEL_ID
     assert record["model_revision"] == adapter.MODEL_REVISION
@@ -228,7 +226,9 @@ def test_diagnose_runtime_missing(tmp_path):
     report = _diagnose(
         tmp_path,
         run_probe=False,
-        dist_versions=lambda name: None if name == "sentence-transformers" else _FULL_VERSIONS[name],
+        dist_versions=lambda name: (
+            None if name == "sentence-transformers" else _FULL_VERSIONS[name]
+        ),
         engine_describer=_fake_engine_describer,
     )
     assert report.state is adapter.DiagnosticState.RUNTIME_MISSING
@@ -327,7 +327,9 @@ def _loaded_embedder(vectors) -> adapter.LoadedEmbedder:
         "runtime_versions": dict(_FULL_VERSIONS),
         "dimensions": 384,
     }
-    return adapter.LoadedEmbedder(model=FakeEncoder(vectors=vectors), metadata=record, snapshot_dir=Path("/x"))
+    return adapter.LoadedEmbedder(
+        model=FakeEncoder(vectors=vectors), metadata=record, snapshot_dir=Path("/x")
+    )
 
 
 def test_embed_produces_float32_little_endian_unit_blobs():
@@ -368,7 +370,9 @@ def test_embed_rejects_row_count_mismatch():
 
 def test_embed_empty_input_returns_empty_without_calling_encoder():
     encoder = FakeEncoder()
-    embedder = adapter.LoadedEmbedder(model=encoder, metadata={"dimensions": 384}, snapshot_dir=Path("/x"))
+    embedder = adapter.LoadedEmbedder(
+        model=encoder, metadata={"dimensions": 384}, snapshot_dir=Path("/x")
+    )
     assert embedder.embed([]) == []
     assert encoder.encode_calls == []
 
@@ -381,9 +385,7 @@ def _stub_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
     class StubST:
         def __init__(self, path, device=None, local_files_only=False, **kwargs):
-            calls.append(
-                {"path": path, "device": device, "local_files_only": local_files_only}
-            )
+            calls.append({"path": path, "device": device, "local_files_only": local_files_only})
             self.max_seq_length = None
 
         def encode(self, *args, **kwargs):  # pragma: no cover - never reached here
@@ -440,8 +442,12 @@ def test_diagnose_refuses_foreign_generation_record(tmp_path):
     foreign = dict(record)
     foreign["model_id"] = "other-org/other-model"
     (tmp_path / "generation-metadata.json").write_text(json.dumps(foreign))
-    report = _diagnose(tmp_path, run_probe=False, dist_versions=_ok_versions,
-                       engine_describer=_fake_engine_describer)
+    report = _diagnose(
+        tmp_path,
+        run_probe=False,
+        dist_versions=_ok_versions,
+        engine_describer=_fake_engine_describer,
+    )
     assert report.state is adapter.DiagnosticState.VERSION_MISMATCH
     assert "pinned generation" in report.signals["detail"]
 
@@ -465,8 +471,9 @@ def test_prepare_and_diagnose_survive_symlinked_models_dir(tmp_path):
     link.symlink_to(real)
     record = _prepare(link)
     assert record["snapshot_rel_path"] is not None
-    report = _diagnose(link, run_probe=False, dist_versions=_ok_versions,
-                       engine_describer=_fake_engine_describer)
+    report = _diagnose(
+        link, run_probe=False, dist_versions=_ok_versions, engine_describer=_fake_engine_describer
+    )
     assert report.state is adapter.DiagnosticState.PREPARED
 
 
@@ -482,8 +489,9 @@ def test_unobservable_engine_version_is_runtime_missing_not_mismatch(tmp_path):
             "vec_version_pinned": PINNED_VEC_VERSION,
         }
 
-    report = _diagnose(tmp_path, run_probe=False, dist_versions=_ok_versions,
-                       engine_describer=unobservable)
+    report = _diagnose(
+        tmp_path, run_probe=False, dist_versions=_ok_versions, engine_describer=unobservable
+    )
     assert report.state is adapter.DiagnosticState.RUNTIME_MISSING
     assert "no engine version could be observed" in report.signals["detail"]
 

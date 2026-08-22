@@ -19,8 +19,8 @@ from typing import Any, Dict, List, Optional
 
 import click
 
-from cli_agent_orchestrator.clients.database import ensure_tracker_schema
 from cli_agent_orchestrator.cli.commands.search_index import search_index
+from cli_agent_orchestrator.clients.database import ensure_tracker_schema
 from cli_agent_orchestrator.services import issue_tracker as tracker
 from cli_agent_orchestrator.services.issue_tracker import TrackerError
 

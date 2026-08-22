@@ -71,9 +71,7 @@ def test_prepare_repairs_corrupt_metadata_through_the_cli(runner, tmp_path, fake
 
     (tmp_path / "generation-metadata.json").write_text("{corrupt")
     with patch.object(adapter, "_default_snapshot_downloader", fake_downloader):
-        result = runner.invoke(
-            model_prepare, ["--models-dir", str(tmp_path), "--json"]
-        )
+        result = runner.invoke(model_prepare, ["--models-dir", str(tmp_path), "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["prepare"]["ok"] is True

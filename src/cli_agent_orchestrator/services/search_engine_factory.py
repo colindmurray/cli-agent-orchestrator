@@ -103,7 +103,7 @@ def _load_sqlite_vec_module() -> Any:
     installed" into an opaque ImportError far from the operator's decision.
     """
     try:
-        import sqlite_vec  # type: ignore[import-not-found]
+        import sqlite_vec  # type: ignore[import-untyped]
     except ImportError as exc:
         raise SearchEngineError(
             "runtime-missing",
@@ -249,6 +249,7 @@ def describe_search_engine(
         # filesystem footprint.
         def connection_factory() -> Any:
             return sqlite3.connect(":memory:")
+
     try:
         probe = open_search_connection(connection_factory=connection_factory)
     except SearchEngineError as exc:

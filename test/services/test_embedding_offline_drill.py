@@ -97,9 +97,9 @@ def test_offline_drill_embeddings_are_validated_and_separable(
     related = cosine(vecs[0], vecs[1])
     unrelated = cosine(vecs[0], vecs[2])
     assert related > 0.5, f"paraphrase pair should be close, got {related}"
-    assert related > unrelated, (
-        f"related pair ({related:.3f}) must outrank unrelated ({unrelated:.3f})"
-    )
+    assert (
+        related > unrelated
+    ), f"related pair ({related:.3f}) must outrank unrelated ({unrelated:.3f})"
 
 
 def test_offline_drill_output_is_byte_stable_within_process(

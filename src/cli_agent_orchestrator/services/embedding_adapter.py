@@ -289,9 +289,7 @@ def _snapshot_dir(models_dir: Path, record: Mapping[str, Any]) -> Path:
     )
 
 
-def _check_generation_identity(
-    record: Mapping[str, Any], expected_artifact_sha256: str
-) -> None:
+def _check_generation_identity(record: Mapping[str, Any], expected_artifact_sha256: str) -> None:
     """Verify the record names THE pinned generation, not just a consistent one.
 
     A well-formed self-consistent metadata file for a DIFFERENT model or
@@ -354,9 +352,7 @@ def prepare_model(
         expected_artifact_sha256 = MODEL_ARTIFACT_SHA256
     resolved_dir = Path(models_dir) if models_dir is not None else default_models_dir()
     resolved_dir.mkdir(parents=True, exist_ok=True)
-    resolved_cache = (
-        Path(hf_cache_dir) if hf_cache_dir is not None else resolved_dir / "_hf-cache"
-    )
+    resolved_cache = Path(hf_cache_dir) if hf_cache_dir is not None else resolved_dir / "_hf-cache"
     read_version = dist_versions if dist_versions is not None else _read_dist_version
 
     runtime_versions: Dict[str, Optional[str]] = {
@@ -400,9 +396,7 @@ def prepare_model(
         if candidate is not None:
             observed_digest = dir_sha256(candidate)
             if observed_digest != expected_artifact_sha256:
-                raise ArtifactDigestMismatch(
-                    observed_digest, expected_artifact_sha256, candidate
-                )
+                raise ArtifactDigestMismatch(observed_digest, expected_artifact_sha256, candidate)
             snapshot = candidate
             if (
                 existing.get("artifact_sha256") == expected_artifact_sha256
@@ -611,8 +605,7 @@ class LoadedEmbedder:
         if array.shape[0] != expected_count:
             raise EmbeddingValidationError(
                 "probe-failed",
-                f"encoder returned {array.shape[0]} vectors for "
-                f"{expected_count} inputs",
+                f"encoder returned {array.shape[0]} vectors for " f"{expected_count} inputs",
             )
         if array.shape[1] != self.dimensions:
             raise EmbeddingValidationError(
@@ -870,9 +863,7 @@ def diagnose_embedding(
             "elapsed_ms": stats[0].elapsed_ms if stats else None,
         }
     except EmbeddingCapabilityError as exc:
-        return CapabilityReport(
-            DiagnosticState.PROBE_FAILED, {**signals, "detail": exc.message}
-        )
+        return CapabilityReport(DiagnosticState.PROBE_FAILED, {**signals, "detail": exc.message})
     except Exception as exc:  # noqa: BLE001 - diagnostics never raise
         return CapabilityReport(
             DiagnosticState.PROBE_FAILED,

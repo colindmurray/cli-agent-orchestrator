@@ -25,9 +25,7 @@ from cli_agent_orchestrator.services import embedding_adapter as adapter
 def _fail(exc: adapter.EmbeddingCapabilityError, as_json: bool = False) -> None:
     """Report a typed refusal, parseable under --json, and exit non-zero."""
     if as_json:
-        click.echo(
-            jsonlib.dumps({"ok": False, "reason": exc.reason, "message": exc.message})
-        )
+        click.echo(jsonlib.dumps({"ok": False, "reason": exc.reason, "message": exc.message}))
     else:
         click.echo(f"error [{exc.reason}]: {exc.message}", err=True)
     raise SystemExit(1)
@@ -88,7 +86,11 @@ def model_prepare(models_dir: Optional[Path], as_json: bool):
 
 @model.command(name="status")
 @click.option("--models-dir", type=click.Path(file_okay=False, path_type=Path), default=None)
-@click.option("--no-probe", is_flag=True, help="report from metadata/runtime/engine observation only (no model load)")
+@click.option(
+    "--no-probe",
+    is_flag=True,
+    help="report from metadata/runtime/engine observation only (no model load)",
+)
 @click.option("--json", "as_json", is_flag=True)
 def model_status(models_dir: Optional[Path], no_probe: bool, as_json: bool):
     """Report the embedding capability state with positive signals.
