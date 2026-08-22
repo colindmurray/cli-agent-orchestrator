@@ -1,0 +1,14 @@
+# Golden assignment
+
+Ship the four canonical communication shapes through the real capture path.
+
+## Acceptance
+
+Every downstream renderer must present this body inertly: no script
+execution, no javascript navigation, no remote image fetch.
+
+<script>alert('x')</script>
+
+[Click here](javascript:alert('x'))
+
+![remote image](https://example.invalid/golden.png)
