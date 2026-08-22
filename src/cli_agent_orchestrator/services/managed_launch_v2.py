@@ -54,7 +54,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.constants import COMPANION_DIR
@@ -858,6 +858,19 @@ def _published_terminal_facts(terminal_id: Optional[str]) -> dict[str, Any]:
     answered, and the row holds nothing". The first must fail closed; the
     second is ordinary.
 
+    A projection that cannot be derived publishes the same all-null facts.
+    The conductor's adoptability law is an allowlist of positively live
+    states, so an unproven lifecycle refuses adoption where the decision
+    belongs; raising here would instead fail a whole reservation response
+    on one unreadable peer surface.
+
+    A store that cannot answer — schema drift such as a missing column, or
+    a locked database surfacing as ``OperationalError`` — is a different
+    observation and propagates: the surface exists and cannot be read is a
+    typed unavailability, never unknown-by-default. (A missing v2 table
+    never reaches this clause: the projection layer resolves it as vacuity
+    before any query against the table can fail.)
+
     Read through the projection so this surface and the human views cannot
     drift: one authority for what a terminal's lifecycle is, rather than a
     second implementation that agrees today.
@@ -867,7 +880,17 @@ def _published_terminal_facts(terminal_id: Optional[str]) -> dict[str, Any]:
         return published
     from cli_agent_orchestrator.services import terminal_projection
 
-    projected = terminal_projection.project_terminal(terminal_id)
+    try:
+        projected = terminal_projection.project_terminal(terminal_id)
+    except OperationalError:
+        raise
+    except Exception as exc:
+        logger.debug(
+            "terminal projection underivable for %s; publishing unknown facts: %s",
+            terminal_id,
+            exc,
+        )
+        return published
     if not projected:
         return published
     for field in PUBLISHED_TERMINAL_FIELDS:
