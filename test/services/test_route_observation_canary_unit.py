@@ -638,32 +638,36 @@ class TestReceiptValidator:
 # ---------------------------------------------------------------------------
 
 
+def _runner_spec(operation_id: str) -> dict:
+    """One installed-source spec for the M17 runner prepare command."""
+    return {
+        "operation_id": operation_id,
+        "target_terminal_id": "term-target",
+        "target_generation": "gen-target",
+        "native_session_id": fixtures.SESSION_ID,
+        "provider": "codex",
+        "provider_version": fixtures.CODEX_PINNED_VERSION,
+        "provider_artifact_sha256": ARTIFACT,
+        "requester_terminal_id": "term-requester",
+        "requester_generation": "gen-requester",
+    }
+
+
 class TestRunnerEntryPoints:
     def test_prepare_builds_the_exact_operation_request(self, tmp_path):
+        case = cases.POSITIVE_PATH
         spec_path = tmp_path / "spec.json"
         output_path = tmp_path / "prepared.json"
         operation_id = str(uuid.uuid4())
         spec_path.write_text(
-            json.dumps(
-                {
-                    "operation_id": operation_id,
-                    "target_terminal_id": "term-target",
-                    "target_generation": "gen-target",
-                    "native_session_id": fixtures.SESSION_ID,
-                    "provider": "codex",
-                    "provider_version": fixtures.CODEX_PINNED_VERSION,
-                    "provider_artifact_sha256": ARTIFACT,
-                    "requester_terminal_id": "term-requester",
-                    "requester_generation": "gen-requester",
-                },
-                sort_keys=True,
-            ),
+            json.dumps(_runner_spec(operation_id), sort_keys=True),
             encoding="utf-8",
         )
 
-        canary_runner._prepare(spec_path, output_path)
+        canary_runner._prepare(case.runner_key, spec_path, output_path)
 
         record = json.loads(output_path.read_text(encoding="utf-8"))
+        assert record["case"] == case.runner_key
         assert record["request"]["operation_id"] == operation_id
         assert record["request"]["native_session_id"] == fixtures.SESSION_ID
         assert (
@@ -671,19 +675,33 @@ class TestRunnerEntryPoints:
             == ro.RouteObservationRequest(**record["request"]).request_digest()
         )
 
-    def test_execute_terminates_pending_live_in_this_build(self, tmp_path):
+    def test_execute_terminates_pending_live_consuming_the_prepared_output(self, tmp_path):
+        """The documented M17 flow — ``prepare`` writes the prepared record,
+        ``execute`` consumes that exact output and must reach the typed
+        ``PendingLiveExecution`` seam for the prepared case (never fabricating
+        a live result)."""
         case = cases.POSITIVE_PATH
+        spec_path = tmp_path / "spec.json"
         prepared_path = tmp_path / "prepared.json"
-        prepared_path.write_text(
-            json.dumps(
-                {
-                    "case": case.runner_key,
-                    "request": {"operation_id": str(uuid.uuid4())},
-                },
-                sort_keys=True,
-            ),
+        spec_path.write_text(
+            json.dumps(_runner_spec(str(uuid.uuid4())), sort_keys=True),
             encoding="utf-8",
         )
 
+        canary_runner._prepare(case.runner_key, spec_path, prepared_path)
+
         with pytest.raises(canary_runner.PendingLiveExecution, match=case.case_id):
-            canary_runner._execute(prepared_path, tmp_path / "evidence.json")
+            canary_runner._execute(case.runner_key, prepared_path, tmp_path / "evidence.json")
+
+    def test_execute_refuses_a_prepared_record_for_a_different_case(self, tmp_path):
+        case = cases.POSITIVE_PATH
+        spec_path = tmp_path / "spec.json"
+        prepared_path = tmp_path / "prepared.json"
+        spec_path.write_text(
+            json.dumps(_runner_spec(str(uuid.uuid4())), sort_keys=True),
+            encoding="utf-8",
+        )
+        canary_runner._prepare(case.runner_key, spec_path, prepared_path)
+
+        with pytest.raises(ValueError, match="names case"):
+            canary_runner._execute("ambiguous-close", prepared_path, tmp_path / "evidence.json")

@@ -70,13 +70,20 @@ def build_request_from_spec(spec: Mapping[str, Any]) -> ro.RouteObservationReque
     )
 
 
-def _prepare(spec_path: Path, output_path: Path) -> None:
-    """Resolve the exact operation request and write the prepared record."""
+def _prepare(case_key: str, spec_path: Path, output_path: Path) -> None:
+    """Resolve the exact operation request and write the prepared record.
+
+    The prepared record is self-describing: it carries the ``case`` key it
+    was prepared for, so a later ``execute`` consuming it knows the case
+    without guessing.
+    """
+    case = get_case_by_runner_key(case_key)
     spec = _read(spec_path)
     request = build_request_from_spec(spec)
     _write(
         output_path,
         {
+            "case": case.runner_key,
             "spec": spec,
             "request": dataclasses.asdict(request),
             "request_digest": request.request_digest(),
@@ -84,16 +91,23 @@ def _prepare(spec_path: Path, output_path: Path) -> None:
     )
 
 
-def _execute(prepared_path: Path, output_path: Path) -> None:
+def _execute(case_key: str, prepared_path: Path, output_path: Path) -> None:
     """Drive the installed Codex pane for one case and write evidence.
 
     M17 wires the real ``RealCodexPaneSurface`` from the prepared pane facts
     here and validates the terminal outcome against the case's expected
     result.  This build deliberately has no live provider surface, so the
-    entry point terminates as pending rather than fabricating a receipt.
+    entry point terminates as pending rather than fabricating a receipt.  The
+    prepared record must name the same case the CLI requested, so an ``execute``
+    can never silently run against a record prepared for a different case.
     """
     prepared = _read(prepared_path)
-    case = get_case_by_runner_key(prepared.get("case", ""))
+    if prepared.get("case") != case_key:
+        raise ValueError(
+            f"prepared record {prepared_path} names case {prepared.get('case')!r}, "
+            f"but the CLI requested {case_key!r}"
+        )
+    case = get_case_by_runner_key(case_key)
     raise PendingLiveExecution(
         f"canary {case.case_id} ({case.name}) is pending_live_execution; the M17 "
         "activation lane owns its live installed run against the real Codex pane "
@@ -115,9 +129,9 @@ def main() -> None:
     execute.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "prepare":
-        _prepare(args.spec, args.output)
+        _prepare(args.case, args.spec, args.output)
     else:
-        _execute(args.prepared, args.output)
+        _execute(args.case, args.prepared, args.output)
 
 
 if __name__ == "__main__":
