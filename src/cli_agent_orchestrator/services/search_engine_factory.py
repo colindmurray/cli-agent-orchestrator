@@ -46,9 +46,10 @@ class SearchEngineError(Exception):
     can branch on failure kind instead of parsing messages:
     ``runtime-missing`` (the sqlite-vec package is not installed),
     ``extension-api-unavailable`` (this Python's sqlite3 cannot load
-    extensions), ``version-mismatch`` (loaded vec_version() differs from the
-    pin), and ``open-failed`` (the connection itself could not be opened or
-    loaded).
+    extensions), ``open-failed`` (the connection could not be opened, or an
+    injected producer failed), ``load-failed`` (the connection opened with
+    extensions enabled but ``sqlite_vec.load`` itself threw), and
+    ``version-mismatch`` (loaded vec_version() differs from the pin).
     """
 
     def __init__(

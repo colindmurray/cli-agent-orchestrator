@@ -658,7 +658,7 @@ def load_embedder(
     embedder_factory: Optional[Callable[[Mapping[str, Any], Path], Any]] = None,
     metadata: Optional[Mapping[str, Any]] = None,
     dist_versions: Optional[DistVersionReader] = None,
-    expected_artifact_sha256: str = MODEL_ARTIFACT_SHA256,
+    expected_artifact_sha256: Optional[str] = None,
 ) -> LoadedEmbedder:
     """Load the prepared generation, refusing typed absence/mismatch first.
 
@@ -670,6 +670,11 @@ def load_embedder(
     the local snapshot. A base install therefore answers in milliseconds
     without ever touching torch.
     """
+    # Call-time pin resolution, matching prepare_model: re-pinning the module
+    # constant (tests, alternate builds) must reach every entry point the same
+    # way instead of freezing at import time.
+    if expected_artifact_sha256 is None:
+        expected_artifact_sha256 = MODEL_ARTIFACT_SHA256
     resolved_dir = Path(models_dir) if models_dir is not None else default_models_dir()
     record: Optional[Dict[str, Any]] = (
         dict(metadata) if metadata is not None else read_metadata(resolved_dir)
@@ -720,7 +725,7 @@ def diagnose_embedding(
     embedder_factory: Optional[Callable[[Mapping[str, Any], Path], Any]] = None,
     engine_describer: Optional[Callable[[], Dict[str, Any]]] = None,
     dist_versions: Optional[DistVersionReader] = None,
-    expected_artifact_sha256: str = MODEL_ARTIFACT_SHA256,
+    expected_artifact_sha256: Optional[str] = None,
 ) -> CapabilityReport:
     """Diagnose the embedding capability end to end, never raising.
 
@@ -747,6 +752,8 @@ def diagnose_embedding(
     (no model load, no encode). Every injection parameter exists so tests can
     exercise all five states without heavy dependencies.
     """
+    if expected_artifact_sha256 is None:
+        expected_artifact_sha256 = MODEL_ARTIFACT_SHA256
     signals: Dict[str, Any] = {}
     resolved_dir = Path(models_dir) if models_dir is not None else default_models_dir()
     signals["models_dir"] = str(resolved_dir)
