@@ -1,0 +1,2167 @@
+{
+  "cases": [
+    {
+      "case_types": [
+        "cross-repository",
+        "data-flow"
+      ],
+      "id": "cond-0209",
+      "issue": {
+        "component": "cli-agent-orchestrator fork native session attachment",
+        "key": "cond-0209",
+        "narrative": "native session attachments are never released, so every provider session is permanently unresumable\n\nMeasured on the live install 2026-08-07: 255 rows in native_session_attachments, ALL 255 owned by a terminal id that no longer exists in the terminals table. 248 are in state 'attached' and 7 in 'ambiguous'. Zero are detached.\n\nnative_attachment.release() is defined and fully unit-tested, and is called from production code exactly ZERO times. Its only non-test reference is a docstring in services/native_tui_launch.py describing it as 'a deliberate, evidence-bearing' operation. Nothing releases an attachment on terminal death, on session teardown, or anywhere else.\n\nConsequence: the attachment table's whole purpose is exclusive ownership, and _refuse_live_owner raises NativeAttachmentConflict for any owner in a LIVE state (declared/starting/attached/draining). So each of those 255 provider-native sessions is now permanently unresumable - blocked by a ghost owner that cannot be adjudicated, because mark_ambiguous and release have no operator-facing path either (no API route, no CLI command), and release requires a no-survivor proof nothing constructs for a human.\n\nThis directly blocks the 'stopped' state in docs/session-lifecycle.md: stop collects panes and resume relaunches each worker against its recorded native session id. Every one of those ids is already claimed. Hibernate would never wake.\n\nTwo fixes are needed and they are separable:\n1. Release on terminal death - wire release() into the terminal teardown path so an attachment does not outlive its owner.\n2. Operator adjudication - a surface that shows who holds a session, what evidence exists that the owner is gone, and records the operator's acknowledgement as the release proof. Live owner stays refused; unresponsive owner becomes releasable, deliberately, with a name attached.\n\nFound while inventorying the live fleet before the fire-marshal cutover.",
+        "status": "closed",
+        "title": "native session attachments are never released, so every provider session is permanently unresumable",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Attachment release spans ledger semantics in conductor and the CAO native-attachment lifecycle.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/native_attachment.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "A",
+              "in_search_tree": false,
+              "path": "src/cli_agent_orchestrator/api/attachments.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "A",
+              "in_search_tree": false,
+              "path": "src/cli_agent_orchestrator/services/native_attachment_recovery.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [],
+          "fix_commits": [
+            {
+              "sha": "5d4c4b0b043789a49f2513f10f14ff1ab7052351",
+              "short": "5d4c4b0b0437",
+              "subject": "Merge pull request #76 from colindmurray/fix/cond-0209-attachment-release"
+            }
+          ],
+          "pull_request": "colindmurray/cli-agent-orchestrator#76",
+          "search_sha": "d691f8062983693a616c5ff490cd27e4d199aa1a",
+          "symbol_note": "Merge PR adds module-level surfaces; expectations carried at file level."
+        },
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/issue.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/issues.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/caoapi.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "tests/test_issue.py"
+              ],
+              "name": "_file_to_tracker",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 2
+            },
+            {
+              "diff_files": [
+                "tests/test_issue.py"
+              ],
+              "name": "resolve_tracker_project",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            },
+            {
+              "diff_files": [
+                "tests/test_issue.py"
+              ],
+              "name": "file_issue",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 2
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "d2f1dc6d1685f294ba65dabbd4f375a00d774d24",
+              "short": "d2f1dc6d1685",
+              "subject": "fix(issue): three defects two independent reviewers found"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "e1e308bff8003deaa35c2c1e1874ab5bf6878b4e",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "cross-repository",
+        "data-flow"
+      ],
+      "id": "cond-0072",
+      "issue": {
+        "component": "",
+        "key": "cond-0072",
+        "narrative": "delivered inbox row can remain outside the model turn\n\nCAO inbox `status=delivered` is not proof that a message entered the receiver's model turn. During the live self-heal run, inbox row 360 transitioned to `delivered` while the Codex supervisor UI still showed the exact message under `Messages to be submitted after next tool call (press esc to interrupt and send immediately)`; only after a later tool boundary did the message enter the turn. Kimi showed the same semantic gap more starkly: delivered deadman row 346 remained in the active composer's queue with Ctrl-S required for immediate steering, then entered only after task completion and induced duplicate report row 355. The row-360 correlation is durable in supervisor terminal-log lines around 7850 and the CAO SQLite inbox.\n\nThis is distinct from cond-0070's POST-acceptance versus inbox-delivery gap and cond-0071's false-idle badge. Current `delivered` means terminal paste/queue acceptance, not provider/model-turn submission or consumption. It may be a useful transport milestone, but it is too weak to be the durable W8/W9 completion boundary approved in Fable `1e8f8af` and now being implemented by PR-A.\n\nP1 failure scenario: a callback can be pasted into the composer behind the exact safety interstitial or provider refusal W8/W9 is trying to recover (especially when stale terminal state incorrectly permits idle-gated delivery, as already reproduced by cond-0056/cond-0071). The pre-action reconcile then sees the row as `delivered`, declares recovery stale, performs zero answer/continuation I/O, and leaves both the prompt and callback queued forever. A terminal crash after paste but before turn submission can likewise lose a row already marked delivered. This defeats the recovery completion contract rather than merely delaying an ordinary message.\n\nCorrect the contract before W8/W9/W10 acceptance. Durable callback completion must require an exact identity/generation-bound acknowledgement that the callback crossed into a receiver model turn (or a stronger supervisor-consumed acknowledgement), not current inbox `delivered` alone. The smallest CAO companion should expose a durable lifecycle such as `pending -> terminal_queued -> submitted` with `submitted` recorded only when the provider adapter confirms the user message became model input; an exact callback acknowledgement bound to message id and receiver generation is an acceptable equivalent. Keep terminal-queued rows open for bounded prompt/refusal recovery, re-read the exact acknowledgement immediately before action, and preserve no-replay/ambiguity rules. If no authoritative submitted/ack surface exists, remain fail-closed alert-only.\n\nMandatory tests: Codex and Kimi active-turn delivery where DB says delivered/terminal-queued while the UI queue has not entered the model turn; a safety interstitial and refusal with the callback queued behind them; queued-to-submitted transition closes completion; crash/restart after paste but before submission; stale/wrong message or receiver generation rejection; transition racing pre-action reconciliation; and exactly one original callback with no replay or duplicate task/report. Amend cond-0070/W10 plus both W8/W9 boundaries and keep their issues open until the companion and installed acceptance pass.\n\nExact-head hostile validation at conductor `9eb0b208c9560e13bff112b62f7aa0d81b2fbfed` found the sentinel's interim completion reader does not enforce this binding. `InterstitialRecovery._worker_completed` returned `True` for a live `assigned` run whose entire alleged submission proof was `{\"message_id\":\"m1\",\"submitted_receipt\":{\"message_id\":\"m1\"}}`. No sender, receiver, project, task/run/report path, callback digest, worker/supervisor generation, obligation, manifest/lease binding, provider boundary, or receipt provenance was present. The implementation compares only the nested and outer message ids. Until a provider-native companion writes and validates the full \u00a719.5 identity, no locally writable `submitted_receipt`/`consumed_receipt` dictionary may close W8/W9. Centralize strict schema/provenance validation shared by the companion and sentinel; reject missing/unknown fields and unknown manifest states fail-closed. Add minimal-forgery, cross-task, cross-generation, wrong-receiver, wrong-digest, stale-obligation, and locally-written receipt regressions, plus the exact valid companion receipt and finalized-collection cases.",
+        "status": "closed",
+        "title": "delivered inbox row can remain outside the model turn",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Delivered inbox rows must be reconciled against model-turn receipts in both repos.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/control_input_journal.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/control_input_service.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/inbox_service.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "A",
+              "in_search_tree": false,
+              "path": "src/cli_agent_orchestrator/services/wake_receipts.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "test/services/test_control_input_service.py"
+              ],
+              "name": "deliver_control_input",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 6
+            },
+            {
+              "diff_files": [],
+              "name": "_native_composer_preflight",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 4
+            },
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/services/control_input_contract.py",
+                "src/cli_agent_orchestrator/services/control_input_service.py",
+                "test/services/test_control_input_contract.py",
+                "test/services/test_control_input_service.py"
+              ],
+              "name": "control_input_request_digest",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 15
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "d7b22eeca13d76af72ffd44148e621df8dce1576",
+              "short": "d7b22eeca13d",
+              "subject": "fix(control-plane): final-gate Lane A \u2014 chord v2, write deadline, wake receipt"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "ea594ee588602392eabd21b3e4c63ded54dbf664",
+          "symbol_note": null
+        },
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "A/M",
+              "in_search_tree": false,
+              "path": "plugin/conductor_sentinel/model_turn_receipt_contract.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "A/M",
+              "in_search_tree": false,
+              "path": "plugin/conductor_sentinel/model_turn_lookup.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M/M",
+              "in_search_tree": true,
+              "path": "plugin/conductor_sentinel/refusal_recovery.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/report.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": false,
+              "path": "conduct/commands/retire.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "plugin/conductor_sentinel/interstitial_recovery.py",
+                "plugin/conductor_sentinel/model_turn_lookup.py",
+                "plugin/conductor_sentinel/refusal_recovery.py",
+                "plugin/conductor_sentinel/sentinel.py",
+                "plugin/tests/_receipt.py"
+              ],
+              "name": "ModelTurnVerifier",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            },
+            {
+              "diff_files": [
+                "conduct/commands/retire.py"
+              ],
+              "name": "_reconcile_processing",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            },
+            {
+              "diff_files": [
+                "conduct/commands/retire.py"
+              ],
+              "name": "_finalization_turn_finality",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "81d8f556f0b7ff3409cb2787f70ce48105909f01",
+              "short": "81d8f556f0b7",
+              "subject": "fix: require a live strict model-turn receipt at W8/W9"
+            },
+            {
+              "sha": "6431c41861b9d760ae1852a67048a8548969226c",
+              "short": "6431c41861b9",
+              "subject": "fix: bind callbacks to immutable round occurrences"
+            },
+            {
+              "sha": "3d26d5f20140c5bda3f0cff40622de9820df2a1c",
+              "short": "3d26d5f20140",
+              "subject": "fix(retire): reconcile stale processing rows against turn-terminal evidence"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "a4b64cea625debe127004e3986276e9b1822f23b",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "cross-repository"
+      ],
+      "id": "cond-0107",
+      "issue": {
+        "component": "",
+        "key": "cond-0107",
+        "narrative": "native v2 preflight failure loses its cause and cannot be recovered\n\nA Kimi native-TUI v2 reservation became preflight_blocked with zero task bytes and its terminal was removed, but the durable/API record retained no human-readable failure detail. The documented conduct spawn --recover path correctly read the v2 row first, then called the v1 negative/reconcile endpoint and failed 404, leaving the v2 run and breaker stranded. Preserve redacted typed preflight detail in the v2 reservation surface and make recovery use v2-native negative/cleanup evidence end to end. Acceptance requires idempotent exact-id recovery, lease/breaker release, no duplicate provider or task I/O, and one lawful replacement launch.\n\nThe immediate preflight cause was subsequently confirmed as exact-version drift:\nthe installed Kimi Code is `0.29.1`, while the deployed fork admits only the\nstage-verified `0.29.0` contract. Static inspection found the required resume,\nACP, model/thinking, newline, submit, suppression, and normalization behavior\nunchanged, so the fix should add an explicit `0.29.1` compatibility entry and\nretain the `0.29.0` entry for existing sessions rather than accept a version\nrange.\n\nThe same failure also leaked one ACP bootstrap child because the transport is\ncreated before version validation but its cleanup `finally` starts afterward.\nThe exact orphan (PID 22189, parent production cao-server PID 18377, cwd the\ndisposable Kimi acceptance worktree, no terminal/attachment/provider task I/O)\nignored `TERM` and was removed with an exact-PID `KILL` after identity\nrevalidation. Put every post-transport validation exit inside the termination\nguard and test that version/digest/worktree refusals terminate once without\nprovider task I/O. Never broad-kill Kimi, tmux, or the CAO server.\n\nOn 2026-07-27 the same exact-version drift recurred after Kimi Code\nauto-updated to `0.29.2`. A fresh native-TUI reviewer launch\n(`final-gate-pr37-k27-p0p1-review`, terminal reservation `fe5beca3`) failed\npre-I/O because the deployed conductor and fork accept only `0.29.1` and\n`0.29.0`. This is an extension of cond-0107, not a new issue. Direct inspection\nof the published `0.29.2` bundle (installed `dist/main.mjs` SHA-256\n`2ee6e2f15d68bffdce532d1c8e50f8d40e0230090b3a0dd1dbcdb7c29bf532db`)\nconfirmed the ACP protocol/session surfaces and the TUI newline, submit,\nnormalization, paste-suppression, and Ctrl-S paths remain compatible. A\nzero-prompt ACP `session/new` and `session/load` probe also passed. Inspection\nalso clarified the exact resume surface: `-S, --session [id]` is documented,\nwhile both bundles separately register the valid hidden compatibility alias\n`-r, --resume [id]`. The existing `-r` contract is therefore valid and must not\nbe removed; adding documented `-S` is a local compatibility improvement. The\ncoordinated P1 fix must enumerate `0.29.2` explicitly in both repositories,\nretain older exact entries for already-minted sessions, and add the proven\ncomposer/steer entry in the fork.",
+        "status": "closed",
+        "title": "native v2 preflight failure loses its cause and cannot be recovered",
+        "tracker_project": "cao-system"
+      },
+      "notes": "v2 preflight failure recovery must use v2 verbs on both sides of the API.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/models/managed_launch_v2.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/api/main.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/vintage_migration.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [],
+              "name": "_validate_readiness_for_bind",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 2
+            },
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+                "test/api/test_v2_recovery_api.py",
+                "test/services/test_v2_recovery_surface.py"
+              ],
+              "name": "_mark_preflight_blocked",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 10
+            },
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/api/main.py",
+                "src/cli_agent_orchestrator/models/managed_launch_v2.py",
+                "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+                "test/services/test_v2_recovery_surface.py"
+              ],
+              "name": "ManagedLaunchV2CleanupRequest",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "108755642cc755b9d16c432175cfa3c4e99d06da",
+              "short": "108755642cc7",
+              "subject": "fix(managed-launch-v2): typed preflight evidence + route-correct recovery verbs"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "a2ddd2b6d56f769f557c9b62b62a796c66edee49",
+          "symbol_note": null
+        },
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/spawn.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/spawn_delivery.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/caoapi.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [],
+              "name": "_complete_launch_failed_bridge",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 4
+            },
+            {
+              "diff_files": [],
+              "name": "_forfeit_stale_breaker",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            },
+            {
+              "diff_files": [
+                "conduct/commands/spawn.py",
+                "conduct/lib/caoapi.py"
+              ],
+              "name": "cleanup_managed_generation_v2",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "16b6fc83b4d31ea62cae12afe0ee8b1b07cd1d06",
+              "short": "16b6fc83b4d3",
+              "subject": "fix(cond-0107): recover v2 preflight failures on the v2 surface"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "7453e2110b1629e4a0f1726a6cee5182688c7938",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "cross-repository"
+      ],
+      "id": "cond-0173",
+      "issue": {
+        "component": "",
+        "key": "cond-0173",
+        "narrative": "abandoned pre-terminal journals re-alert every recovery timeout forever\n\nThe sentinel scans every project state directory, including abandoned campaigns with no live tmux session or terminals, and treats old created/provider-launch-attempted/preflight-blocked/never-started-proven journals as recoverable forever. After a deploy changes the source-bound conduct package hash, recovery correctly fails closed with source-bound recovery command identity changed, but sentinel-managed-recovery.json only suppresses for one 2700-second timeout, so the same stale task alerts OpenClaw again every 45 minutes. Current examples span chess-shakedown, cao-conductor-self-heal, and Users-colin-Projects-chess-shakedown; none has a live terminal. Add explicit campaign archival/reconciliation or terminal finality, and dedupe/quarantine an unchanged recovery failure rather than emitting identical alerts indefinitely. Preserve one durable alert plus a digest/count; never hide a new identity or failure class. This is a P1 operational lifecycle defect that should be fixed soon. By explicit human direction it does not block the current final-gate merge or chess shakedown because the abandoned state was pruned in a one-time clean sweep.\n\nA supported recovery can also strand a legacy prepared journal: `precutover-opus-native-v1` had no terminal, publishing lease, reservation, or `manifest.json`; `conduct spawn --recover` proved the reservation absent and advanced it safely through `cleaned`, then refused finalization with `recovered run has no manifest to finalize`. Because `cleaned` remains in the sentinel's pre-terminal candidate set, the record is still alertable. Archival/finality must explicitly support manifest-less legacy journals after exact negative cleanup proof, or quarantine them durably without requiring operators to fabricate a manifest or edit journal state by hand.\n\nOther legacy rows cannot be closed by the current recovery path even when their panes and sessions are gone. For example, `live-compact-claude-v3` reconciles its exact old reservation as `bound`, but that persisted row predates terminal lifecycle publication, so the current peer truthfully returns `terminal-non-adoptable` / `peer-too-old` and refuses cleanup. A campaign archive or operator reconciliation path therefore needs an explicit historical-bound-row disposition as well as the manifest-less case; repeatedly invoking ordinary recovery cannot converge these records.\n\n**2026-07-27 one-time legacy cleanup and priority confirmation:** the remaining\nsessionless history was not visible in the dashboard but still occupied seven\nlegacy terminal rows. Six belonged to the absent\n`cao-cao-conductor-self-heal` tmux session (`635d63c1`, `a3e1fcef`,\n`6697b7ef`, `65a43164`, `fc5f7a20`, and `3c40861b`); the seventh was the\nabsent `cao-strategist-dashboard-proxy-input-smoke-*` terminal `0b283b4d`.\nThe only live tmux/CAO session was independently proven to be\n`cao-chess-shakedown`, and none of those seven rows named one of its panes.\nThe current `GET /terminals/{id}` could not render the legacy rows because\ntheir stored `unknown-liveness` status fails current enum validation, making\nthem effectively hidden and reinforcing the need for lifecycle convergence.\nThe exact seven rows were deleted through the supported terminal DELETE\nendpoint; every request returned `{\"success\":true}`. A subsequent database,\ntmux, API, and browser-dashboard reconciliation showed only the four intended\nchess agents in one live session. Per human direction, abandoned sessionless\nagent state and its recurring recovery-alert ownership remain **P1**, though\nthis P1 is explicitly non-blocking for the ongoing chess shakedown. The\npermanent fix must make archival/finality and legacy-schema handling converge\nwithout another manual sweep.\n\n**Resolution:** conductor PR #32 merged at\n`50b3f10b3563cc61353a28502fba284000baa049` and the follow-up PR #33 merged at\n`24681f8abca528479a1e543bd7aecb0638c62198`, deployed with fork head\n`32518b64287c7d687df7837f92de0d8d06fa8be3`. The supported\n`conduct spawn --recover --archive` path now gives manifest-less and\nhistorical-bound pre-terminal records explicit final dispositions, refuses\nlive terminal/session/lease ownership, and is idempotent. The sentinel keeps\none durable alert per unchanged failure identity while recording suppressed\nrepeat counts; a changed failure class or command identity alerts again.\nSixteen recovery-finality tests and ten sentinel-dedupe tests passed. The\ninstalled archive sweep then converged eight remaining pre-terminal records\nacross the active historical project stores. Conservatively refused\n`submitted` journals are outside the pre-terminal alert scan. API, tmux, and\nthe dashboard remained at zero live sessions throughout the final sweep.",
+        "status": "closed",
+        "title": "abandoned pre-terminal journals re-alert every recovery timeout forever",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Abandoned journals alerted forever: dedupe/finality in conductor, truthful legacy vocabulary in CAO.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/models/terminal.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [],
+          "fix_commits": [
+            {
+              "sha": "a5f6bae75487e2d3a8ebca8d270ffcec481505cb",
+              "short": "a5f6bae75487",
+              "subject": "fix(terminals): admit the lifecycle vocabulary at the response boundary (cond-0173)"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "4d244d1b4ed4bfd7d93f1e8f5cbe1509b3b10e2f",
+          "symbol_note": "Fix admits lifecycle vocabulary at response boundary; TerminalLifecycleState is introduced by the fix itself."
+        },
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "A",
+              "in_search_tree": false,
+              "path": "plugin/conductor_sentinel/_dedupe.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "plugin/conductor_sentinel/sentinel.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/spawn_delivery.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/spawn.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "plugin/conductor_sentinel/sentinel.py"
+              ],
+              "name": "_alert_recovery_failure",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            },
+            {
+              "diff_files": [
+                "conduct/commands/spawn.py"
+              ],
+              "name": "_finalize_recovered_run",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 4
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "9b3453a6c0075b83681e41a4326f696a250bbc03",
+              "short": "9b3453a6c007",
+              "subject": "Merge pull request #26 from colindmurray/fix/cond0173-recovery-finality"
+            }
+          ],
+          "pull_request": "colindmurray/cao-conductor#26",
+          "search_sha": "446b978bcc88ee660e10aa0764b5b6df1f4bbdf9",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "stack-trace",
+        "vague-prose"
+      ],
+      "id": "cond-0462",
+      "issue": {
+        "component": "conduct",
+        "key": "cond-0462",
+        "narrative": "successor dispose crashes on missing source occurrence digest\n\nA releasable COND-0388 r3 successor claim is fully quiet and disposable, but the supported dispose command raises an uncaught KeyError for missing source_occurrence_sha256 while recording custody discharge. The preserved implementation source remains fenced and conduct continue refuses without provider I/O. The exact census, refusal, command, and traceback are in the evidence file. Expected disposal to release the claim; do not weaken or bypass the successor fence.",
+        "status": "closed",
+        "title": "successor dispose crashes on missing source occurrence digest",
+        "tracker_project": "cao-system"
+      },
+      "notes": "KeyError on missing source occurrence digest during successor dispose commit.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/_successor.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "A",
+              "in_search_tree": false,
+              "path": "tests/test_dispose_commit.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "tests/test_dispose_commit.py"
+              ],
+              "name": "dispose_claim",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            },
+            {
+              "diff_files": [
+                "conduct/commands/_successor.py"
+              ],
+              "name": "_journal_binding",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "015f62699a2691be6ff9dc2ec150de3179500b5e",
+              "short": "015f62699a26",
+              "subject": "Merge pull request #172 from colindmurray/fix/cond-0462-dispose-commit"
+            }
+          ],
+          "pull_request": "colindmurray/cao-conductor#172",
+          "search_sha": "da389a60a55525e35b568b5e631abca236829da7",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "stack-trace",
+        "data-flow"
+      ],
+      "id": "cond-0549",
+      "issue": {
+        "component": "",
+        "key": "cond-0549",
+        "narrative": "report-on-behalf tears down a worker without releasing its leases and claims\n\nThe teardown leg is persist-evidence-then-DELETE-terminal (report_on_behalf.py:54, :469). Its own comments place branch-lease release and ledger finalization at park then collect --retained, which a halted worker never reaches. The break-glass path is exactly where a stranded lease is most likely, and a lease outliving its worker wedges the next dispatch.",
+        "status": "resolved",
+        "title": "report-on-behalf tears down a worker without releasing its leases and claims",
+        "tracker_project": "cao-system"
+      },
+      "notes": "report-on-behalf teardown must release leases/claims through retained-track custody flow.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/report_on_behalf.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/retained_track.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/workstate.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/state.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "conduct/commands/report_on_behalf.py"
+              ],
+              "name": "_pr_custody_equivalent",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 2
+            },
+            {
+              "diff_files": [
+                "conduct/commands/report_on_behalf.py"
+              ],
+              "name": "run_retirement",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 6
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "a1e4f3f8b185b39f19fab3645be08ba54738a0ac",
+              "short": "a1e4f3f8b185",
+              "subject": "fix: finalize report-on-behalf teardown (cond-0549)"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "46dd1fbf43f232d448948e8a3e715f2d36cc84d7",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "stack-trace",
+        "vague-prose"
+      ],
+      "id": "cond-0055",
+      "issue": {
+        "component": "",
+        "key": "cond-0055",
+        "narrative": "Codex safety interstitial wedges unattended terminals\n\nThe persistent GPT-5.6-sol supervisor has reached the Codex \"Additional safety checks\" numbered interstitial on four distinct orchestration turns during this campaign (manual recoveries recorded at 14:03:02, 14:03:43, 14:20:29, and 14:25:25 EDT). Ordinary worker adjudication or spawn preparation stops indefinitely at choices Retry with a faster model / Keep waiting / Learn more. A fifth occurrence then wedged disposable Sol/max PR-B validator `350c2c19` during ordinary isolated probes; evidence is also in `/Users/colin/.aws/cli-agent-orchestrator/logs/terminal/350c2c19.log`. Worker deadmen do not cover the supervisor, and a worker deadman can notify the supervisor but cannot answer the worker's waiting-user-answer prompt; pending-inbox recovery resolves neither case. A nominally unattended long-running run therefore wedges or eventually discards healthy work until this external monitor sends key 2 plus Enter. Implement a narrow, auditable recovery boundary for every conduct-managed Codex terminal: detect this exact provider prompt, select only the non-bypass Keep waiting action with a bounded attempt count, journal/emit the recovery, and resume the same turn. Never choose a faster model or bypass a safety decision. If prompt text/choices differ, Keep waiting repeats beyond the bound, or recovery does not restore progress, fail closed and alert the human out of band. Add provider-adapter/integration tests for exact detection, single key sequence, changed-prompt refusal, bounded repeat escalation, preservation of queued supervisor work, and preservation of an in-flight disposable worker task.\n\n**Implementation status (W8 fixer pass, `fix/long-run-readiness`):** the conductor side of spec \u00a717 is implemented \u2014 the separate sentinel `interstitial_recovery` subsystem with the versioned one-entry prompt registry, durable eligibility (recorded supervisor / manifest-bound Codex workers with open obligation and write-role lease), generation binding with intent-before-I/O, at-most-one answer, 3/hour repetition bound, 10-minute progress window, pre-answer completion reconcile, redacted W1-mirrored events, and the full mandatory test matrix against a fake structured boundary (`plugin/tests/test_interstitial_recovery.py`). **Closure remains BLOCKED on the CAO fork companion:** installed CAO 2.3.0 exposes neither (ii) `GET /terminals/{id}/user-prompt` returning `{prompt_id, text, choices[]}` nor (iii) the idempotent stale-rejecting `POST /terminals/{id}/user-prompt/answer`, and its Codex adapter does not classify this interstitial as `waiting_user_answer` (see cond-0056). Until the companion lands and both supervisor and managed-worker coverages are proven against the real boundary, the subsystem runs fail-closed alert-only and this issue stays OPEN.\n\nPR-A W8 head `74ba7fbae25eb94ef8ad4cf9780ee7e123fa505f` implemented the conductor-side alert-only seam but its pre-answer reconcile treats an existing `report.md` as `run-done`. The campaign's PR-C refusal timeline disproves that completion proxy: a report file can be fully written while the original `conduct report` callback/event is still undelivered, and recovery is required to let that callback occur. For W8 as for W9, durable completion is the delivered original callback/report event for the exact task/run/callback generation or finalized collection, never report-file existence, mtime, terminal idleness, or provider/dashboard status. Correct W8 before acceptance: written report + undelivered callback remains eligible for exactly one bounded option-2 recovery that preserves the report and yields only the original callback; delivered callback/event, finalized collection, or a callback race before answer produces zero answer I/O. Add the matching preservation/race/no-duplicate tests. This is an amendment to existing cond-0055, not a new issue.\n\n**Authoritative user correction, superseding automatic option-2 and immediate-human-gate interpretations:** the OpenAI `Additional safety checks` choice screen is a transient validation display that normally self-resolves. On preserved Sol/max validator `self-heal-pr-b-validator-sol-post-final-fix`, terminal `79d5a2b8`, the screen cleared with zero answer/input and the same turn continued. The attempted structured `answer_user_prompt(..., answer=2)` returned `success=false` before I/O, so it consumed neither an answer nor a recovery generation and is evidence only that no input was sent. Default handling is passive wait/monitor with no answer, no recovery-budget consumption, no deadman nudge, and no human-blocker alert. Escalation or any bounded recovery requires a separately specified timeout plus durable proof that the transient failed to resolve; prompt appearance alone is insufficient. Existing W8/spec language that treats appearance as immediately answerable must be corrected before implementation acceptance. Evidence: terminal `79d5a2b8`, provider pane `%158`, Codex session `019f8700-b267-7cb3-9fef-f5205d029ea7`, and the zero-I/O structured-answer response in `.conductor/JOURNAL.md`.\n\n<!-- preserved from the markdown ledger -->\n- **amended:** 2026-07-21T18:33:00Z \u2014 same prompt also wedged disposable Sol validator `350c2c19`\n- **amended:** 2026-07-21 \u2014 conductor-side W8 (spec \u00a717) implemented on `fix/long-run-readiness`; closure BLOCKED on the CAO fork companion structured user-prompt boundary (see entry tail)\n- **amended:** 2026-07-21T19:52:57Z \u2014 PR-A W8 implementation incorrectly equated report-file existence with durable completion\n- **amended:** 2026-07-22T00:20:34Z \u2014 authoritative correction: the safety screen is transient and self-resolving by default",
+        "status": "closed",
+        "title": "Codex safety interstitial wedges unattended terminals",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Codex safety interstitial wedged unattended terminals; fixed inside the shared postfix adjudication commit that also carries sibling work (sampling notes the sharing).",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "plugin/conductor_sentinel/interstitial_recovery.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "A",
+              "in_search_tree": false,
+              "path": "plugin/conductor_sentinel/refusal_recovery.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "plugin/conductor_sentinel/sentinel.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "plugin/conductor_sentinel/refusal_recovery.py",
+                "plugin/conductor_sentinel/sentinel.py",
+                "plugin/tests/test_refusal_recovery.py"
+              ],
+              "name": "RefusalBoundary",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            },
+            {
+              "diff_files": [
+                "plugin/conductor_sentinel/refusal_recovery.py"
+              ],
+              "name": "RefusalBoundaryUnavailable",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "9eb0b208c9560e13bff112b62f7aa0d81b2fbfed",
+              "short": "9eb0b208c956",
+              "subject": "fix: postfix adjudication P0+P1 set (cond-0076, W8/W9/W10, W11 hardening)"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "d783c1fc24d1c54ae2d0e2025bc43a1a3632fefb",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": {
+        "also_carries": "cond-0076, W8/W9/W10 hardening",
+        "sha": "9eb0b208c956"
+      },
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "stack-trace"
+      ],
+      "id": "cond-0464",
+      "issue": {
+        "component": "cli-agent-orchestrator test isolation",
+        "key": "cond-0464",
+        "narrative": "Local test runs read the operator real settings.json, so a local suite total is meaningless and machine-dependent\n\nSeverity: P3. Repository: cli-agent-orchestrator. Not a product defect; a test-isolation defect that makes local verification unreliable and silently machine-dependent.\n\nDEFECT. A large part of the test suite reads the OPERATOR's real `settings.json` rather than a fixture. On this machine the memory subsystem is disabled there, so those tests raise `MemoryDisabledError: memory subsystem is disabled. Set memory.enabled=true in settings.json to re-enable` and fail.\n\nMEASURED. Running the exact CI invocation locally against UNMODIFIED fork main `1cfa6c04`:\n\n    uv sync --all-extras --dev\n    pytest test/ --ignore=test/providers/test_kiro_cli_integration.py --ignore=test/e2e -m \"not e2e\"\n\ngives `402 failed, 10107 passed, 9 errors`, against `4 failed, 10508 passed` for the same commit in hosted CI. The ~398 extra failures are entirely the memory / wiki / scoring / operation-journal / restore-contract cluster. CI's clean environment has no operator settings to read, so it never hits this.\n\nWHY IT MATTERS. Live operator configuration is an undeclared input to the suite:\n\n- A local total is never comparable to a CI total, and never comparable between two machines, so the ordinary \"did I break anything\" check silently stops working locally.\n- A local run can be perturbed by editing `settings.json`, which no test declares as an input and no failure message attributes.\n- With ~400 pre-existing failures locally, a genuine new failure is easy to miss by eye. Only a failure-ID set comparison is trustworthy, which is materially more work than reading a totals line.\n- It cost real time twice in one session. The first diagnosis attributed the discrepancy to a stale worktree venv or missing extras, which was wrong; the real cause was only established when someone ran the exact CI invocation against an unmodified base.\n\nCOOPERATIVE FAILURE SEQUENCE. An implementer verifies a change locally, sees ~400 failures, cannot tell which are theirs, and either reports a number that means nothing or spends the effort to build id sets. In the worse direction, an implementer sees a familiar-looking large failure count, assumes it is the known environmental noise, and ships a real regression inside it.\n\nFIX DIRECTION. Point the affected tests at a fixture settings file or an isolated config root (a monkeypatched settings path, or a `CAO_SETTINGS`-style env override honoured by the loader), so the suite declares its own configuration instead of inheriting the operator's. A narrower first step: make the memory-dependent tests skip explicitly with a stated reason when the subsystem is disabled, so the failure count stays honest even before isolation lands.\n\nINTERIM GUIDANCE for anyone verifying locally in this repository: diff failure-ID SETS against the base commit. Do not compare totals, and do not treat the hosted-CI baseline (`4 failed, 10508 passed`, the four cond-0432 Claude-version assertions) as a local expectation.\n\nPROVENANCE. Established by the cond-0439/0440/0441 batch implementer while proving no-regression for PR #129, after the coordinator's delegation brief had stated the CI baseline without labelling it CI-only. That batch proved no-regression by set comparison instead: 409 failing ids on a stashed base, 409 on the branch, identical, zero new and zero removed.\n",
+        "status": "closed",
+        "title": "Local test runs read the operator real settings.json, so a local suite total is meaningless and machine-dependent",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Local suites inherited operator settings.json; isolation lives in test fixtures, not src/.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "test/conftest.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "test/fixtures/cao_server.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [],
+              "name": "CaoServer",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 50
+            },
+            {
+              "diff_files": [],
+              "name": "_subprocess_env",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 4
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "04adf8764e624d0bc1180e59b866dbcedb20e498",
+              "short": "04adf8764e62",
+              "subject": "Merge pull request #130 from colindmurray/fix/cond0464-test-isolation"
+            }
+          ],
+          "pull_request": "colindmurray/cli-agent-orchestrator#130",
+          "search_sha": "4b62d8b65ac2bf7bb58c7a5993008875e31948e7",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "exact-technical"
+      ],
+      "id": "cond-0093",
+      "issue": {
+        "component": "",
+        "key": "cond-0093",
+        "narrative": "managed Codex launches blocked by stale audited CLI pin\n\nSeverity: P1\n\nThe one authorized cond-0092 Sol/max sanity reviewer was allocated as terminal\n`c6ae0374`, generation `c50ec4a1-a2f3-4103-b12f-6f61ca118da1`, but the\nmanaged bridge exited before task submission:\n\n`[managed-provider-blocked] unsupported provider version 'codex-cli 0.145.0';\nexpected 'codex-cli 0.144.6'`\n\nThe installed `codex --version` is now `codex-cli 0.145.0`, while\n`codex_trust.SUPPORTED_CODEX_VERSION` and the managed bridge remain pinned to\n`0.144.6`. The conductor correctly finalized the delivery as\n`never-submitted` with evidence SHA-256\n`a316bd5f418f83b9a85a84e814272e5042e69f836a162822144e8dfbf5e0815a`;\nno review task bytes reached Codex and no retry occurred.\n\nImpact: every managed Codex worker launch is blocked, including the sole\nP0/P1 cond-0092 sanity gate and later Codex implementation/review work.\n\nRequired narrow fix: audit Codex CLI `0.145.0` against the app-server\ninitialize/thread/turn protocol used by the bridge, update the exact supported\nversion and version-bound documentation/fixtures, run the focused bridge,\ntrust, recovery, and launch tests, build/deploy an exact artifact, then retry\nthe never-submitted reviewer once under a fresh generation. Preserve the\nfail-closed version gate; do not replace it with a loose range or silently\naccept an unaudited provider version.\n\nThis is a transient compatibility lane, not a reason to broaden cond-0092 or\nredesign provider routing. Fable should be informed as a P1 implementation\ndependency, but no further broad spec review is warranted unless the 0.145.0\nprotocol audit finds a material design change.",
+        "status": "closed",
+        "title": "managed Codex launches blocked by stale audited CLI pin",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Exact pin string 'codex-cli 0.144.6' gates managed launches; bump to 0.145.0.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/codex_trust.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "docs/managed-launch-protocol.md",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/services/codex_trust.py",
+                "test/services/test_codex_trust.py",
+                "test/services/test_managed_provider_bridge.py"
+              ],
+              "name": "SUPPORTED_CODEX_VERSION",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 5
+            },
+            {
+              "diff_files": [
+                "test/services/test_codex_trust.py"
+              ],
+              "name": "attest_trusted_project",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 6
+            },
+            {
+              "diff_files": [
+                "test/services/test_codex_trust.py"
+              ],
+              "name": "CodexTrustProbeError",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 25
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "655bcfbcc7113893d01f238d40db478d39b2b347",
+              "short": "655bcfbcc711",
+              "subject": "fix: pin managed Codex bridge to codex-cli 0.145.0"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "be4ee7d47862bcaadbe77028e1d353d71ef90fba",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "exact-technical"
+      ],
+      "id": "cond-0312",
+      "issue": {
+        "component": "",
+        "key": "cond-0312",
+        "narrative": "Kimi 0.31 process-title rewrite defeats exact-session admission proof\n\nP1 live managed-launch recurrence after the accepted COND-0310 Kimi 0.31.0 compatibility cutover.\n\nAt installed conductor `3a699241e5f208c48e2d2d6909d3199702507620` and fork `2b27bbaf36c291e43c37ecedb99a01bf73e63ec1`, a fresh native Kimi reviewer launch for COND-0303 created tmux pane `%47` and exact provider session `session_84a67fa5-3aab-4d84-9693-49343fd924a6`. The pane visibly reports that exact session, K3, version 0.31.0, and the exact bound worktree. The primary process is the pinned Kimi provider process at PID 53952, but Kimi 0.31.0 rewrites its process title/observable argv to bare `kimi-code`. `native_tui_launch._verify_bound_session_and_cwd` therefore cannot find `--session <id>` in observed argv and freezes the attachment as `pane_argv_does_not_resume_bound_session` before any task bytes are sent.\n\nThis is distinct from COND-0310's version allowlist. The launcher must preserve its fail-closed guarantee that a Kimi pane is attached to the exact minted session even when an admitted provider version legitimately masks its argv after parsing it. Do not merely trust launch intent, accept a bare process title, or weaken the Claude path. Add provider-specific, independently observed exact-session evidence (or another equivalently strong design) bound to the admitted process identity, executable digest, pane identity, start marker, and worktree. The interactive picker, wrong/missing/duplicate session identity, foreign executable, changed PID/start marker, wrong cwd, missing evidence, and unsupported versions must continue to freeze before delivery.\n\nGold reproduction evidence is the immutable run directory and route-breaker record. Add a failing regression that models the Kimi 0.31.0 process-title rewrite, then prove the exact valid case passes and all negative cases fail closed. Validate focused native-launch/managed-launch/API suites plus the relevant full fork suite. No campaign retry or task replay is authorized until the fix is reviewed, merged, deployed, source-proved, and a fresh generation is admitted.",
+        "status": "closed",
+        "title": "Kimi 0.31 process-title rewrite defeats exact-session admission proof",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Kimi 0.31 process-title rewrite defeats exact-session admission proof; rendered-header proof replaces deleted verifier.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/kimi_native_launch.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/native_tui_launch.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/managed_launch_v2.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/services/native_tui_launch.py"
+              ],
+              "name": "_verify_bound_session_and_cwd",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            },
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/services/kimi_native_launch.py",
+                "test/services/test_kimi_native_launch.py"
+              ],
+              "name": "RenderedSessionProof",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "06c756ecfbc476762e1e925f1db7ac5439552797",
+              "short": "06c756ecfbc4",
+              "subject": "Merge pull request #66 from colindmurray/fix/cond0311-kimi-process-title-binding"
+            }
+          ],
+          "pull_request": "colindmurray/cli-agent-orchestrator#66",
+          "search_sha": "54d1ce116b5e4c8a64074e3633c319402ae43b01",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "exact-technical"
+      ],
+      "id": "cond-0343",
+      "issue": {
+        "component": "cao-conductor fire marshal",
+        "key": "cond-0343",
+        "narrative": "the fire-marshal incident-store lock has no stale recovery; one crashed writer blocks every future report\n\nFound by the first real fire-marshal run (incident `4a19f6c5578395ca`, 2026-08-08).\n\n## What happens\n\n`conduct/lib/marshal_incidents.py` takes a lock around the incident store (`lock_path`, :174). It has\n**no stale recovery of any kind** \u2014 no age threshold, no holder check, no removal path. `grep -n lock`\nin that module returns exactly one function.\n\nSo a writer that dies while holding it \u2014 crashed, killed, or in this case blocked by a sandbox before\nit could release \u2014 leaves a lock file behind, and **every subsequent `conduct marshal report`,\n`open_incident` and `update_incident` fails for the lifetime of the installation.** There is no\ntimeout that clears it and no command that reports why.\n\nObserved: a 0-byte `fire-marshal/incidents.json.lock`, 497 seconds old at the point the marshal tried\nto write, with no holder under `lsof` or `fuser`. The marshal could not record its outcome and had to\nhand the recovery to a human. I cleared it by hand after verifying no holder.\n\n## Contrast with the launcher, which gets this right\n\n`scripts/fire-marshal.sh` already treats a stale lock as recoverable: it breaks a launch lock older\nthan ten minutes and says so on stderr (`clearing a stale launch lock`). The STORE lock \u2014 the one\nwhose loss costs an entire investigation rather than one launch attempt \u2014 has none of that.\n\nRelated but distinct: `cond-0216` is about the launcher's stale-break not being atomic. This is a\ndifferent lock in a different module with the opposite problem: not a racy break, but no break at all.\n\n## Severity\n\nP1. One crash permanently bricks the incident store, and the failure surfaces only at the moment an\ninvestigation is being recorded \u2014 after the frontier spend, not before it. The \u00a710.4 circuit breaker\nand `prior_incidents` both read that store, so a stuck lock also degrades every future wake's ability\nto recognise a repeat.\n\n## Suggested direction\n\nGive the store lock the same treatment the launcher already has: an age threshold, a holder check\nwhere the platform allows, a loud stderr line when it breaks one, and a typed refusal naming the lock\npath when it will not. A marshal that cannot record its finding should fail loudly at that moment, not\nhand a human a `rm` command it worked out itself.\n",
+        "status": "closed",
+        "title": "the fire-marshal incident-store lock has no stale recovery; one crashed writer blocks every future report",
+        "tracker_project": "cao-system"
+      },
+      "notes": "fire-marshal incident-store lock stale recovery across marshal_incidents and launcher scripts.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/marshal_incidents.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/marshal.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "scripts/fire-marshal.sh",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "conduct/commands/marshal.py",
+                "conduct/lib/marshal_incidents.py",
+                "tests/test_marshal_command.py",
+                "tests/test_marshal_incidents.py"
+              ],
+              "name": "IncidentStoreUnwritable",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            },
+            {
+              "diff_files": [],
+              "name": "_now_utc",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 11
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "1d56d496a844e2c119efcd8e81c181de9ad3cf28",
+              "short": "1d56d496a844",
+              "subject": "Merge pull request #112 from colindmurray/fix/marshal-p1-lock-and-muse-write"
+            }
+          ],
+          "pull_request": "colindmurray/cao-conductor#112",
+          "search_sha": "f48ab5fd109fb0a72cf6bae05e4a690e23d94613",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "exact-technical"
+      ],
+      "id": "cond-0097",
+      "issue": {
+        "component": "",
+        "key": "cond-0097",
+        "narrative": "Sentinel drops a queued recovery event while the event lock is held\n\nThe inherited `plugin/tests` suite deterministically fails one sentinel\nliveness test: while the event lock is held and recovery events are queued,\nthe test expects two events but observes one. The exact failure reproduced five\nof five isolated runs. The active Lane C conductor slice does not modify\n`plugin/`, the test imports only `conductor_sentinel`, and the failing run could\nnot import `conduct`; this is therefore a pre-existing plugin defect rather\nthan a regression from execution-mode selection.\n\nThe missing event appears to be the surface-unavailable recovery observation.\nThat can lose observability/evidence under contention, but no current evidence\nshows launch or control correctness failing. Classify it P2 and defer it from\nthe speed-first pre-chess Lane C/D path. A later fix should determine whether\nthe event is incorrectly starved or the test expectation is stale, then add a\ndeterministic held-lock regression that preserves every required recovery event\nwithout weakening lock ordering or duplicating events.\n\n<!-- preserved from the markdown ledger -->\n- **failing test:** `test_held_event_lock_liveness_with_recovery_events_queued`",
+        "status": "closed",
+        "title": "Sentinel drops a queued recovery event while the event lock is held",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Test-only regression fix: held events lock must retain queued recovery events across ticks; refusal surface must be injected, not live urllib.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "plugin/tests/test_interstitial_recovery.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "plugin/tests/test_interstitial_recovery.py"
+              ],
+              "name": "refusal_get_fn",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 5
+            },
+            {
+              "diff_files": [
+                "plugin/tests/test_interstitial_recovery.py"
+              ],
+              "name": "EVENTS_FILENAME",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 10
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "21db674ed6a0bba7cb7ef2163d31e2510687628f",
+              "short": "21db674ed6a0",
+              "subject": "fix(tests): pin the W9 refusal surface in the sentinel fixture (cond-0097)"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "2d67357037476d1bf61d086914439552246cc5a6",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": true,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "exact-technical",
+        "data-flow"
+      ],
+      "id": "cond-0386",
+      "issue": {
+        "component": "developer-tooling",
+        "key": "cond-0386",
+        "narrative": "pre-push hook leaks Git environment and commits fixtures onto source branch\n\n",
+        "status": "closed",
+        "title": "pre-push hook leaks Git environment and commits fixtures onto source branch",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Pre-push hook leaks GIT_DIR/GIT_WORK_TREE into nested test repos; fix clears git local env vars.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "cao_mcp_apps/.husky/pre-push",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "A",
+              "in_search_tree": false,
+              "path": "test/ext_apps/test_pre_push_env_isolation.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "cao_mcp_apps/.husky/pre-push",
+                "test/ext_apps/test_pre_push_env_isolation.py"
+              ],
+              "name": "--local-env-vars",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "2c00cc069ec0553b015bae09c4bfb01e9f8c76fb",
+              "short": "2c00cc069ec0",
+              "subject": "fix(cond-0386): isolate pre-push hook from Git local env vars"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "68f3efa511f97acf7cdee9b7a4b84734b427c28f",
+          "symbol_note": "Shell hook target; string-level expectation (--local-env-vars) recorded as introduced symbol."
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "vague-prose"
+      ],
+      "id": "cond-0012",
+      "issue": {
+        "component": "",
+        "key": "cond-0012",
+        "narrative": "Sentinel ignores spec-writer idle timeout and raises false deadman\n\nThe persistent spec-writer has no outstanding task and policy sets deadman_minutes.spec-writer to 100000, but the sentinel emitted a 30-minute deadman alert. This contradicts the documented intentional-idle behavior and risks unnecessary nudges/recovery.",
+        "status": "closed",
+        "title": "Sentinel ignores spec-writer idle timeout and raises false deadman",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Role-keyed deadman timeouts missed concrete profile names; projection onto routing profiles.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/sentinelcfg.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "tests/test_sentinelcfg.py"
+              ],
+              "name": "build",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 81
+            },
+            {
+              "diff_files": [
+                "conduct/lib/sentinelcfg.py",
+                "tests/test_sentinelcfg.py"
+              ],
+              "name": "deadman_minutes",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 40
+            },
+            {
+              "diff_files": [
+                "conduct/lib/sentinelcfg.py"
+              ],
+              "name": "task_classes",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 5
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "1067d6480cbbe885f42aebb26d68f188d77b2c2b",
+              "short": "1067d6480cbb",
+              "subject": "fix(cond-0012): project role deadman timeouts onto concrete profile names incl. overrides"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "d2c907553320d94948e36f3cf08bf9bd5bc94a7f",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "vague-prose"
+      ],
+      "id": "cond-0253",
+      "issue": {
+        "component": "",
+        "key": "cond-0253",
+        "narrative": "Final collection deletes quality-critical worker before callback route finality\n\nA quality-critical native reviewer emitted callback message 2124. report-callback.json still recorded status unknown/not-yet-reconciled. Its route evidence was a worker-authored live-env/manifest file rather than the required provider-native status, and immutable/process/env effort high conflicted with the native footer xhigh. The supervisor nevertheless ran ordinary final collect; conduct collect returned collected and deleted the terminal at 2026-07-31T12:36:46Z, destroying the only live pane capable of producing authoritative status. The monitor warning was delivered shortly afterward and implementation was halted, but exact-session route recovery is now unsupported/unclear. Expected: final collection of any quality-critical worker must fail closed unless the original callback occurrence has terminal route-finality status (reconciled/accepted under typed provenance or explicitly waived by authorized policy) and any required review/plan gate has been durably dispositioned. Actual: collect ignores unknown callback route state and deletes the terminal. Impact: a recoverable attestation gap becomes a campaign blocker and can let false-positive evidence pass into implementation. Preserve report/receipt history and one-callback semantics. Add tests for unknown callback, unattested callback, provenance conflict, valid reconciled callback, explicit authorized waiver, concurrent warning/collect ordering, and zero deletion on refusal. Also make registry retirement atomic with successful collect.\n\n**2026-08-05 p1-closure fleet recurrence \u2014 same issue, not a duplicate.** The\n44-row p1-closure roster at `2026-08-05T01:32:25Z` is durably recorded in\n`/Users/colin/Projects/cao-conductor-worktrees/p1-closure-campaign/.conductor/JOURNAL.md`\nunder \u201croster final-collection hygiene (no unsafe collection)\u201d. It had one\nactive COND-0303 writer seat, four protected leases, and obsolete predecessor\nrows whose durable reports and exact identities existed but whose v2 callback\nstate was `unknown/not-yet-reconciled`. The installed callback guard correctly\nrefused managed collection before terminal deletion; there was no force,\nreplay, raw terminal operation, or cleanup. The recurrence exposes the missing\naffirmative counterpart to this issue\u2019s fail-closed guard: once a supervisor\ntruthfully determines that a worker/artifact is superseded, cancelled, or has\nno current round, authority seat, lease, PR custody, callback effect, or named\ncontinuation, there is no supported append-only administrative retirement that\nremoves the obsolete terminal without falsely accepting its callback.\n\nThe repair must preserve exact task, terminal, generation, native session,\nreport/report hash, and source/PR head history; distinguish successful final\ncollection from a `superseded-unaccepted` retirement; explicitly disposition\nPR, lease, and authority; atomically seal or tombstone an unresolved callback;\nretain the no-replay boundary; and refuse active/open-authority runs. It must\nnot weaken the existing finality guard or silently rewrite historical status.",
+        "status": "closed",
+        "title": "Final collection deletes quality-critical worker before callback route finality",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Final collection retired a worker before callback route finality; replay must preserve seals and custody.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/retirement.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/retire.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/status.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [],
+              "name": "run_retirement",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            },
+            {
+              "diff_files": [],
+              "name": "seals_equivalent",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            },
+            {
+              "diff_files": [
+                "tests/test_retire.py"
+              ],
+              "name": "observe_delete",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "24e6ba736b4db206dff1bc87d035c3781dc5b1a4",
+              "short": "24e6ba736b4d",
+              "subject": "fix(cond-0253): preserve retirement seals and custody on replay"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "27504f654c238f84c748a730ac5b16604044ecf7",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "vague-prose"
+      ],
+      "id": "cond-0071",
+      "issue": {
+        "component": "",
+        "key": "cond-0071",
+        "narrative": "active Kimi terminal remains falsely idle\n\nDuring active task `self-heal-pr-a-fix-w8-boundary-w9`, Kimi K3 terminal `45f30e69` was visibly and durably active while CAO reported it idle. At 16:22:23 EDT the terminal log was still growing and the pane showed the worker editing `plugin/conductor_sentinel/_receipts.py` and `interstitial_recovery.py`; at the same time `GET /terminals/45f30e69` returned `status=\"idle\"` with stale `last_active=\"2026-07-21T16:17:34.988935\"`. The dashboard displayed the same false Idle badge. No `report_device_status(private=True)` TypeError or other private-DSR parser exception appears in this terminal log, so this is distinct from cond-0049's transient parser-failure reproduction.\n\nThis is P2 and intentionally deferred from Fable. The badge itself is minor, but the same status drives idle-gated inbox delivery: a false idle can paste ordinary messages into an active Kimi composer, where Kimi leaves them queued unless Ctrl-S steers them, compounding cond-0031 and making a `delivered` inbox row look as though it entered the model turn when it did not. It can also mislead spawn/readiness and monitoring decisions.\n\nFix the Kimi provider adapter so an active turn/output stream refreshes `last_active` and remains `processing` until the real idle prompt is reached; dashboard state should reflect that authoritative transition. Add an integration regression that starts a long Kimi turn, observes multiple tool/edit cycles, and proves the terminal never becomes idle or receives idle-gated inbox delivery mid-turn, then transitions idle only at the actual prompt. Preserve normal nonurgent idle delivery and the separate explicit Ctrl-S urgent-steer path.\n\nFresh reproduction during active Sol/max task `self-heal-pr-b-validator-sol-post-final-fix`: terminal API briefly reported terminal `79d5a2b8` as `error` and the selected tmux window appeared to be a raw zsh prompt, while the real validator remained active. Window 2 contained two panes: pane 2.0 (pid 58230, current command `node`, cwd Skillshare) held the live GPT-5.6-sol/max turn and continued exact-head hostile probes with Codex session `019f8700-b267-7cb3-9fef-f5205d029ea7` and one background terminal; pane 2.1 (pid 71583, current command `zsh`, cwd cao-conductor) was the empty active pane that drove the misleading observation/API state. Preserve both panes and the original callback; no restart or duplicate validator is warranted. This broadens cond-0071's evidence from false `idle` to false terminal-lifecycle classification when multi-pane active-window selection follows the wrong pane. The provider/session adapter must bind status and cleanup decisions to the actual task-owning pane/session identity rather than the currently selected empty shell pane, and tests must cover an active provider pane beside an active empty shell pane. Evidence: terminal `79d5a2b8`, tmux window 2 panes 2.0/2.1, Codex session `019f8700-b267-7cb3-9fef-f5205d029ea7`, monitor occurrence `monitor-prb-validator-multipane-false-error-20260721`.\n\nThe same multi-pane misbinding then blocked recovery, not just monitoring. CAO durably queued the sole cond-0069 continuation as inbox row `406`, but left it `pending` because the wrong-pane `error` classification prevented the required IDLE/COMPLETED event. The provider pane was ready at its refusal prompt, yet the installed API exposes no identity-bound status reconciliation or wake operation; window-level input would select the active zsh pane and is unsafe. This remains P2 as the lifecycle/status owner, while the campaign-blocking exactly-once delivery effect is adjudicated under existing P1 cond-0031. A regression must bind liveness, status events, and inbox delivery to the same task-owning pane/provider generation and prove that a pending row is delivered once after that exact provider becomes ready even when another pane in the window is active.\n\nFresh CAO shakedown reproduction during exact-head Sol/max task `self-heal-root-exact-head-review-sol-cao`: terminal `f96fa7ba` stopped at the Codex update-choice menu while `GET /terminal` reported `idle`. The task could not progress from that state despite the lifecycle claiming readiness; the human monitor selected `Skip` with `Down` + `Enter`, after which the same review continued and produced its report. This is additional evidence for the existing false-lifecycle/status class, not a new P0/P1: an interactive preflight can be misreported as idle even though model input is unavailable. Preserve the manual recovery provenance and add a version-bound update-menu fixture proving the task-owning provider generation remains preflight-blocked until a structured resolution or authoritative readiness transition occurs. Evidence: terminal `f96fa7ba`, task/run `self-heal-root-exact-head-review-sol-cao`, and its CAO terminal/event history. Keep this P2 out of Fable and active implementation scope.",
+        "status": "closed",
+        "title": "active Kimi terminal remains falsely idle",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Active Kimi terminal stayed falsely idle; retire reconciliation now weighs turn-terminal evidence. Shares its fix commit with cond-0293.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/retire.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "tests/test_retire.py"
+              ],
+              "name": "mark_turn_quiesced",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            },
+            {
+              "diff_files": [
+                "tests/test_retire.py"
+              ],
+              "name": "_install_terminal_heartbeat",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "3d26d5f20140c5bda3f0cff40622de9820df2a1c",
+              "short": "3d26d5f20140",
+              "subject": "fix(retire): reconcile stale processing rows against turn-terminal evidence"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "f8819321ad1fcb110c38063afcb3634efbaccc51",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": {
+        "also_resolves": "cond-0293",
+        "sha": "3d26d5f20140"
+      },
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "data-flow",
+        "exact-technical"
+      ],
+      "id": "cond-0131",
+      "issue": {
+        "component": "",
+        "key": "cond-0131",
+        "narrative": "managed native terminal panels discard mouse-wheel input\n\nManaged terminal views suppress every xterm onData event to protect the provider composer. When tmux mouse mode is active, xterm translates desktop or synthetic touch wheel events into terminal mouse-report bytes through onData, so the same guard also discards scrolling. Preserve the read-only keyboard and paste boundary while forwarding only wheel-originated, structurally valid mouse reports to the existing websocket. Cover managed wheel forwarding and prove ordinary keyboard/paste data remains blocked.\n\nThe first client-side fix merged in fork PR 28 and emitted the correct live SGR\nwheel frame (`ESC [ < 64 ; 76 ; 16 M`) from Chrome, but installed acceptance at\nfork head `96ecef1ba3efa591e69b84416d791ebde151f31f` proved the server still\ndiscarded it: `terminal_ws._forward_input` unconditionally continues for every\nmanaged terminal before parsing the payload. A real Playwright mouse wheel over\nmanaged Kimi terminal `19e46c65` produced the WebSocket input frame while tmux\npane `%3` remained outside copy mode. This is P1, not P2, because the human\ndashboard's required read-only observation path cannot inspect output above\nthe current screen. The server must independently admit only structurally\nvalid wheel reports for managed terminals and continue rejecting all printable,\npaste, malformed, and non-wheel mouse input.\n\nFork PR 31 merged as `bb5d2426733df8e6992b264991eb4e97c4b16a2c`\nafter all hosted checks passed. The retained Opus 5 reviewer approved exact\nhead `e64c9a86d27418f89745f1ddeae6fed68332927c` with no P0/P1 and approved the\ncheap encoding-tightening follow-up with no new findings; reports are\n`cao-p1-opus-review-recovery-v4` and `cao-p1-opus-review-recovery-v5`.\nConductor deploy attempt `c4471f9acce0` installed the merged head. A real mouse\nwheel event in the user's Chrome dashboard then moved managed Kimi pane `%3`\ninto tmux copy mode at scroll position 73. The focused gate still rejects\nprintable, paste, malformed, non-wheel, Unicode-digit, and out-of-range X10\ninput while preserving unmanaged delivery.",
+        "status": "closed",
+        "title": "managed native terminal panels discard mouse-wheel input",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Mouse-wheel scroll put panes into tmux copy mode so control input was discarded; guard flows from tmux client through delivery service.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/clients/tmux.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/control_input_contract.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/control_input_service.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [],
+              "name": "_deliver_under_lease",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            },
+            {
+              "diff_files": [
+                "test/services/test_copy_mode_guard.py"
+              ],
+              "name": "send_literal",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 61
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "53b29fd26782c9b8e13c63e5c86bff6818dac389",
+              "short": "53b29fd26782",
+              "subject": "fix(control-input): guard managed delivery against tmux copy mode (cond-0178)"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "4d244d1b4ed4bfd7d93f1e8f5cbe1509b3b10e2f",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "history-dependent"
+      ],
+      "id": "cond-0270",
+      "issue": {
+        "component": "",
+        "key": "cond-0270",
+        "narrative": "COND-0266 barrier fix does not migrate existing epoch gaps\n\nAfter deployed conductor 4333ead and fresh exact source proof, clear-barrier still refuses epoch 1 because its pre-cutover required_tracks remain in tracks gaps. The new code reports planned_unbound_conflicts empty, proving the tracks have the intended shape, but it does not reclassify legacy barrier entries. Normal clear cannot complete without prohibited invented bindings or plan republishing.",
+        "status": "closed",
+        "title": "COND-0266 barrier fix does not migrate existing epoch gaps",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Follow-up to cond-0266: barrier fix did not migrate registries whose epoch gaps predate plan declarations.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/campaign_registry.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "skills/plan-epoch-synchronization/SKILL.md",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "conduct/lib/campaign_registry.py"
+              ],
+              "name": "legacy_migration_assessment",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            },
+            {
+              "diff_files": [
+                "conduct/lib/campaign_registry.py"
+              ],
+              "name": "_apply_legacy_migration",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "69bf0d5b75afdcab39839d9d6d646dfa966a7a4f",
+              "short": "69bf0d5b75af",
+              "subject": "fix(cond-0270): migrate legacy plan barriers that predate declarations"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "4333ead68d14e9faf6353f20a8ae8c3b6922f718",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "history-dependent"
+      ],
+      "id": "cond-0414",
+      "issue": {
+        "component": "conduct",
+        "key": "cond-0414",
+        "narrative": "deployed report-identity reconciler cannot consume preserved PR121 alternate evidence\n\nAfter cutover to conductor 924b38dc7facda0a7516808fe0460bc8875722b3 plus fork c52e670384e02e0648b43d9957c20ea95ff25f45, the supported reconcile-report-identity command for preserved COND-0388 task cond-0388-pr121-review-luna-r4 refuses with result-handoff-validation: delivered packet does not contain one complete alternate task/report identity. The authoritative delivery is submitted but its provider submission receipt has task_id=null and task_sha256=null; the task packet names only the authoritative path, while the unchanged alternate report exists separately. The refusal is zero-effect and prevents the authorized no-replay reconciliation needed before PR #121 review can advance. Preserve all identity/report bytes and add a supported recovery path; do not weaken identity or finality guards.",
+        "status": "closed",
+        "title": "deployed report-identity reconciler cannot consume preserved PR121 alternate evidence",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Deployed reconciler could not consume PR121-preserved alternate callback evidence; extends COND-0392 command.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M/M",
+              "in_search_tree": true,
+              "path": "conduct/commands/reconcile_report_identity.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "conduct/commands/reconcile_report_identity.py"
+              ],
+              "name": "_extract_alternate_identity",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            },
+            {
+              "diff_files": [],
+              "name": "_read_reconciliation_record",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 1
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "ca598999d81dab3e3ac46f5ad99ae2b095c9d331",
+              "short": "ca598999d81d",
+              "subject": "fix(cond-0414): support callback-derived legacy report identity reconciliation"
+            },
+            {
+              "sha": "d08900e088de902448e4c839c67d8c31f5928aee",
+              "short": "d08900e088de",
+              "subject": "fix(cond-0414): validate submission evidence and CAS exclusivity for callback reconciliation"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "924b38dc7facda0a7516808fe0460bc8875722b3",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "history-dependent"
+      ],
+      "id": "cond-0050",
+      "issue": {
+        "component": "",
+        "key": "cond-0050",
+        "narrative": "session-env clear fails open and resurrects stale routing\n\nFresh independent Sol/max validation of companion PR-C head `a81853fa547788b97775af9fa377bc25e6a1643e` proved that session-env deletion fails open. `set_session_env({})` delegates to `clear_session_env`, whose exhausted database delete is warned and swallowed before the cache is evicted. The valid stale row remains durable, is accepted on a cold read, and can be injected into a later window of a newly reused session name. A real SQLite exclusive lock reproduced the behavior; new-session creation proceeded, and reconciliation falsely reported the still-present row as removed.\n\nMake public clear strict: durable deletion must complete before cache eviction, and retry exhaustion must raise `SessionEnvStoreError`. Empty-set and new-session pre-clear paths must fail before tmux creation. Reconciliation may report `removed` only after confirmed deletion. Cleanup that must preserve an earlier exception may catch/log the strict clear only at that explicit teardown call site. Add injected-delete-failure, real-lock, reused-session-window, and reconciliation regressions. This is a P1 amendment to the active C1 companion lane; PR-C must not merge or deploy until fixed and independently revalidated.",
+        "status": "closed",
+        "title": "session-env clear fails open and resurrects stale routing",
+        "tracker_project": "cao-system"
+      },
+      "notes": "session-env clear failed open and resurrected stale routing; strict fail-closed clear.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/session_env.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/session_service.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/services/session_env.py",
+                "src/cli_agent_orchestrator/services/terminal_service.py",
+                "test/services/test_plugin_event_emission.py",
+                "test/services/test_session_env.py",
+                "test/services/test_session_service.py",
+                "test/services/test_terminal_service_coverage.py",
+                "test/services/test_terminal_service_full.py"
+              ],
+              "name": "clear_session_env",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 19
+            },
+            {
+              "diff_files": [],
+              "name": "delete_session",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 46
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "8e46d8912c0033d7b8a6ce5097ec5773dc108587",
+              "short": "8e46d8912c00",
+              "subject": "fix(server): strict fail-closed session-env clear (cond-0050)"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "a81853fa547788b97775af9fa377bc25e6a1643e",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "history-dependent"
+      ],
+      "id": "cond-0067",
+      "issue": {
+        "component": "",
+        "key": "cond-0067",
+        "narrative": "failed session-env preclear cleanup destroys colliding terminal\n\nFresh Sol/max revalidation of companion PR-C head `8e46d8912c0033d7b8a6ce5097ec5773dc108587` proved the cond-0050 zero-side-effect boundary remains incomplete. New-session strict pre-clear is inside `create_terminal`'s broad resource-cleanup try. When pre-clear raises before this invocation acquires any resource, the generic handler still stops/unlinks the generated terminal ID's FIFO, clears status, cleans its provider, and deletes its terminal row.\n\nA deterministic isolated probe forced the 32-bit generated terminal ID to collide with an unrelated seeded live terminal. Injected pre-clear exhaustion correctly retained the stale session-env row but deleted the unrelated terminal DB row, unlinked its FIFO, and removed/cleaned its provider state. Move the no-env/new-session durable clear into a true preflight outside the resource-owning try, preferably before terminal-ID generation, or rigorously gate every cleanup on exact per-resource acquisition by this invocation. Add a collision regression seeding unrelated FIFO/status/provider/row state and proving byte-for-byte preservation plus zero cleanup calls. cond-0050 remains open; PR-C must not merge until this P1 and the full strict-clear matrix pass fresh independent revalidation.",
+        "status": "closed",
+        "title": "failed session-env preclear cleanup destroys colliding terminal",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Failed preclear cleanup destroyed a colliding live terminal; pre-clear became a true preflight after cond-0050 introduced strictness.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "test/services/test_terminal_service_full.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "test/services/test_terminal_service_full.py"
+              ],
+              "name": "create_terminal",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 368
+            },
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/services/terminal_service.py",
+                "test/services/test_terminal_service_full.py"
+              ],
+              "name": "clear_session_env",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 53
+            },
+            {
+              "diff_files": [
+                "test/services/test_terminal_service_full.py"
+              ],
+              "name": "generate_terminal_id",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 48
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "deda4ab52afaa4d9fe85ebcdbb1915449726dd42",
+              "short": "deda4ab52afa",
+              "subject": "fix(server): make strict session-env pre-clear a true preflight (cond-0067)"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "8e46d8912c0033d7b8a6ce5097ec5773dc108587",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "data-flow"
+      ],
+      "id": "cond-0550",
+      "issue": {
+        "component": "",
+        "key": "cond-0550",
+        "narrative": "A rebuilt on-demand provider silently loses its pinned route\n\nproviders/manager.py:208-209 reconstructs a provider with expected_model=metadata.get(\"model\") and expected_effort=metadata.get(\"effort\"), but clients/database.py:5180-5203 returns neither key. Both are always None, so the rebuilt provider falls back to profile.model. This is the stored-versus-live divergence the identity project exists to fix, already happening in production.",
+        "status": "closed",
+        "title": "A rebuilt on-demand provider silently loses its pinned route",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Rebuilt on-demand provider lost its pinned route; assigned_route must persist and reconstruct.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M/M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/providers/manager.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M/M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/clients/database.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/terminal_service.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "test/providers/test_provider_manager_assigned_route.py"
+              ],
+              "name": "ProviderManager",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 46
+            },
+            {
+              "diff_files": [
+                "test/api/test_terminals_assigned_route_api.py",
+                "test/providers/test_provider_manager_assigned_route.py"
+              ],
+              "name": "assigned_route",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 38
+            },
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/api/main.py",
+                "src/cli_agent_orchestrator/providers/manager.py",
+                "test/providers/test_provider_manager_assigned_route.py"
+              ],
+              "name": "TerminalAssignedRouteIncompleteError",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "7401a08200132073c0b1831177b8b421b8a04146",
+              "short": "7401a0820013",
+              "subject": "fix(terminal): persist assigned route and guard managed reconstruction (cond-0550)"
+            },
+            {
+              "sha": "5bbdcc701144b10ad988dc4e121233e11f57cafc",
+              "short": "5bbdcc701144",
+              "subject": "fix(terminal): preserve ordinary route reconstruction (cond-0550)"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "7e7b2d1bbb1511b65222a7d8a74d2228fca41235",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "data-flow"
+      ],
+      "id": "cond-0422",
+      "issue": {
+        "component": "retained-delivery",
+        "key": "cond-0422",
+        "narrative": "conduct continue records a retained round delivered without provider-native submission proof\n\n## Symptom\n\n`conduct continue` records a retained round as `delivery.status = \"delivered\"`\nfor every non-Kimi provider whenever the inbox POST does not raise, without any\nproof the instruction reached the provider session. When the message is queued\nbut never becomes a model turn, the round is silently stranded: the control\nplane believes delivery succeeded, no ambiguity is recorded, and the only\nremaining net is the 120-minute sentinel deadman.\n\n## Observed instance\n\nTask `cond-0388-report-chain-reconciliation-fix-deepseek-r3`, project\np1-closure, terminal `9fb2b974`, provider `claude_code` / `deepseek-v4-flash`.\n\nRound 2 record in `retained-track.json`:\n\n    {\n      \"attempt\": 1,\n      \"attempted_at\": \"2026-08-16T18:37:56Z\",\n      \"deadman_rearmed_at\": \"2026-08-16T18:37:56Z\",\n      \"instruction_sha256\": \"f2066c4a68508f6f5199a01a4dc1915cd3707db2a16f2456d79bd56d5c998831\",\n      \"recorded_at\": \"2026-08-16T18:37:56Z\",\n      \"status\": \"delivered\"\n    }\n\nNote there is no `evidence` key at all.\n\nThe provider transcript for session `dfb378de-abc2-4c93-bc06-b88a13690a34` shows\nthe round-2 instruction never arrived. After 18:35Z the session contains only a\nleftover background-task notification from round 1, then two assistant turns\nconcluding:\n\n> The acknowledgement round is already complete - the callback was delivered.\n> The round is closed; no further action in this acknowledgement-only round.\n\nThe worker then went idle. 70+ minutes later: no worktree writes, branch head\nunchanged at `fefd1089`, no campaign events, no report.\n\n## Defect\n\n`conduct/commands/continue_round.py`, generic delivery path (~line 413-433):\n\n    try:\n        client.send_inbox(track[\"terminal_id\"], sender_id=..., message=_idle_round_pointer(track))\n    except CaoApiError as exc:\n        client_error = exc\n    if client_error is not None:\n        record_delivery(..., status=\"ambiguous\", ...)\n        return _outcome(psd, task_id, \"delivery-ambiguous\", ...)\n    record_delivery(run_dir, instruction_sha256=instruction_sha256,\n                    status=\"delivered\", at=_common.now_utc())\n\nThe POST response is discarded. `delivered` is inferred from the absence of an\nexception. No `evidence` is recorded.\n\nThe Kimi path in the same file (~line 300-312) does it correctly, requiring a\npositive submission observation:\n\n    if outcome == \"success\" and submission.get(\"observed\") == \"submitted\":\n        retained_track.record_delivery(..., status=\"delivered\", evidence=evidence)\n\n## Why this is a contract violation, not just a gap\n\nThe codebase already states the invariant this path breaks.\n\n`caoapi.get_message_turn_receipt`:\n\n> An ordinary inbox `delivered`/terminal paste is never an acknowledgement.\n\n`report._reconcile_turn_receipt`:\n\n> Never inferred from ordinary inbox `delivered`/terminal paste.\n\n`report._receipt_from_response`:\n\n> The COMPLETE server-returned identity is required - message id, sender,\n> receiver, and creation time; nothing is inferred locally. Any missing or\n> contradictory field is an ambiguity, never an assumed acceptance.\n\n`caoapi.send_inbox` is documented as idle-gated queueing. A 2xx means the row\nwas created, not that the session consumed it.\n\n## Consequences\n\n1. `record_delivery` sets `deadman_rearmed_at` only on `delivered`, so a false\n   `delivered` arms the worker's deadman obligation against a delivery that\n   never happened. The stall is detected 120 minutes later instead of at once.\n2. `conduct recover-delivery` refuses anything whose status is not `ambiguous`\n   carrying `evidence.control_id`. Because this path records neither, the\n   precise recovery route is unreachable - the failure was recorded as success,\n   so the mechanism built to fix it cannot engage.\n3. The supervisor receives exit 0 and correctly believes the round is running.\n   No model or supervisor judgment can detect this; the record is simply wrong.\n\n## Suggested direction\n\nBring the generic path up to the standard the Kimi path and the callback path\nalready meet:\n\n- validate the inbox POST receipt and record `message_id` in delivery evidence\n  in every outcome, so a stranded round always has a reconciliation handle;\n- treat a missing or contradictory receipt field as `ambiguous`, never as\n  assumed acceptance;\n- confirm the provider-native `terminal_queued -> submitted` acknowledgement via\n  `get_message_turn_receipt` within a bounded wait before recording\n  `delivered`;\n- record `ambiguous` when that acknowledgement cannot be obtained, so the\n  supervisor sees `delivery-ambiguous` immediately and no deadman is armed off\n  an unproven delivery.\n",
+        "status": "closed",
+        "title": "conduct continue records a retained round delivered without provider-native submission proof",
+        "tracker_project": "cao-system"
+      },
+      "notes": "continue must prove the retained round became a model turn; submission proof threads through the receipt client.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/continue_round.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "tests/fake_cao.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "tests/test_continue_round.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "conduct/commands/continue_round.py"
+              ],
+              "name": "get_message_turn_receipt",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 3
+            },
+            {
+              "diff_files": [],
+              "name": "_idle_round_pointer",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 4
+            },
+            {
+              "diff_files": [
+                "conduct/commands/continue_round.py",
+                "tests/test_continue_round.py"
+              ],
+              "name": "SUBMISSION_CONFIRM_SECONDS",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "5477b9c2775b289740f126952489f97787c2fe00",
+              "short": "5477b9c2775b",
+              "subject": "fix(continue): prove the retained round became a model turn (cond-0422)"
+            }
+          ],
+          "pull_request": "colindmurray/cao-conductor#156",
+          "search_sha": "b8ce04be10b0c101c5301995d27e7850a2410438",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "data-flow",
+        "history-dependent"
+      ],
+      "id": "cond-0303",
+      "issue": {
+        "component": "",
+        "key": "cond-0303",
+        "narrative": "Fresh successor cannot bind campaign routing over historical worktree policy\n\nSeverity P1: this deterministically blocks two approved conductor repair lanes. A parked native Codex writer is bound to an exact spec head whose historical worktree contains an older .conductor/policy.md routing spec to claude_code/Fable. The current campaign policy explicitly selects Codex Sol, but conduct continue resolves the historical worktree policy and refuses route drift; a fresh successor spawn from the same exact document handoff resolves that same stale policy and cannot select the supervisor-approved current route. Editing the historical worktree, fabricating a profile, or forcing fallback would corrupt provenance. Add a generation-bound successor/policy-root contract that separates immutable artifact source from the current authorized campaign routing snapshot and records both identities. It must reject unapproved route drift but allow an explicit current-policy successor at the same exact artifact head. Cover old-policy/current-policy conflict, same-provider changed effort, cross-provider handoff, stale policy digest, exact-head preservation, denied Fable without task approval, no provider I/O on refusal, and idempotent retry.",
+        "status": "closed",
+        "title": "Fresh successor cannot bind campaign routing over historical worktree policy",
+        "tracker_project": "cao-system"
+      },
+      "notes": "Fresh succession bound routing over historical worktree policy; round number carried on prepared slots, generation bindings appended.",
+      "repos": {
+        "cao-conductor": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/successor_policy_registry.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/_successor.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M/M",
+              "in_search_tree": true,
+              "path": "conduct/commands/spawn.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/lib/ledger.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "conduct/commands/continue_round.py",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "conduct/commands/_successor.py",
+                "conduct/commands/spawn.py"
+              ],
+              "name": "claim_source",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 2
+            },
+            {
+              "diff_files": [
+                "conduct/commands/spawn.py",
+                "conduct/lib/spawn_delivery.py",
+                "tests/test_spawn.py"
+              ],
+              "name": "create_locked",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            },
+            {
+              "diff_files": [
+                "conduct/commands/spawn.py"
+              ],
+              "name": "_attach_generation_binding",
+              "origin": "introduced",
+              "pre_fix_grep_hits": 0
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "e34c9b7e88b9b3b9b661839105828e3b53aceb5d",
+              "short": "e34c9b7e88b9",
+              "subject": "fix(cond-0303): close the second-review crash-resume and hand-back seams"
+            },
+            {
+              "sha": "54ceca22bd20fafba86bf6b148ffbaa9f692031e",
+              "short": "54ceca22bd20",
+              "subject": "fix(cond-0303): carry the round number on a prepared slot"
+            },
+            {
+              "sha": "59ef2d387223df3fbbf0d71a8152bcc0578a6b5b",
+              "short": "59ef2d387223",
+              "subject": "fix(cond-0303): append the generation and native-session bindings"
+            }
+          ],
+          "pull_request": null,
+          "search_sha": "4ce481479e2ffb4e7b05fd6e735f9e4b581321dd",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    },
+    {
+      "case_types": [
+        "exact-technical",
+        "data-flow"
+      ],
+      "id": "cond-0242",
+      "issue": {
+        "component": "",
+        "key": "cond-0242",
+        "narrative": "FIFO liveness libtmux parse storm starves CAO event loop\n\n# Recurrent CAO event-loop starvation from FIFO liveness tmux parsing\n\n- Observed: 2026-07-30T22:46:50Z\u201322:49:22Z and again beginning\n  2026-07-30T22:53:52Z\n- Installed `cao-server` identity: PID 5480, listening on\n  `127.0.0.1:9889`\n- Installed source proof at observation:\n  - cao-conductor `b731946f5a12ee7ea76e90c5f9bf955038933b91`\n  - cli-agent-orchestrator `e703dd3218ec7365a04dd4606bee5e891805fd58`\n- Severity: P1, recurrent control-plane unavailability during an active\n  multi-session campaign\n\n## Symptom\n\nWhile the server process remained alive and held the listener:\n\n```text\nconduct tell --project p1-closure --session cao-p1-closure\n```\n\ntimed out resolving the supervisor. A direct bounded request also received\nzero response bytes:\n\n```text\ncurl --max-time 5 http://127.0.0.1:9889/health\n```\n\nThe first managed tell attempt produced no inbox event, so it was not replayed\nblindly. After the API recovered, a fresh managed tell succeeded and emitted\none inbox receipt.\n\n## Authoritative evidence\n\nThe process-bound daemon log is:\n\n```text\n/Users/colin/.aws/cli-agent-orchestrator/logs/cao_2026-07-30_03-38-11.log\n```\n\nAt both occurrences it records the same stack:\n\n```text\nfifo_reader._watchdog_loop\n  -> fifo_reader._check_pipe_liveness\n  -> terminal_service._probe_pane\n  -> tmux_backend.get_history\n  -> libtmux ... fetch_objs / parse_output\nValueError: zip() argument 2 is shorter than argument 1\n```\n\nDuring the second occurrence the log also emitted a burst of\n`Terminal metadata not found` warnings for live terminals and the sentinel's\nloopback `GET /terminals/7864d54f` timed out. A two-second process sample of\nPID 5480 showed the uvloop main thread synchronously executing libtmux\nsubprocess/listing and parsing work. `lsof` simultaneously proved that PID\n5480 still owned the listener.\n\nRead-only `tmux list-sessions`, `list-windows -a`, and `list-panes -a` later\nsucceeded, and `/health` recovered without a server restart. This makes the\nparse failure intermittent, but the shared-loop availability failure repeated\nunder ordinary operation.\n\n## Expected and actual\n\n- Expected: a malformed or slow tmux history/liveness observation is bounded\n  and isolated from FastAPI request processing; `/health`, inbox delivery,\n  callbacks, and managed lifecycle commands remain responsive.\n- Actual: the FIFO watchdog's failing tmux observation repeatedly starves the\n  shared server event loop long enough for health, terminal-status, and\n  supervisor-message requests to time out.\n\n## Minimal regression boundary\n\nExercise the FIFO liveness watchdog with a backend `get_history` operation that\neither blocks for a bounded interval or raises the observed libtmux\n`ValueError`. Concurrently issue a trivial event-loop request. The request must\ncomplete within its normal budget, the watchdog must record one bounded error,\nand the watchdog must not spin or emit a terminal-metadata warning storm.\n\nThis is related in failure class to cond-0154, but not a duplicate: cond-0154\ncovers the unmanaged inbox wake `_nudge_once` path. This occurrence is the\nmanaged FIFO pipe-pane liveness watchdog and its libtmux history/listing path.\n\n**Resolution.** PR #57 merged as cli-agent-orchestrator `64bba6e42607c9093f332440662db1c7c53e2977`, preserving strict direct tmux identity reads while replacing `get_history`'s broad libtmux traversal with bounded exact-window observation, per-terminal exponential retry/log containment, conservative pane resolution, and truthful v1/v2 metadata diagnostics. Exact-head CI was green and retained independent review approved. Shared-fleet deploy attempt `2f9b9f13bef8` installed and activated conductor `b731946f5a12ee7ea76e90c5f9bf955038933b91` plus fork `64bba6e`, preserving all terminal/generation/native-session/pane identities and rebinding both p1-closure and dnd-scheduler environments. Live acceptance passed: dashboard reload 0.20s; representative P1/D&D/Claude/Codex/legacy card opens and Output modal about 0.27s; health about 0.002s; a stale ACP FIFO was bounded to five re-arms then unenrolled; no libtmux parse or valid-v2 warning storm recurred. Existing Output `no output` behavior remains the separate cond-0228 identity-projection defect, not a duplicate or closure exception.",
+        "status": "closed",
+        "title": "FIFO liveness libtmux parse storm starves CAO event loop",
+        "tracker_project": "cao-system"
+      },
+      "notes": "libtmux FIFO liveness parse storm starved the event loop; bounded observation across fifo_reader/tmux client/constants.",
+      "repos": {
+        "cao": {
+          "expected_files": [
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/services/fifo_reader.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/clients/tmux.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "src/cli_agent_orchestrator/constants.py",
+              "verified_against_diff": true
+            },
+            {
+              "diff_status": "M",
+              "in_search_tree": true,
+              "path": "docs/configuration.md",
+              "verified_against_diff": true
+            }
+          ],
+          "expected_symbols": [
+            {
+              "diff_files": [
+                "test/services/test_cond0242_liveness_contention.py"
+              ],
+              "name": "FifoManager",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 19
+            },
+            {
+              "diff_files": [
+                "src/cli_agent_orchestrator/services/fifo_reader.py",
+                "test/services/test_cond0242_liveness_contention.py"
+              ],
+              "name": "_check_pipe_liveness",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 41
+            },
+            {
+              "diff_files": [
+                "test/clients/test_tmux_client.py",
+                "test/services/test_cond0242_liveness_contention.py"
+              ],
+              "name": "get_history",
+              "origin": "preexisting",
+              "pre_fix_grep_hits": 246
+            }
+          ],
+          "fix_commits": [
+            {
+              "sha": "ce4b986e7de09294a33aebbf02be6c92ec8a98bc",
+              "short": "ce4b986e7de0",
+              "subject": "fix: bound FIFO liveness tmux observation (cond-0242)"
+            }
+          ],
+          "pull_request": "colindmurray/cli-agent-orchestrator#57",
+          "search_sha": "e703dd3218ec7365a04dd4606bee5e891805fd58",
+          "symbol_note": null
+        }
+      },
+      "shared_fix_commit": null,
+      "test_only_fix": false,
+      "tool_lanes": {
+        "codebase_memory": null,
+        "qmd": null,
+        "serena": null
+      }
+    }
+  ],
+  "description": "Historical-bug code-grounding benchmark: 25 resolved cao-system bugs with fix-commit-bound expected targets. Search runs at each repo's pre-fix search_sha; recall denominators exclude targets absent from the search tree and symbols introduced by the fix.",
+  "meta": {
+    "authoring_base": {
+      "cao_conductor_head_at_authoring": "9e3a43bf7366533428b0b5aaf794344de4b79f4b",
+      "cli-agent-orchestrator": "539796799ae56f7694f2d201763212a1ccb10e67"
+    },
+    "case_count": 25,
+    "case_type_coverage": [
+      "cross-repository",
+      "data-flow",
+      "exact-technical",
+      "history-dependent",
+      "stack-trace",
+      "vague-prose"
+    ],
+    "generated_by": "evals/code-grounding/tools/build_fixture.py (hand-sampled diffs, mechanical verification)",
+    "repos": {
+      "cao": {
+        "env_override": "CAO_EVAL_REPO_CAO",
+        "local_path": "/Users/colin/Projects/cli-agent-orchestrator"
+      },
+      "cao-conductor": {
+        "env_override": "CAO_EVAL_REPO_CAO_CONDUCTOR",
+        "local_path": "/Users/colin/Projects/cao-conductor"
+      }
+    },
+    "tracker_project": "cao-system"
+  },
+  "schema_version": 1
+}
