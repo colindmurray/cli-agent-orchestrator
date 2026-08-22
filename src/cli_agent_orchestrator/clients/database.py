@@ -29,6 +29,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, declarative_base, sessionmaker
 from sqlalchemy.schema import CreateColumn
 
+from cli_agent_orchestrator.clients import tracker_search_schema
 from cli_agent_orchestrator.constants import DATABASE_URL, DB_DIR, DEFAULT_PROVIDER
 from cli_agent_orchestrator.models.flow import Flow
 from cli_agent_orchestrator.models.inbox import InboxMessage, MessageStatus
@@ -2642,6 +2643,81 @@ def _migrate_tracker_observed_revision_columns(target_engine: Optional[Any] = No
         raw.close()
 
 
+def _migrate_tracker_search_projection(target_engine: Optional[Any] = None) -> None:
+    """Install the derived tracker search projection, idempotently.
+
+    Both tracker schema entry points call this ONE injectable raw migration
+    after the observed-columns migration has guaranteed
+    ``tracker_issues.observed_revision`` and ``tracker_issue_comments.important``.
+    It creates the metadata singleton, the durable vector outbox and its
+    generation/vector tables, both FTS5 documents, the seven source triggers,
+    and backfills any unprojected source rows — all inside one ``BEGIN
+    IMMEDIATE`` held from before shape validation through the final coverage
+    proof (design §13.1), so a concurrent writer can never land in the
+    backfill/trigger gap.
+
+    The lexical migration never creates a vector generation: with no generation
+    prepared, the triggers enqueue no dirty work and the installation stays
+    lexical-only. An incompatible prior derived shape raises a typed error
+    instead of trusting ``IF NOT EXISTS``; the rollback leaves every prior
+    table intact for the ordinary backup/migration-repair path.
+    """
+    target = target_engine if target_engine is not None else engine
+    raw = target.raw_connection()
+    try:
+        raw.execute("BEGIN IMMEDIATE")
+        try:
+            issues = _tracker_table_columns(raw, "tracker_issues")
+            comments = _tracker_table_columns(raw, "tracker_issue_comments")
+            if issues is None and comments is None:
+                # Fresh store below create_all's reach: there is nothing to
+                # project yet, and create_all plus the next entry-point run
+                # owns installation.
+                raw.commit()
+                return
+            _require_observed_columns(issues=issues, comments=comments)
+            tracker_search_schema.ensure_projection(raw)
+            raw.commit()
+        except tracker_search_schema.TrackerSearchSchemaError:
+            raw.rollback()
+            raise
+        except TrackerSchemaMigrationError:
+            raw.rollback()
+            raise
+        except Exception as exc:
+            raw.rollback()
+            raise TrackerSchemaMigrationError(
+                f"tracker search projection migration failed: {exc}"
+            ) from exc
+    finally:
+        raw.close()
+
+
+def _require_observed_columns(
+    *, issues: Optional[Dict[str, Dict[str, Any]]], comments: Optional[Dict[str, Dict[str, Any]]]
+) -> None:
+    """Refuse a half-migrated source shape before projecting it.
+
+    Both entry points run the observed-columns migration first, so reaching
+    this point without both columns means an unknown writer shaped the store;
+    projecting such a table would bless a schema nobody established.
+    """
+    for label, columns, column in (
+        ("tracker_issues", issues, "observed_revision"),
+        ("tracker_issue_comments", comments, "important"),
+    ):
+        if columns is None:
+            raise TrackerSchemaMigrationError(
+                f"tracker search projection requires {label}, which does not exist",
+                table=label,
+            )
+        if column not in columns:
+            raise TrackerSchemaMigrationError(
+                f"{label}.{column} is missing; run the observed-columns migration first",
+                table=label,
+            )
+
+
 def ensure_tracker_schema() -> None:
     """Create the issue-tracker tables if they are absent.
 
@@ -2650,9 +2726,10 @@ def ensure_tracker_schema() -> None:
     lifespan; the CLI has no lifespan, so on a fresh state root every tracker
     command died with a raw SQLAlchemy traceback about a missing table.
 
-    Deliberately narrower than ``init_db``: it creates these six tables and
-    runs the shared tracker column migrations. ``init_db`` includes gated
-    migrations that can refuse
+    Deliberately narrower than ``init_db``: it creates the six tracker tables
+    and runs the shared tracker column migrations plus the search projection
+    migration, which is part of the tracker schema itself. The gated migrations
+    ``init_db`` additionally runs can refuse
     to proceed, and an issue is filed exactly when something else is already
     broken — "cannot record the defect because an unrelated schema gate
     refused" is the worst possible time for that refusal.
@@ -2666,6 +2743,7 @@ def ensure_tracker_schema() -> None:
     _migrate_tracker_work_context_columns()
     _migrate_tracker_planning_columns()
     _migrate_tracker_observed_revision_columns()
+    _migrate_tracker_search_projection()
 
 
 def _ensure_db_dir() -> None:
@@ -2720,6 +2798,7 @@ def init_db() -> None:
     _migrate_tracker_work_context_columns()
     _migrate_tracker_planning_columns()
     _migrate_tracker_observed_revision_columns()
+    _migrate_tracker_search_projection()
     _migrate_terminals_schema()
     inbox_schema_ready = _migrate_callback_recovery_inbox_schema()
     _migrate_callback_recovery_schema(inbox_schema_ready=inbox_schema_ready)
