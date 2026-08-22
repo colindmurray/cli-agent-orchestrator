@@ -289,6 +289,36 @@ def _snapshot_dir(models_dir: Path, record: Mapping[str, Any]) -> Path:
     )
 
 
+def _check_generation_identity(
+    record: Mapping[str, Any], expected_artifact_sha256: str
+) -> None:
+    """Verify the record names THE pinned generation, not just a consistent one.
+
+    A well-formed self-consistent metadata file for a DIFFERENT model or
+    revision (another machine's store restored under CAO_SEARCH_MODELS_DIR,
+    say) would otherwise read as prepared and produce embeddings no other
+    generation can compare against. The identity triple — model id, immutable
+    revision, recorded artifact digest — must equal this build's pins;
+    anything else is a version-mismatch naming both sides.
+    """
+    observed_id = record.get("model_id")
+    observed_rev = record.get("model_revision")
+    observed_digest = record.get("artifact_sha256")
+    if (
+        observed_id == MODEL_ID
+        and observed_rev == MODEL_REVISION
+        and observed_digest == expected_artifact_sha256
+    ):
+        return
+    raise EmbeddingCapabilityError(
+        "version-mismatch",
+        "prepared generation does not match this build's pinned generation: "
+        f"model {observed_id!r}@{observed_rev!r} digest {observed_digest!r} but this "
+        f"build pins {MODEL_ID!r}@{MODEL_REVISION!r} digest {expected_artifact_sha256!r}. "
+        "Re-run prepare to install the pinned artifact.",
+    )
+
+
 # --- Explicit operator prepare ------------------------------------------------
 
 
@@ -296,7 +326,7 @@ def prepare_model(
     models_dir: Union[str, Path, None] = None,
     *,
     snapshot_downloader: Optional[SnapshotDownloader] = None,
-    expected_artifact_sha256: str = MODEL_ARTIFACT_SHA256,
+    expected_artifact_sha256: Optional[str] = None,
     dist_versions: Optional[DistVersionReader] = None,
     hf_cache_dir: Union[str, Path, None] = None,
 ) -> Dict[str, Any]:
@@ -318,6 +348,10 @@ def prepare_model(
     tests; the defaults are the real network downloader and the installed
     distribution versions.
     """
+    # Resolved at CALL time (not as a def-time default) so embedders of the
+    # module — including tests — can re-pin the target artifact explicitly.
+    if expected_artifact_sha256 is None:
+        expected_artifact_sha256 = MODEL_ARTIFACT_SHA256
     resolved_dir = Path(models_dir) if models_dir is not None else default_models_dir()
     resolved_dir.mkdir(parents=True, exist_ok=True)
     resolved_cache = (
@@ -401,6 +435,15 @@ def prepare_model(
 
     observed_bytes = sum(p.stat().st_size for p in snapshot.rglob("*") if p.is_file())
 
+    resolved_snapshot = snapshot.resolve()
+    resolved_models = resolved_dir.resolve()
+    rel_path: Optional[str] = None
+    if resolved_snapshot.is_relative_to(resolved_models):
+        # Both sides resolved so a symlinked models_dir (macOS /var, volume
+        # aliases) cannot make the containment check and the relativization
+        # disagree.
+        rel_path = resolved_snapshot.relative_to(resolved_models).as_posix()
+
     record: Dict[str, Any] = {
         "schema": METADATA_SCHEMA,
         "model_id": MODEL_ID,
@@ -417,12 +460,9 @@ def prepare_model(
         "artifact_sha256": observed_digest,
         "artifact_bytes": observed_bytes,
         "vec_version_pinned": PINNED_VEC_VERSION,
+        "python_version": platform.python_version(),
         "snapshot_path": str(snapshot),
-        "snapshot_rel_path": (
-            snapshot.relative_to(resolved_dir.resolve()).as_posix()
-            if snapshot.resolve().is_relative_to(resolved_dir.resolve())
-            else None
-        ),
+        "snapshot_rel_path": rel_path,
         "prepared_at": _utcnow_iso(),
     }
 
@@ -618,27 +658,29 @@ def load_embedder(
     embedder_factory: Optional[Callable[[Mapping[str, Any], Path], Any]] = None,
     metadata: Optional[Mapping[str, Any]] = None,
     dist_versions: Optional[DistVersionReader] = None,
+    expected_artifact_sha256: str = MODEL_ARTIFACT_SHA256,
 ) -> LoadedEmbedder:
     """Load the prepared generation, refusing typed absence/mismatch first.
 
-    Order matters and is observable: metadata absence is ``unprepared``;
-    missing distributions are ``runtime-missing``; installed-but-different
-    versions are ``version-mismatch``; only then does the (possibly injected)
-    factory load the local snapshot. A base install therefore answers
-    "runtime-missing" in milliseconds without ever touching torch.
+    Order matters and is observable: metadata absence is ``unprepared``; a
+    record naming a different model/revision/digest is ``version-mismatch``
+    (the pin check runs before anything heavy); missing distributions are
+    ``runtime-missing``; installed-but-different versions are
+    ``version-mismatch``; only then does the (possibly injected) factory load
+    the local snapshot. A base install therefore answers in milliseconds
+    without ever touching torch.
     """
     resolved_dir = Path(models_dir) if models_dir is not None else default_models_dir()
     record: Optional[Dict[str, Any]] = (
         dict(metadata) if metadata is not None else read_metadata(resolved_dir)
     )
     if record is None:
-        record = read_metadata(resolved_dir)
-    if record is None:
         raise EmbeddingCapabilityError(
             "unprepared",
             f"no generation metadata at {metadata_path(resolved_dir)}; run the "
             "explicit model prepare command first",
         )
+    _check_generation_identity(record, expected_artifact_sha256)
     read_version = dist_versions if dist_versions is not None else _read_dist_version
     _check_runtime(record, read_version)
     snapshot = _snapshot_dir(resolved_dir, record)
@@ -678,6 +720,7 @@ def diagnose_embedding(
     embedder_factory: Optional[Callable[[Mapping[str, Any], Path], Any]] = None,
     engine_describer: Optional[Callable[[], Dict[str, Any]]] = None,
     dist_versions: Optional[DistVersionReader] = None,
+    expected_artifact_sha256: str = MODEL_ARTIFACT_SHA256,
 ) -> CapabilityReport:
     """Diagnose the embedding capability end to end, never raising.
 
@@ -686,12 +729,19 @@ def diagnose_embedding(
 
     1. metadata present and parseable, snapshot on disk, digest re-verified
        — otherwise ``unprepared``;
-    2. required distributions installed — otherwise ``runtime-missing``;
-    3. installed versions equal the generation-bound versions, and the
+    2. the record names THIS build's pinned generation (model id, revision,
+       artifact digest) — otherwise ``version-mismatch``;
+    3. required distributions installed — otherwise ``runtime-missing``;
+    4. installed versions equal the generation-bound versions, and the
        loaded engine's ``vec_version()`` equals the pin — otherwise
        ``version-mismatch``;
-    4. a real probe embedding passes the dim/dtype/norm contract — otherwise
+    5. a real probe embedding passes the dim/dtype/norm contract — otherwise
        ``probe-failed``; all green is ``prepared``.
+
+    An engine whose version could not be OBSERVED at all (extension API
+    unavailable or the load itself failing) reports ``runtime-missing`` with
+    what was seen — never a mismatch between two versions when only one of
+    them exists.
 
     ``run_probe=False`` answers from metadata/runtime/engine observation only
     (no model load, no encode). Every injection parameter exists so tests can
@@ -734,6 +784,12 @@ def diagnose_embedding(
                 "re-run prepare from a trusted source",
             },
         )
+    try:
+        _check_generation_identity(record, expected_artifact_sha256)
+    except EmbeddingCapabilityError as exc:
+        return CapabilityReport(
+            DiagnosticState.VERSION_MISMATCH, {**signals, "detail": exc.message}
+        )
 
     try:
         observed_versions = _check_runtime(record, read_version)
@@ -758,14 +814,24 @@ def diagnose_embedding(
             DiagnosticState.RUNTIME_MISSING,
             {**signals, "detail": "sqlite-vec runtime not installed ([search] extra)"},
         )
-    if engine.get("vec_version_observed") != engine.get("vec_version_pinned"):
+    observed_vec = engine.get("vec_version_observed")
+    if observed_vec is None:
+        return CapabilityReport(
+            DiagnosticState.RUNTIME_MISSING,
+            {
+                **signals,
+                "detail": "sqlite-vec is installed but no engine version could be "
+                "observed (extension API unavailable or load failed); vector search "
+                "cannot serve on this sqlite build",
+            },
+        )
+    if observed_vec != engine.get("vec_version_pinned"):
         return CapabilityReport(
             DiagnosticState.VERSION_MISMATCH,
             {
                 **signals,
-                "detail": f"vec_version() observed "
-                f"{engine.get('vec_version_observed')!r} but the generation pins "
-                f"{engine.get('vec_version_pinned')!r}",
+                "detail": f"vec_version() observed {observed_vec!r} but the "
+                f"generation pins {engine.get('vec_version_pinned')!r}",
             },
         )
 
@@ -778,6 +844,7 @@ def diagnose_embedding(
             embedder_factory=embedder_factory,
             metadata=record,
             dist_versions=read_version,
+            expected_artifact_sha256=expected_artifact_sha256,
         )
         stats: List[EmbedBatchStats] = []
         blobs = embedder.embed(

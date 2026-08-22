@@ -22,9 +22,14 @@ import click
 from cli_agent_orchestrator.services import embedding_adapter as adapter
 
 
-def _fail(exc: adapter.EmbeddingCapabilityError) -> None:
-    """Report a typed refusal on stderr and exit non-zero."""
-    click.echo(f"error [{exc.reason}]: {exc.message}", err=True)
+def _fail(exc: adapter.EmbeddingCapabilityError, as_json: bool = False) -> None:
+    """Report a typed refusal, parseable under --json, and exit non-zero."""
+    if as_json:
+        click.echo(
+            jsonlib.dumps({"ok": False, "reason": exc.reason, "message": exc.message})
+        )
+    else:
+        click.echo(f"error [{exc.reason}]: {exc.message}", err=True)
     raise SystemExit(1)
 
 
@@ -45,15 +50,22 @@ def model_prepare(models_dir: Optional[Path], as_json: bool):
     """Explicitly download, digest-verify, and record the pinned model.
 
     The ONLY command that touches the network for model weights. Safe to
-    re-run: an already-verified store is returned unchanged.
+    re-run: an already-verified store is returned unchanged, and a corrupt
+    metadata file is rewritten from the verified artifact.
     """
-    before = None
+    # Best-effort read for the idempotency flag ONLY: a corrupt or absent
+    # file must never block prepare itself — repairing that state is exactly
+    # what this command is for.
     try:
-        if models_dir is not None:
-            before = adapter.read_metadata(models_dir)
+        before = adapter.read_metadata(
+            models_dir if models_dir is not None else adapter.default_models_dir()
+        )
+    except adapter.EmbeddingCapabilityError:
+        before = None
+    try:
         record = adapter.prepare_model(models_dir)
     except adapter.EmbeddingCapabilityError as exc:
-        _fail(exc)
+        _fail(exc, as_json)
         return
     payload: dict[str, Any] = dict(record)
     payload["prepare"] = {

@@ -136,20 +136,26 @@ def open_search_connection(
     database FILE, deliberately bypassing the pooled engine) or a
     ``connection_factory`` returning any DBAPI connection — tests inject
     temporary databases, later lanes may inject read-only or alternate-store
-    producers. The loaded-then-disabled extension sequence and the
-    ``vec_version()`` pin run identically regardless of where the connection
-    came from, so an injected producer can never skip the boundary checks.
+    producers. Supplying both is a caller ambiguity and refuses. The
+    loaded-then-disabled extension sequence and the ``vec_version()`` pin run
+    identically regardless of where the connection came from, so an injected
+    producer can never skip the boundary checks.
 
     Refusals are typed (:class:`SearchEngineError`): the sqlite-vec runtime
     is absent, this sqlite build cannot load extensions, the connection
-    cannot be opened, or the observed ``vec_version()`` differs from
-    ``expected_vec_version``. A refused connection is closed before raising;
-    no half-loaded handle escapes.
+    cannot be opened or loaded, or the observed ``vec_version()`` differs
+    from ``expected_vec_version``. A refused connection is closed before
+    raising; no half-loaded handle escapes.
     """
+    if connection_factory is not None and db_path is not None:
+        raise SearchEngineError(
+            "open-failed",
+            "pass either db_path or connection_factory, not both; the source "
+            "of the search connection must be unambiguous",
+        )
     sqlite_vec = _load_sqlite_vec_module()
 
     if connection_factory is not None:
-        owned_by_caller = True
         try:
             raw = connection_factory()
         except Exception as exc:
@@ -158,7 +164,6 @@ def open_search_connection(
             ) from exc
         path_label = "<injected>"
     else:
-        owned_by_caller = False
         resolved = Path(db_path) if db_path is not None else DATABASE_FILE
         if not resolved.exists():
             raise SearchEngineError(
@@ -196,7 +201,10 @@ def open_search_connection(
         raise
     except Exception as exc:
         raw.close()
-        raise SearchEngineError("open-failed", f"loading sqlite-vec failed: {exc}") from exc
+        # Distinct from open-failed: the connection opened and extension
+        # loading was enabled, but sqlite_vec.load itself failed — the
+        # extension API demonstrably exists.
+        raise SearchEngineError("load-failed", f"loading sqlite-vec failed: {exc}") from exc
 
     return SearchConnection(connection=raw, vec_version=observed, db_path=path_label)
 
@@ -245,10 +253,13 @@ def describe_search_engine(
     except SearchEngineError as exc:
         if exc.reason == "extension-api-unavailable":
             return signals
-        # The load sequence itself ran far enough to observe a version (a
-        # mismatch refusal) or failed for another typed reason; report what
-        # was observed and stop there.
-        signals["extension_api_available"] = exc.reason != "open-failed"
+        # The sequence got far enough to attempt a load (a mismatch refusal,
+        # or the load itself throwing with the API already enabled): the
+        # extension API exists even though no version was observed.
+        signals["extension_api_available"] = exc.reason in (
+            "version-mismatch",
+            "load-failed",
+        )
         if exc.observed_vec_version is not None:
             signals["vec_version_observed"] = exc.observed_vec_version
         return signals

@@ -9,6 +9,7 @@ proven separately by the offline drill and the dogfood probe.
 from __future__ import annotations
 
 import json
+import sqlite3
 import struct
 import sys
 import types
@@ -18,7 +19,11 @@ import numpy as np
 import pytest
 
 from cli_agent_orchestrator.services import embedding_adapter as adapter
-from cli_agent_orchestrator.services.search_engine_factory import PINNED_VEC_VERSION
+from cli_agent_orchestrator.services.search_engine_factory import (
+    PINNED_VEC_VERSION,
+    describe_search_engine,
+    open_search_connection,
+)
 
 _FULL_VERSIONS = {
     "sentence-transformers": "6.0.0",
@@ -66,6 +71,11 @@ class FakeDownloader:
     def __call__(self, *, repo_id, revision, cache_dir, ignore_patterns=None) -> str:
         self.calls.append({"repo_id": repo_id, "revision": revision})
         return str(_materialize_snapshot(Path(cache_dir)))
+
+
+def _diagnose(models_dir, **kwargs):
+    kwargs.setdefault("expected_artifact_sha256", _fake_expected_digest())
+    return adapter.diagnose_embedding(models_dir, **kwargs)
 
 
 def _prepare(tmp_path: Path, downloader=None, **kwargs):
@@ -188,7 +198,7 @@ def test_prepare_repairs_corrupt_metadata_from_verified_artifact(tmp_path):
 
 
 def test_diagnose_unprepared_on_empty_dir(tmp_path):
-    report = adapter.diagnose_embedding(tmp_path, run_probe=False)
+    report = _diagnose(tmp_path, run_probe=False)
     assert report.state is adapter.DiagnosticState.UNPREPARED
     assert report.signals["metadata_present"] is False
 
@@ -196,7 +206,7 @@ def test_diagnose_unprepared_on_empty_dir(tmp_path):
 def test_diagnose_unprepared_on_corrupt_metadata(tmp_path):
     _prepare(tmp_path)
     (tmp_path / "generation-metadata.json").write_text("{corrupt")
-    report = adapter.diagnose_embedding(tmp_path, run_probe=False)
+    report = _diagnose(tmp_path, run_probe=False)
     assert report.state is adapter.DiagnosticState.UNPREPARED
     assert "cannot be parsed" in report.signals["detail"]
 
@@ -207,7 +217,7 @@ def test_diagnose_unprepared_when_artifact_missing(tmp_path):
     record["snapshot_path"] = str(tmp_path / "gone")
     record["snapshot_rel_path"] = "gone"
     (tmp_path / "generation-metadata.json").write_text(json.dumps(record))
-    report = adapter.diagnose_embedding(tmp_path, run_probe=False)
+    report = _diagnose(tmp_path, run_probe=False)
     assert report.state is adapter.DiagnosticState.UNPREPARED
     assert report.signals["metadata_present"] is True
     assert report.signals["artifact_present"] is False
@@ -215,7 +225,7 @@ def test_diagnose_unprepared_when_artifact_missing(tmp_path):
 
 def test_diagnose_runtime_missing(tmp_path):
     _prepare(tmp_path)
-    report = adapter.diagnose_embedding(
+    report = _diagnose(
         tmp_path,
         run_probe=False,
         dist_versions=lambda name: None if name == "sentence-transformers" else _FULL_VERSIONS[name],
@@ -228,7 +238,7 @@ def test_diagnose_runtime_missing(tmp_path):
 def test_diagnose_version_mismatch_on_runtime_drift(tmp_path):
     _prepare(tmp_path)
     drifted = dict(_FULL_VERSIONS, **{"sentence-transformers": "7.7.7"})
-    report = adapter.diagnose_embedding(
+    report = _diagnose(
         tmp_path,
         run_probe=False,
         dist_versions=lambda name: drifted[name],
@@ -240,7 +250,7 @@ def test_diagnose_version_mismatch_on_runtime_drift(tmp_path):
 
 def test_diagnose_version_mismatch_on_vec_version_drift(tmp_path):
     _prepare(tmp_path)
-    report = adapter.diagnose_embedding(
+    report = _diagnose(
         tmp_path,
         run_probe=False,
         dist_versions=_ok_versions,
@@ -252,7 +262,7 @@ def test_diagnose_version_mismatch_on_vec_version_drift(tmp_path):
 
 def test_diagnose_prepared_without_probe(tmp_path):
     _prepare(tmp_path)
-    report = adapter.diagnose_embedding(
+    report = _diagnose(
         tmp_path,
         run_probe=False,
         dist_versions=_ok_versions,
@@ -266,7 +276,7 @@ def test_diagnose_prepared_without_probe(tmp_path):
 def test_diagnose_prepared_with_probe(tmp_path):
     _prepare(tmp_path)
     encoder = FakeEncoder()
-    report = adapter.diagnose_embedding(
+    report = _diagnose(
         tmp_path,
         run_probe=True,
         dist_versions=_ok_versions,
@@ -283,7 +293,7 @@ def test_diagnose_prepared_with_probe(tmp_path):
 def test_diagnose_probe_failed_on_wrong_dimensions(tmp_path):
     _prepare(tmp_path)
     bad = np.stack([np.ones(7, dtype=np.float32) / 7**0.5])
-    report = adapter.diagnose_embedding(
+    report = _diagnose(
         tmp_path,
         run_probe=True,
         dist_versions=_ok_versions,
@@ -297,7 +307,7 @@ def test_diagnose_probe_failed_on_wrong_dimensions(tmp_path):
 def test_diagnose_probe_failed_on_non_unit_norm(tmp_path):
     _prepare(tmp_path)
     bad = np.stack([np.full(384, 3.0, dtype=np.float32)])
-    report = adapter.diagnose_embedding(
+    report = _diagnose(
         tmp_path,
         run_probe=True,
         dist_versions=_ok_versions,
@@ -389,7 +399,11 @@ def test_load_embedder_uses_local_files_only_and_pins_seq_length(tmp_path, monke
     record = _prepare(tmp_path)
     calls = _stub_sentence_transformers(monkeypatch)
 
-    embedder = adapter.load_embedder(tmp_path, dist_versions=_ok_versions)
+    embedder = adapter.load_embedder(
+        tmp_path,
+        dist_versions=_ok_versions,
+        expected_artifact_sha256=_fake_expected_digest(),
+    )
 
     assert len(calls) == 1
     assert calls[0]["local_files_only"] is True, "loader must never consult the hub"
@@ -411,6 +425,97 @@ def test_load_embedder_refuses_runtime_missing_before_any_model_load(tmp_path, m
         adapter.load_embedder(
             tmp_path,
             dist_versions=lambda name: None if name == "torch" else _FULL_VERSIONS[name],
+            expected_artifact_sha256=_fake_expected_digest(),
         )
     assert excinfo.value.reason == "runtime-missing"
     assert calls == [], "runtime check must precede any model construction"
+
+
+# --- review-round repairs -----------------------------------------------------
+
+
+def test_diagnose_refuses_foreign_generation_record(tmp_path):
+    """A self-consistent record for a DIFFERENT model must not read prepared."""
+    record = _prepare(tmp_path)
+    foreign = dict(record)
+    foreign["model_id"] = "other-org/other-model"
+    (tmp_path / "generation-metadata.json").write_text(json.dumps(foreign))
+    report = _diagnose(tmp_path, run_probe=False, dist_versions=_ok_versions,
+                       engine_describer=_fake_engine_describer)
+    assert report.state is adapter.DiagnosticState.VERSION_MISMATCH
+    assert "pinned generation" in report.signals["detail"]
+
+    calls = []
+    with pytest.raises(adapter.EmbeddingCapabilityError) as excinfo:
+        adapter.load_embedder(
+            tmp_path,
+            embedder_factory=lambda rec, snap: calls.append(1),
+            dist_versions=_ok_versions,
+            expected_artifact_sha256=_fake_expected_digest(),
+        )
+    assert excinfo.value.reason == "version-mismatch"
+    assert calls == [], "identity check must run before any model construction"
+
+
+def test_prepare_and_diagnose_survive_symlinked_models_dir(tmp_path):
+    """macOS /var-style symlinked state roots must not crash rel-path math."""
+    real = tmp_path / "real-models"
+    link = tmp_path / "linked-models"
+    real.mkdir()
+    link.symlink_to(real)
+    record = _prepare(link)
+    assert record["snapshot_rel_path"] is not None
+    report = _diagnose(link, run_probe=False, dist_versions=_ok_versions,
+                       engine_describer=_fake_engine_describer)
+    assert report.state is adapter.DiagnosticState.PREPARED
+
+
+def test_unobservable_engine_version_is_runtime_missing_not_mismatch(tmp_path):
+    """No observed version means no comparison happened; say so honestly."""
+    _prepare(tmp_path)
+
+    def unobservable():
+        return {
+            "runtime_present": True,
+            "extension_api_available": False,
+            "vec_version_observed": None,
+            "vec_version_pinned": PINNED_VEC_VERSION,
+        }
+
+    report = _diagnose(tmp_path, run_probe=False, dist_versions=_ok_versions,
+                       engine_describer=unobservable)
+    assert report.state is adapter.DiagnosticState.RUNTIME_MISSING
+    assert "no engine version could be observed" in report.signals["detail"]
+
+
+def test_load_failed_still_reports_extension_api_available(monkeypatch):
+    import sys
+
+    class ExplodingVec(types.ModuleType):
+        def load(self, conn):  # pragma: no cover - exercised via factory
+            raise RuntimeError("boom")
+
+    monkeypatch.setitem(sys.modules, "sqlite_vec", ExplodingVec("sqlite_vec"))
+    signals = describe_search_engine()
+    assert signals["runtime_present"] is True
+    assert signals["extension_api_available"] is True
+    assert signals["vec_version_observed"] is None
+
+
+def test_factory_refuses_ambiguous_dual_source(tmp_path):
+    from cli_agent_orchestrator.services.search_engine_factory import SearchEngineError
+
+    with pytest.raises(SearchEngineError) as excinfo:
+        open_search_connection(
+            db_path=tmp_path / "x.db",
+            connection_factory=lambda: sqlite3.connect(":memory:"),
+        )
+    assert excinfo.value.reason == "open-failed"
+    assert "not both" in excinfo.value.message
+
+
+def test_metadata_records_python_version_provenance(tmp_path):
+    import platform
+
+    record = _prepare(tmp_path)
+    assert record["python_version"] == platform.python_version()
