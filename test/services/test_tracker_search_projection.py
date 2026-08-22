@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+from cli_agent_orchestrator.clients import tracker_search_schema
 from cli_agent_orchestrator.clients.database import (
     _TRACKER_ORM_TABLE_NAMES,
     Base,
@@ -788,3 +789,271 @@ class TestDirectAndServiceWritersConverge:
             ).fetchone()
         assert service_doc == direct_doc
         assert service_comment == direct_comment
+
+
+# ---------------------------------------------------------------------------
+# §19.7 mutation red proofs, codified
+#
+# Each proof reverts one production behavior through the same seam the
+# migration reads (the canonical trigger registry / the dirty-upsert
+# builder), installs a fresh store through the real migration under that
+# revert, and then replays the named tests' central assertion to prove it
+# fails. The always-on tests above catch a regression; these prove those
+# assertions are load-bearing.
+# ---------------------------------------------------------------------------
+
+
+class TestMutationRedProofs:
+    def test_dropping_the_issue_update_trigger_turns_the_named_assertion_red(
+        self, tmp_path, monkeypatch
+    ):
+        """§19.7 (a): without trg_tracker_issues_search_au installed, the
+        assertion of TestReindexBoundaries::
+        test_claiming_reindexes_status_and_bumps_the_clock and
+        TestDirectSqlWritesProjectThroughTriggers::
+        test_an_indexed_update_rewrites_the_document_with_a_fresh_version
+        must fail."""
+        mutated_registry = {
+            name: sql
+            for name, sql in tracker_search_schema._TRIGGER_STATEMENTS.items()
+            if name != TRIGGER_NAMES[1]
+        }
+        monkeypatch.setattr(tracker_search_schema, "_TRIGGER_STATEMENTS", mutated_registry)
+        db = ProjectionDb(tmp_path / "mutation-a.db")
+        try:
+            with db.engine.begin() as conn:
+                installed = conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+                        f"AND name = '{TRIGGER_NAMES[1]}'"
+                    )
+                ).scalar()
+            assert installed == 0, "the mutation did not remove the trigger"
+            conn = db.raw()
+            try:
+                conn.execute("BEGIN")
+                conn.execute(
+                    "INSERT INTO tracker_issues (key, project_id, title, status) "
+                    "VALUES ('p-1', 'p', 't', 'open')"
+                )
+                conn.commit()
+                version_before = conn.execute(
+                    f"SELECT content_version FROM {ISSUE_FTS_TABLE} WHERE rowid = 1"
+                ).fetchone()[0]
+                conn.execute("UPDATE tracker_issues SET status = 'in-progress' WHERE key = 'p-1'")
+                status_now, version_now = conn.execute(
+                    f"SELECT status, content_version FROM {ISSUE_FTS_TABLE} WHERE rowid = 1"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            def named_test_assertion():
+                assert (status_now, version_now) == ("in-progress", version_before + 1)
+
+            with pytest.raises(AssertionError):
+                named_test_assertion()
+        finally:
+            db.engine.dispose()
+
+    def test_stubbing_the_dirty_outbox_upsert_turns_the_named_assertion_red(
+        self, tmp_path, monkeypatch
+    ):
+        """§19.7 (b): with every dirty outbox upsert stubbed to a no-op, the
+        assertion of TestDirtyOutbox::
+        test_each_write_enqueues_one_row_per_active_and_building_generation
+        must fail."""
+        monkeypatch.setattr(
+            tracker_search_schema,
+            "_dirty_upsert",
+            lambda **kwargs: f"DELETE FROM {VECTOR_DIRTY_TABLE} WHERE 0",
+        )
+        # The canonical trigger text was baked at import; rebuild it so the
+        # stubbed upsert is what the migration actually installs.
+        monkeypatch.setattr(
+            tracker_search_schema,
+            "_TRIGGER_STATEMENTS",
+            tracker_search_schema._build_trigger_statements(),
+        )
+        db = ProjectionDb(tmp_path / "mutation-b.db")
+
+        insert_generation = text(
+            f"INSERT INTO {VECTOR_GENERATIONS_TABLE} (generation_id, state, model_id, "
+            "model_revision, runtime_id, runtime_version, artifact_sha256, dimensions, "
+            "element_type, distance_metric, normalized, document_schema_version, created_at) "
+            "VALUES ('gen-active', 'active', 'm', 'r', 'st', '1', 'aa', 384, 'float32', "
+            "'cosine', 1, 1, '2026-08-21T00:00:00Z')"
+        )
+        try:
+            with db.engine.begin() as conn:
+                conn.execute(insert_generation)
+            conn = db.raw()
+            try:
+                conn.execute("BEGIN")
+                conn.execute(
+                    "INSERT INTO tracker_issues (key, project_id, title) "
+                    "VALUES ('p-1', 'p', 't')"
+                )
+                conn.execute(
+                    "INSERT INTO tracker_issue_comments (issue_key, body) " "VALUES ('p-1', 'c')"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with db.engine.begin() as sql:
+                rows = sql.execute(text(f"SELECT COUNT(*) FROM {VECTOR_DIRTY_TABLE}")).scalar()
+
+            def named_test_assertion():
+                assert rows == 2, f"expected one dirty row per document, saw {rows}"
+
+            with pytest.raises(AssertionError):
+                named_test_assertion()
+        finally:
+            db.engine.dispose()
+
+
+class TestReviewFixRegressions:
+    def test_a_comment_author_or_body_update_replaces_its_document(self, proj_db):
+        """§8 keeps the author/body trigger correct for trusted writers: the
+        rewrite must delete the existing document before inserting, or every
+        such write dies on the FTS rowid conflict."""
+        conn = proj_db.raw()
+        try:
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT INTO tracker_issue_comments (issue_key, body) VALUES ('p-1', 'v1')"
+            )
+            conn.commit()
+            clock_before = proj_db.clock()
+            version_before = conn.execute(
+                f"SELECT content_version FROM {COMMENT_FTS_TABLE} WHERE rowid = 1"
+            ).fetchone()[0]
+            conn.execute("UPDATE tracker_issue_comments SET body = 'v2' WHERE id = 1")
+            assert proj_db.clock() == clock_before + 1
+            text_now, version_now = conn.execute(
+                f"SELECT body, content_version FROM {COMMENT_FTS_TABLE} WHERE rowid = 1"
+            ).fetchone()
+            with proj_db.engine.begin() as sql:
+                count = sql.execute(text(f"SELECT COUNT(*) FROM {COMMENT_FTS_TABLE}")).scalar()
+            assert (text_now, version_now) == ("v2", version_before + 1)
+            assert count == 1
+        finally:
+            conn.close()
+
+    def test_a_combined_body_and_important_update_ticks_the_clock_once(self, proj_db):
+        """One UPDATE statement is one logical write event: the importance
+        trigger steps aside when the content trigger already fired."""
+        conn = proj_db.raw()
+        try:
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT INTO tracker_issue_comments (issue_key, body) VALUES ('p-1', 'v1')"
+            )
+            conn.commit()
+            clock_before = proj_db.clock()
+            doc_version_before = conn.execute(
+                f"SELECT content_version FROM {COMMENT_FTS_TABLE} WHERE rowid = 1"
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE tracker_issue_comments SET body = 'v2', important = 1 WHERE id = 1"
+            )
+            clock_delta = proj_db.clock() - clock_before
+            doc_version_after = conn.execute(
+                f"SELECT content_version FROM {COMMENT_FTS_TABLE} WHERE rowid = 1"
+            ).fetchone()[0]
+            assert clock_delta == 1
+            assert doc_version_after > doc_version_before
+        finally:
+            conn.close()
+
+    def test_a_declared_type_mismatch_in_a_derived_table_is_refused(self, tmp_path):
+        """Same names, nullability, and PK order but a different declared
+        affinity is a different shape: content_version as TEXT stores and
+        compares differently than INTEGER."""
+        engine = create_engine(f"sqlite:///{tmp_path}/typed-shape.db")
+        try:
+            Base.metadata.create_all(
+                bind=engine,
+                tables=[
+                    t for t in Base.metadata.sorted_tables if t.name in _TRACKER_ORM_TABLE_NAMES
+                ],
+            )
+            import sqlite3
+
+            conn = sqlite3.connect(str(tmp_path / "typed-shape.db"))
+            try:
+                conn.execute(
+                    "CREATE TABLE tracker_vector_dirty ("
+                    "generation_id TEXT NOT NULL, document_key TEXT NOT NULL, "
+                    "issue_key TEXT NOT NULL, document_kind TEXT NOT NULL, "
+                    "source_id INTEGER NOT NULL, content_version TEXT NOT NULL, "
+                    "document_schema_version INTEGER NOT NULL, enqueued_at TEXT NOT NULL, "
+                    "attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, "
+                    "last_error TEXT, PRIMARY KEY (generation_id, document_key))"
+                )
+            finally:
+                conn.close()
+            from cli_agent_orchestrator.clients.tracker_search_schema import (
+                TrackerSearchSchemaError,
+            )
+
+            with pytest.raises(TrackerSearchSchemaError) as exc:
+                _migrate_tracker_search_projection(engine)
+            assert "declared TEXT" in str(exc.value)
+        finally:
+            engine.dispose()
+
+    def test_a_project_id_only_edit_does_not_reindex_nor_tick(self, proj_db):
+        """project_id is absent from the indexed-content OF list: no writer
+        moves issues between projects, and the document does not index it."""
+        conn = proj_db.raw()
+        try:
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT INTO tracker_issues (key, project_id, title, status) "
+                "VALUES ('p-1', 'p', 't', 'open')"
+            )
+            conn.commit()
+            before = proj_db.snapshot_derived()
+            conn.execute("UPDATE tracker_issues SET project_id = 'elsewhere' WHERE key = 'p-1'")
+            after = proj_db.snapshot_derived()
+            assert after["clock"] == before["clock"]
+            assert after[ISSUE_FTS_TABLE] == before[ISSUE_FTS_TABLE]
+        finally:
+            conn.close()
+
+    def test_an_importance_trigger_installed_without_the_when_guard_is_repaired(self, proj_db):
+        """A store upgraded from the pre-WHEN shape has its drifted trigger
+        definition replaced with the canonical one by the next migration run,
+        restoring single-tick semantics for combined updates."""
+        conn = proj_db.raw()
+        try:
+            conn.execute(f"DROP TRIGGER IF EXISTS {TRIGGER_NAMES[5]}")
+            conn.execute(
+                f"CREATE TRIGGER {TRIGGER_NAMES[5]} "
+                "AFTER UPDATE OF important ON tracker_issue_comments\nBEGIN\n"
+                "  UPDATE tracker_search_meta SET content_clock = content_clock + 1 "
+                "WHERE singleton = 1;\nEND"
+            )
+        finally:
+            conn.close()
+        _migrate_tracker_search_projection(proj_db.engine)
+        with proj_db.engine.begin() as sql:
+            stored = sql.execute(
+                text("SELECT sql FROM sqlite_master WHERE name = :n"), {"n": TRIGGER_NAMES[5]}
+            ).scalar()
+        assert "WHEN OLD.body IS NEW.body" in str(stored).replace("\n", " ")
+        # And the repaired trigger enforces single-tick combined updates.
+        raw = proj_db.raw()
+        try:
+            raw.execute("BEGIN")
+            raw.execute("INSERT INTO tracker_issue_comments (issue_key, body) VALUES ('p-2', 'v1')")
+            raw.commit()
+            clock_before = proj_db.clock()
+            raw.execute(
+                "UPDATE tracker_issue_comments SET body = 'v2', important = 1 "
+                "WHERE issue_key = 'p-2'"
+            )
+            assert proj_db.clock() == clock_before + 1
+        finally:
+            raw.close()
