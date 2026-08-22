@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import click
 
+from cli_agent_orchestrator.cli.commands.search_index import search_index
 from cli_agent_orchestrator.clients.database import ensure_tracker_schema
 from cli_agent_orchestrator.services import issue_tracker as tracker
 from cli_agent_orchestrator.services.issue_tracker import TrackerError
@@ -281,6 +282,11 @@ def scope_rm(project_id, scope_id, as_json):
 def issue():
     """File, search and edit issues."""
     ensure_tracker_schema()
+
+
+# The search-index verbs live in commands/search_index.py; the model half
+# ships there, lexical refresh/rebuild/integrity verbs join the same group.
+issue.add_command(search_index)
 
 
 @issue.command(name="file")

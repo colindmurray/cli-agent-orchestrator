@@ -147,6 +147,13 @@ CAO_ENV_FILE = CAO_HOME_DIR / ".env"
 # SQLite database directory
 DB_DIR = CAO_HOME_DIR / "db"
 
+# Local embedding model artifacts for semantic search (hybrid issue-search
+# design §9.4). Populated ONLY by the explicit operator `prepare` command —
+# no ordinary write or search path ever downloads here. Override the location
+# via CAO_SEARCH_MODELS_DIR (drills, alternate stores, read-only mounts).
+SEARCH_MODELS_DIR_ENV = "CAO_SEARCH_MODELS_DIR"
+SEARCH_MODELS_DIR = CAO_HOME_DIR / "models" / "embeddings"
+
 # Log file directory structure
 LOG_DIR = CAO_HOME_DIR / "logs"
 TERMINAL_LOG_DIR = LOG_DIR / "terminal"  # Per-terminal log files for pipe-pane output
