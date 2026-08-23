@@ -34,8 +34,11 @@ exact terminal id and generation, persists `cleanup_intended`, deletes that
 terminal, verifies its database record is absent, and returns durable cleanup
 proof. It is rejected for ready, admitting, or admitted reservations.
 
-`POST /managed-launch/attest-route` performs the same provider-native Codex or
-Kimi probe without reserving a terminal or carrying task bytes. It exists for
+`POST /managed-launch/attest-route` runs the same provider-native probe as
+the corresponding managed launch — Codex's zero-turn app-server trust
+exchange, Kimi's zero-prompt ACP session, Claude's version-pinned binary
+check, or Muse's two-leg profile-carrier probe against the resolved inner
+binary — without reserving a terminal or carrying task bytes. It exists for
 bounded launch-breaker recovery and cannot submit work.
 
 ## Durable states
@@ -64,9 +67,10 @@ projects={"/canonical/worktree"={trust_level="trusted"}}
 Before terminal launch, a zero-turn app-server probe verifies the exact project
 key has `sessionFlags` provenance, verifies the resolved model and reasoning
 effort, starts no turn, and confirms `~/.codex/config.toml` is byte-unchanged.
-This proof is version-bound to `codex-cli 0.146.0`; any other version is
-rejected. If a trust prompt still appears, the managed provider sends zero
-prompt keystrokes and records a preflight-blocked outcome.
+This proof admits exactly the builds named in `ROUTE_ATTEST_CAPABLE_VERSIONS`
+— currently `codex-cli 0.146.0` and `0.147.0`; every other build is refused.
+If a trust prompt still appears, the managed provider sends zero prompt
+keystrokes and records a preflight-blocked outcome.
 
 ## Kimi route proof
 

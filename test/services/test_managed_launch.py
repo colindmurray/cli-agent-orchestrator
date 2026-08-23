@@ -892,6 +892,26 @@ def _attest_request(tmp_path, provider, **changes):
     return ManagedLaunchRouteAttestRequest(**payload)
 
 
+def test_attest_and_reserve_provider_literals_stay_paired():
+    """The two hand-maintained provider Literals must enumerate the same set.
+
+    The route receipt names the same canonical provider a reservation does;
+    if either Literal widens alone, a lawful launch loses its attestor or an
+    attestation advertises a provider no launch can reserve. Derived from
+    the annotations themselves so the test cannot drift from the models.
+    """
+    from typing import get_args
+
+    from cli_agent_orchestrator.models.managed_launch_v2 import (
+        ManagedLaunchV2ReserveRequest,
+    )
+
+    reserve_args = get_args(ManagedLaunchV2ReserveRequest.model_fields["provider"].annotation)
+    attest_args = get_args(ManagedLaunchRouteAttestRequest.model_fields["provider"].annotation)
+
+    assert set(attest_args) == set(reserve_args)
+
+
 class TestRouteAttestationDispatchesByProvider:
     """One attestor per provider, chosen by name, never by falling through.
 
@@ -1033,6 +1053,180 @@ class TestRouteAttestationDispatchesByProvider:
             managed_launch.attest_route(
                 _attest_request(tmp_path, "claude_code", trusted_project_root=str(tmp_path))
             )
+
+    def test_muse_reaches_the_muse_attestor_and_not_the_other_ones(self, tmp_path, monkeypatch):
+        """A tripped muse_cli domain gets its own probe, never a stand-in."""
+        called = []
+
+        def _attestor(name):
+            def _fn(root, *, expected_model, expected_effort):
+                called.append(name)
+                return {"probe_version": f"{name}-route-v1"}
+
+            return _fn
+
+        monkeypatch.setattr(
+            "cli_agent_orchestrator.services.codex_trust.attest_trusted_project",
+            _attestor("codex"),
+        )
+        monkeypatch.setattr(
+            "cli_agent_orchestrator.services.kimi_route.attest_kimi_route", _attestor("kimi")
+        )
+        monkeypatch.setattr(
+            "cli_agent_orchestrator.services.claude_route.attest_claude_route",
+            _attestor("claude"),
+        )
+        monkeypatch.setattr(
+            "cli_agent_orchestrator.services.muse_route.attest_muse_route", _attestor("muse")
+        )
+
+        request = ManagedLaunchRouteAttestRequest(
+            protocol_version=PROTOCOL_VERSION,
+            provider="muse_cli",
+            agent_profile="reviewer",
+            working_directory=str(tmp_path),
+            expected_model="muse-spark-1.2-contributor",
+            expected_effort="high",
+        )
+        receipt = managed_launch.attest_route(request)
+
+        assert called == ["muse"]
+        assert receipt["provider"] == "muse_cli"
+        assert receipt["provider_route_receipt"]["probe_version"] == "muse-route-v1"
+        assert receipt["no_task_admitted"] is True
+
+    @staticmethod
+    def _muse_install(tmp_path, *, behavior: str):
+        """A real launcher layout so the attestor's own subprocess calls run.
+
+        The wrapper answers ``--version`` like Meta's launcher; the inner
+        binary is a truth-table stub (probed / disproved / unproven), so the
+        two-leg carrier probe executes against a process without the real
+        muse CLI.
+        """
+        import sys as _sys
+
+        from cli_agent_orchestrator.services import muse_native_launch as muse
+
+        revision = "0.2.1-R1215.1"
+        banner = "Muse Code 0.2.1 (0.2.1-R1215.1)"
+        wrapper = tmp_path / "muse"
+        wrapper.write_text(f'#!/bin/sh\nif [ "$1" = "--version" ]; then\n  echo "{banner}"\nfi\n')
+        wrapper.chmod(0o755)
+        (tmp_path / ".muse-version").write_text(revision)
+        inner = tmp_path / f"muse-bin-{revision}"
+        if behavior == "probed":
+            # Model the real truth table: with base instructions present the
+            # build refuses them (so the probe moves to its control leg),
+            # without them it exits clean.
+            script = (
+                f"#!{_sys.executable}\n"
+                "import os, sys\n"
+                f"if os.environ.get('{muse.PROFILE_SYSTEM_PROMPT_ENV}'):\n"
+                f"    sys.stderr.write('{muse.CARRIER_PROBE_REFUSAL}\\n')\n"
+                "    sys.exit(1)\n"
+                "sys.exit(0)\n"
+            )
+        elif behavior == "disproved":
+            script = f"#!{_sys.executable}\nimport sys\nsys.exit(0)\n"
+        else:
+            script = f"#!{_sys.executable}\nimport sys\nsys.stderr.write('unknown preset\\n')\nsys.exit(2)\n"
+        inner.write_text(script)
+        inner.chmod(0o755)
+        return wrapper
+
+    def _run_muse_attestation(self, tmp_path, monkeypatch, behavior: str):
+        wrapper = self._muse_install(tmp_path, behavior=behavior)
+        monkeypatch.setattr(
+            "cli_agent_orchestrator.services.muse_route.shutil.which", lambda name: str(wrapper)
+        )
+        from cli_agent_orchestrator.services import muse_native_launch
+
+        muse_native_launch._PROBE_CACHE.clear()
+        request = ManagedLaunchRouteAttestRequest(
+            protocol_version=PROTOCOL_VERSION,
+            provider="muse_cli",
+            agent_profile="reviewer",
+            working_directory=str(tmp_path),
+            expected_model="muse-spark-1.2-contributor",
+            expected_effort="high",
+        )
+        return request
+
+    def test_muse_attestation_is_available_rather_than_a_dead_end(self, tmp_path, monkeypatch):
+        """An always-refusing muse attestation would wedge recovery instead.
+
+        Before cond-0712 a tripped muse_cli domain could never be attested:
+        the request Literal refused the provider outright, an absorbing
+        state for the launch breaker. The receipt is now real.
+        """
+        request = self._run_muse_attestation(tmp_path, monkeypatch, "probed")
+
+        receipt = managed_launch.attest_route(request)
+
+        assert receipt["no_task_admitted"] is True
+        provider_receipt = receipt["provider_route_receipt"]
+        assert provider_receipt["carrier_verdict"] == "probed"
+        # Requested is not resolved, and the receipt says so in both
+        # directions rather than leaving the reader to infer it.
+        assert provider_receipt["requested_model"] == "muse-spark-1.2-contributor"
+        assert provider_receipt["observed_model"] is None
+        assert provider_receipt["observed_effort"] is None
+        assert provider_receipt["pre_turn_route_surface"] is False
+        assert provider_receipt["unobserved_reason"]
+
+    def test_an_unproven_muse_carrier_travels_as_unproven(self, tmp_path, monkeypatch):
+        """Inconclusive crosses the endpoint verbatim, never upgraded."""
+        request = self._run_muse_attestation(tmp_path, monkeypatch, "unproven")
+
+        receipt = managed_launch.attest_route(request)
+
+        provider_receipt = receipt["provider_route_receipt"]
+        assert provider_receipt["carrier_verdict"] == "unproven"
+        assert provider_receipt["carrier_verdict_detail"]
+
+    def test_a_disproved_muse_carrier_conflicts_at_the_endpoint(self, tmp_path, monkeypatch):
+        request = self._run_muse_attestation(tmp_path, monkeypatch, "disproved")
+
+        with pytest.raises(managed_launch.ManagedLaunchConflict):
+            managed_launch.attest_route(request)
+
+    def test_trusted_project_root_stays_codex_only_for_muse(self, tmp_path):
+        with pytest.raises(managed_launch.ManagedLaunchConflict):
+            managed_launch.attest_route(
+                _attest_request(
+                    tmp_path,
+                    "muse_cli",
+                    trusted_project_root=str(tmp_path),
+                    expected_model="muse-spark-1.2-contributor",
+                    expected_effort="high",
+                )
+            )
+
+    def test_an_unknown_provider_is_refused_without_running_any_attestor(
+        self, tmp_path, monkeypatch
+    ):
+        """Unreachable through the typed request — and still refused if it
+        ever isn't: widening the Literal without adding an attestor must
+        fail here rather than silently reaching whichever probe ran last."""
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("no attestor should run for an unknown provider")
+
+        for module, name in (
+            ("cli_agent_orchestrator.services.codex_trust", "attest_trusted_project"),
+            ("cli_agent_orchestrator.services.kimi_route", "attest_kimi_route"),
+            ("cli_agent_orchestrator.services.claude_route", "attest_claude_route"),
+            ("cli_agent_orchestrator.services.muse_route", "attest_muse_route"),
+        ):
+            monkeypatch.setattr(f"{module}.{name}", _forbidden)
+
+        untyped = _attest_request(tmp_path, "claude_code").model_copy(
+            update={"provider": "glm_cli"}
+        )
+
+        with pytest.raises(managed_launch.ManagedLaunchConflict, match="no route attestor"):
+            managed_launch.attest_route(untyped)
 
 
 def _codex_app_server_stdout(root: str) -> str:
