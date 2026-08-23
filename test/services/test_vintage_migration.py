@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.services import vintage_migration as vm
 
 
@@ -109,6 +110,74 @@ def test_migrate_backfills_bind_intent_on_pre_existing_surface(tmp_path):
     finally:
         conn.close()
     assert vm.migrate_v2(db_path)["added_columns"] == []
+
+
+def test_migrate_v2_pins_launch_facts_json_on_legacy_surface(tmp_path):
+    """A pre-column store gains launch_facts_json and says so in the receipt.
+
+    Real installs build the v2 reservation table from
+    ``_V2_RESERVATIONS_DDL`` / ``_V2_RESERVATIONS_ADDITIVE_COLUMNS``, never
+    from the ORM ``create_all`` the suite uses, so a column dropped from both
+    DDL sources disappears from every real install while the suite stays
+    green.  This builds the pre-column shape (mirroring the
+    ``task_occurrence_id`` pin in ``test_managed_launch_v2_occurrence.py``),
+    migrates it, and pins both the resulting column and the receipt report.
+    """
+    db_path = tmp_path / "metadata.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "CREATE TABLE managed_launch_v2_reservations ("
+            "reservation_id TEXT PRIMARY KEY, terminal_id TEXT NOT NULL UNIQUE, "
+            "generation TEXT NOT NULL UNIQUE, protocol_vintage TEXT NOT NULL DEFAULT 'v2' "
+            "CHECK (protocol_vintage = 'v2'), session_name TEXT NOT NULL, "
+            "provider TEXT NOT NULL, agent_profile TEXT NOT NULL, caller_id TEXT NOT NULL, "
+            "working_directory TEXT NOT NULL, trusted_project_root TEXT, "
+            "obligation_generation TEXT NOT NULL, task_id TEXT, run_id TEXT NOT NULL, "
+            "launch_nonce_digest TEXT NOT NULL, state TEXT NOT NULL, request_json TEXT NOT NULL, "
+            "binding_json TEXT, admission_json TEXT, created_at TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    receipt = vm.migrate_v2(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(managed_launch_v2_reservations)")
+        }
+        assert "launch_facts_json" in columns
+    finally:
+        conn.close()
+    assert "launch_facts_json" in receipt["added_columns"]
+
+
+def test_migrate_v2_raw_surface_matches_orm_models(tmp_path):
+    """The v2 surface migrate_v2 builds equals what the ORM reads.
+
+    The suite builds the v2 tables through ``Base.metadata.create_all``,
+    which masks any drift between the ORM models and the ``vintage_migration``
+    DDL that real installs are actually built from.  Building the surface the
+    way a real install does (raw sqlite + ``migrate_v2``) and pinning the full
+    column set against the ORM for both v2 tables kills that dual-source trap
+    for every future column, not just ``launch_facts_json``.
+    """
+    db_path = tmp_path / "metadata.db"
+    vm.migrate_v2(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for table, model in (
+            ("managed_launch_v2_reservations", database.ManagedLaunchV2ReservationModel),
+            ("managed_launch_v2_terminals", database.ManagedLaunchV2TerminalModel),
+        ):
+            ddl_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            orm_columns = {column.name for column in model.__table__.columns}
+            assert ddl_columns == orm_columns
+    finally:
+        conn.close()
 
 
 def _insert_v2_reservation(db_path, reservation_id="r-1", generation="gen-1"):
