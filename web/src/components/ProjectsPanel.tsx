@@ -3,6 +3,7 @@ import {
   api, ApiError, errorText, conflictDetail, TrackerProject, TrackerIssue, TrackerIssuePage,
   TrackerVocabulary, TrackerScope, TrackerOptionField, TrackerIssueBrief, TrackerProjectHome,
   TrackerProjectSessions, TrackerProjectSessionDetail, TrackerProjectSessionSummary,
+  RankedSearchResponse,
 } from '../api'
 import { linkPhrase } from '../lib/issueMap'
 import { useStore } from '../store'
@@ -10,6 +11,7 @@ import { ConfirmModal } from './ConfirmModal'
 import { IssueGraphPanel } from './IssueGraphPanel'
 import { WayfinderPanel } from './WayfinderPanel'
 import { SearchableMultiSelect, SearchableOption, SearchableSelect } from './SearchablePicker'
+import { RankedSearchResults } from './RankedSearchResults'
 import {
   FolderGit2, Plus, Search, Trash2, X, Loader2, Archive, ChevronRight, MessageSquare,
   History, Link2, Save, FileDown, CircleDot, CheckCircle2, Lightbulb, Compass, List,
@@ -183,6 +185,10 @@ function presentationFor(kind: string | undefined): KindPresentation {
 
 interface TabFilters {
   query: string
+  /** The query after debounce settled — what the ranked search actually runs.
+   * Kept per-tab alongside `query` so switching tabs mid-debounce can never
+   * fire a search mixing one tab's text with another's filters. */
+  effectiveQuery: string
   statusFilter: string[]
   severityFilter: string[]
   openOnly: boolean
@@ -200,6 +206,7 @@ interface TabFilters {
 function defaultTabFilters(): TabFilters {
   return {
     query: '',
+    effectiveQuery: '',
     statusFilter: [],
     severityFilter: [],
     openOnly: true,
@@ -212,6 +219,10 @@ function defaultTabFilters(): TabFilters {
     offset: 0,
   }
 }
+
+/** Debounce window for ranked-search input, ms. §12.3 V1: debounce and cancel
+ * superseded requests so typing cannot stack a request per keystroke. */
+const SEARCH_DEBOUNCE_MS = 250
 
 // ---------------------------------------------------------------------------
 
@@ -299,6 +310,7 @@ export function ProjectsPanel() {
           unlabeled: urlUnlabeled,
           openOnly: params.get('open') !== '0',
           offset: 0,
+          effectiveQuery: '',
         },
       }))
       // Defer project override until after projects load; store intent
@@ -371,6 +383,14 @@ export function ProjectsPanel() {
 
   const loadIssues = useCallback(async () => {
     if (!activeId) { setPage(null); return }
+    // §12.3: a non-empty query hands the surface to ranked search; the flat
+    // list is the empty-query fallback. Gating on the RAW query (not just its
+    // settled form) keeps the debounce window itself free of per-keystroke
+    // substring fetches against the list endpoint.
+    if (filtersByKind[kind].query.trim() || filtersByKind[kind].effectiveQuery) {
+      setPage(null)
+      return
+    }
     setIssuesLoading(true)
     const f = filtersByKind[kind]
     const shared = {
@@ -401,6 +421,108 @@ export function ProjectsPanel() {
   }, [activeId, filtersByKind, kind, showSnackbar])
 
   useEffect(() => { loadIssues() }, [loadIssues])
+
+  // ---------------------------------------------------------------------
+  // Ranked search (M1.5 / §12.3): debounced input, superseded-request
+  // cancellation, structured filters preserved, visible degradation.
+  // ---------------------------------------------------------------------
+
+  interface RankedSearchState {
+    response: RankedSearchResponse | null
+    loading: boolean
+    error: string | null
+  }
+  const [searchState, setSearchState] = useState<RankedSearchState>({ response: null, loading: false, error: null })
+  const [searchRetryNonce, setSearchRetryNonce] = useState(0)
+  // The comment a search hit asked to navigate to (issue key + comment id);
+  // consumed by ItemDetail once its comments are loaded.
+  const [commentTarget, setCommentTarget] = useState<{ issueKey: string; commentId: number } | null>(null)
+  // content_clock of the last applied search page — a changed clock means the
+  // underlying tracker moved under an established offset, so pagination
+  // restarts instead of showing a stale page of a shifted ordering.
+  const lastSearchClockRef = useRef<number | null>(null)
+
+  // Debounce raw input into the effective query. Kept inside TabFilters so it
+  // is per-tab state like every other filter.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      const settled = currentFilters.query.trim()
+      if (settled !== currentFilters.effectiveQuery) updateCurrentFilters({ effectiveQuery: settled })
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(handle)
+  }, [currentFilters.query, currentFilters.effectiveQuery, updateCurrentFilters])
+
+  const searchActive = Boolean(activeId) && view === 'list' && currentFilters.effectiveQuery.length > 0
+
+  // Structured filters serialize into one dependency key so adding a status
+  // chip or label refetches the search without depending on object identity.
+  const structuredFilterKey = useMemo(() => JSON.stringify([
+    currentFilters.statusFilter, currentFilters.severityFilter, currentFilters.labels,
+    currentFilters.excludedLabels, currentFilters.component, currentFilters.assignee,
+    currentFilters.reporter, currentFilters.unlabeled, currentFilters.openOnly,
+  ]), [currentFilters])
+
+  useEffect(() => {
+    if (!searchActive || !activeId) {
+      setSearchState({ response: null, loading: false, error: null })
+      return
+    }
+    const f = currentFilters
+    const controller = new AbortController()
+    setSearchState(prev => ({ ...prev, loading: true, error: null }))
+    api.searchTrackerIssues({
+      projectId: activeId,
+      q: f.effectiveQuery,
+      kind: kind === 'all' ? undefined : kind,
+      status: f.statusFilter.length ? f.statusFilter : undefined,
+      severity: f.severityFilter.length ? f.severityFilter : undefined,
+      label: f.labels.length ? f.labels : undefined,
+      withoutLabel: f.excludedLabels.length ? f.excludedLabels : undefined,
+      component: f.component || undefined,
+      assignee: f.assignee || undefined,
+      reporter: f.reporter || undefined,
+      unlabeled: f.unlabeled || undefined,
+      openOnly: f.openOnly,
+      limit: PAGE_SIZE,
+      offset: f.offset,
+    }, controller.signal)
+      .then(response => {
+        if (controller.signal.aborted) return
+        const rawClock = response.generations?.content_clock
+        const clock = typeof rawClock === 'number' ? rawClock : null
+        if (
+          clock !== null && lastSearchClockRef.current !== null
+          && clock !== lastSearchClockRef.current && f.offset > 0
+        ) {
+          // The tracker's content changed between page fetches; this offset
+          // addresses a page of an ordering that no longer exists. Restart.
+          lastSearchClockRef.current = null
+          updateCurrentFilters({ offset: 0 })
+          return
+        }
+        if (clock !== null) lastSearchClockRef.current = clock
+        setSearchState({ response, loading: false, error: null })
+      })
+      .catch(err => {
+        if (controller.signal.aborted) return
+        setSearchState({ response: null, loading: false, error: errorText(err) })
+      })
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    searchActive, activeId, kind, currentFilters.effectiveQuery, currentFilters.offset,
+    structuredFilterKey, searchRetryNonce, updateCurrentFilters,
+  ])
+
+  const handleSearchSelectIssue = useCallback((issue: TrackerIssue) => {
+    setSelectedKey(selectedKey === issue.key ? null : issue.key)
+    setCommentTarget(null)
+  }, [selectedKey])
+
+  const handleOpenComment = useCallback((issueKey: string, commentId: number) => {
+    setSelectedKey(issueKey)
+    setCommentTarget({ issueKey, commentId })
+  }, [])
 
   // Sync URL on project/kind/key/view/root/map/filter changes — pushState
   // so Back/Forward traverses history. `kind` is written only when it differs
@@ -515,6 +637,7 @@ export function ProjectsPanel() {
             unlabeled: urlUnlabeled,
             openOnly: params.get('open') !== '0',
             offset: 0,
+            effectiveQuery: '',
           },
         }))
       } catch { /* */ }
@@ -955,6 +1078,39 @@ export function ProjectsPanel() {
               )}
             </div>
 
+            {/* Ranked search surface — owns the space whenever the debounced
+                query is non-empty; the flat list below is the empty-query
+                fallback (§12.3). */}
+            {searchActive && (
+              <>
+                <RankedSearchResults
+                  response={searchState.response}
+                  loading={searchState.loading}
+                  error={searchState.error}
+                  onRetry={() => setSearchRetryNonce(n => n + 1)}
+                  selectedKey={selectedKey}
+                  onSelectIssue={handleSearchSelectIssue}
+                  onOpenComment={handleOpenComment}
+                  onOffsetChange={offset => updateCurrentFilters({ offset })}
+                />
+                {selectedKey && vocab && (
+                  <div className="mt-4 rounded-lg border border-gray-800 overflow-hidden" data-testid="search-detail">
+                    <ItemDetail
+                      issueKey={selectedKey}
+                      initialKind={kind === 'all' ? undefined : kind}
+                      vocab={vocab}
+                      onChanged={refreshAfterIssueChange}
+                      onDeleted={() => { setSelectedKey(null); refreshAfterIssueChange() }}
+                      onNavigate={key => { setSelectedKey(key); setCommentTarget(null) }}
+                      commentTarget={commentTarget && commentTarget.issueKey === selectedKey ? commentTarget.commentId : null}
+                    />
+                  </div>
+                )}
+              </>
+            )}
+
+            {!searchActive && (
+            <>
             {/* Issue list */}
             <div className="mt-4 rounded-lg border border-gray-800 overflow-hidden">
               {issuesLoading && (
@@ -968,7 +1124,7 @@ export function ProjectsPanel() {
               {!issuesLoading && page?.issues.map(issue => (
                 <div key={issue.key} className="border-b border-gray-800/70 last:border-b-0">
                   <button
-                    onClick={() => setSelectedKey(selectedKey === issue.key ? null : issue.key)}
+                    onClick={() => { setSelectedKey(selectedKey === issue.key ? null : issue.key); setCommentTarget(null) }}
                     aria-expanded={selectedKey === issue.key}
                     className="w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-gray-900/60 transition-colors"
                   >
@@ -994,6 +1150,7 @@ export function ProjectsPanel() {
                       vocab={vocab}
                       onChanged={refreshAfterIssueChange}
                       onDeleted={() => { setSelectedKey(null); refreshAfterIssueChange() }}
+                      commentTarget={commentTarget && commentTarget.issueKey === issue.key ? commentTarget.commentId : null}
                     />
                   )}
                 </div>
@@ -1010,6 +1167,7 @@ export function ProjectsPanel() {
                   vocab={vocab}
                   onChanged={refreshAfterIssueChange}
                   onDeleted={() => { setSelectedKey(null); refreshAfterIssueChange() }}
+                  commentTarget={commentTarget && commentTarget.issueKey === selectedKey ? commentTarget.commentId : null}
                 />
               </div>
             )}
@@ -1036,6 +1194,8 @@ export function ProjectsPanel() {
                   </button>
                 </div>
               </div>
+            )}
+            </>
             )}
             </>
             )}
@@ -1615,7 +1775,7 @@ function ScopeEditor({
 // one implementation and copy is not duplicated.
 
 function ItemDetail({
-  issueKey, initialKind, vocab, onChanged, onDeleted, onNavigate,
+  issueKey, initialKind, vocab, onChanged, onDeleted, onNavigate, commentTarget,
 }: {
   issueKey: string
   initialKind?: string
@@ -1623,6 +1783,9 @@ function ItemDetail({
   onChanged: () => Promise<void>
   onDeleted: () => void
   onNavigate?: (key: string) => void
+  /** A ranked-search hit asked to land on this comment (§12.3 "navigate
+   * directly to a matching comment"): scroll to it and ring it once loaded. */
+  commentTarget?: number | null
 }) {
   const { showSnackbar } = useStore()
   const [issue, setIssue] = useState<TrackerIssue | null>(null)
@@ -1690,6 +1853,21 @@ function ItemDetail({
   }, [issueKey, showSnackbar])
 
   useEffect(() => { load() }, [load])
+
+  // Comment navigation from a ranked-search hit: once the issue (and its
+  // comments) are loaded, bring the target comment on screen and ring it
+  // briefly. jsdom has no layout, so the scroll is guarded.
+  const [highlightedCommentId, setHighlightedCommentId] = useState<number | null>(null)
+  useEffect(() => {
+    if (!commentTarget || !issue) return
+    if (!(issue.comments ?? []).some(c => c.id === commentTarget)) return
+    const el = document.getElementById(`issue-comment-${commentTarget}`)
+    if (!el) return
+    if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' })
+    setHighlightedCommentId(commentTarget)
+    const timer = setTimeout(() => setHighlightedCommentId(null), 3200)
+    return () => clearTimeout(timer)
+  }, [commentTarget, issue])
 
   // The pending change set against a given base. Label edits go out as
   // add/remove DELTAS rather than a full replacement, so a label another
@@ -2400,7 +2578,14 @@ function ItemDetail({
 
       <div className="space-y-2">
         {(issue.comments ?? []).map(c => (
-          <div key={c.id} className={`rounded bg-gray-900/60 border px-3 py-2 ${c.important ? 'border-amber-600/40' : 'border-gray-800'}`}>
+          <div
+            key={c.id}
+            id={`issue-comment-${c.id}`}
+            data-testid={`issue-comment-${c.id}`}
+            className={`rounded bg-gray-900/60 border px-3 py-2 ${c.important ? 'border-amber-600/40' : 'border-gray-800'} ${
+              highlightedCommentId === c.id ? 'ring-1 ring-amber-400/70' : ''
+            }`}
+          >
             <div className="flex items-center justify-between gap-2 text-[11px] text-gray-600">
               <span>{c.author ?? 'unknown'} · {shortDate(c.created_at)}</span>
               <button

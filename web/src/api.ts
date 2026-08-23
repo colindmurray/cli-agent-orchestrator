@@ -32,6 +32,14 @@ export function errorText(err: unknown): string {
 async function fetchJSON<T>(url: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 10000)
+  // A caller-supplied signal (e.g. superseded-search cancellation) composes
+  // with the internal timeout instead of being overwritten by it.
+  const externalSignal = opts?.signal
+  const propagateAbort = () => controller.abort()
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort()
+    else externalSignal.addEventListener('abort', propagateAbort)
+  }
   try {
     const res = await fetch(`${BASE}${url}`, { ...opts, signal: controller.signal })
     if (!res.ok) {
@@ -62,6 +70,7 @@ async function fetchJSON<T>(url: string, opts?: RequestInit & { timeoutMs?: numb
     return res.json()
   } finally {
     clearTimeout(timeout)
+    if (externalSignal) externalSignal.removeEventListener('abort', propagateAbort)
   }
 }
 
@@ -1114,6 +1123,91 @@ export interface TrackerLabelFacet {
   open: number
 }
 
+// ---------------------------------------------------------------------------
+// Ranked issue search — GET /tracker/issues/search (M1.4a contract)
+
+export interface RankedSearchLaneContribution {
+  lane: string
+  rank: number
+  raw_score: number
+}
+
+/** The §10.4 comment-lane winner: the single comment that carried the issue
+ * into the results, plus the rest of the matching set behind it. */
+export interface RankedWinningComment {
+  comment_id: number
+  important: boolean
+  retained_hits: number
+  additional_comment_ids: number[]
+  total_matching_comments: number
+}
+
+export interface RankedSearchExplanation {
+  issue: TrackerIssue | null
+  rank_score: number
+  contributing_lanes: RankedSearchLaneContribution[]
+  matched_fields: string[]
+  snippets: Record<string, string>
+  winning_comment: RankedWinningComment | null
+  exact_boosts: string[]
+  neighborhood: Array<{ from_key: string; to_key: string; kind: string }>
+  duplicate_chain: Array<{ canonical_key: string; canonical_title: string | null; resolved: boolean }>
+}
+
+export interface RankedSearchLaneAvailability {
+  available: boolean
+  reason?: string
+}
+
+export interface RankedSearchDegradation {
+  requested_mode: string
+  effective_mode: string
+  reasons: string[]
+  lanes: Record<string, RankedSearchLaneAvailability>
+}
+
+export interface RankedSearchResponse {
+  query: string
+  scope: {
+    project_ids: string[]
+    all_projects: boolean
+    subtree_roots: string[]
+    subtree_closure_size: number
+  }
+  mode_requested: string
+  mode_effective: string
+  degradation: RankedSearchDegradation
+  generations: Partial<Record<'schema_version' | 'document_schema_version' | 'content_clock' | 'active_vector_generation' | 'rebuilt_at', number | string | null>>
+  diagnostics: {
+    lane_elapsed_ms: Record<string, number>
+    total_elapsed_ms: number
+  }
+  total: number
+  limit: number
+  offset: number
+  results: RankedSearchExplanation[]
+}
+
+/** Filters for the dashboard's ranked search. Structured filters mirror
+ * TrackerIssueFilters so an operator's active list filters survive the switch
+ * into search; multi-value families go over the wire as repeated params. */
+export interface RankedSearchFilters {
+  projectId?: string
+  q: string
+  kind?: string
+  status?: string[]
+  severity?: string[]
+  component?: string
+  assignee?: string
+  reporter?: string
+  label?: string[]
+  withoutLabel?: string[]
+  unlabeled?: boolean
+  openOnly?: boolean
+  limit?: number
+  offset?: number
+}
+
 export interface TrackerLabelFacets {
   project_id: string
   labels: TrackerLabelFacet[]
@@ -1250,6 +1344,29 @@ function trackerQuery(filters?: TrackerIssueFilters): string {
   if (filters.offset) parts.push(`offset=${filters.offset}`)
   if (filters.order) parts.push(`order=${encodeURIComponent(filters.order)}`)
   return parts.length ? `?${parts.join('&')}` : ''
+}
+
+/** Query string for GET /tracker/issues/search. Same repeated-param
+ * conventions as trackerQuery: multi-value families repeat, scope is exactly
+ * one project here (the dashboard is per-project), and `q` is mandatory — the
+ * route refuses an empty normalized query, so callers only send non-empty
+ * text (the empty-query surface stays on the issue list). */
+function rankedSearchQuery(filters: RankedSearchFilters): string {
+  const parts: string[] = [`q=${encodeURIComponent(filters.q)}`]
+  if (filters.projectId) parts.push(`project_id=${encodeURIComponent(filters.projectId)}`)
+  if (filters.kind && filters.kind !== 'all') parts.push(`kind=${encodeURIComponent(filters.kind)}`)
+  for (const s of filters.status ?? []) parts.push(`status=${encodeURIComponent(s)}`)
+  for (const s of filters.severity ?? []) parts.push(`severity=${encodeURIComponent(s)}`)
+  if (filters.component) parts.push(`component=${encodeURIComponent(filters.component)}`)
+  if (filters.assignee) parts.push(`assignee=${encodeURIComponent(filters.assignee)}`)
+  if (filters.reporter) parts.push(`reporter=${encodeURIComponent(filters.reporter)}`)
+  for (const label of filters.label ?? []) parts.push(`label=${encodeURIComponent(label)}`)
+  for (const label of filters.withoutLabel ?? []) parts.push(`without_label=${encodeURIComponent(label)}`)
+  if (filters.unlabeled) parts.push('unlabeled=true')
+  if (filters.openOnly) parts.push('open_only=true')
+  if (filters.limit) parts.push(`limit=${filters.limit}`)
+  if (filters.offset) parts.push(`offset=${filters.offset}`)
+  return `?${parts.join('&')}`
 }
 
 export const api = {
@@ -1743,6 +1860,8 @@ export const api = {
 
   listTrackerIssues: (filters?: TrackerIssueFilters) =>
     fetchJSON<TrackerIssuePage>(`/tracker/issues${trackerQuery(filters)}`),
+  searchTrackerIssues: (filters: RankedSearchFilters, signal?: AbortSignal) =>
+    fetchJSON<RankedSearchResponse>(`/tracker/issues/search${rankedSearchQuery(filters)}`, { signal }),
   getTrackerIssue: (key: string) =>
     fetchJSON<TrackerIssue>(`/tracker/issues/${encodeURIComponent(key)}`),
   createTrackerIssue: (body: Record<string, unknown>) =>
