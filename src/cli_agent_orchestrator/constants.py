@@ -350,6 +350,25 @@ INBOX_RECONCILE_GRACE_SECONDS = 30
 # Data retention period for terminals, messages, and log files
 RETENTION_DAYS = 14
 
+# Lane X2 — campaign-era store enrollment.  Each store keeps its own
+# retention horizon behind its own env flag so activation timing and blast
+# radius stay per-store.  All of these run inside the startup
+# ``cleanup_old_data`` pass and are fail-closed on unreadable state.
+# M10 route-observation operations: a terminal result is removable once it
+# is older than this AND its inbox wake claim is no longer pending.
+ROUTE_OBSERVATION_RETENTION_DAYS = _env_int("CAO_ROUTE_OBSERVATION_RETENTION_DAYS", 30)
+# Append-only restore contracts: a contract whose source incarnation is
+# retired AND superseded by a newer contract for the same stable agent is
+# removable once older than this.
+RESTORE_CONTRACT_RETENTION_DAYS = _env_int("CAO_RESTORE_CONTRACT_RETENTION_DAYS", 30)
+# Terminal-state registered waits (and their admission verdicts) are
+# removable once older than this and no longer wake-pending.
+REGISTERED_WAIT_RETENTION_DAYS = _env_int("CAO_REGISTERED_WAIT_RETENTION_DAYS", 30)
+# Terminal wake-receipt sidecar files (wake_confirmed / wake_unconfirmed).
+WAKE_RECEIPT_RETENTION_DAYS = _env_int("CAO_WAKE_RECEIPT_RETENTION_DAYS", 30)
+# Companion-receipt sidecar files whose roster incarnation is retired.
+COMPANION_RECEIPT_RETENTION_DAYS = _env_int("CAO_COMPANION_RECEIPT_RETENTION_DAYS", 30)
+
 # =============================================================================
 # Agent Profile Storage
 # =============================================================================

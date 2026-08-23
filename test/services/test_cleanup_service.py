@@ -68,8 +68,10 @@ class TestCleanupOldData:
         # Verify cleanup was called:
         # Session 1: query.all() for terminal iteration + query.delete() for terminal deletion
         # Session 2: query.delete() for inbox deletion
+        # The Lane X2 store enrollment opens one more transaction per store,
+        # so the commit count is no longer a fixed value; it only grows.
         assert mock_db.query.call_count >= 2
-        assert mock_db.commit.call_count == 2
+        assert mock_db.commit.call_count >= 2
 
     @patch("cli_agent_orchestrator.services.cleanup_service.SessionLocal")
     @patch("cli_agent_orchestrator.services.cleanup_service.RETENTION_DAYS", 7)
