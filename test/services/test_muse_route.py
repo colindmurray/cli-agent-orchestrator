@@ -134,7 +134,7 @@ def test_a_disproved_carrier_refuses(tmp_path, monkeypatch):
         "cli_agent_orchestrator.services.muse_route.shutil.which", lambda name: str(wrapper)
     )
 
-    with pytest.raises(MuseRouteProbeError, match="disproved"):
+    with pytest.raises(MuseRouteProbeError, match="non-empty base instructions present"):
         attest_muse_route(str(tmp_path), expected_model="m", expected_effort="high")
 
 
@@ -149,8 +149,48 @@ def test_an_unproven_verdict_travels_verbatim_never_upgraded(tmp_path, monkeypat
 
     assert receipt["carrier_verdict"] == "unproven"
     assert receipt["carrier_verdict_detail"] == (
-        "unknown preset <name>; expected native-basic|miniswe"
+        "profile_carrier_unproven: unknown preset <name>; expected native-basic|miniswe"
     )
+
+
+def test_an_operator_pinned_build_attests_as_probed_by_operator(tmp_path, monkeypatch):
+    """The documented override reads identically on both surfaces.
+
+    A persistent-disproved build cleared by CAO_MUSE_PROFILE_CARRIER_PROVEN
+    launches as probed_by_operator; if attest-route refused it anyway, a
+    tripped breaker could never be re-armed for a route that launches fine.
+    The stub is the disproved build: only the pin gets it through.
+    """
+    wrapper, inner = _make_install(tmp_path, behavior="disproved")
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.muse_route.shutil.which", lambda name: str(wrapper)
+    )
+    digest = muse._sha256_file(str(inner))
+    monkeypatch.setenv(muse.CAO_MUSE_PROFILE_CARRIER_PROVEN_ENV, digest)
+
+    receipt = attest_muse_route(str(tmp_path), expected_model="m", expected_effort="high")
+
+    assert receipt["carrier_verdict"] == "probed_by_operator"
+    assert muse.CAO_MUSE_PROFILE_CARRIER_PROVEN_ENV in receipt["carrier_verdict_detail"]
+    assert receipt["inner_executable"] == str(inner)
+    assert receipt["inner_executable_sha256"] == digest
+    # The live probe never ran: a disproved stub would have refused.
+    assert receipt["no_managed_session_started"] is True
+
+
+def test_a_mismatched_operator_pin_falls_through_to_the_live_probe(tmp_path, monkeypatch):
+    """A pin naming some other binary proves nothing about this one."""
+    wrapper, _ = _make_install(tmp_path, behavior="normal")
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.muse_route.shutil.which", lambda name: str(wrapper)
+    )
+    monkeypatch.setenv(muse.CAO_MUSE_PROFILE_CARRIER_PROVEN_ENV, "f" * 64)
+
+    receipt = attest_muse_route(str(tmp_path), expected_model="m", expected_effort="high")
+
+    # The live two-leg probe ran and answered, rather than the pin speaking.
+    assert receipt["carrier_verdict"] == "probed"
+    assert receipt["carrier_verdict_detail"] == ""
 
 
 def test_an_absent_wrapper_is_a_typed_probe_failure(tmp_path, monkeypatch):

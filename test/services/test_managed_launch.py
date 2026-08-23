@@ -892,6 +892,26 @@ def _attest_request(tmp_path, provider, **changes):
     return ManagedLaunchRouteAttestRequest(**payload)
 
 
+def test_attest_and_reserve_provider_literals_stay_paired():
+    """The two hand-maintained provider Literals must enumerate the same set.
+
+    The route receipt names the same canonical provider a reservation does;
+    if either Literal widens alone, a lawful launch loses its attestor or an
+    attestation advertises a provider no launch can reserve. Derived from
+    the annotations themselves so the test cannot drift from the models.
+    """
+    from typing import get_args
+
+    from cli_agent_orchestrator.models.managed_launch_v2 import (
+        ManagedLaunchV2ReserveRequest,
+    )
+
+    reserve_args = get_args(ManagedLaunchV2ReserveRequest.model_fields["provider"].annotation)
+    attest_args = get_args(ManagedLaunchRouteAttestRequest.model_fields["provider"].annotation)
+
+    assert set(attest_args) == set(reserve_args)
+
+
 class TestRouteAttestationDispatchesByProvider:
     """One attestor per provider, chosen by name, never by falling through.
 

@@ -10,7 +10,15 @@ The carrier verdict travels verbatim and is never upgraded: ``probed`` is
 the only verdict that asserts the base-instructions surface works,
 ``unproven`` records that this probe established nothing, and ``disproved``
 — a build that ran a clean echo turn with base instructions present, so it
-ignores them — refuses here exactly as it fails closed at launch.
+ignores them — refuses here exactly as it fails closed at launch. An
+operator who has pinned ``CAO_MUSE_PROFILE_CARRIER_PROVEN`` to the inner
+binary's digest attests as ``probed_by_operator``, the same verdict the
+launch path records, so the two surfaces cannot disagree about a build.
+
+Resolution and proof go through
+:func:`muse_native_launch.profile_carrier_capability` — the same authority a
+managed Muse launch consults — rather than a private re-derivation, so the
+override, the launcher-layout gate, and the probe have exactly one reader.
 
 What this receipt deliberately does not claim: an observed model or effort.
 The zero-task probe pins neither — model and effort are carried by launch
@@ -69,17 +77,16 @@ def attest_muse_route(
     *,
     expected_model: str,
     expected_effort: str,
-    timeout: float = 20.0,
     muse_bin: str = "muse",
 ) -> dict[str, Any]:
     """Return a provider-native Muse route receipt without starting a session.
 
     What is proven: the working directory is a canonical existing directory,
-    the installed launcher wrapper is present and parseable, its active
-    revision resolves to the exact ``muse-bin-<revision>`` a managed launch
-    would exec, and that inner binary answers the two-leg carrier probe with
-    a verdict carried through verbatim. A ``disproved`` verdict raises, as
-    it fails closed at launch; ``unproven`` produces a receipt that says so.
+    the installed launcher wrapper is present and parseable, and the
+    carrier-capability authority a managed launch consults resolves this
+    installation to a verdict, carried through verbatim. A ``disproved``
+    capability raises, as it fails closed at launch; ``unproven`` produces
+    a receipt that says so.
     """
     if not os.path.isdir(project_root) or os.path.realpath(project_root) != project_root:
         raise MuseRouteProbeError("project_root must be an existing canonical directory")
@@ -128,33 +135,38 @@ def attest_muse_route(
             f"{list(SUPPORTED_MUSE_VERSIONS)!r}"
         )
 
-    try:
-        inner = muse_native_launch.resolve_profile_carrier_inner_executable(wrapper, banner)
-        digest = muse_native_launch._sha256_file(inner)
-    except muse_native_launch.MuseProfileCarrierUnverified as exc:
-        raise MuseRouteProbeError(str(exc)) from exc
-    except OSError as exc:
-        raise MuseRouteProbeError(f"Muse inner executable could not be digested: {exc}") from exc
+    # Resolve, override, and probe through the one capability authority a
+    # managed launch consults. An operator pin on
+    # CAO_MUSE_PROFILE_CARRIER_PROVEN therefore reads identically here and at
+    # launch: a build that launches as probed_by_operator also attests as it,
+    # and a disproved build refuses on both surfaces instead of wedging a
+    # tripped breaker that launch can clear.
+    capability = muse_native_launch.profile_carrier_capability(
+        wrapper_executable=wrapper, full_banner=banner
+    )
+    if not capability.supported:
+        raise MuseRouteProbeError(f"Muse route attestation failed: {capability.reason}")
 
-    proof, detail = muse_native_launch.probe_profile_carrier(inner, timeout=timeout)
-    if proof == muse_native_launch.PROOF_DISPROVED:
-        reason = (
-            "the installed build ran a clean `muse exec --provider echo` turn "
-            "with non-empty base instructions present, so it ignores them"
+    detail = capability.reason
+    if capability.proof == muse_native_launch.PROOF_PROBED_BY_OPERATOR:
+        detail = (
+            "operator attestation: "
+            f"{muse_native_launch.CAO_MUSE_PROFILE_CARRIER_PROVEN_ENV} is pinned to "
+            "this inner binary's sha256"
         )
-        raise MuseRouteProbeError(f"Muse profile carrier disproved ({reason}): {detail}")
 
     return {
         "probe_version": PROBE_VERSION,
         "muse_version": normalized,
         "full_banner": banner,
         "wrapper_executable": wrapper,
-        "inner_executable": inner,
-        "inner_executable_sha256": digest,
+        "inner_executable": capability.inner_executable,
+        "inner_executable_sha256": capability.inner_executable_sha256,
         "project_root": project_root,
-        # Verbatim from the probe: unproven travels as unproven, never
-        # upgraded to probed and never silently dropped.
-        "carrier_verdict": proof,
+        # Verbatim from the authority: unproven travels as unproven and an
+        # operator attestation travels as probed_by_operator — never
+        # upgraded to probed, never silently dropped.
+        "carrier_verdict": capability.proof,
         "carrier_verdict_detail": detail,
         "route_source": "launcher-resolved-inner-binary",
         # Requested, not resolved — the two are different claims and the
