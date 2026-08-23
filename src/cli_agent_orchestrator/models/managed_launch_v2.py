@@ -51,6 +51,7 @@ class ManagedLaunchV2ReserveRequest(BaseModel):
     provider_executable_sha256: str
     obligation_generation: str
     task_id: Optional[str] = None
+    task_occurrence_id: Optional[str] = None
     run_id: str
     project: Optional[str] = None
     delivery_id: str
@@ -114,6 +115,13 @@ class ManagedLaunchV2ReserveRequest(BaseModel):
     @classmethod
     def _delivery_uuid(cls, value: str) -> str:
         return _uuid_text(value)
+
+    @field_validator("task_occurrence_id")
+    @classmethod
+    def _task_occurrence_uuid(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            return _uuid_text(value)
+        return value
 
     @field_validator("caller_id")
     @classmethod
