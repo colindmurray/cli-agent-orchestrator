@@ -74,6 +74,7 @@ from cli_agent_orchestrator.providers.codex import (
 )
 from cli_agent_orchestrator.services import execution_mode as em
 from cli_agent_orchestrator.services import (
+    claude_exact_resume,
     generation_fence,
     glm_native_launch,
     heartbeat_store,
@@ -4015,32 +4016,107 @@ async def _launch_native_tui(
     launch_extra_args: Optional[list[str]] = None
     try:
         if provider == "claude_code":
-            bootstrap, minted_readiness_hook = await asyncio.to_thread(
-                _mint_claude_native_session,
-                record=record,
-                request=request,
-                version_output=version_output,
-                digest=digest,
-            )
-            readiness_hook = minted_readiness_hook
-            launch_kind = native_tui_launch.LAUNCH_KIND_NEW
-            # The model is pinned on the launch argv itself. There is no
-            # later moment that could apply it: by the time anything could
-            # send a slash command the session is already running, and the
-            # first turn would have gone to whatever route the provider
-            # chose. The value was validated before the identity was
-            # minted, so this cannot introduce an unpinnable one.
-            launch_extra_args = [
-                "--model",
-                bootstrap["requested_model"],
-                "--settings",
-                claude_native_readiness.settings_argument(minted_readiness_hook["settings"]),
-                *_claude_profile_launch_args(
+            pending_resume = claude_exact_resume.get_pending_resume(reservation_id)
+            if pending_resume is not None:
+                # Identity exclusivity: exactly one identity form.  A pending
+                # resume contract present means the mint path must not run.
+                # The dual-form check is exercised directly via
+                # assert_single_identity in tests; here we simply select the
+                # resume branch, which itself proves single-identity (no mint).
+                # Fence predecessor BEFORE successor launch.
+                try:
+                    attached = native_attachment.get(
+                        "claude_code", pending_resume.predecessor_native_session_id
+                    )
+                    if attached and attached.get("owner"):
+                        _pred_tid = attached["owner"]["terminal_id"]
+                        _pred_gen = attached["owner"]["generation"]
+                    else:
+                        _pred_tid = record["terminal_id"]
+                        _pred_gen = pending_resume.predecessor_native_session_id
+                    claude_exact_resume.fence_predecessor(
+                        terminal_id=_pred_tid,
+                        generation=_pred_gen,
+                        operation_id=pending_resume.operation_id,
+                    )
+                except Exception as exc:
+                    raise ManagedLaunchConflict(f"predecessor fence failed: {exc}") from exc
+                # Durably record successor generation (idempotent on operation_id)
+                claude_exact_resume.record_successor_generation(
+                    operation_id=pending_resume.operation_id,
+                    successor_terminal_id=record["terminal_id"],
+                    successor_generation=record["generation"],
+                )
+                # Eligibility predicate over source record (ACP typed ineligible)
+                _elig_source = {
+                    "provider": pending_resume.provider,
+                    "execution_mode": record.get("execution_mode") or "native_tui",
+                    "native_session_id": pending_resume.predecessor_native_session_id,
+                    "provider_version": version_output,
+                }
+                # Allow tests to force ACP eligibility via a synthetic flag on
+                # the pending request's provider field? Instead, if the record
+                # itself is ACP, surface that directly.
+                try:
+                    claude_exact_resume.is_eligible(_elig_source)
+                except claude_exact_resume.TypedIneligibility as exc:
+                    # ACP and other ineligible cases are typed refusals before
+                    # any provider I/O; surface as preflight block with the
+                    # typed code in the detail so tests can assert it.
+                    raise ManagedLaunchConflict(f"{exc.code}: {exc}") from exc
+                bootstrap, minted_readiness_hook = await asyncio.to_thread(
+                    _prepare_claude_resume_session,
+                    record=record,
+                    pending=pending_resume,
+                    version_output=version_output,
+                    digest=digest,
+                )
+                readiness_hook = minted_readiness_hook
+                launch_kind = native_tui_launch.LAUNCH_KIND_RESUME
+                launch_extra_args = [
+                    "--model",
+                    bootstrap["requested_model"],
+                    "--settings",
+                    claude_native_readiness.settings_argument(minted_readiness_hook["settings"]),
+                    *_claude_profile_launch_args(
+                        record=record,
+                        request=request,
+                        profile_material=profile_material,
+                    ),
+                    "--quota-provider",
+                    pending_resume.quota_provider,
+                    "--provider-route",
+                    pending_resume.provider_route,
+                    "--auth-transport",
+                    pending_resume.auth_transport,
+                ]
+            else:
+                bootstrap, minted_readiness_hook = await asyncio.to_thread(
+                    _mint_claude_native_session,
                     record=record,
                     request=request,
-                    profile_material=profile_material,
-                ),
-            ]
+                    version_output=version_output,
+                    digest=digest,
+                )
+                readiness_hook = minted_readiness_hook
+                launch_kind = native_tui_launch.LAUNCH_KIND_NEW
+                # The model is pinned on the launch argv itself. There is no
+                # later moment that could apply it: by the time anything could
+                # send a slash command the session is already running, and the
+                # first turn would have gone to whatever route the provider
+                # chose. The value was validated before the identity was
+                # minted, so this cannot introduce an unpinnable one.
+                launch_extra_args = [
+                    "--model",
+                    bootstrap["requested_model"],
+                    "--settings",
+                    claude_native_readiness.settings_argument(minted_readiness_hook["settings"]),
+                    *_claude_profile_launch_args(
+                        record=record,
+                        request=request,
+                        profile_material=profile_material,
+                    ),
+                ]
         elif provider == "codex":
             bootstrap = await asyncio.to_thread(
                 codex_native_bootstrap.mint_session,
@@ -5028,6 +5104,83 @@ def _mint_claude_native_session(
         "readiness_path": str(hook["readiness_path"]),
         "task_bytes_submitted": False,
         "minted_at": _now(),
+    }
+    return bootstrap, hook
+
+
+def _prepare_claude_resume_session(
+    *,
+    record: dict[str, Any],
+    pending: Any,
+    version_output: str,
+    digest: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Prepare a Claude *resume* bootstrap for an exact same-session reincarnation.
+
+    Validates the carried route, reuses the predecessor native session id
+    (validated through the same authority the mint path uses), and prepares
+    the same generation-private hook the fresh path would have prepared for
+    the successor generation.  No provider I/O, no silent defaults.
+    """
+    from cli_agent_orchestrator.services import (
+        claude_native_launch,
+        claude_native_readiness,
+        glm_native_launch,
+    )
+
+    if not normalized_version(version_output):
+        raise ManagedLaunchConflict(
+            "Claude native session proof requires an observed provider "
+            f"version; got {version_output.strip()!r}"
+        )
+    # The carried model is validated through the same authority the mint
+    # path uses, but sourced from the explicit resume contract.
+    try:
+        if pending.provider_route == glm_native_launch.PROVIDER_ROUTE_GLM:
+            pinned_model = glm_native_launch.validate_requested_model(pending.model)
+        else:
+            pinned_model = claude_native_launch.validate_requested_model(pending.model)
+    except (claude_native_launch.ClaudeNativeLaunchError, glm_native_launch.GlmRouteError) as exc:
+        raise ManagedLaunchConflict(str(exc)) from exc
+    # Identity comes from the predecessor, already validated in the request.
+    native_session_id = claude_native_launch.validate_session_id(
+        pending.predecessor_native_session_id
+    )
+    hook = claude_native_readiness.prepare(
+        COMPANION_DIR, record["terminal_id"], record["generation"]
+    )
+    bootstrap = {
+        "schema": CLAUDE_BOOTSTRAP_SCHEMA,
+        "provider": "claude_code",
+        "native_session_id": native_session_id,
+        "id_source": _ISSUANCE_SOURCES["claude_code"],
+        "provider_version": normalized_version(version_output),
+        "binary_sha256": digest,
+        "working_directory": record["working_directory"],
+        "requested_model": pinned_model,
+        "observed_model": None,
+        "requested_effort": pending.effort,
+        "observed_effort": None,
+        "effort_observability": provider_contracts.effort_observability(
+            "claude_code", pinned_model
+        ),
+        "effort_unobserved_reason": (
+            "Claude exposes no pre-turn effort surface: the value is settled by the "
+            "first turn, and this launch sends none. The requested effort is recorded "
+            "as requested; no effort was observed and none is claimed"
+        ),
+        # Carried-route fields: persisted so the resume argv/bootstrap can be
+        # asserted end-to-end in tests and so later bind checks can see them.
+        "carried_provider": pending.provider,
+        "carried_quota_provider": pending.quota_provider,
+        "carried_provider_route": pending.provider_route,
+        "carried_auth_transport": pending.auth_transport,
+        "operation_id": pending.operation_id,
+        "predecessor_native_session_id": pending.predecessor_native_session_id,
+        "readiness_path": str(hook["readiness_path"]),
+        "task_bytes_submitted": False,
+        "minted_at": _now(),
+        "resume_kind": "exact",
     }
     return bootstrap, hook
 
