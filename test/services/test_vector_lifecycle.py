@@ -13,12 +13,12 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, text
 
+from cli_agent_orchestrator.clients import tracker_search_schema as schema
 from cli_agent_orchestrator.clients.database import (
     _TRACKER_ORM_TABLE_NAMES,
     Base,
     _migrate_tracker_search_projection,
 )
-from cli_agent_orchestrator.clients import tracker_search_schema as schema
 from cli_agent_orchestrator.services import vector_lifecycle as vlc
 from cli_agent_orchestrator.services.embedding_adapter import EmbeddingCapabilityError
 
@@ -85,9 +85,7 @@ def _seed_comment(eng, issue_key="cao-1", body="a comment", author="alice"):
 def _update_issue_title(eng, key, title):
     raw = eng.raw_connection()
     try:
-        raw.execute(
-            "UPDATE tracker_issues SET title = ? WHERE key = ?", (title, key)
-        )
+        raw.execute("UPDATE tracker_issues SET title = ? WHERE key = ?", (title, key))
         raw.commit()
     finally:
         raw.close()
@@ -384,16 +382,12 @@ class TestCreateGeneration:
 
 
 class TestConcurrencyAndFailureMatrix:
-    def test_mutation_during_embedding_cannot_clear_a_newer_dirty_row(
-        self, store, db_file
-    ):
+    def test_mutation_during_embedding_cannot_clear_a_newer_dirty_row(self, store, db_file):
         """§19.3: mutation during embedding cannot clear a newer dirty row."""
         _seed_issue(store, "cao-1", title="before")
         created = vlc.create_generation(metadata=MINIMAL_RECORD, target_engine=store)
 
-        racing = MutatingEmbedder(
-            lambda: _update_issue_title(store, "cao-1", "after")
-        )
+        racing = MutatingEmbedder(lambda: _update_issue_title(store, "cao-1", "after"))
         result = vlc.refresh_generation(
             generation_id=created["generation_id"], db_path=str(db_file), embedder=racing
         )
@@ -407,9 +401,7 @@ class TestConcurrencyAndFailureMatrix:
         assert dirty[0]["attempt_count"] == 0
         assert dirty[0]["last_error"] is None
 
-    def test_deletion_during_embedding_cannot_resurrect_a_semantic_result(
-        self, store, db_file
-    ):
+    def test_deletion_during_embedding_cannot_resurrect_a_semantic_result(self, store, db_file):
         """§19.3: deletion during embedding cannot resurrect a semantic result."""
         _seed_issue(store, "cao-1", title="doomed")
         created = vlc.create_generation(metadata=MINIMAL_RECORD, target_engine=store)
@@ -486,9 +478,7 @@ class TestConcurrencyAndFailureMatrix:
         # The proven vector predates the current version: never served fresh.
         assert semantic_rows(store, created["generation_id"]) == []
 
-    def test_stale_failure_cannot_overwrite_a_newer_dirty_rows_retry_state(
-        self, store, db_file
-    ):
+    def test_stale_failure_cannot_overwrite_a_newer_dirty_rows_retry_state(self, store, db_file):
         """§19.3: stale embedding failure cannot overwrite newer retry state."""
         _seed_issue(store, "cao-1", title="v1 title")
         created = vlc.create_generation(metadata=MINIMAL_RECORD, target_engine=store)
@@ -547,9 +537,7 @@ class TestConcurrencyAndFailureMatrix:
         assert _pointer(store) == rebuilt["generation_id"]
         assert activated["activated_at"] is not None
 
-    def test_encoding_dimension_mismatch_never_activates_a_mixed_generation(
-        self, store, db_file
-    ):
+    def test_encoding_dimension_mismatch_never_activates_a_mixed_generation(self, store, db_file):
         """§19.3: model/dimension mismatch never mixes generations."""
         _seed_issue(store, "cao-1")
         created = vlc.create_generation(metadata=MINIMAL_RECORD, target_engine=store)
@@ -631,6 +619,7 @@ class TestConcurrencyAndFailureMatrix:
         )
         assert refreshed["published"] == 3
         assert semantic_rows(store, created["generation_id"]) == [
+            "comment:1",
             "issue:cao-1",
             "issue:cao-2",
         ]
@@ -704,7 +693,7 @@ class TestConcurrencyAndFailureMatrix:
         assert before == after
         assert drained["published"] == 2
         assert len(_vectors(store, created["generation_id"])) == 2
-        assert semantic_rows(store, created["generation_id"]) == ["issue:cao-1", "comment:1"]
+        assert semantic_rows(store, created["generation_id"]) == ["comment:1", "issue:cao-1"]
 
     def test_embedding_unavailable_is_typed_and_leaves_authoritative_state_unchanged(
         self, store, db_file, tmp_path
@@ -715,9 +704,7 @@ class TestConcurrencyAndFailureMatrix:
         created = vlc.create_generation(metadata=MINIMAL_RECORD, target_engine=store)
 
         with pytest.raises(EmbeddingCapabilityError) as excinfo:
-            vlc.refresh_generation(
-                models_dir=tmp_path / "no-models-here", db_path=str(db_file)
-            )
+            vlc.refresh_generation(models_dir=tmp_path / "no-models-here", db_path=str(db_file))
         assert excinfo.value.reason == "unprepared"
 
         dirty = _dirty_rows(store, created["generation_id"])
@@ -761,9 +748,7 @@ class TestRefreshMechanics:
 
         raw = _raw(store)
         try:
-            raw.execute(
-                f"UPDATE {schema.VECTOR_DIRTY_TABLE} SET next_attempt_at = NULL"
-            )
+            raw.execute(f"UPDATE {schema.VECTOR_DIRTY_TABLE} SET next_attempt_at = NULL")
             raw.commit()
         finally:
             raw.close()
@@ -802,9 +787,7 @@ class TestRefreshMechanics:
         finally:
             raw.close()
         with pytest.raises(vlc.VectorLifecycleError) as excinfo:
-            vlc.refresh_generation(
-                generation_id=created["generation_id"], db_path=str(db_file)
-            )
+            vlc.refresh_generation(generation_id=created["generation_id"], db_path=str(db_file))
         assert excinfo.value.reason == "generation-not-refreshable"
 
 
@@ -873,9 +856,7 @@ class TestActivationAndStatus:
         )
         assert not vlc.mark_generation_failed("gen-absent", failure="x", target_engine=store)
 
-    def test_status_transitions_from_unprepared_through_building_to_ready(
-        self, store, db_file
-    ):
+    def test_status_transitions_from_unprepared_through_building_to_ready(self, store, db_file):
         assert vlc.semantic_status(target_engine=store)["state"] == "unprepared"
         created = vlc.create_generation(metadata=MINIMAL_RECORD, target_engine=store)
         building = vlc.semantic_status(target_engine=store)
