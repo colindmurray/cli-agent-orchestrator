@@ -143,15 +143,38 @@ def seed(store):
     session = sessionmaker(bind=store.engine)()
     rows = [
         # key, project, title, body, failing_command, important_comment
-        ("k-1", "p1", "Deploy pipeline bounces on dry run",
-         "the deploy pipeline returned no verified bounce receipt", None, None),
-        ("k-2", "p1", "Widget color tuning wish",
-         "the widget color palette needs softer defaults", None, None),
-        ("k-3", "p1", "Election misbehaves under load",
-         "title says little; the thread knows more", None,
-         "lease deadlock fixed by fencing token rotation"),
-        ("k-4", "p1", "Lease deadlock in successor election",
-         "successor election lease deadlock reproduces on restart", None, None),
+        (
+            "k-1",
+            "p1",
+            "Deploy pipeline bounces on dry run",
+            "the deploy pipeline returned no verified bounce receipt",
+            None,
+            None,
+        ),
+        (
+            "k-2",
+            "p1",
+            "Widget color tuning wish",
+            "the widget color palette needs softer defaults",
+            None,
+            None,
+        ),
+        (
+            "k-3",
+            "p1",
+            "Election misbehaves under load",
+            "title says little; the thread knows more",
+            None,
+            "lease deadlock fixed by fencing token rotation",
+        ),
+        (
+            "k-4",
+            "p1",
+            "Lease deadlock in successor election",
+            "successor election lease deadlock reproduces on restart",
+            None,
+            None,
+        ),
     ]
     for key, project, title, body, command, important_body in rows:
         session.add(
@@ -177,9 +200,7 @@ def seed(store):
     # nearly parallel; only the importance bonus may let the farther-but-
     # important twin win, while its reported distance stays raw.
     session.flush()
-    session.add(
-        TrackerCommentModel(issue_key="k-4", author="twin-a", body="leasing deadlocks")
-    )
+    session.add(TrackerCommentModel(issue_key="k-4", author="twin-a", body="leasing deadlocks"))
     # Nine repetitions per query word: the important twin embeds only barely
     # farther from the query than the ordinary twin (cosine distance ≈0.001),
     # so the production ordering bonus (-0.05) — and nothing else — decides
@@ -347,12 +368,12 @@ class TestSemanticEligibility:
             "FROM tracker_search_vectors WHERE generation_id = ? AND document_kind = 'issue'",
             (generation,),
         )
-        still_served = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
+        still_served = search(
+            hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False
+        )
         assert keys_of(still_served)[0] == "k-1"
 
-    def test_mutation_permitting_stale_vectors_turns_the_exclusion_red(
-        self, hybrid, monkeypatch
-    ):
+    def test_mutation_permitting_stale_vectors_turns_the_exclusion_red(self, hybrid, monkeypatch):
         """§19.7 mutation proof: dropping the freshness joins must flip the
         named exclusion tests above."""
         hybrid.execute("UPDATE tracker_issue_fts SET content_version = content_version + 10")
@@ -361,7 +382,9 @@ class TestSemanticEligibility:
 
         monkeypatch.setattr(rsearch, "SEMANTIC_FRESHNESS_JOINS", "")
         monkeypatch.setattr(rsearch, "SEMANTIC_FRESHNESS_PREDICATE", "1 = 1\n")
-        permitted = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
+        permitted = search(
+            hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False
+        )
         try:
             assert "k-1" not in keys_of(permitted)
         except AssertionError:
@@ -415,16 +438,28 @@ class TestPersistedMetricDecoding:
         # query sits at half e0, so cosine prefers doc-a and l2 prefers doc-b.
         session.add(
             TrackerIssueModel(
-                key="doc-a", project_id="p1", title="alpha probe", body="alpha probe",
-                status="open", kind="bug", labels="[]",
-                created_at=_ts(1), updated_at=_ts(1),
+                key="doc-a",
+                project_id="p1",
+                title="alpha probe",
+                body="alpha probe",
+                status="open",
+                kind="bug",
+                labels="[]",
+                created_at=_ts(1),
+                updated_at=_ts(1),
             )
         )
         session.add(
             TrackerIssueModel(
-                key="doc-b", project_id="p1", title="beta probe", body="beta probe",
-                status="open", kind="bug", labels="[]",
-                created_at=_ts(1), updated_at=_ts(1),
+                key="doc-b",
+                project_id="p1",
+                title="beta probe",
+                body="beta probe",
+                status="open",
+                kind="bug",
+                labels="[]",
+                created_at=_ts(1),
+                updated_at=_ts(1),
             )
         )
         session.commit()
@@ -515,23 +550,33 @@ class TestUndefinedDistances:
         for entry in by_key["k-3"]["contributing_lanes"]:
             assert entry["lane"] != "semantic-issue"
 
-    def test_l2_generation_ranks_a_zero_embedding_instead_of_dropping_it(
-        self, tmp_path_factory
-    ):
+    def test_l2_generation_ranks_a_zero_embedding_instead_of_dropping_it(self, tmp_path_factory):
         store = SemanticStore(tmp_path_factory.mktemp("l2zero") / "l2zero.db")
         session = sessionmaker(bind=store.engine)()
         session.add(
             TrackerIssueModel(
-                key="doc-near", project_id="p1", title="alpha probe", body="alpha probe",
-                status="open", kind="bug", labels="[]",
-                created_at=_ts(1), updated_at=_ts(1),
+                key="doc-near",
+                project_id="p1",
+                title="alpha probe",
+                body="alpha probe",
+                status="open",
+                kind="bug",
+                labels="[]",
+                created_at=_ts(1),
+                updated_at=_ts(1),
             )
         )
         session.add(
             TrackerIssueModel(
-                key="doc-zero", project_id="p1", title="empty probe", body="empty probe",
-                status="open", kind="bug", labels="[]",
-                created_at=_ts(1), updated_at=_ts(1),
+                key="doc-zero",
+                project_id="p1",
+                title="empty probe",
+                body="empty probe",
+                status="open",
+                kind="bug",
+                labels="[]",
+                created_at=_ts(1),
+                updated_at=_ts(1),
             )
         )
         session.commit()
@@ -600,9 +645,7 @@ class TestSemanticAggregation:
         # important twin win; its REPORTED distance must stay the raw,
         # larger value — never relabeled by importance.
         normal = search(hybrid, "lease deadlock", mode="hybrid", limit=50)
-        winner = next(
-            r for r in normal["results"] if r["issue"]["key"] == "k-4"
-        )["winning_comment"]
+        winner = next(r for r in normal["results"] if r["issue"]["key"] == "k-4")["winning_comment"]
         assert winner is not None
         assert winner["source_lane"] == "semantic-comment"
         assert winner["important"] is True
@@ -610,9 +653,9 @@ class TestSemanticAggregation:
 
         monkeypatch.setattr(rsearch, "SEMANTIC_IMPORTANT_COMMENT_BONUS", 0.0)
         reverted = search(hybrid, "lease deadlock", mode="hybrid", limit=50)
-        reverted_winner = next(
-            r for r in reverted["results"] if r["issue"]["key"] == "k-4"
-        )["winning_comment"]
+        reverted_winner = next(r for r in reverted["results"] if r["issue"]["key"] == "k-4")[
+            "winning_comment"
+        ]
         assert reverted_winner["important"] is False
         assert reverted_winner["raw_distance"] == pytest.approx(0.0, abs=1e-6)
         assert boosted_distance > reverted_winner["raw_distance"], (
@@ -681,9 +724,7 @@ class TestModeSurfaces:
 
     def test_runtime_missing_degrades_visibly(self, hybrid, monkeypatch):
         def runtime_missing(db_path):
-            raise SearchEngineError(
-                "runtime-missing", "the sqlite-vec package is not installed"
-            )
+            raise SearchEngineError("runtime-missing", "the sqlite-vec package is not installed")
 
         monkeypatch.setattr(rsearch, "_open_search_engine", runtime_missing)
         response = search(hybrid, "deploy pipeline", mode="hybrid")
@@ -702,9 +743,7 @@ class TestModeSurfaces:
         assert response["mode_effective"] == "lexical"
         assert any("query embedding failed" in r for r in response["degradation"]["reasons"])
 
-    def test_in_memory_store_degrades_instead_of_scanning_a_lookalike(
-        self, tmp_path, monkeypatch
-    ):
+    def test_in_memory_store_degrades_instead_of_scanning_a_lookalike(self, tmp_path, monkeypatch):
         memory_engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(
             bind=memory_engine,
@@ -720,8 +759,15 @@ class TestModeSurfaces:
         seed_memory = sessionmaker(bind=memory_engine)()
         seed_memory.add(
             TrackerIssueModel(
-                key="m-1", project_id="p1", title="deploy pipeline probe", body="deploy pipeline",
-                status="open", kind="bug", labels="[]", created_at=_ts(1), updated_at=_ts(1),
+                key="m-1",
+                project_id="p1",
+                title="deploy pipeline probe",
+                body="deploy pipeline",
+                status="open",
+                kind="bug",
+                labels="[]",
+                created_at=_ts(1),
+                updated_at=_ts(1),
             )
         )
         seed_memory.commit()
@@ -752,9 +798,7 @@ class TestModeSurfaces:
         monkeypatch.setattr(vlc, "drain_bounded_batch", broken_drain)
         response = search(hybrid, "deploy pipeline bounce", mode="hybrid")
         assert response["mode_effective"] == "hybrid"
-        assert any(
-            "query-time refresh skipped" in r for r in response["degradation"]["reasons"]
-        )
+        assert any("query-time refresh skipped" in r for r in response["degradation"]["reasons"])
         assert keys_of(response), "semantic lanes still served despite the skipped drain"
 
     def test_include_comments_false_drops_only_the_comment_side(self, hybrid):
@@ -762,8 +806,7 @@ class TestModeSurfaces:
         assert response["mode_effective"] == "hybrid"
         for result in response["results"]:
             assert all(
-                entry["lane"] != "semantic-comment"
-                for entry in result["contributing_lanes"]
+                entry["lane"] != "semantic-comment" for entry in result["contributing_lanes"]
             )
 
 

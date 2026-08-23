@@ -270,9 +270,7 @@ class TestHarnessGateAgainstRankedService:
 
 
 HYBRID_LANE = "ranked-hybrid"
-_EXACT_CLASSES = frozenset(
-    {"exact-command", "exact-symbol", "exact-error", "exact-path"}
-)
+_EXACT_CLASSES = frozenset({"exact-command", "exact-symbol", "exact-error", "exact-path"})
 
 
 class TestHybridVersusLexicalHarnessComparison:
@@ -370,9 +368,9 @@ class TestHybridVersusLexicalHarnessComparison:
         try:
             for case in fixture["cases"]:
                 response = rsearch.ranked_search(_request_for(case, mode="hybrid", limit=10))
-                assert response["mode_effective"] == "hybrid", (
-                    f"case {case['id']} degraded: {response['degradation']['reasons']}"
-                )
+                assert (
+                    response["mode_effective"] == "hybrid"
+                ), f"case {case['id']} degraded: {response['degradation']['reasons']}"
                 assert response["diagnostics"]["semantic"]["served"] is True
         finally:
             rsearch.SessionLocal = original
@@ -397,9 +395,7 @@ class TestHybridVersusLexicalHarnessComparison:
             }
 
         report = {
-            mode: {
-                scope: block(values[scope]) for scope in ("overall", "exact")
-            }
+            mode: {scope: block(values[scope]) for scope in ("overall", "exact")}
             for mode, values in comparison.items()
         }
         print("\n=== M2.3 harness comparison (fixture corpus.v1) ===")

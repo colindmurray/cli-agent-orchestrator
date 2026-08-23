@@ -320,7 +320,10 @@ class TestJsonShapeAndHumanRendering:
         seed_corpus()
         out = search(runner, "deploy", "--all-projects", "--mode", "semantic")
         assert "degraded:" in out
-        assert "semantic lanes install at milestone M2" in out
+        assert (
+            "no active vector generation: build and activate one with the "
+            "search-index model verbs before requesting semantic retrieval"
+        ) in out
 
     def test_pagination_footer_appears_when_truncating(self, runner):
         seed_corpus()
