@@ -628,6 +628,14 @@ class TestOrderingPaginationExplanations:
         # k-6 updated most recently, then k-5, then k-4.
         assert page_keys == ["k-6", "k-5", "k-4"]
 
+    def test_tie_break_handles_mixed_timestamp_precision(self):
+        """A fraction-less instant equals .000000 — never loses to an older one."""
+        older_with_fraction = rsearch._desc_key("2026-08-01T12:00:00.500000")
+        newer_without_fraction = rsearch._desc_key("2026-08-10T12:00:00")
+        assert newer_without_fraction < older_with_fraction
+        same_second = rsearch._desc_key("2026-08-10T12:00:00")
+        assert same_second == newer_without_fraction
+
     def test_limit_bounds_are_typed_refusals(self, service):
         with pytest.raises(TrackerError):
             search(service, "deploy", limit=0)
