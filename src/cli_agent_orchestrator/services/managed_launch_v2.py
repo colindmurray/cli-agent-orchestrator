@@ -4018,59 +4018,112 @@ async def _launch_native_tui(
         if provider == "claude_code":
             pending_resume = claude_exact_resume.get_pending_resume(reservation_id)
             if pending_resume is not None:
-                # Identity exclusivity: exactly one identity form.  A pending
-                # resume contract present means the mint path must not run.
-                # The dual-form check is exercised directly via
-                # assert_single_identity in tests; here we simply select the
-                # resume branch, which itself proves single-identity (no mint).
-                # Fence predecessor BEFORE successor launch.
+                # P2-1 + P1-1: identity exclusivity and eligibility BEFORE any
+                # durable side effect. No fence, record, terminal, or argv-run
+                # may precede a typed refusal.
+                _mint_intent = claude_exact_resume.get_pending_mint_intent(reservation_id)
+                try:
+                    claude_exact_resume.assert_single_identity(
+                        resume_request=pending_resume, mint_intent=_mint_intent
+                    )
+                except claude_exact_resume.TypedIneligibility as exc:
+                    raise ManagedLaunchConflict(f"{exc.code}: {exc}") from exc
+                # P2-2: absent execution_mode on a resume source is a typed
+                # refusal — never default to native_tui.
+                _predecessor_execution_mode = record.get("execution_mode")
+                _elig_source = {
+                    "provider": pending_resume.provider,
+                    "execution_mode": _predecessor_execution_mode,
+                    "native_session_id": pending_resume.predecessor_native_session_id,
+                    "provider_version": version_output,
+                }
+                # Propagate any existing capability receipt shape if present
+                # in the pending or record (tests may supply it via record's
+                # provider_version or explicit receipt).
+                if isinstance(record.get("capability_receipt"), dict):
+                    _elig_source["capability_receipt"] = record["capability_receipt"]
+                if isinstance(record.get("readiness"), dict):
+                    _elig_source["readiness"] = record["readiness"]
+                # P1-1: eligibility before side effects
+                try:
+                    claude_exact_resume.is_eligible(_elig_source)
+                except claude_exact_resume.TypedIneligibility as exc:
+                    raise ManagedLaunchConflict(f"{exc.code}: {exc}") from exc
+                # P3: write successor-intent BEFORE fence; on failure after
+                # fence, release fence in same path.
+                try:
+                    claude_exact_resume.record_successor_generation(
+                        operation_id=pending_resume.operation_id,
+                        successor_terminal_id=record["terminal_id"],
+                        successor_generation=record["generation"],
+                    )
+                except Exception as exc:
+                    raise ManagedLaunchConflict(f"successor intent failed: {exc}") from exc
+                # P1-2: _pred_gen must be predecessor GENERATION from source
+                # record; never substitute another identifier.
+                _pred_tid = None
+                _pred_gen = None
+                _fence_installed = False
                 try:
                     attached = native_attachment.get(
                         "claude_code", pending_resume.predecessor_native_session_id
                     )
-                    if attached and attached.get("owner"):
+                    if attached and attached.get("owner") and attached["owner"].get("generation"):
                         _pred_tid = attached["owner"]["terminal_id"]
                         _pred_gen = attached["owner"]["generation"]
                     else:
-                        _pred_tid = record["terminal_id"]
-                        _pred_gen = pending_resume.predecessor_native_session_id
+                        # Check for explicit predecessor generation carried via
+                        # test helper (for harness that doesn't use native_attachment)
+                        _pred_gen_candidate = getattr(pending_resume, "predecessor_generation", None)
+                        _pred_tid_candidate = getattr(pending_resume, "predecessor_terminal_id", None)
+                        if isinstance(_pred_gen_candidate, str) and _pred_gen_candidate and isinstance(
+                            _pred_tid_candidate, str
+                        ) and _pred_tid_candidate:
+                            _pred_tid = _pred_tid_candidate
+                            _pred_gen = _pred_gen_candidate
+                        else:
+                            raise claude_exact_resume.TypedIneligibility(
+                                "MISSING_PREDECESSOR_GENERATION",
+                                "exact resume requires predecessor generation from source record; none usable; "
+                                "clearing path: ensure predecessor generation is recorded and readable via "
+                                "native_attachment or predecessor record",
+                            )
                     claude_exact_resume.fence_predecessor(
                         terminal_id=_pred_tid,
                         generation=_pred_gen,
                         operation_id=pending_resume.operation_id,
                     )
+                    _fence_installed = True
+                except claude_exact_resume.TypedIneligibility as exc:
+                    raise ManagedLaunchConflict(f"{exc.code}: {exc}") from exc
                 except Exception as exc:
                     raise ManagedLaunchConflict(f"predecessor fence failed: {exc}") from exc
-                # Durably record successor generation (idempotent on operation_id)
-                claude_exact_resume.record_successor_generation(
-                    operation_id=pending_resume.operation_id,
-                    successor_terminal_id=record["terminal_id"],
-                    successor_generation=record["generation"],
-                )
-                # Eligibility predicate over source record (ACP typed ineligible)
-                _elig_source = {
-                    "provider": pending_resume.provider,
-                    "execution_mode": record.get("execution_mode") or "native_tui",
-                    "native_session_id": pending_resume.predecessor_native_session_id,
-                    "provider_version": version_output,
-                }
-                # Allow tests to force ACP eligibility via a synthetic flag on
-                # the pending request's provider field? Instead, if the record
-                # itself is ACP, surface that directly.
+                # Bootstrap and launch — if this fails after fence, release fence
                 try:
-                    claude_exact_resume.is_eligible(_elig_source)
-                except claude_exact_resume.TypedIneligibility as exc:
-                    # ACP and other ineligible cases are typed refusals before
-                    # any provider I/O; surface as preflight block with the
-                    # typed code in the detail so tests can assert it.
-                    raise ManagedLaunchConflict(f"{exc.code}: {exc}") from exc
-                bootstrap, minted_readiness_hook = await asyncio.to_thread(
-                    _prepare_claude_resume_session,
-                    record=record,
-                    pending=pending_resume,
-                    version_output=version_output,
-                    digest=digest,
-                )
+                    bootstrap, minted_readiness_hook = await asyncio.to_thread(
+                        _prepare_claude_resume_session,
+                        record=record,
+                        pending=pending_resume,
+                        version_output=version_output,
+                        digest=digest,
+                    )
+                except Exception as exc:
+                    if _fence_installed:
+                        try:
+                            claude_exact_resume.release_fence(
+                                terminal_id=_pred_tid, generation=_pred_gen
+                            )
+                        except Exception:
+                            pass
+                    # Preserve typed ineligibility codes if they were the cause
+                    if isinstance(exc, claude_exact_resume.TypedIneligibility):
+                        raise ManagedLaunchConflict(f"{exc.code}: {exc}") from exc
+                    raise
+                # If bootstrap succeeded but later failure occurs before launch,
+                # the fence remains installed until launch completes — launch
+                # itself will either succeed or be torn down with fence still
+                # installed, which is the correct crash-window state (intent
+                # before fence, so fence with intent is the durable pair).
                 readiness_hook = minted_readiness_hook
                 launch_kind = native_tui_launch.LAUNCH_KIND_RESUME
                 launch_extra_args = [

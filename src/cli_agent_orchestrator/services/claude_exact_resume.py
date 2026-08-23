@@ -6,6 +6,23 @@ selected provider route byte-for-byte.  Every carried route field is
 required-present; absent/None on a required field is a typed refusal,
 never a silent default.  ACP is explicitly typed ineligible.
 
+Ordering and crash recovery:
+- Eligibility and typed refusals complete BEFORE any durable side
+  effect.  No fence, successor-intent record, terminal, or argv-run
+  side effect may precede a refusal.
+- The successor-intent record (keyed by operation_id) is written
+  BEFORE the predecessor fence is installed.  If eligibility or any
+  typed refusal fires after the fence was installed, the fence is
+  released in the same code path via the supported fence-release verb
+  (removing the fence state), so a crash window never leaves a
+  predecessor fenced with no successor intent.
+- Clearing path for ACP ineligibility: route the generation as
+  execution_mode='native_tui' provider='claude_code' (fresh launch) or
+  implement the ACP exact-resume adapter.  For missing capability
+  receipt: stage-verify the installed build and provide a valid
+  capability receipt/version proof; an unproven surface is ineligible,
+  never vacuously eligible.
+
 This module is the single authority on:
 - the resume request shape and its uuid / required-field validation,
 - the eligibility predicate over a source record,
@@ -233,13 +250,12 @@ def is_eligible(source_record: Dict[str, Any]) -> bool:
         ) from exc
     # valid capability receipt — absence refuses, never defaults
     # The record must carry a proof that the provider version/bundle can
-    # resume exactly.  We accept either a truthy capability flag or a
-    # readable installed bundle version.
+    # resume exactly.  We accept either a truthy capability flag, a
+    # readable installed bundle version, or an explicit receipt dict.
+    # An unproven surface is NOT eligible with a typed reason — never
+    # vacuously eligible.
     capability = source_record.get("capability_receipt_valid")
     if capability is None:
-        # Fallback: a provider_version that is parseable counts as the
-        # narrow capability proof this module recognizes, matching the
-        # provider-version policy's open/closed distinction.
         from cli_agent_orchestrator.services.provider_contracts import normalized_version
 
         provider_version = source_record.get("provider_version") or source_record.get(
@@ -247,22 +263,17 @@ def is_eligible(source_record: Dict[str, Any]) -> bool:
         )
         if isinstance(provider_version, str) and normalized_version(provider_version):
             capability = True
+        elif isinstance(source_record.get("capability_receipt"), dict):
+            capability = True
+        elif isinstance(source_record.get("readiness"), dict):
+            capability = True
         else:
-            # Also accept an explicit "capability_receipt" dict as proof
-            if isinstance(source_record.get("capability_receipt"), dict):
-                capability = True
-            elif isinstance(source_record.get("readiness"), dict):
-                capability = True
-            else:
-                # No explicit receipt, but if the record is otherwise well-formed
-                # we treat it as eligible — the test harness supplies minimal
-                # records; a real store would carry a receipt.  This keeps the
-                # eligible path reachable without requiring a full bridge state.
-                capability = True
+            capability = False
     if not capability:
         raise TypedIneligibility(
             "MISSING_CAPABILITY_RECEIPT",
-            "exact resume requires a valid capability receipt; none present or receipt is invalid",
+            "exact resume requires a valid capability receipt; none present or receipt is invalid; "
+            "clearing path: stage-verify the installed build and provide a valid capability receipt/version proof",
         )
     # unambiguous effect boundary — a fenced/ambiguous prior effect refuses
     # before any resume.  The record must not be marked ambiguous.
@@ -444,6 +455,7 @@ def fence_predecessor(
 # these helpers; production would set it through the (unshipped) caller
 # contract without touching other providers' paths.
 _PENDING_BY_RESERVATION: Dict[str, ExactResumeRequest] = {}
+_PENDING_MINT_INTENT_BY_RESERVATION: Dict[str, bool] = {}
 
 
 def set_pending_resume(reservation_id: str, request: ExactResumeRequest) -> None:
@@ -462,6 +474,39 @@ def clear_pending_resume(reservation_id: str) -> None:
 
 def clear_all_pending_resumes() -> None:
     _PENDING_BY_RESERVATION.clear()
+
+
+def set_pending_mint_intent(reservation_id: str, mint_intent: bool) -> None:
+    if not isinstance(reservation_id, str) or not reservation_id:
+        raise ValueError("reservation_id must be a non-empty string")
+    _PENDING_MINT_INTENT_BY_RESERVATION[reservation_id] = bool(mint_intent)
+
+
+def get_pending_mint_intent(reservation_id: str) -> bool:
+    return bool(_PENDING_MINT_INTENT_BY_RESERVATION.get(reservation_id, False))
+
+
+def clear_pending_mint_intent(reservation_id: str) -> None:
+    _PENDING_MINT_INTENT_BY_RESERVATION.pop(reservation_id, None)
+
+
+def release_fence(*, terminal_id: str, generation: str) -> bool:
+    """Release a previously installed predecessor fence (supported verb).
+
+    Removes the fence state file if it exists.  Used to unwind a fence
+    that was installed before an eligibility refusal, so a crash window
+    never leaves a predecessor fenced with no successor intent.
+    """
+    from cli_agent_orchestrator.services.generation_fence import fence_state_path
+
+    path = fence_state_path(Path(COMPANION_DIR), terminal_id, generation)
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
