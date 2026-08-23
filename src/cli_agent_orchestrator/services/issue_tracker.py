@@ -1314,9 +1314,11 @@ def list_issues(
     """
     limit = max(1, min(int(limit or 100), 500))
     offset = max(0, int(offset or 0))
+    # Preserve the historical earliest-error order: kind, then project id,
+    # then the remaining families through the shared builder.
+    if kind not in (None, "all"):
+        _validate_kind(kind)
     if project_id:
-        # Validate before family construction to keep today's earliest-error
-        # order (an invalid project id is reported ahead of filter refusals).
         validated_project_id = _validate_slug(project_id)
     else:
         validated_project_id = None

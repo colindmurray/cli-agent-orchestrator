@@ -329,9 +329,15 @@ def _chunked_in_sql(
 # ---------------------------------------------------------------------------
 
 
-def _issue_fts_indexed_columns() -> List[str]:
-    """Indexed (non-UNINDEXED) issue FTS columns in canonical declaration order."""
-    ddl = tracker_search_schema._FTS_TABLES[tracker_search_schema.ISSUE_FTS_TABLE]
+def _fts_declared_columns(table: str) -> List[Tuple[str, bool]]:
+    """All declared FTS columns in order as ``(name, indexed)``.
+
+    bm25() weight arguments map to every declared column left-to-right,
+    UNINDEXED ones included (SQLite assigns 1.0 when arguments run out), so
+    the weight list must cover the full declaration, never just the indexed
+    subset.
+    """
+    ddl = tracker_search_schema._FTS_TABLES[table]
     body = ddl.split("(", 1)[1].rsplit(")", 1)[0]
     parts: List[str] = []
     depth = 0
@@ -348,32 +354,37 @@ def _issue_fts_indexed_columns() -> List[str]:
             current += ch
     if current.strip():
         parts.append(current)
-    columns: List[str] = []
+    columns: List[Tuple[str, bool]] = []
     for part in parts:
         stripped = part.strip()
         if not stripped or stripped.upper().startswith("TOKENIZE"):
             continue
         tokens = stripped.split()
-        if not any(token.upper() == "UNINDEXED" for token in tokens[1:]):
-            columns.append(tokens[0])
+        columns.append((tokens[0], not any(t.upper() == "UNINDEXED" for t in tokens[1:])))
     return columns
 
 
 def _bm25_weight_args(table: str) -> str:
-    """Literal BM25 weight list in the table's canonical column order."""
-    if table == tracker_search_schema.ISSUE_FTS_TABLE:
-        ordered = _issue_fts_indexed_columns()
-        weights = ISSUE_FIELD_WEIGHTS
-    else:
-        ordered = ["author", "body"]
-        weights = COMMENT_FIELD_WEIGHTS
-    missing = [name for name in ordered if name not in weights]
+    """Literal BM25 weight list covering every declared column in order.
+
+    Unlisted columns (the UNINDEXED identity/context ones) take SQLite's
+    default of 1.0; an indexed column without a configured weight is a
+    configuration error rather than a silent misweighting.
+    """
+    weights = (
+        ISSUE_FIELD_WEIGHTS
+        if table == tracker_search_schema.ISSUE_FTS_TABLE
+        else COMMENT_FIELD_WEIGHTS
+    )
+    declared = _fts_declared_columns(table)
+    missing = [name for name, indexed in declared if indexed and name not in weights]
     if missing:
         raise TrackerRankedSearchError(
             "configuration",
             f"missing BM25 weight(s) for {table} column(s): {', '.join(missing)}",
         )
-    return ", " + ", ".join(repr(float(weights[name])) for name in ordered)
+    rendered = ", ".join(repr(float(weights.get(name, 1.0))) for name, _ in declared)
+    return ", " + rendered
 
 
 def run_issue_bm25_lane(
@@ -385,7 +396,7 @@ def run_issue_bm25_lane(
         f"SELECT c.issue_key, bm25({fts}{_bm25_weight_args(fts)}) AS score\n"
         f"FROM {fts} AS c\n"
         f"WHERE {fts} MATCH :match{candidate_sql}\n"
-        "ORDER BY score\n"
+        "ORDER BY score, c.issue_key\n"
         f"LIMIT {ISSUE_LANE_CANDIDATE_CAP}"
     )
     rows = _exec(conn, sql, {"match": match_expr, **candidate_params}).fetchall()
@@ -416,7 +427,7 @@ def run_comment_bm25_lane(
         f"FROM {fts} AS c\n"
         "JOIN tracker_issue_comments AS src ON src.id = c.comment_id\n"
         f"WHERE {fts} MATCH :match{candidate_sql}\n"
-        "ORDER BY score\n"
+        "ORDER BY score, c.comment_id\n"
         f"LIMIT {COMMENT_LANE_CANDIDATE_CAP}"
     )
     best_per_issue: Dict[str, List[Tuple[float, int, str, bool]]] = {}
@@ -443,6 +454,8 @@ def run_comment_bm25_lane(
             "important": best[3],
             "retained_hits": len(retained),
             "additional_comment_ids": [hit[1] for hit in retained[1:]],
+            # Scoped to this lane's retrieval window: when COMMENT_LANE_CANDIDATE_CAP
+            # truncates a very hot corpus, this counts hits seen, not all hits.
             "total_matching_comments": total_matching[issue_key],
         }
     ranked.sort(key=lambda pair: (pair[1], pair[0]))
@@ -455,10 +468,13 @@ def run_exact_lane(
     """Exact/substring lane (§10.3 lane 3) for strings tokenization mishandles.
 
     Escaped-LIKE matching across identity, reproducer, and prose fields plus
-    comment bodies. Ranking is deterministic: earliest field priority wins,
-    then shorter matched text (a tight fingerprint beats a passing mention),
-    then newest update, then key. Raw scores encode negated priority so RRF
-    sees a stable lane ordering while diagnostics stay legible.
+    comment bodies. Per issue, the representing match is the earliest field
+    priority, ties broken by shorter matched text (a tight fingerprint beats a
+    passing mention); comment matches use -length so a longer body wins as the
+    richer window at equal priority. Issues order by that priority, then
+    newest update, then key — matched length never orders issues against each
+    other. Raw scores encode negated priority so RRF sees a stable lane
+    ordering while diagnostics stay legible.
     """
     needle = "%" + raw_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     conditions = " OR ".join(f"s.{name} LIKE :needle ESCAPE '\\'" for name in EXACT_SEARCH_FIELDS)
@@ -490,7 +506,7 @@ def run_exact_lane(
             updated_by_key[key] = updated.isoformat()
         else:
             updated_by_key[key] = str(updated)
-        for offset, field_name in enumerate(EXACT_SEARCH_FIELDS, start=1):
+        for offset, field_name in enumerate(EXACT_SEARCH_FIELDS, start=2):
             value = row[offset]
             if value is None:
                 continue
@@ -539,12 +555,20 @@ def run_exact_lane(
 
 
 def _desc_key(iso: str) -> str:
-    """A key sorting NEWER strings first when the outer sort is ascending."""
+    """A key sorting NEWER strings first when the outer sort is ascending.
+
+    Digits keep full timestamp precision (including fractional seconds), so
+    sub-second ``updated_at`` differences still order before the key falls
+    through, per the §10.5 tie-break.
+    """
     if not iso:
-        return "0000"
-    digits = re.sub(r"[^0-9]", "", iso)[:14].zfill(14)
-    # Nine-nines minus digits: bigger timestamps become smaller keys.
-    return str(99999999999999 - int(digits)).zfill(14)
+        return _DESC_MAX
+    digits = re.sub(r"[^0-9]", "", iso)[:20].zfill(20)
+    # 10^20-1 minus the digits: bigger timestamps become smaller keys.
+    return str(int(_DESC_MAX) - int(digits)).zfill(20)
+
+
+_DESC_MAX = str(10**20 - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -814,13 +838,11 @@ def _apply_exact_fingerprint_boosts(
             payload["score"] += EXACT_FINGERPRINT_BOOST
             boosted.setdefault(issue_key, []).append("issue-key-equality")
     if fused:
-        keys = list(fused)
-        placeholders = ", ".join(":bki" + str(i) for i in range(len(keys)))
-        params = {f"bki{i}": key for i, key in enumerate(keys)}
+        fragment, params = _chunked_in_sql("key", sorted(fused), "bki")
         rows = _exec(
             conn,
-            f"SELECT key, failing_command FROM tracker_issues "
-            f"WHERE failing_command IS NOT NULL AND key IN ({placeholders})",
+            "SELECT key, failing_command FROM tracker_issues "
+            f"WHERE failing_command IS NOT NULL{fragment}",
             params,
         ).fetchall()
         for key, command in rows:

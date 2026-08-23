@@ -183,6 +183,29 @@ def _terminal_statuses() -> FrozenSet[str]:
 # ---------------------------------------------------------------------------
 
 
+# Host-parameter ceiling per IN group; SQLite's default bind limit is far
+# higher on current builds, but chunking keeps every statement portable.
+_IN_CHUNK = 500
+
+
+def _chunked_in(column_sql: str, values: Sequence[str], prefix: str) -> Tuple[str, Dict[str, Any]]:
+    """``column IN (...)`` over many values as OR'd chunks of bound params."""
+    ordered = list(values)
+    if not ordered:
+        return "1 = 0", {}
+    groups: List[str] = []
+    params: Dict[str, Any] = {}
+    for i in range(0, len(ordered), _IN_CHUNK):
+        chunk = ordered[i : i + _IN_CHUNK]
+        placeholders = []
+        for j, value in enumerate(chunk):
+            name = f"{prefix}{i}_{j}"
+            placeholders.append(f":{name}")
+            params[name] = value
+        groups.append(f"{column_sql} IN ({', '.join(placeholders)})")
+    return "(" + " OR ".join(groups) + ")", params
+
+
 def subtree_closure(executor: Any, roots: Sequence[str]) -> Dict[str, Any]:
     """Complete transitive ``part-of`` descendant closure of ``roots``.
 
@@ -200,12 +223,11 @@ def subtree_closure(executor: Any, roots: Sequence[str]) -> Dict[str, Any]:
     wanted = list(dict.fromkeys(str(r).strip() for r in roots if str(r).strip()))
     if not wanted:
         return {"keys": frozenset(), "root_presence": {}}
-    placeholders = ", ".join(f":root{i}" for i in range(len(wanted)))
-    params: Dict[str, Any] = {f"root{i}": key for i, key in enumerate(wanted)}
+    seed_sql, params = _chunked_in("key", wanted, "root")
     found = {
         str(row[0])
         for row in executor.execute(
-            _sql_text(f"SELECT key FROM tracker_issues WHERE key IN ({placeholders})"),
+            _sql_text(f"SELECT key FROM tracker_issues WHERE {seed_sql}"),
             params,
         ).fetchall()
     }
@@ -217,7 +239,7 @@ def subtree_closure(executor: Any, roots: Sequence[str]) -> Dict[str, Any]:
         )
     closure_sql = (
         "WITH RECURSIVE subtree(key) AS (\n"
-        f"  SELECT key FROM tracker_issues WHERE key IN ({placeholders})\n"
+        f"  SELECT key FROM tracker_issues WHERE {seed_sql}\n"
         "  UNION\n"
         "  SELECT l.from_key FROM tracker_issue_links AS l\n"
         "  JOIN subtree ON l.to_key = subtree.key\n"
@@ -277,12 +299,11 @@ def resolve_scope(
 
     allowed: Optional[FrozenSet[str]] = None
     if projects:
-        placeholders = ", ".join(f":p{i}" for i in range(len(projects)))
-        params = {f"p{i}": pid for i, pid in enumerate(projects)}
+        project_sql, params = _chunked_in("project_id", projects, "p")
         project_keys = {
             str(row[0])
             for row in executor.execute(
-                _sql_text(f"SELECT key FROM tracker_issues WHERE project_id IN ({placeholders})"),
+                _sql_text(f"SELECT key FROM tracker_issues WHERE {project_sql}"),
                 params,
             ).fetchall()
         }

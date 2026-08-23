@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from cli_agent_orchestrator.clients import tracker_search_schema
 from cli_agent_orchestrator.clients.database import (
     _TRACKER_ORM_TABLE_NAMES,
     Base,
@@ -243,6 +244,21 @@ def seed(db: SearchDb) -> None:
             2,
             None,
         ),
+        (
+            "k-13",
+            "p1",
+            "Body symbol probe",
+            "the marker zeta_symbol_only_body_marker lives only in this body",
+            "open",
+            "unset",
+            "bug",
+            None,
+            None,
+            "[]",
+            None,
+            2,
+            None,
+        ),
     ]
     for (
         key,
@@ -417,6 +433,24 @@ class TestLaneBehavior:
         # escaped-LIKE matching without FTS syntax errors and returns nothing.
         assert response["total"] == 0
 
+    def test_exact_lane_finds_a_symbol_that_exists_only_in_the_body(self, service):
+        """Red proof for the exact-lane column alignment.
+
+        The marker occurs only in k-13's body — a column the BM25 phrase lane
+        tokenizes apart (underscores split) and the only lane that can own the
+        hit is exact substring. If the exact lane reads the wrong column this
+        returns nothing or attributes the wrong field.
+        """
+        response = search(service, "zeta_symbol_only_body_marker")
+        assert "k-13" in keys_of(response)
+        top = next(r for r in response["results"] if r["issue"]["key"] == "k-13")
+        lanes = {entry["lane"]: entry for entry in top["contributing_lanes"]}
+        assert "exact" in lanes
+        # body's EXACT_FIELD_PRIORITY is 11; raw_score encodes -priority.
+        assert lanes["exact"]["raw_score"] == pytest.approx(-11.0)
+        assert top["matched_fields"]
+        assert any("zeta_symbol_only_body_marker" in s for s in top["snippets"].values())
+
     def test_exact_lane_matches_wrapped_error_fragment_via_bm25_phrase(self, service):
         response = search(service, "guarded bounce returned no verified activation receipt")
         assert keys_of(response)[0] == "k-1"
@@ -433,14 +467,51 @@ class TestLaneBehavior:
         assert top["issue"]["failing_command"] == "conduct deploy --dry-run --bounce"
         assert "failing-command-equality" in top["exact_boosts"]
 
-    def test_rrf_constant_and_lane_weights_shape_the_fusion(self, service):
-        assert rsearch.RRF_K == 60
-        weights = (
-            rsearch.LANE_WEIGHT_ISSUE_BM25,
-            rsearch.LANE_WEIGHT_COMMENT_BM25,
-            rsearch.LANE_WEIGHT_EXACT,
-        )
-        assert all(w > 0 for w in weights)
+    def test_rrf_fusion_math_wires_weights_and_constant_together(self):
+        lanes = {
+            "issue-bm25": [("a", -3.2), ("b", -5.0)],
+            "comment-bm25": [("a", -1.0)],
+            "exact": [],
+        }
+        fused = rsearch._fuse_lane_ranks(lanes)
+        # rank_score is the weighted RRF sum, not a sum of raw scores.
+        expected_a = rsearch.LANE_WEIGHT_ISSUE_BM25 / (
+            rsearch.RRF_K + 1
+        ) + rsearch.LANE_WEIGHT_COMMENT_BM25 / (rsearch.RRF_K + 1)
+        expected_b = rsearch.LANE_WEIGHT_ISSUE_BM25 / (rsearch.RRF_K + 2)
+        assert fused["a"]["score"] == pytest.approx(expected_a)
+        assert fused["b"]["score"] == pytest.approx(expected_b)
+        assert {entry["lane"] for entry in fused["a"]["lanes"]} == {
+            "issue-bm25",
+            "comment-bm25",
+        }
+        assert fused["a"]["lanes"][0]["raw_score"] == -3.2
+
+    def test_bm25_weight_arguments_align_with_every_declared_column(self):
+        """bm25() maps weights to ALL declared columns (UNINDEXED included).
+
+        A list built over only the indexed subset silently shifts every
+        weight onto the wrong column; this pin freezes the alignment.
+        """
+        for table, weights in (
+            (tracker_search_schema.ISSUE_FTS_TABLE, rsearch.ISSUE_FIELD_WEIGHTS),
+            (tracker_search_schema.COMMENT_FTS_TABLE, rsearch.COMMENT_FIELD_WEIGHTS),
+        ):
+            declared = rsearch._fts_declared_columns(table)
+            args_text = rsearch._bm25_weight_args(table)
+            values = [float(part) for part in args_text.strip(", ").split(",")]
+            assert len(values) == len(declared), (table, declared, values)
+            for value, (name, indexed) in zip(values, declared):
+                if indexed:
+                    assert value == weights[name], (table, name, value)
+                else:
+                    assert value == 1.0, (table, name, value)
+
+    def test_title_weight_position_actually_receives_the_title_weight(self, service):
+        """End-to-end: the §10.3 title>body hypothesis orders the fixture."""
+        response = search(service, "artifact")
+        ordered = keys_of(response)
+        assert ordered.index("k-4") < ordered.index("k-5")
 
 
 # ---------------------------------------------------------------------------
