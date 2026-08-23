@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
-import uuid
 import hashlib
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from cli_agent_orchestrator.models.managed_launch_v2 import (
+    PROTOCOL_VERSION_V2,
+    ManagedLaunchV2ReserveRequest,
+)
 from cli_agent_orchestrator.services import claude_exact_resume as cer
 from cli_agent_orchestrator.services import claude_native_launch
+from cli_agent_orchestrator.services import execution_mode as em
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
-from cli_agent_orchestrator.models.managed_launch_v2 import (
-    ManagedLaunchV2ReserveRequest,
-    PROTOCOL_VERSION_V2,
-)
+from cli_agent_orchestrator.services import native_attachment
 from cli_agent_orchestrator.services.claude_exact_resume import (
     ExactResumeRequest,
     TypedIneligibility,
 )
-from cli_agent_orchestrator.services import native_attachment
-from cli_agent_orchestrator.services import execution_mode as em
 
 
 def _valid_uuid() -> str:

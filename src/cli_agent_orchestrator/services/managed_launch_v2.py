@@ -72,9 +72,11 @@ from cli_agent_orchestrator.providers.codex import (
     codex_route_suffix,
     compose_codex_core_args,
 )
-from cli_agent_orchestrator.services import execution_mode as em
 from cli_agent_orchestrator.services import (
     claude_exact_resume,
+)
+from cli_agent_orchestrator.services import execution_mode as em
+from cli_agent_orchestrator.services import (
     generation_fence,
     glm_native_launch,
     heartbeat_store,

@@ -43,8 +43,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from cli_agent_orchestrator.constants import COMPANION_DIR
-from cli_agent_orchestrator.services import claude_native_launch
-from cli_agent_orchestrator.services import generation_fence
+from cli_agent_orchestrator.services import claude_native_launch, generation_fence
 
 
 class TypedIneligibility(ValueError):
