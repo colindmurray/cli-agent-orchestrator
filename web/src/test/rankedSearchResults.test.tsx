@@ -153,6 +153,23 @@ describe('RankedSearchResults', () => {
     expect(screen.getByTestId('open-winning-comment').textContent).toContain('+1')
   })
 
+  it('never nests one interactive control inside another (a11y / valid HTML)', () => {
+    // Regression pin for review finding P1: the winning-comment button was
+    // originally rendered inside the row's open-issue button.
+    renderResults(searchFixture())
+    const container = screen.getByTestId('ranked-search')
+    const buttons = Array.from(container.querySelectorAll('button'))
+    expect(buttons.length).toBeGreaterThan(1)
+    for (const button of buttons) {
+      // closest() includes the element itself; an ancestor button would make
+      // this inner control unreachable for assistive tech.
+      expect(button.parentElement?.closest('button')).toBeNull()
+    }
+    const commentButton = screen.getByTestId('open-winning-comment')
+    const selectButton = screen.getByRole('button', { name: /Open cond-0638:/ })
+    expect(commentButton.parentElement).toBe(selectButton.parentElement)
+  })
+
   it('never presents a lexical-only result set as complete', () => {
     renderResults(searchFixture())
     const banner = screen.getByTestId('search-degradation')
