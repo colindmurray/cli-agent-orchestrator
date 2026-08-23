@@ -80,6 +80,7 @@ from cli_agent_orchestrator.services import (
     kimi_native_launch,
     muse_native_launch,
     muse_native_status,
+    muse_session_store,
     native_attachment,
     native_tui_launch,
     provider_contracts,
@@ -420,6 +421,18 @@ _PINNED_PROVIDER = {
 # than from two literals that can drift back into contradiction (COND-0314).
 NATIVE_PANE_READY_TIMEOUT_SECONDS = native_tui_launch.NATIVE_COLD_START_RUNWAY_SECONDS
 _NATIVE_PANE_READY_POLL_SECONDS = 0.1
+
+#: How long the Muse /status observation may keep polling a capture that
+#: has produced ZERO recognizable content — no labeled panel, no boxed
+#: panel, not even the persistent inline footer.  A pane whose render is
+#: entirely unrecognized for this long is not a slow cold start (the
+#: footer appears within seconds of the composer); it is an incompatible
+#: build or a lost keystroke, and holding the launch's full cold-start
+#: runway on it only converts one blocked spawn into a bind-timeout storm.
+#: Once ANY recognized shape has been seen, the full
+#: :data:`NATIVE_PANE_READY_TIMEOUT_SECONDS` runway applies again, because
+#: then the observation is waiting on evidence that is known to arrive.
+MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS = 15.0
 
 #: Machine-readable reasons for a native admission that wrote no bytes.
 #:
@@ -4123,6 +4136,23 @@ async def _launch_native_tui(
             # discovered from the provider's own /status panel, and only
             # then is the attachment claimed and published for that exact
             # id.  Nothing else is typed into the pane before the claim.
+            #
+            # The session-store fallback needs its "before" picture taken
+            # BEFORE this pane's process exists: the provider registers a
+            # fresh session at cold start, so a snapshot taken any later
+            # would fold this launch's own session into the known set.
+            # A snapshot failure only disables the fallback (the panel
+            # remains the primary observation), so it degrades loudly but
+            # never blocks the launch on its own.
+            muse_store_snapshot: Optional[frozenset] = None
+            try:
+                muse_store_snapshot = muse_session_store.snapshot_known_session_ids()
+            except Exception as exc:  # noqa: BLE001 - fallback-only surface
+                logger.warning(
+                    "Muse session-store snapshot failed; /status panel remains the "
+                    "only discovery surface for this launch: %s",
+                    exc,
+                )
             outcome = await asyncio.to_thread(
                 native_tui_launch.start_discovered,
                 provider=provider,
@@ -4140,6 +4170,7 @@ async def _launch_native_tui(
                     capture=transport.capture_render,
                     bootstrap=bootstrap,
                     request=request,
+                    store_snapshot=muse_store_snapshot,
                 ),
                 build_intent=partial(
                     _muse_bootstrap_intent, bootstrap, reservation_id=reservation_id
@@ -4412,6 +4443,83 @@ MUSE_BOOTSTRAP_SCHEMA = "cao-muse-native-bootstrap-v1"
 MUSE_BOOTSTRAP_INTENT_SCHEMA = "cao-muse-native-bootstrap-intent-v1"
 
 
+def _require_store_discovered_status(
+    found: dict[str, Any],
+    footer: Optional[dict[str, Any]],
+    *,
+    request: dict[str, Any],
+    working_directory: str,
+) -> dict[str, Any]:
+    """Validate a store-discovered identity against this exact launch.
+
+    The store diff proves the provider registered exactly one new session
+    for this workspace since the pre-spawn snapshot; the candidate's own
+    cold-start metadata record is re-checked here (exact workspace root,
+    expected provider) together with the canonical-UUID shape of the id,
+    and every route fact the inline footer rendered must agree with the
+    request.  Route facts the store cannot prove are left absent — never
+    filled from the request — so a launch adopted without route evidence
+    still fails bind's exact-route check instead of being certified by an
+    assumption.
+    """
+    session_id = muse_native_status.validate_discovered_session_id(found.get("session_id"))
+    metadata = found.get("metadata") or {}
+    mismatches: list[str] = []
+    if metadata.get("workspace_root") != working_directory:
+        mismatches.append(
+            f"workspace: the store names {metadata.get('workspace_root')!r}, not the "
+            f"reserved {working_directory!r}"
+        )
+    if metadata.get("provider_id") != "meta":
+        mismatches.append(f"provider: the store names {metadata.get('provider_id')!r}, not 'meta'")
+    model = footer.get("model") if footer else None
+    effort = footer.get("reasoning") if footer else None
+    if footer is not None:
+        if footer.get("directory") != working_directory:
+            mismatches.append(
+                f"cwd: the pane's footer renders {footer.get('directory')!r}, not the "
+                f"bound {working_directory!r}"
+            )
+        if bool(model) and model != request["expected_model"]:
+            mismatches.append(
+                f"model: the pane's footer renders {model!r}, not the requested "
+                f"{request['expected_model']!r}"
+            )
+        if provider_contracts.route_selects_effort(request.get("expected_effort")) and (
+            not effort or effort != request["expected_effort"]
+        ):
+            mismatches.append(
+                f"effort: the pane's footer renders {effort!r}, not the requested "
+                f"{request['expected_effort']!r}"
+            )
+    if mismatches:
+        raise ManagedLaunchConflict(
+            "the session-store discovery does not describe the claimed launch: "
+            + "; ".join(mismatches)
+        )
+    return {
+        "schema": muse_session_store.MUSE_SESSION_STORE_SCHEMA,
+        "source": "session-store-diff",
+        "identity_proven": True,
+        "route_from_footer_only": footer is not None,
+        "observed": {
+            "session_id": session_id,
+            "model": model,
+            "effort": effort,
+            # The store carries no agent-profile fact; leaving it absent is
+            # the honest reading, and nothing downstream may fill it in.
+            "agent_profile": None,
+            "model_provider": metadata.get("provider_id"),
+            "directory": metadata.get("workspace_root"),
+            "run": None,
+            "tokens": None,
+            "turns": None,
+        },
+        "footer_observation": footer,
+        "store_evidence": found,
+    }
+
+
 def _observe_muse_status_panel(
     record: dict[str, Any],
     pane_id: Optional[str],
@@ -4422,6 +4530,9 @@ def _observe_muse_status_panel(
     expected_effort: Optional[str],
     working_directory: str,
     expected_profile_identity: str,
+    muse_version: str = "",
+    request: Optional[dict[str, Any]] = None,
+    store_discovery: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Type ``/status`` once into the pane, then capture until it parses.
 
@@ -4430,8 +4541,21 @@ def _observe_muse_status_panel(
     and returned as the identity.  When a ``session_id`` is supplied (an
     exact restore), the panel must name exactly it.
 
-    The observation is bounded by :data:`NATIVE_PANE_READY_TIMEOUT_SECONDS`
-    (the shared cold-start runway) and never retyped: a second ``/status``
+    Three renderings count as recognized content: the installed labeled
+    panel, the 0.2.1+ boxed panel, and the persistent inline footer.  A
+    footer-only capture on a fresh launch means *route observed, identity
+    absent*: with ``store_discovery`` wired, identity is then adopted from
+    the exactly-one new session the provider registered on disk for this
+    workspace (the snapshot must predate the pane process).  A capture
+    that produces NO recognized content is bounded by
+    :data:`MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS` — an entirely
+    unrecognized render is refused in seconds with the installed version
+    and the last screen's fingerprint instead of holding the launch's full
+    cold-start runway — while recognized-but-incomplete content keeps the
+    full :data:`NATIVE_PANE_READY_TIMEOUT_SECONDS` bound, because it is
+    waiting on evidence known to arrive.
+
+    The observation is bounded and never retyped: a second ``/status``
     after a first landed would render a second panel and make the capture
     ambiguous, which the parser refuses rather than guesses at.  Every
     outcome that is not a clean parse of exactly the claimed pre-task
@@ -4439,10 +4563,9 @@ def _observe_muse_status_panel(
     with zero task bytes.
 
     The capture reads the composited viewport (no escape sequences), which
-    is how the installed panel renders — box-drawn rows and a composer
-    line that stays ready underneath.
+    is how the installed panels render.
     """
-    from cli_agent_orchestrator.services import muse_native_status
+    from cli_agent_orchestrator.services import muse_native_status, muse_session_store
     from cli_agent_orchestrator.services.native_pane_input import TmuxPaneInput
 
     if not isinstance(pane_id, str) or not pane_id:
@@ -4454,29 +4577,70 @@ def _observe_muse_status_panel(
     typed_input.send_enter()
 
     deadline = time.monotonic() + NATIVE_PANE_READY_TIMEOUT_SECONDS
+    unrecognized_deadline = time.monotonic() + MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS
     last_error: Optional[str] = None
+    captures = 0
+    last_rows: list[str] = []
+    recognized_any = False
     while True:
+        captures += 1
         try:
             rows = list(capture(pane_id))
         except Exception as exc:  # noqa: BLE001 - an unread pane is not a failed panel
             last_error = f"the pane's rendered screen could not be captured: {exc}"
         else:
+            last_rows = rows
+            parsed: Optional[dict[str, Any]]
             try:
                 parsed = muse_native_status.parse_status_panel(rows)
-                return muse_native_status.require_pre_task_status(
-                    parsed,
-                    session_id=session_id,
-                    expected_model=expected_model,
-                    expected_effort=expected_effort,
-                    working_directory=working_directory,
-                    expected_profile_identity=expected_profile_identity,
-                )
             except (
                 muse_native_status.MuseStatusParseError,
                 muse_native_status.MuseStatusMismatch,
             ) as exc:  # noqa: E501
+                parsed = None
                 last_error = str(exc)
-        if time.monotonic() >= deadline:
+            if parsed is not None and parsed.get("partial"):
+                # Route observed, identity absent.  On a fresh launch with
+                # the store wired, adopt the identity from the exactly-one
+                # new session the provider registered for this workspace.
+                recognized_any = True
+                if session_id is None and store_discovery is not None and request is not None:
+                    found = muse_session_store.discover_new_session_id(
+                        store_discovery["snapshot"],
+                        working_directory=store_discovery["working_directory"],
+                        deadline_monotonic=deadline,
+                    )
+                    return _require_store_discovered_status(
+                        found,
+                        parsed,
+                        request=request,
+                        working_directory=working_directory,
+                    )
+            elif parsed is not None:
+                recognized_any = True
+                try:
+                    return muse_native_status.require_pre_task_status(
+                        parsed,
+                        session_id=session_id,
+                        expected_model=expected_model,
+                        expected_effort=expected_effort,
+                        working_directory=working_directory,
+                        expected_profile_identity=expected_profile_identity,
+                    )
+                except muse_native_status.MuseStatusMismatch as exc:
+                    last_error = str(exc)
+        now = time.monotonic()
+        rows_sha = hashlib.sha256("\n".join(last_rows).encode("utf-8")).hexdigest()[:12]
+        if not recognized_any and now >= unrecognized_deadline:
+            raise ManagedLaunchConflict(
+                f"the Muse /status observation never produced recognized content "
+                f"within {MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS:g} seconds "
+                f"(installed {muse_version or 'unknown version'}; {captures} captures, "
+                f"last screen sha256:{rows_sha} over {len(last_rows)} rows); refusing "
+                "fast rather than holding the launch through the cold-start runway. "
+                f"Last observation: {last_error or 'no capture was ever made'}"
+            )
+        if now >= deadline:
             raise ManagedLaunchConflict(
                 f"the /status panel never described the claimed pre-task session within "
                 f"{NATIVE_PANE_READY_TIMEOUT_SECONDS:g} seconds; last observation: "
@@ -4623,6 +4787,7 @@ def _discover_muse_session(
     capture: Any,
     bootstrap: dict[str, Any],
     request: dict[str, Any],
+    store_snapshot: Optional[frozenset[str]] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Wait for the composer, type ``/status`` once, and discover the id.
 
@@ -4634,6 +4799,11 @@ def _discover_muse_session(
     discovered id as a canonical UUID (the discovery proof) while still
     requiring the exact model/effort/profile/provider/cwd and idle/zero-turn
     pre-task state.  Returns ``(discovered_id, status_observation)``.
+
+    ``store_snapshot`` (taken before the pane process existed) enables the
+    session-store fallback: when the capture only ever renders the
+    route-only inline footer, identity is adopted from the exactly-one new
+    session the provider registered on disk for this workspace.
     """
     readiness = _await_native_pane_input_ready(record, pane_id)
     if not readiness.get("input_ready"):
@@ -4650,6 +4820,16 @@ def _discover_muse_session(
         expected_effort=bootstrap["requested_effort"],
         working_directory=record["working_directory"],
         expected_profile_identity=muse_native_status.DEFAULT_AGENT_PROFILE,
+        muse_version=bootstrap["provider_version"],
+        request=request,
+        store_discovery=(
+            {
+                "snapshot": store_snapshot,
+                "working_directory": record["working_directory"],
+            }
+            if store_snapshot is not None
+            else None
+        ),
     )
     discovered = status_observation["observed"]["session_id"]
     return discovered, status_observation

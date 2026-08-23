@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import subprocess
 import threading
@@ -59,6 +60,7 @@ from cli_agent_orchestrator.services import (
     muse_native_control,
     muse_native_launch,
     muse_native_status,
+    muse_session_store,
     native_attachment,
 )
 from cli_agent_orchestrator.services import native_pane_input as npi
@@ -648,9 +650,13 @@ class _MuseHarness:
 
 
 @pytest.fixture
-def muse_harness(monkeypatch):
+def muse_harness(monkeypatch, tmp_path):
     state = _MuseHarness()
     real_declare = native_attachment.declare
+    # The session-store fallback reads ${XDG_DATA_HOME}/muse/sessions;
+    # every launch takes a pre-spawn snapshot there, so keep tests off the
+    # developer's real store entirely.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-store"))
 
     async def _create_terminal(**kwargs):
         state.terminals.append(kwargs)
@@ -1657,3 +1663,501 @@ def test_the_profile_surface_is_not_prompt_only():
     when the profile material is missing."""
     with pytest.raises(muse_native_launch.MuseNativeLaunchError):
         muse_native_launch.validate_profile_system_prompt("")
+
+
+# --------------------------------------------------------------------
+# 7. cond-0713: the 0.2.1 renderings — boxed /status panel, inline
+#    footer, and the session-store fallback identity.
+#
+#    Muse auto-updated to 0.2.1-R1215.1 and replaced the labeled panel
+#    with a boxed one (which DOES name the SESSION id) over a persistent
+#    inline footer that names none.  Everything here is pinned to the
+#    real renders captured live on the installed build.
+# --------------------------------------------------------------------
+
+#: A provider-generated id from a real 0.2.1-R1215.1 meta TUI (`/status`
+#: typed at zero turns in /private/tmp/muse-probe-cond0713).
+PROBE_SESSION_ID = "e10c3a42-a792-406c-98f3-b0ed88f747e2"
+
+
+def boxed_status_rows(
+    worktree,
+    session_id: str,
+    *,
+    model: str = MUSE_MODEL,
+    effort: Optional[str] = MUSE_EFFORT,
+    provider: str = "meta",
+    agent_profile: str = "native-basic",
+    directory: Optional[str] = None,
+    run_badge: str = "IDLE",
+    usage: str = "0 tokens · 0 turns · 0 subagents",
+) -> list[str]:
+    """The 0.2.1-R1215.1 boxed ``/status`` panel, as really rendered.
+
+    Faithful to the live meta capture: MODEL carries ``<model> ·
+    <effort>`` (a bare model on echo), the continuation row under MODEL
+    is ``<provider> · <profile>``, USAGE is ``N tokens · N turns · N
+    subagents``, and the run badge rides the header row.
+    """
+    directory = directory or str(worktree)
+    model_value = f"{model} · {effort}" if effort is not None else model
+    return [
+        "muse: incompatible_endpoint: local session-message endpoint did not complete "
+        "the current broker hello",
+        "  Muse Code 0.2.1",
+        "┌──────────────────────────────────────────────────────┐",
+        f"│  MUSE CODE 0.2.1 / swift-fireball{run_badge:>17} │",
+        "│                                                      │",
+        f"│  MODEL          {model_value:<37}│",
+        f"│                 {provider} · {agent_profile:<24}│",
+        "│                                                      │",
+        f"│  WORKSPACE      {directory:<37}│",
+        "│                 trusted · not found                  │",
+        "│  ACCESS         approval Normal · sandbox Normal     │",
+        "│                 none                                 │",
+        "│                                                      │",
+        f"│  USAGE          {usage:<37}│",
+        "│  CONTEXT        not projected · 1008K limit          │",
+        "│                                                      │",
+        f"│  SESSION        {session_id:<37}│",
+        "│  ACTIVITY       no tasks                             │",
+        "│                 0 terminals · inbox clear            │",
+        "└──────────────────────────────────────────────────────┘",
+        "── Voice input (⌥V to start) ──────────────────────────",
+        "⟩",
+        "────────────────────────────────────────────────────",
+        f"  {model_value} · {directory}",
+    ]
+
+
+def footer_only_rows(worktree, *, model: str = MUSE_MODEL, effort: Optional[str] = MUSE_EFFORT):
+    """The persistent inline footer with NO panel: route without identity.
+
+    This is the shape of the real failed-launch capture
+    (muse-0.2.1-status-capture.txt): the composer holds ``/status`` and
+    the only new content is the always-rendered footer line.
+    """
+    directory = str(worktree)
+    value = f"{model} · {effort}" if effort is not None else model
+    return [
+        "muse: incompatible_endpoint: local session-message endpoint did not complete "
+        "the current broker hello; remedy",
+        ": restart or update the older sessions to join the current broker generation",
+        "",
+        "  Muse Code 0.2.1",
+        "",
+        "  Model set to muse-spark-1.2-contributor",
+        "  ⎿  Discounted tokens: your content may be used for product improvement.",
+        "",
+        "── Voice input (⌥V to start) ───────────────────────────────────────────",
+        "⟩ /status",
+        "",
+        "────────────────────────────────────────────────────────────────────────",
+        f"  {value} · {directory}",
+    ]
+
+
+def _seed_session_store(
+    xdg_root: Path,
+    session_id: str,
+    *,
+    workspace_root: str,
+    provider_id: str = "meta",
+    semver: str = "0.2.1",
+) -> Path:
+    """A fake Muse session-store entry exactly like the cold-start write."""
+    session_dir = xdg_root / "muse" / "sessions" / "2026" / "08" / "22" / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "schema_version": 1,
+        "id": str(uuid.uuid4()),
+        "stream": {"kind": "session", "id": session_id},
+        "sequence": 1,
+        "record_type": "event",
+        "payload_type": "runtime.session.metadata",
+        "payload_schema_version": 1,
+        "payload": {
+            "kind": "metadata",
+            "record": {
+                "workspace_root": workspace_root,
+                "provider_id": provider_id,
+                "web_search_mode": "client",
+                "build": {"sha": "b3170a534f", "semver": semver},
+            },
+        },
+    }
+    (session_dir / "session.jsonl").write_text(json.dumps(metadata) + "\n", encoding="utf-8")
+    return session_dir
+
+
+def test_status_parser_accepts_the_real_021_boxed_meta_panel(worktree):
+    """The boxed panel parses into the same canonical fields as 0.1.x."""
+    parsed = muse_native_status.parse_status_panel(boxed_status_rows(worktree, PROBE_SESSION_ID))
+    assert parsed["panel_shape"] == "boxed-0.2"
+    assert parsed["schema"] == "cao-muse-status-panel-v1"
+    assert parsed["session_id"] == PROBE_SESSION_ID
+    assert parsed["model"] == MUSE_MODEL
+    assert parsed["reasoning"] == MUSE_EFFORT
+    assert parsed["model_provider"] == "meta"
+    assert parsed["agent_profile"] == "native-basic"
+    assert parsed["directory"] == str(worktree)
+    assert parsed["run"] == "idle"
+    assert parsed["tokens"] == 0 and parsed["turns"] == 0
+
+    proven = muse_native_status.require_pre_task_status(
+        parsed,
+        session_id=None,
+        expected_model=MUSE_MODEL,
+        expected_effort=MUSE_EFFORT,
+        working_directory=str(worktree),
+        expected_profile_identity="native-basic",
+    )
+    assert proven["session_matches"] is True and proven["zero_turns"] is True
+
+
+def test_status_parser_accepts_the_021_boxed_echo_panel_with_a_bare_model(worktree):
+    """Echo renders no effort segment; none is claimed observed."""
+    parsed = muse_native_status.parse_status_panel(
+        boxed_status_rows(
+            worktree,
+            PROBE_SESSION_ID,
+            model="echo",
+            effort=None,
+            provider="echo",
+        )
+    )
+    assert parsed["model"] == "echo"
+    assert parsed["reasoning"] is None
+    assert parsed["model_provider"] == "echo"
+
+
+def test_boxed_panel_mutations_are_refused(worktree):
+    """Every wrong fact in the boxed panel is refused, never guessed."""
+    session_id = _uuid()
+
+    def mutate(mutator):
+        rows = boxed_status_rows(worktree, PROBE_SESSION_ID)
+        mutator(rows)
+        return muse_native_status.parse_status_panel(rows)
+
+    with pytest.raises(muse_native_status.MuseStatusParseError):
+        # A second SESSION row: the capture cannot prove which is real.
+        mutate(lambda rows: rows.insert(17, rows[16]))
+    with pytest.raises(muse_native_status.MuseStatusParseError):
+        muse_native_status.parse_status_panel(
+            [row for row in boxed_status_rows(worktree, PROBE_SESSION_ID) if "SESSION" not in row]
+        )
+    with pytest.raises(muse_native_status.MuseStatusParseError):
+        # An effort outside the installed vocabulary.
+        muse_native_status.parse_status_panel(
+            boxed_status_rows(worktree, PROBE_SESSION_ID, effort="maximum")
+        )
+    with pytest.raises(muse_native_status.MuseStatusParseError):
+        # No provider/profile continuation row under MODEL.
+        muse_native_status.parse_status_panel(
+            [
+                row
+                for row in boxed_status_rows(worktree, PROBE_SESSION_ID)
+                if "meta · native-basic" not in row
+            ]
+        )
+    with pytest.raises(muse_native_status.MuseStatusParseError):
+        muse_native_status.parse_status_panel(
+            boxed_status_rows(worktree, PROBE_SESSION_ID, usage="0 tokens / 0 turns")
+        )
+
+    # A non-idle badge parses but fails the pre-task requirement.
+    parsed = muse_native_status.parse_status_panel(
+        boxed_status_rows(worktree, PROBE_SESSION_ID, run_badge="WORKING")
+    )
+    with pytest.raises(muse_native_status.MuseStatusMismatch):
+        muse_native_status.require_pre_task_status(
+            parsed,
+            session_id=None,
+            expected_model=MUSE_MODEL,
+            expected_effort=MUSE_EFFORT,
+            working_directory=str(worktree),
+            expected_profile_identity="native-basic",
+        )
+
+
+def test_the_real_021_footer_capture_is_a_partial_route_observation(worktree):
+    """The failed-launch capture proves the route and NO identity."""
+    rows = footer_only_rows(worktree)
+    parsed = muse_native_status.parse_status_panel(rows)
+    assert parsed["partial"] is True
+    assert parsed["observation"] == "route-only-footer"
+    assert parsed["session_id"] is None
+    assert parsed["model"] == MUSE_MODEL
+    assert parsed["reasoning"] == MUSE_EFFORT
+    assert parsed["directory"] == str(worktree)
+
+
+def test_require_pre_task_status_refuses_a_partial_observation(worktree):
+    """A footer observation is never a ready receipt."""
+    parsed = muse_native_status.parse_status_panel(footer_only_rows(worktree))
+    with pytest.raises(muse_native_status.MuseStatusMismatch, match="route-only"):
+        muse_native_status.require_pre_task_status(
+            parsed,
+            session_id=None,
+            expected_model=MUSE_MODEL,
+            expected_effort=MUSE_EFFORT,
+            working_directory=str(worktree),
+            expected_profile_identity="native-basic",
+        )
+
+
+def test_two_distinct_footers_refuse_as_ambiguous():
+    """Two footer shapes cannot prove which pane rendered them."""
+    rows = ["  a · high · /one", "  b · low · /two"]
+    with pytest.raises(muse_native_status.MuseStatusParseError):
+        muse_native_status.parse_status_panel(rows)
+
+
+def test_the_labeled_01_panel_still_parses_backwards_compatibly(worktree):
+    """The 0.1.x labeled panel keeps its exact pre-existing parse."""
+    parsed = muse_native_status.parse_status_panel(status_panel_rows(worktree, PROVIDER_SESSION_ID))
+    assert parsed["panel_shape"] == "labeled-0.1"
+    assert parsed["session_id"] == PROVIDER_SESSION_ID
+    assert parsed["model"] == MUSE_MODEL
+
+
+def test_session_store_snapshot_and_discovery_round_trip(tmp_path, monkeypatch, worktree):
+    """The store diff adopts the exactly-one cold-start registration."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    snapshot = muse_session_store.snapshot_known_session_ids()
+    assert snapshot == frozenset()
+
+    seeded = _seed_session_store(tmp_path / "xdg", _uuid(), workspace_root=str(worktree))
+    found = muse_session_store.discover_new_session_id(
+        snapshot,
+        working_directory=str(worktree),
+        deadline_monotonic=time.monotonic() + 2,
+    )
+    assert found["session_id"] == seeded.name
+    assert found["metadata"]["workspace_root"] == str(worktree)
+    assert found["metadata"]["provider_id"] == "meta"
+    assert found["metadata"]["build_semver"] == "0.2.1"
+
+    # Once known, the same session never counts as new again.
+    assert seeded.name in muse_session_store.snapshot_known_session_ids()
+
+
+def test_session_store_discovery_refuses_two_candidates_as_ambiguous(
+    tmp_path, monkeypatch, worktree
+):
+    """Concurrent registrations are ambiguity, never a coin flip."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    snapshot = muse_session_store.snapshot_known_session_ids()
+    _seed_session_store(tmp_path / "xdg", _uuid(), workspace_root=str(worktree))
+    _seed_session_store(tmp_path / "xdg", _uuid(), workspace_root=str(worktree))
+    with pytest.raises(muse_session_store.MuseSessionStoreAmbiguous):
+        muse_session_store.discover_new_session_id(
+            snapshot,
+            working_directory=str(worktree),
+            deadline_monotonic=time.monotonic() + 2,
+        )
+
+
+def test_session_store_discovery_scopes_to_workspace_and_provider(tmp_path, monkeypatch, worktree):
+    """Other workspaces and other providers are never adoptable matches."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    snapshot = muse_session_store.snapshot_known_session_ids()
+    _seed_session_store(tmp_path / "xdg", _uuid(), workspace_root="/somewhere/else")
+    _seed_session_store(tmp_path / "xdg", _uuid(), workspace_root=str(worktree), provider_id="echo")
+    with pytest.raises(muse_session_store.MuseSessionStoreUnavailable):
+        muse_session_store.discover_new_session_id(
+            snapshot,
+            working_directory=str(worktree),
+            deadline_monotonic=time.monotonic() + 0.3,
+            poll_seconds=0.05,
+        )
+
+
+def test_session_store_discovery_names_pending_and_unreadable_candidates(
+    tmp_path, monkeypatch, worktree
+):
+    """A log not yet flushed stays pending; garbage evidence is unreadable.
+
+    Neither state is adoptable: adopting an identity whose own metadata
+    record has not been read would bind a pane on a guess.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    snapshot = muse_session_store.snapshot_known_session_ids()
+
+    pending_dir = tmp_path / "xdg" / "muse" / "sessions" / "2026" / "08" / "22" / _uuid()
+    pending_dir.mkdir(parents=True)
+    garbage_dir = tmp_path / "xdg" / "muse" / "sessions" / "2026" / "08" / "22" / _uuid()
+    garbage_dir.mkdir(parents=True)
+    (garbage_dir / "session.jsonl").write_text("not json\n", encoding="utf-8")
+
+    with pytest.raises(muse_session_store.MuseSessionStoreUnavailable) as refused:
+        muse_session_store.discover_new_session_id(
+            snapshot,
+            working_directory=str(worktree),
+            deadline_monotonic=time.monotonic() + 0.3,
+            poll_seconds=0.05,
+        )
+    message = str(refused.value)
+    assert "1 candidate(s) still pending" in message
+    assert "1 unreadable" in message
+
+    # The pending candidate becomes adoptable once its metadata flushes.
+    _seed_session_store(tmp_path / "xdg", pending_dir.name, workspace_root=str(worktree))
+    found = muse_session_store.discover_new_session_id(
+        snapshot,
+        working_directory=str(worktree),
+        deadline_monotonic=time.monotonic() + 2,
+    )
+    assert found["session_id"] == pending_dir.name
+
+
+@pytest.mark.asyncio
+async def test_muse_launch_discovers_through_the_021_boxed_panel(
+    isolated_memory_db, worktree, tmp_path, muse_harness
+):
+    """On 0.2.1 the boxed panel names the session; nothing else changes."""
+    muse_harness.captures.append(boxed_status_rows(worktree, PROBE_SESSION_ID))
+    record, result = await _launch(worktree, tmp_path, muse_harness)
+    assert result["state"] == "launching"
+    attachment = native_attachment.get("muse_cli", PROBE_SESSION_ID)
+    assert attachment is not None
+    terminal = (
+        database.SessionLocal()
+        .query(database.ManagedLaunchV2TerminalModel)
+        .filter(database.ManagedLaunchV2TerminalModel.id == record["terminal_id"])
+        .first()
+    )
+    assert terminal.v2_native_session_id == PROBE_SESSION_ID
+
+    receipt = _published_receipt(record["reservation_id"])
+    assert receipt["provider_session_id"] == PROBE_SESSION_ID
+    assert receipt["model"] == MUSE_MODEL
+    assert receipt["effort"] == MUSE_EFFORT
+    assert receipt["provider_session_start"]["observed"]["effort"] == MUSE_EFFORT
+
+
+@pytest.mark.asyncio
+async def test_muse_launch_falls_back_to_store_identity_when_only_the_footer_renders(
+    isolated_memory_db, worktree, tmp_path, muse_harness, monkeypatch
+):
+    """Footer-only renders adopt the exactly-one store registration.
+
+    The fake store is seeded when the pane is created — the moment the
+    real provider registers its cold-start session — so the launch's own
+    pre-spawn snapshot excludes it and the diff yields exactly one match.
+    """
+    xdg_root = tmp_path / "xdg-home"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_root))
+    store_session_id = _uuid()
+    real_create = terminal_service.create_terminal
+
+    async def _create_terminal_and_register_session(**kwargs):
+        result = await real_create(**kwargs)
+        _seed_session_store(xdg_root, store_session_id, workspace_root=str(worktree))
+        return result
+
+    monkeypatch.setattr(terminal_service, "create_terminal", _create_terminal_and_register_session)
+    muse_harness.captures.append(footer_only_rows(worktree))
+
+    record, result = await _launch(worktree, tmp_path, muse_harness)
+    assert result["state"] == "launching"
+    attachment = native_attachment.get("muse_cli", store_session_id)
+    assert attachment is not None
+
+    receipt = _published_receipt(record["reservation_id"])
+    assert receipt["provider_session_id"] == store_session_id
+    # Route facts come from the footer, never from the request.
+    assert receipt["model"] == MUSE_MODEL
+    assert receipt["effort"] == MUSE_EFFORT
+    session_start = receipt["provider_session_start"]
+    assert session_start["source"] == "session-store-diff"
+    assert session_start["identity_proven"] is True
+    assert session_start["observed"]["agent_profile"] is None
+    assert session_start["footer_observation"]["partial"] is True
+
+
+@pytest.mark.asyncio
+async def test_muse_store_fallback_refuses_a_footer_that_disagrees_with_the_request(
+    isolated_memory_db, worktree, tmp_path, muse_harness, monkeypatch
+):
+    """A footer naming another model is route evidence against the launch."""
+    xdg_root = tmp_path / "xdg-home"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_root))
+    store_session_id = _uuid()
+    real_create = terminal_service.create_terminal
+
+    async def _create_terminal_and_register_session(**kwargs):
+        result = await real_create(**kwargs)
+        _seed_session_store(xdg_root, store_session_id, workspace_root=str(worktree))
+        return result
+
+    monkeypatch.setattr(terminal_service, "create_terminal", _create_terminal_and_register_session)
+    muse_harness.captures.append(
+        footer_only_rows(worktree, model="muse-spark-1.2", effort=MUSE_EFFORT)
+    )
+    _record, result = await _launch(worktree, tmp_path, muse_harness)
+    assert result["state"] == "preflight_blocked"
+    detail = result["preflight_failure"]["detail"]
+    assert "does not describe the claimed launch" in detail
+    assert "muse-spark-1.2" in detail
+    # Nothing was bound or advertised for the refused identity.
+    assert native_attachment.get("muse_cli", store_session_id) is None
+    assert bridge.read_state(result["reservation_id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_muse_launch_fast_fails_when_the_render_is_never_recognized(
+    isolated_memory_db, worktree, tmp_path, muse_harness, monkeypatch
+):
+    """Zero recognized rows refuse in seconds, naming version + fingerprint.
+
+    A build whose screen never matches any known shape must not hold the
+    full cold-start runway: the refusal carries the installed version and
+    the last screen's fingerprint so the operator can act on it instead
+    of watching bind-timeout storms.
+    """
+    monkeypatch.setattr(v2, "MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(v2, "NATIVE_PANE_READY_TIMEOUT_SECONDS", 30)
+    monkeypatch.setattr(v2, "_NATIVE_PANE_READY_POLL_SECONDS", 0.005)
+    muse_harness.captures.append(["Muse Code 0.2.1", "", "⟫ garbage render ⟪", "⟩"])
+    started = time.monotonic()
+    _record, result = await _launch(worktree, tmp_path, muse_harness)
+    elapsed = time.monotonic() - started
+    assert result["state"] == "preflight_blocked"
+    detail = result["preflight_failure"]["detail"]
+    assert "never produced recognized content" in detail
+    # The installed provider_version the bootstrap recorded, named verbatim.
+    assert "0.1.0" in detail
+    assert "sha256:" in detail
+    assert elapsed < 10
+
+
+@pytest.mark.asyncio
+async def test_muse_launch_keeps_the_full_runway_once_content_is_recognized(
+    isolated_memory_db, worktree, tmp_path, muse_harness, monkeypatch
+):
+    """Recognized-but-incomplete content waits the full bound, then refuses.
+
+    The footer alone is recognized content, so the observation holds the
+    whole cold-start runway even though the unrecognized bound has long
+    passed — it is waiting on evidence known to arrive (the panel or a
+    store registration), not on an unrecognizable screen.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-xdg"))
+    monkeypatch.setattr(v2, "MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(v2, "NATIVE_PANE_READY_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(v2, "_NATIVE_PANE_READY_POLL_SECONDS", 0.005)
+    # The footer IS recognized content; nothing else ever renders.
+    muse_harness.captures.append(footer_only_rows(worktree))
+    started = time.monotonic()
+    _record, result = await _launch(worktree, tmp_path, muse_harness)
+    elapsed = time.monotonic() - started
+    assert result["state"] == "preflight_blocked"
+    # Held well past the unrecognized bound before refusing.
+    assert elapsed >= 0.4
+    detail = result["preflight_failure"]["detail"]
+    assert (
+        "never described the claimed pre-task session within 0.4 seconds" in detail
+        or "refusing to adopt an identity the store cannot prove" in detail
+    )
