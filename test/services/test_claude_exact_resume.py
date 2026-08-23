@@ -14,8 +14,14 @@ import pytest
 from cli_agent_orchestrator.services import claude_exact_resume as cer
 from cli_agent_orchestrator.services import claude_native_launch
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
-from cli_agent_orchestrator.models.managed_launch_v2 import ManagedLaunchV2ReserveRequest, PROTOCOL_VERSION_V2
-from cli_agent_orchestrator.services.claude_exact_resume import ExactResumeRequest, TypedIneligibility
+from cli_agent_orchestrator.models.managed_launch_v2 import (
+    ManagedLaunchV2ReserveRequest,
+    PROTOCOL_VERSION_V2,
+)
+from cli_agent_orchestrator.services.claude_exact_resume import (
+    ExactResumeRequest,
+    TypedIneligibility,
+)
 from cli_agent_orchestrator.services import native_attachment
 from cli_agent_orchestrator.services import execution_mode as em
 
@@ -76,9 +82,17 @@ def test_acp_refusal_even_when_other_fields_would_also_fail():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("field", [
-    "provider", "model", "effort", "quota_provider", "provider_route", "auth_transport",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "provider",
+        "model",
+        "effort",
+        "quota_provider",
+        "provider_route",
+        "auth_transport",
+    ],
+)
 def test_missing_carried_field_refuses_typed(field):
     data = {
         "predecessor_native_session_id": _valid_uuid(),
@@ -274,9 +288,13 @@ def test_each_carried_field_individually_reaches_bootstrap(tmp_path, monkeypatch
         ("auth_transport", "oauth"),
     ]:
         req = _valid_request(**{field: value} if field != "provider" else {})
-        record = {"terminal_id": "abcd1234", "generation": _valid_uuid(), "working_directory": str(tmp_path)}
+        record = {
+            "terminal_id": "abcd1234",
+            "generation": _valid_uuid(),
+            "working_directory": str(tmp_path),
+        }
         bootstrap, _ = _prepare_claude_resume_session(
-            record=record, pending=req, version_output="claude 2.1.220", digest="0"*64
+            record=record, pending=req, version_output="claude 2.1.220", digest="0" * 64
         )
         carried_map = {
             "provider": "carried_provider",
@@ -312,8 +330,12 @@ def test_dual_identity_refuses_before_provider_io():
 
 def test_resume_uses_build_resume_argv_not_mint(monkeypatch):
     req = _valid_request()
-    with patch.object(claude_native_launch, "build_resume_argv", wraps=claude_native_launch.build_resume_argv) as mock_resume, \
-         patch.object(claude_native_launch, "mint_session_id") as mock_mint:
+    with (
+        patch.object(
+            claude_native_launch, "build_resume_argv", wraps=claude_native_launch.build_resume_argv
+        ) as mock_resume,
+        patch.object(claude_native_launch, "mint_session_id") as mock_mint,
+    ):
         argv = cer.build_resume_argv(req)
         mock_resume.assert_called_once()
         mock_mint.assert_not_called()
@@ -341,6 +363,7 @@ async def test_fence_before_successor_ordering(tmp_path, monkeypatch, isolated_m
     monkeypatch.setattr(cer, "COMPANION_DIR", tmp_path / "companion")
 
     import hashlib
+
     executable = tmp_path / "fake-claude"
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o755)
@@ -409,7 +432,9 @@ async def test_fence_before_successor_ordering(tmp_path, monkeypatch, isolated_m
         call_order.append("fence")
         captured_fence_args.update(kwargs)
         # also track intent-before-fence: intent should already be recorded
-        intent_path = Path(tmp_path / "companion" / "claude_exact_resume" / f"{resume_req.operation_id}.json")
+        intent_path = Path(
+            tmp_path / "companion" / "claude_exact_resume" / f"{resume_req.operation_id}.json"
+        )
         assert intent_path.exists(), "intent-before-fence: successor intent must exist before fence"
         return orig_fence(*args, **kwargs)
 
@@ -421,6 +446,7 @@ async def test_fence_before_successor_ordering(tmp_path, monkeypatch, isolated_m
     monkeypatch.setattr(cer, "record_successor_generation", tracked_record)
 
     from cli_agent_orchestrator.services import managed_provider_bridge as bridge
+
     monkeypatch.setattr(bridge, "provider_version_banner", lambda *a, **k: "claude 2.1.220")
     orig_prepare = v2._prepare_claude_resume_session
 
@@ -438,7 +464,10 @@ async def test_fence_before_successor_ordering(tmp_path, monkeypatch, isolated_m
 
     monkeypatch.setattr(ntl, "start", fake_start)
 
-    from cli_agent_orchestrator.services.managed_provider_bridge import _profile_material, profile_digest
+    from cli_agent_orchestrator.services.managed_provider_bridge import (
+        _profile_material,
+        profile_digest,
+    )
 
     pm = _profile_material(record["agent_profile"], record["terminal_id"])
     bridge_request = {
@@ -467,6 +496,7 @@ async def test_fence_before_successor_ordering(tmp_path, monkeypatch, isolated_m
     }
 
     import asyncio
+
     try:
         await v2._launch_native_tui(reservation_id, v2.get(reservation_id), bridge_request)
     except Exception:
@@ -483,7 +513,9 @@ async def test_fence_before_successor_ordering(tmp_path, monkeypatch, isolated_m
 
 
 @pytest.mark.asyncio
-async def test_refusal_before_side_effects_no_fence_or_intent(tmp_path, monkeypatch, isolated_memory_db):
+async def test_refusal_before_side_effects_no_fence_or_intent(
+    tmp_path, monkeypatch, isolated_memory_db
+):
     """P1-1: TypedIneligibility (e.g., ACP) must complete BEFORE any fence or intent."""
     worktree = tmp_path / "repo"
     worktree.mkdir()
@@ -498,6 +530,7 @@ async def test_refusal_before_side_effects_no_fence_or_intent(tmp_path, monkeypa
     monkeypatch.setattr(cer, "COMPANION_DIR", tmp_path / "companion")
 
     import hashlib
+
     executable = tmp_path / "fake-claude"
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o755)
@@ -536,6 +569,7 @@ async def test_refusal_before_side_effects_no_fence_or_intent(tmp_path, monkeypa
     # We will make is_eligible fail by providing no provider_version and no receipt
     # To force this, we will monkeypatch version_output to empty string via bridge stub
     from cli_agent_orchestrator.services import managed_provider_bridge as bridge
+
     monkeypatch.setattr(bridge, "provider_version_banner", lambda *a, **k: "")
 
     predecessor_session = _valid_uuid()
@@ -581,7 +615,10 @@ async def test_refusal_before_side_effects_no_fence_or_intent(tmp_path, monkeypa
     monkeypatch.setattr(cer, "fence_predecessor", spy_fence)
     monkeypatch.setattr(cer, "record_successor_generation", spy_intent)
 
-    from cli_agent_orchestrator.services.managed_provider_bridge import _profile_material, profile_digest
+    from cli_agent_orchestrator.services.managed_provider_bridge import (
+        _profile_material,
+        profile_digest,
+    )
 
     pm = _profile_material(record["agent_profile"], record["terminal_id"])
     bridge_request = {
@@ -637,6 +674,7 @@ async def test_prod_path_dual_identity_refusal(tmp_path, monkeypatch, isolated_m
     monkeypatch.setattr(cer, "COMPANION_DIR", tmp_path / "companion")
 
     import hashlib
+
     executable = tmp_path / "fake-claude"
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o755)
@@ -701,8 +739,12 @@ async def test_prod_path_dual_identity_refusal(tmp_path, monkeypatch, isolated_m
 
     monkeypatch.setattr(cer, "fence_predecessor", spy_fence)
     from cli_agent_orchestrator.services import managed_provider_bridge as bridge
+
     monkeypatch.setattr(bridge, "provider_version_banner", lambda *a, **k: "claude 2.1.220")
-    from cli_agent_orchestrator.services.managed_provider_bridge import _profile_material, profile_digest
+    from cli_agent_orchestrator.services.managed_provider_bridge import (
+        _profile_material,
+        profile_digest,
+    )
 
     pm = _profile_material(record["agent_profile"], record["terminal_id"])
     bridge_request = {
@@ -773,7 +815,9 @@ def test_ambiguous_retry_reuses_operation_id(tmp_path, monkeypatch):
     monkeypatch.setattr(cer, "COMPANION_DIR", tmp_path / "companion")
     op_id = _valid_uuid()
     gen1 = _valid_uuid()
-    cer.record_successor_generation(operation_id=op_id, successor_terminal_id="tid1", successor_generation=gen1)
+    cer.record_successor_generation(
+        operation_id=op_id, successor_terminal_id="tid1", successor_generation=gen1
+    )
     rec = cer.read_successor_generation(op_id)
     assert rec["operation_id"] == op_id
     assert rec["successor_generation"] == gen1

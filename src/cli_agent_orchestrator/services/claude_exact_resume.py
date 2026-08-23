@@ -183,7 +183,9 @@ class ExactResumeRequest:
         except TypedIneligibility:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise TypedIneligibility("INVALID_REQUEST", f"invalid exact resume request: {exc}") from exc
+            raise TypedIneligibility(
+                "INVALID_REQUEST", f"invalid exact resume request: {exc}"
+            ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -400,9 +402,7 @@ def read_successor_generation(operation_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def fence_predecessor(
-    *, terminal_id: str, generation: str, operation_id: str
-) -> Dict[str, Any]:
+def fence_predecessor(*, terminal_id: str, generation: str, operation_id: str) -> Dict[str, Any]:
     """Fence the predecessor terminal generation before the successor launches.
 
     The predecessor terminal is fenced BEFORE the successor launches so

@@ -4074,11 +4074,18 @@ async def _launch_native_tui(
                     else:
                         # Check for explicit predecessor generation carried via
                         # test helper (for harness that doesn't use native_attachment)
-                        _pred_gen_candidate = getattr(pending_resume, "predecessor_generation", None)
-                        _pred_tid_candidate = getattr(pending_resume, "predecessor_terminal_id", None)
-                        if isinstance(_pred_gen_candidate, str) and _pred_gen_candidate and isinstance(
-                            _pred_tid_candidate, str
-                        ) and _pred_tid_candidate:
+                        _pred_gen_candidate = getattr(
+                            pending_resume, "predecessor_generation", None
+                        )
+                        _pred_tid_candidate = getattr(
+                            pending_resume, "predecessor_terminal_id", None
+                        )
+                        if (
+                            isinstance(_pred_gen_candidate, str)
+                            and _pred_gen_candidate
+                            and isinstance(_pred_tid_candidate, str)
+                            and _pred_tid_candidate
+                        ):
                             _pred_tid = _pred_tid_candidate
                             _pred_gen = _pred_gen_candidate
                         else:
