@@ -437,10 +437,12 @@ export function ProjectsPanel() {
   // The comment a search hit asked to navigate to (issue key + comment id);
   // consumed by ItemDetail once its comments are loaded.
   const [commentTarget, setCommentTarget] = useState<{ issueKey: string; commentId: number } | null>(null)
-  // content_clock of the last applied search page — a changed clock means the
-  // underlying tracker moved under an established offset, so pagination
-  // restarts instead of showing a stale page of a shifted ordering.
-  const lastSearchClockRef = useRef<number | null>(null)
+  // The [content_clock, active_vector_generation] pair of the last applied
+  // search page. Either half moving means the tracker's derived search state
+  // changed under an established offset — §12.3 keys pagination restarts on
+  // BOTH: content moved (clock) or the vector generation rolled over — so an
+  // offset addressing a page of a stale ordering is never shown.
+  const lastPageFingerprintRef = useRef<string | null>(null)
 
   // Debounce raw input into the effective query. Kept inside TabFilters so it
   // is per-tab state like every other filter.
@@ -488,19 +490,23 @@ export function ProjectsPanel() {
     }, controller.signal)
       .then(response => {
         if (controller.signal.aborted) return
-        const rawClock = response.generations?.content_clock
-        const clock = typeof rawClock === 'number' ? rawClock : null
+        const generations = response.generations ?? {}
+        const fingerprint = JSON.stringify([
+          typeof generations.content_clock === 'number' ? generations.content_clock : null,
+          generations.active_vector_generation ?? null,
+        ])
         if (
-          clock !== null && lastSearchClockRef.current !== null
-          && clock !== lastSearchClockRef.current && f.offset > 0
+          lastPageFingerprintRef.current !== null
+          && fingerprint !== lastPageFingerprintRef.current
+          && f.offset > 0
         ) {
-          // The tracker's content changed between page fetches; this offset
+          // The derived search state changed between page fetches; this offset
           // addresses a page of an ordering that no longer exists. Restart.
-          lastSearchClockRef.current = null
+          lastPageFingerprintRef.current = null
           updateCurrentFilters({ offset: 0 })
           return
         }
-        if (clock !== null) lastSearchClockRef.current = clock
+        lastPageFingerprintRef.current = fingerprint
         setSearchState({ response, loading: false, error: null })
       })
       .catch(err => {

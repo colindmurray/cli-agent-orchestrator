@@ -67,24 +67,30 @@ function ExplanationRow({
   const win = hit.winning_comment
   return (
     <div className="border-b border-gray-800/70 last:border-b-0">
-      <button
-        onClick={() => onSelectIssue(issue)}
-        aria-expanded={selected}
-        className="w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-gray-900/60 transition-colors"
-      >
-        <code className="text-xs text-gray-500 w-24 shrink-0">{issue.key}</code>
-        <span className="text-sm text-gray-200 truncate flex-1">{issue.title}</span>
-        <span
-          data-testid="rank-score"
-          title="Reciprocal-rank-fusion score — higher is a better match"
-          className="text-[10px] font-mono text-gray-600 shrink-0"
+      {/* The select affordance and the comment-navigation affordance are
+          siblings, never parent/child: a button inside a button is invalid
+          HTML and screen readers drop the inner control. */}
+      <div className="w-full flex items-center gap-3 px-3 py-2 hover:bg-gray-900/60 transition-colors">
+        <button
+          onClick={() => onSelectIssue(issue)}
+          aria-expanded={selected}
+          aria-label={`Open ${issue.key}: ${issue.title}`}
+          className="flex flex-1 min-w-0 items-center gap-3 text-left"
         >
-          {hit.rank_score.toFixed(4)}
-        </span>
+          <code className="text-xs text-gray-500 w-24 shrink-0">{issue.key}</code>
+          <span className="text-sm text-gray-200 truncate flex-1">{issue.title}</span>
+          <span
+            data-testid="rank-score"
+            title="Reciprocal-rank-fusion score — higher is a better match"
+            className="text-[10px] font-mono text-gray-600 shrink-0"
+          >
+            {hit.rank_score.toFixed(4)}
+          </span>
+        </button>
         {win && (
           <button
             data-testid="open-winning-comment"
-            onClick={e => { e.stopPropagation(); onOpenComment(issue.key, win.comment_id) }}
+            onClick={() => onOpenComment(issue.key, win.comment_id)}
             aria-label={`Open matching comment ${win.comment_id} on ${issue.key}`}
             title={
               win.total_matching_comments > 1
@@ -103,7 +109,7 @@ function ExplanationRow({
             )}
           </button>
         )}
-      </button>
+      </div>
       <div className="px-3 pb-2 pl-[4.75rem] space-y-1">
         <div className="flex flex-wrap gap-1" data-testid="matched-badges">
           {hit.matched_fields.map(field => (

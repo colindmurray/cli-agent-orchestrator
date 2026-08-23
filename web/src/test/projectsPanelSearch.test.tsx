@@ -363,6 +363,75 @@ describe('ProjectsPanel ranked search (M1.5)', () => {
     expect(screen.getByText(/1–2 of 60/)).toBeInTheDocument()
   })
 
+  it('restarts pagination when only active_vector_generation changes (§12.3 keys on both)', async () => {
+    // Regression pin for review finding P2: the restart contract originally
+    // keyed on content_clock alone and missed a generation rollover.
+    respondImpl = (url, opts) => {
+      if (url.startsWith('/tracker/issues/search')) {
+        const params = new URLSearchParams(url.split('?')[1] ?? '')
+        const offset = Number(params.get('offset') ?? 0)
+        return json(searchResponse({
+          offset,
+          total: 60,
+          generations: {
+            schema_version: 1,
+            document_schema_version: 1,
+            content_clock: 7,
+            active_vector_generation: offset > 0 ? 'gen-2' : null,
+          },
+          results: offset > 0 ? [] : searchResponse().results,
+        }))
+      }
+      return defaultRespond(url, opts)
+    }
+
+    render(<ProjectsPanel />)
+    await openIssuesTab()
+    await settle()
+    calls.length = 0
+
+    typeQuery('deadlock')
+    await settle()
+    expect(screen.getByText(/1–2 of 60/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await settle()
+
+    const offsets = searchCalls().map(c => Number(new URLSearchParams(c.url.split('?')[1]).get('offset')))
+    expect(offsets).toEqual([0, 50, 0])
+  })
+
+  it('keeps pagination stable when neither clock nor generation moved', async () => {
+    respondImpl = (url, opts) => {
+      if (url.startsWith('/tracker/issues/search')) {
+        const params = new URLSearchParams(url.split('?')[1] ?? '')
+        const offset = Number(params.get('offset') ?? 0)
+        return json(searchResponse({
+          offset,
+          total: 60,
+          generations: { schema_version: 1, document_schema_version: 1, content_clock: 7, active_vector_generation: null },
+          results: offset > 0 ? [searchResponse().results[1]] : searchResponse().results,
+        }))
+      }
+      return defaultRespond(url, opts)
+    }
+
+    render(<ProjectsPanel />)
+    await openIssuesTab()
+    await settle()
+    calls.length = 0
+
+    typeQuery('deadlock')
+    await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await settle()
+
+    const offsets = searchCalls().map(c => Number(new URLSearchParams(c.url.split('?')[1]).get('offset')))
+    expect(offsets).toEqual([0, 50])
+    // Page two actually renders; a spurious reset would have re-shown page one.
+    expect(screen.getByText(/51–51 of 60/)).toBeInTheDocument()
+    expect(screen.getAllByText(/fusion lane weights/).length).toBeGreaterThan(0)
+  })
+
   it('lands a winning-comment hit on the anchored comment and toggles importance via PATCH', async () => {
     render(<ProjectsPanel />)
     await openIssuesTab()
