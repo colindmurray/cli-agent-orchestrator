@@ -127,7 +127,16 @@ VOCAB = {
     "widget": 9,
     "color": 10,
 }
-SYNONYMS = {"shipping": "deploy", "infrastructure": "pipeline", "stall": "deadlock"}
+SYNONYMS = {
+    "shipping": "deploy",
+    "infrastructure": "pipeline",
+    "stall": "deadlock",
+    # The k-4 twins spell their terms with inflections the FTS index does not
+    # stem, so only the semantic lanes match them; the §10.4 importance
+    # contract below is then observable through the fused explanation.
+    "leasing": "lease",
+    "deadlocks": "deadlock",
+}
 
 
 def seed(store):
@@ -169,7 +178,7 @@ def seed(store):
     # important twin win, while its reported distance stays raw.
     session.flush()
     session.add(
-        TrackerCommentModel(issue_key="k-4", author="twin-a", body="lease deadlock")
+        TrackerCommentModel(issue_key="k-4", author="twin-a", body="leasing deadlocks")
     )
     # Nine repetitions per query word: the important twin embeds only barely
     # farther from the query than the ordinary twin (cosine distance ≈0.001),
@@ -180,9 +189,9 @@ def seed(store):
             issue_key="k-4",
             author="twin-b",
             body=(
-                "lease lease lease lease lease lease lease lease lease "
-                "deadlock deadlock deadlock deadlock deadlock deadlock "
-                "deadlock deadlock deadlock fencing"
+                "leasing leasing leasing leasing leasing leasing leasing "
+                "leasing leasing deadlocks deadlocks deadlocks deadlocks "
+                "deadlocks deadlocks deadlocks deadlocks deadlocks fencing"
             ),
             important=True,
         )
@@ -263,8 +272,12 @@ def semantic_lane_names(response):
 
 
 class TestSemanticEligibility:
+    # Every probe runs in mode="semantic" on purpose: a freshness condition
+    # gates the semantic lanes only, and in hybrid mode the lexical lanes
+    # would still serve an issue whose vector went stale — masking the
+    # exclusion this class pins.
     def test_vector_for_deleted_source_is_excluded_while_the_blob_survives(self, hybrid):
-        response = search(hybrid, "widget color tuning", mode="hybrid")
+        response = search(hybrid, "widget color tuning", mode="semantic", include_comments=False)
         assert "k-2" in keys_of(response)
         generation = hybrid.execute(
             "SELECT generation_id FROM tracker_vector_generations WHERE state = 'active'"
@@ -275,21 +288,21 @@ class TestSemanticEligibility:
         )[0][0]
         assert blob_count == 1, "fixture requires the orphaned vector blob to survive"
 
-        after = search(hybrid, "widget color tuning", mode="hybrid")
+        after = search(hybrid, "widget color tuning", mode="semantic", include_comments=False)
         assert "k-2" not in keys_of(after)
 
     def test_stale_content_version_is_excluded_even_without_a_dirty_row(self, hybrid):
-        response = search(hybrid, "deploy pipeline bounce", mode="hybrid")
+        response = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
         assert keys_of(response)[0] == "k-1"
         # Simulate derived-row drift directly: the stored vector now names an
         # older content_version than the current FTS document, and no dirty
         # row exists. Only the version join can exclude it.
         hybrid.execute("UPDATE tracker_issue_fts SET content_version = content_version + 10")
-        stale = search(hybrid, "deploy pipeline bounce", mode="hybrid")
+        stale = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
         assert "k-1" not in keys_of(stale)
 
-    def test_dirty_row_excludes_an_otherwise_fresh_vector(self, hybrid):
-        response = search(hybrid, "deploy pipeline bounce", mode="hybrid")
+    def test_dirty_row_excludes_an_otherwise_fresh_vector(self, hybrid, monkeypatch):
+        response = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
         assert keys_of(response)[0] == "k-1"
         generation = hybrid.execute(
             "SELECT generation_id FROM tracker_vector_generations WHERE state = 'active'"
@@ -307,11 +320,21 @@ class TestSemanticEligibility:
             "FROM tracker_search_vectors WHERE generation_id = ? AND document_key = ?",
             (generation, document_key),
         )
-        dirty = search(hybrid, "deploy pipeline bounce", mode="hybrid")
+        # A live query would first drain the dirty row (§9.2) and re-embed the
+        # document fresh. Hold the drain so the row is still dirty at scan
+        # time: only the NOT EXISTS predicate can now exclude the vector.
+        from cli_agent_orchestrator.services import vector_lifecycle as vlc
+
+        monkeypatch.setattr(
+            vlc,
+            "drain_bounded_batch",
+            lambda **kwargs: {"attempted": 0, "published": 0},
+        )
+        dirty = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
         assert "k-1" not in keys_of(dirty)
 
     def test_dirty_rows_are_generation_scoped(self, hybrid):
-        response = search(hybrid, "deploy pipeline bounce", mode="hybrid")
+        response = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
         assert keys_of(response)[0] == "k-1"
         generation = hybrid.execute(
             "SELECT generation_id FROM tracker_vector_generations WHERE state = 'active'"
@@ -324,7 +347,7 @@ class TestSemanticEligibility:
             "FROM tracker_search_vectors WHERE generation_id = ? AND document_kind = 'issue'",
             (generation,),
         )
-        still_served = search(hybrid, "deploy pipeline bounce", mode="hybrid")
+        still_served = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
         assert keys_of(still_served)[0] == "k-1"
 
     def test_mutation_permitting_stale_vectors_turns_the_exclusion_red(
@@ -333,12 +356,12 @@ class TestSemanticEligibility:
         """§19.7 mutation proof: dropping the freshness joins must flip the
         named exclusion tests above."""
         hybrid.execute("UPDATE tracker_issue_fts SET content_version = content_version + 10")
-        stale = search(hybrid, "deploy pipeline bounce", mode="hybrid")
+        stale = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
         assert "k-1" not in keys_of(stale)
 
         monkeypatch.setattr(rsearch, "SEMANTIC_FRESHNESS_JOINS", "")
         monkeypatch.setattr(rsearch, "SEMANTIC_FRESHNESS_PREDICATE", "1 = 1\n")
-        permitted = search(hybrid, "deploy pipeline bounce", mode="hybrid")
+        permitted = search(hybrid, "deploy pipeline bounce", mode="semantic", include_comments=False)
         try:
             assert "k-1" not in keys_of(permitted)
         except AssertionError:
@@ -473,6 +496,85 @@ class TestPersistedMetricDecoding:
 
 
 # ---------------------------------------------------------------------------
+# Undefined distances: zero embeddings must be skipped, not fatal (§10.3)
+# ---------------------------------------------------------------------------
+
+
+class TestUndefinedDistances:
+    def test_zero_embedding_issue_document_is_excluded_from_cosine_lanes(self, hybrid):
+        # k-3's issue document carries no vocabulary token, so its stored
+        # embedding is the zero vector and its cosine distance is NULL —
+        # unrankable, not closest. The scan must skip it instead of crashing
+        # the lanes; k-3 stays reachable through its comment document, whose
+        # vector is defined.
+        response = search(hybrid, "deploy pipeline bounce", mode="semantic")
+        assert response["mode_effective"] == "semantic"
+        assert keys_of(response), "the scan survived a corpus holding a zero embedding"
+        by_key = {r["issue"]["key"]: r for r in response["results"]}
+        assert "k-3" in by_key, "fixture requires k-3 served via its comment document"
+        for entry in by_key["k-3"]["contributing_lanes"]:
+            assert entry["lane"] != "semantic-issue"
+
+    def test_l2_generation_ranks_a_zero_embedding_instead_of_dropping_it(
+        self, tmp_path_factory
+    ):
+        store = SemanticStore(tmp_path_factory.mktemp("l2zero") / "l2zero.db")
+        session = sessionmaker(bind=store.engine)()
+        session.add(
+            TrackerIssueModel(
+                key="doc-near", project_id="p1", title="alpha probe", body="alpha probe",
+                status="open", kind="bug", labels="[]",
+                created_at=_ts(1), updated_at=_ts(1),
+            )
+        )
+        session.add(
+            TrackerIssueModel(
+                key="doc-zero", project_id="p1", title="empty probe", body="empty probe",
+                status="open", kind="bug", labels="[]",
+                created_at=_ts(1), updated_at=_ts(1),
+            )
+        )
+        session.commit()
+        session.close()
+        record = dict(MINIMAL_RECORD)
+        record["distance_metric"] = "l2"
+        created = create_generation(metadata=record, target_engine=store.engine)
+        embedder = FixedVectorEmbedder(
+            {
+                "alpha probe": _unit_basis(0),
+                "empty probe": np.zeros(DIMENSIONS, dtype="<f4"),
+                "alpha query": _unit_basis(0),
+            }
+        )
+        refresh_generation(
+            generation_id=created["generation_id"], embedder=embedder, db_path=store.path
+        )
+        activate_generation(created["generation_id"], target_engine=store.engine)
+        original_session = rsearch.SessionLocal
+        original_embedder = rsearch._query_embedder
+        rsearch.SessionLocal = sessionmaker(bind=store.engine)
+        rsearch._query_embedder = lambda models_dir=None: embedder
+        try:
+            response = search(store, "alpha query", mode="semantic")
+            assert response["mode_effective"] == "semantic"
+            # L2 defines every distance: the zero vector sits at the origin,
+            # one unit from the unit query, and must rank — never vanish.
+            ranked = {r["issue"]["key"]: r for r in response["results"]}
+            assert set(ranked) == {"doc-near", "doc-zero"}
+            zero_lane = [
+                entry
+                for entry in ranked["doc-zero"]["contributing_lanes"]
+                if entry["lane"] == "semantic-issue"
+            ]
+            assert zero_lane
+            assert zero_lane[0]["raw_score"] == pytest.approx(1.0, abs=1e-6)
+        finally:
+            rsearch.SessionLocal = original_session
+            rsearch._query_embedder = original_embedder
+            store.engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # Issue-level aggregation of comment documents (§10.4)
 # ---------------------------------------------------------------------------
 
@@ -600,13 +702,21 @@ class TestModeSurfaces:
         assert response["mode_effective"] == "lexical"
         assert any("query embedding failed" in r for r in response["degradation"]["reasons"])
 
-    def test_in_memory_store_degrades_instead_of_scanning_a_lookalike(self, tmp_path):
+    def test_in_memory_store_degrades_instead_of_scanning_a_lookalike(
+        self, tmp_path, monkeypatch
+    ):
         memory_engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(
             bind=memory_engine,
             tables=[t for t in Base.metadata.sorted_tables if t.name in _TRACKER_ORM_TABLE_NAMES],
         )
         _migrate_tracker_search_projection(memory_engine)
+        # Activation demands full coverage of live documents, and an
+        # in-memory corpus can never be embedded (there is no second-
+        # connection path) — so the generation activates empty and the issue
+        # lands afterwards, exactly the state a real in-memory session holds.
+        created = create_generation(metadata=dict(MINIMAL_RECORD), target_engine=memory_engine)
+        activate_generation(created["generation_id"], target_engine=memory_engine)
         seed_memory = sessionmaker(bind=memory_engine)()
         seed_memory.add(
             TrackerIssueModel(
@@ -616,12 +726,19 @@ class TestModeSurfaces:
         )
         seed_memory.commit()
         seed_memory.close()
+        monkeypatch.setattr(
+            rsearch,
+            "_query_embedder",
+            lambda models_dir=None: BasisEmbedder(VOCAB, SYNONYMS),
+        )
         original_session = rsearch.SessionLocal
         rsearch.SessionLocal = sessionmaker(bind=memory_engine)
         try:
             response = search(None, "deploy pipeline", mode="hybrid")
             assert response["mode_effective"] == "lexical"
             assert any("filesystem path" in r for r in response["degradation"]["reasons"])
+            assert response["degradation"]["lanes"]["semantic-issue"]["available"] is False
+            assert keys_of(response), "lexical lanes still serve results"
         finally:
             rsearch.SessionLocal = original_session
             memory_engine.dispose()

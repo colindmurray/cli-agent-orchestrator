@@ -702,6 +702,20 @@ def _distance_expression(metric: str) -> str:
     )
 
 
+def _rankable_distance_clause(metric: str) -> str:
+    """Exclude rows whose distance is undefined under the persisted metric.
+
+    A zero embedding carries no direction, so its cosine distance is NULL —
+    unrankable, not closest. L2 defines every distance, so this clause filters
+    nothing there. The filter lives in the scan so the candidate window is
+    spent on rankable rows rather than consuming it before Python drops
+    NULLs.
+    """
+    if metric == "cosine":
+        return f"  AND {_distance_expression(metric)} IS NOT NULL\n"
+    return ""
+
+
 def resolve_semantic_context(
     conn: Any,
     meta: Dict[str, Any],
@@ -811,6 +825,7 @@ def run_semantic_issue_lane(
         )
         + "WHERE "
         + SEMANTIC_FRESHNESS_PREDICATE.format(dirty=tracker_search_schema.VECTOR_DIRTY_TABLE)
+        + _rankable_distance_clause(context.generation["distance_metric"])
         + f"  AND v.generation_id = :gen AND v.document_kind = 'issue'{candidate_sql}\n"
         "ORDER BY distance, v.issue_key\n"
         f"LIMIT {SEMANTIC_ISSUE_LANE_CANDIDATE_CAP}"
@@ -849,6 +864,7 @@ def run_semantic_comment_lane(
         + "JOIN tracker_issue_comments AS src ON src.id = v.source_id\n"
         "WHERE "
         + SEMANTIC_FRESHNESS_PREDICATE.format(dirty=tracker_search_schema.VECTOR_DIRTY_TABLE)
+        + _rankable_distance_clause(context.generation["distance_metric"])
         + f"  AND v.generation_id = :gen AND v.document_kind = 'comment'{candidate_sql}\n"
         "ORDER BY distance, v.source_id\n"
         f"LIMIT {SEMANTIC_COMMENT_LANE_HIT_CAP}"
@@ -1068,6 +1084,9 @@ def ranked_search(request: RankedSearchRequest) -> Dict[str, Any]:
 
         serve_semantic = semantic_context is not None
         effective_mode = request.mode if serve_semantic else "lexical"
+        # §13.5: ``semantic`` serves lanes 4–5 only, ``hybrid`` fuses all five,
+        # and a degraded semantic request falls back to the full lexical set.
+        serve_lexical_lanes = request.mode != "semantic" or not serve_semantic
 
         semantic_issue_ranking: List[Tuple[str, float]] = []
         semantic_comment_ranking: List[Tuple[str, float]] = []
@@ -1102,11 +1121,24 @@ def ranked_search(request: RankedSearchRequest) -> Dict[str, Any]:
 
         reasons.extend(semantic_reasons)
 
-        lane_availability: Dict[str, Dict[str, Any]] = {
-            "issue-bm25": {"available": True},
-            "comment-bm25": {"available": True},
-            "exact": {"available": True},
-        }
+        lane_availability: Dict[str, Dict[str, Any]] = {}
+        if serve_lexical_lanes:
+            lane_availability.update(
+                {
+                    "issue-bm25": {"available": True},
+                    "comment-bm25": {"available": True},
+                    "exact": {"available": True},
+                }
+            )
+        else:
+            lexical_note = "not requested (semantic mode)"
+            lane_availability.update(
+                {
+                    "issue-bm25": {"available": False, "reason": lexical_note},
+                    "comment-bm25": {"available": False, "reason": lexical_note},
+                    "exact": {"available": False, "reason": lexical_note},
+                }
+            )
         if wants_semantic:
             if serve_semantic:
                 lane_availability["semantic-issue"] = {"available": True}
@@ -1135,29 +1167,39 @@ def ranked_search(request: RankedSearchRequest) -> Dict[str, Any]:
                 "reason": lexical_note,
             }
 
-        t0 = time.perf_counter()
-        issue_ranking = run_issue_bm25_lane(conn, match_expr, candidate_sql, candidate_params)
-        lane_timings["issue-bm25"] = (time.perf_counter() - t0) * 1000.0
+        issue_ranking: List[Tuple[str, float]] = []
+        comment_ranking: List[Tuple[str, float]] = []
+        winning_comments: Dict[str, Dict[str, Any]] = {}
+        exact_facts: Dict[str, Dict[str, Any]] = {}
+        if serve_lexical_lanes:
+            t0 = time.perf_counter()
+            issue_ranking = run_issue_bm25_lane(conn, match_expr, candidate_sql, candidate_params)
+            lane_timings["issue-bm25"] = (time.perf_counter() - t0) * 1000.0
 
-        t0 = time.perf_counter()
-        comment_ranking, winning_comments = run_comment_bm25_lane(
-            conn,
-            match_expr,
-            candidate_sql,
-            candidate_params,
-            include_comments=request.include_comments,
-        )
-        lane_timings["comment-bm25"] = (time.perf_counter() - t0) * 1000.0
+            t0 = time.perf_counter()
+            comment_ranking, winning_comments = run_comment_bm25_lane(
+                conn,
+                match_expr,
+                candidate_sql,
+                candidate_params,
+                include_comments=request.include_comments,
+            )
+            lane_timings["comment-bm25"] = (time.perf_counter() - t0) * 1000.0
 
-        t0 = time.perf_counter()
-        exact_ranking, exact_facts = run_exact_lane(conn, raw_query, scoped)
-        lane_timings["exact"] = (time.perf_counter() - t0) * 1000.0
+            t0 = time.perf_counter()
+            exact_facts: Dict[str, Dict[str, Any]]
+            exact_ranking, exact_facts = run_exact_lane(conn, raw_query, scoped)
+            lane_timings["exact"] = (time.perf_counter() - t0) * 1000.0
 
-        lanes_to_fuse: Dict[str, List[Tuple[str, float]]] = {
-            "issue-bm25": issue_ranking,
-            "comment-bm25": comment_ranking,
-            "exact": exact_ranking,
-        }
+        lanes_to_fuse: Dict[str, List[Tuple[str, float]]] = {}
+        if serve_lexical_lanes:
+            lanes_to_fuse.update(
+                {
+                    "issue-bm25": issue_ranking,
+                    "comment-bm25": comment_ranking,
+                    "exact": exact_ranking,
+                }
+            )
         if serve_semantic:
             lanes_to_fuse["semantic-issue"] = semantic_issue_ranking
             lanes_to_fuse["semantic-comment"] = semantic_comment_ranking
