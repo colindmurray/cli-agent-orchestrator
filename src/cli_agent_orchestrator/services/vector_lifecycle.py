@@ -280,9 +280,12 @@ def create_generation(
     failed or abandoned build — and each gets its own id.
     """
     if metadata is None:
-        from cli_agent_orchestrator.services.embedding_adapter import read_metadata
+        from cli_agent_orchestrator.services.embedding_adapter import (
+            default_models_dir,
+            read_metadata,
+        )
 
-        metadata = read_metadata(models_dir)
+        metadata = read_metadata(models_dir if models_dir is not None else default_models_dir())
     if not isinstance(metadata, Mapping):
         raise VectorLifecycleError(
             "unprepared",
@@ -341,7 +344,7 @@ def create_generation(
 
 
 def _backoff_seconds(attempt_number: int) -> int:
-    scaled = BACKOFF_BASE_SECONDS * (2 ** max(0, attempt_number - 1))
+    scaled: int = BACKOFF_BASE_SECONDS * (2 ** max(0, attempt_number - 1))
     return min(scaled, BACKOFF_CAP_SECONDS)
 
 
@@ -379,7 +382,7 @@ def _select_eligible_batch(
     if limit is not None:
         limit_sql = "LIMIT ?"
         params.append(limit)
-    return raw.execute(
+    rows: List[sqlite3.Row] = raw.execute(
         f"SELECT {_DIRTY_KEY_COLUMNS}, issue_key, document_kind, source_id,\n"
         f"       content_version, document_schema_version\n"
         f"FROM {schema.VECTOR_DIRTY_TABLE}\n"
@@ -388,6 +391,7 @@ def _select_eligible_batch(
         f"ORDER BY enqueued_at, document_key\n{limit_sql}",
         params,
     ).fetchall()
+    return rows
 
 
 def _read_document_snapshot(raw: Any, row: sqlite3.Row) -> Optional[Mapping[str, Any]]:
@@ -413,9 +417,7 @@ def _read_document_snapshot(raw: Any, row: sqlite3.Row) -> Optional[Mapping[str,
     ).fetchone()
     if fts_row is None:
         return None
-    snapshot: Dict[str, Any] = {
-        name: fts_row[index] for index, name in enumerate(columns, start=1)
-    }
+    snapshot: Dict[str, Any] = {name: fts_row[index] for index, name in enumerate(columns, start=1)}
     snapshot["_fts_content_version"] = int(fts_row[0])
     return snapshot
 
@@ -712,7 +714,9 @@ def mark_generation_failed(
     return updated
 
 
-def activate_generation(generation_id: str, *, target_engine: Optional[Any] = None) -> Dict[str, Any]:
+def activate_generation(
+    generation_id: str, *, target_engine: Optional[Any] = None
+) -> Dict[str, Any]:
     """Prove coverage/encoding/dimension, then switch and retire (§13.3).
 
     One immediate transaction prunes target-generation vectors whose live
@@ -759,8 +763,7 @@ def activate_generation(generation_id: str, *, target_engine: Optional[Any] = No
 
             remaining_dirty = int(
                 raw.execute(
-                    f"SELECT COUNT(*) FROM {schema.VECTOR_DIRTY_TABLE} "
-                    "WHERE generation_id = ?",
+                    f"SELECT COUNT(*) FROM {schema.VECTOR_DIRTY_TABLE} " "WHERE generation_id = ?",
                     (generation_id,),
                 ).fetchone()[0]
             )
