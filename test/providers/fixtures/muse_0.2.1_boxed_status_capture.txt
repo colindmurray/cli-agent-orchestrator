@@ -1,0 +1,48 @@
+muse: incompatible_endpoint: local session-message endpoint /Users/colin/.local/share/muse/runtime/muse/session-msg-ns1.sock did not complete the current broker hello; holder pid unavailable, endpoint age 553491s; remedy
+: restart or update the older sessions to join the current broker generation
+
+  Muse Code 0.2.1
+
+  Model set to muse-spark-1.2-contributor
+  ⎿  Discounted tokens: your content may be used for product improvement.
+
+  warning: rules file at /Users/colin/.claude/CLAUDE.md produced 39335 bytes, over the 32000 byte subagent delegation startup context limit; it will be truncated for this session
+
+┌──────────────────────────────────────────────────────┐
+│  MUSE CODE 0.2.1 / linen-telescopium            IDLE │
+│                                                      │
+│  MODEL          muse-spark-1.2-contributor · ultra   │
+│                 meta · native-basic                  │
+│                                                      │
+│  WORKSPACE      /private/tmp                         │
+│                 trusted · not found                  │
+│  ACCESS         approval Normal · sandbox Normal     │
+│                 API key stored                       │
+│                                                      │
+│  USAGE          0 tokens · 0 turns · 0 subagents     │
+│  CONTEXT        not projected · 1008K limit          │
+│                                                      │
+│  SESSION        8da3015d-054b-4600-8045-13742c002e39 │
+│  ACTIVITY       no tasks                             │
+│                 0 terminals · inbox clear            │
+└──────────────────────────────────────────────────────┘
+
+── Voice input (⌥V to start) ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+⟩
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  muse-spark-1.2-contributor · ultra · /private/tmp
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

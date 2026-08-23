@@ -163,14 +163,22 @@ def discover_new_session_id(
 
     A candidate is a session directory absent from the snapshot whose own
     cold-start metadata names exactly ``working_directory`` and
-    ``provider_id``.  Zero matches poll until ``deadline_monotonic``;
-    more than one raises :class:`MuseSessionStoreAmbiguous` immediately —
-    concurrent launches in the same workspace are real ambiguity, and
-    picking among them is how a task gets typed into someone else's
-    session.
+    ``provider_id``.  Adoption additionally requires the ENTIRE new-dir
+    set to be resolved — no sibling directory still pending its first log
+    write or carrying unreadable evidence.  A concurrent launch in this
+    workspace registers the same kind of directory ours does, and whichever
+    flushes first must never be adopted as THIS pane's identity merely
+    because it won the flush race; an unresolved sibling keeps the window
+    open until it resolves into a second match (refused as ambiguous), a
+    non-match (ours is then adoptable), or nothing at all by the deadline.
+
+    More than one resolved match raises :class:`MuseSessionStoreAmbiguous`
+    immediately — resolved matches do not un-resolve, so waiting cannot
+    make two candidates into one, and picking among them is how a task
+    gets typed into someone else's session.  Hitting the deadline with the
+    set still unresolved raises :class:`MuseSessionStoreUnavailable` naming
+    the unresolved counts.
     """
-    pending = 0
-    unreadable = 0
     while True:
         candidates: list[tuple[str, dict[str, Any], Path]] = []
         pending = 0
@@ -197,7 +205,7 @@ def discover_new_session_id(
                 "launch snapshot; it cannot prove which one this pane runs, so "
                 "refusing rather than choosing a value"
             )
-        if len(candidates) == 1:
+        if len(candidates) == 1 and pending == 0 and unreadable == 0:
             session_id, record, path = candidates[0]
             build = record.get("build") if isinstance(record.get("build"), dict) else {}
             return {

@@ -4599,6 +4599,12 @@ def _observe_muse_status_panel(
             ) as exc:  # noqa: E501
                 parsed = None
                 last_error = str(exc)
+                # A shape-detected panel that still fails the strict parse
+                # (a viewport-clipped box mid-render, say) is recognized
+                # content on its way to completeness: it keeps the full
+                # runway instead of tripping the unrecognized bound.
+                if muse_native_status.is_recognized_shape(rows):
+                    recognized_any = True
             if parsed is not None and parsed.get("partial"):
                 # Route observed, identity absent.  On a fresh launch with
                 # the store wired, adopt the identity from the exactly-one

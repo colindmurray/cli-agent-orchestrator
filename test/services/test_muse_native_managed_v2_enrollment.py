@@ -1679,6 +1679,14 @@ def test_the_profile_surface_is_not_prompt_only():
 #: typed at zero turns in /private/tmp/muse-probe-cond0713).
 PROBE_SESSION_ID = "e10c3a42-a792-406c-98f3-b0ed88f747e2"
 
+#: The checked-in live capture the boxed-panel fixtures are pinned to.
+REAL_BOXED_CAPTURE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "providers"
+    / "fixtures"
+    / "muse_0.2.1_boxed_status_capture.txt"
+)
+
 
 def boxed_status_rows(
     worktree,
@@ -1815,6 +1823,38 @@ def test_status_parser_accepts_the_real_021_boxed_meta_panel(worktree):
     assert proven["session_matches"] is True and proven["zero_turns"] is True
 
 
+def test_status_parser_parses_the_checked_in_live_021_boxed_capture():
+    """The synthetic boxed fixture is pinned to a real capture-pane render.
+
+    The checked-in file is a live 220x48 ``capture-pane -p`` of the
+    installed meta build after ``/status`` at zero turns.  Parsing it
+    structurally (rather than against hardcoded model strings, which are
+    the operator's config) is what catches badge/label drift: any rename
+    of SESSION/MODEL/USAGE, a moved run badge, or an effort outside the
+    installed vocabulary makes this parse refuse.
+    """
+    rows = REAL_BOXED_CAPTURE_PATH.read_text(encoding="utf-8").rstrip("\n").splitlines()
+    parsed = muse_native_status.parse_status_panel(rows)
+    assert parsed["panel_shape"] == "boxed-0.2"
+    # The discovered identity is a canonical lowercase UUID.
+    muse_native_status.validate_discovered_session_id(parsed["session_id"])
+    assert parsed["model_provider"] == "meta"
+    assert parsed["agent_profile"] == "native-basic"
+    assert parsed["reasoning"] in ("ultra", MUSE_EFFORT) or parsed["reasoning"] is None
+    assert parsed["run"] == "idle"
+    assert parsed["tokens"] == 0 and parsed["turns"] == 0
+
+    proven = muse_native_status.require_pre_task_status(
+        parsed,
+        session_id=None,
+        expected_model=parsed["model"],
+        expected_effort=parsed["reasoning"],
+        working_directory=parsed["directory"],
+        expected_profile_identity="native-basic",
+    )
+    assert proven["session_matches"] is True and proven["zero_turns"] is True
+
+
 def test_status_parser_accepts_the_021_boxed_echo_panel_with_a_bare_model(worktree):
     """Echo renders no effort segment; none is claimed observed."""
     parsed = muse_native_status.parse_status_panel(
@@ -1879,6 +1919,30 @@ def test_boxed_panel_mutations_are_refused(worktree):
             working_directory=str(worktree),
             expected_profile_identity="native-basic",
         )
+
+
+def test_boxed_panel_tolerates_repeated_chrome_rows(worktree):
+    """CONTEXT/ACCESS/ACTIVITY are chrome: a repeat is not ambiguity."""
+    rows = boxed_status_rows(worktree, PROBE_SESSION_ID)
+    rows.insert(16, "│  CONTEXT        duplicated chrome row          │")
+    parsed = muse_native_status.parse_status_panel(rows)
+    assert parsed["session_id"] == PROBE_SESSION_ID
+    assert parsed["run"] == "idle"
+
+
+def test_a_shape_detected_but_incomplete_box_is_recognized_content(worktree):
+    """Box detection outruns the strict parse for the fast-fail clock.
+
+    A viewport-clipped box (bottom rows not yet rendered) is this pane's
+    panel mid-render: it must hold the full runway, never trip the 15s
+    unrecognized bound against a healthy launch.
+    """
+    full = boxed_status_rows(worktree, PROBE_SESSION_ID)
+    clipped = full[: full.index(next(row for row in full if "USAGE" in row))]
+    # Sanity: the clip keeps the shape but breaks the strict parse.
+    assert muse_native_status.is_recognized_shape(clipped) is True
+    with pytest.raises(muse_native_status.MuseStatusParseError):
+        muse_native_status.parse_status_panel(clipped)
 
 
 def test_the_real_021_footer_capture_is_a_partial_route_observation(worktree):
@@ -1979,8 +2043,9 @@ def test_session_store_discovery_names_pending_and_unreadable_candidates(
 ):
     """A log not yet flushed stays pending; garbage evidence is unreadable.
 
-    Neither state is adoptable: adopting an identity whose own metadata
-    record has not been read would bind a pane on a guess.
+    Neither state is adoptable, and neither may be bypassed because some
+    OTHER new directory already matches: adoption requires the whole
+    new-dir set resolved.
     """
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     snapshot = muse_session_store.snapshot_known_session_ids()
@@ -2002,14 +2067,66 @@ def test_session_store_discovery_names_pending_and_unreadable_candidates(
     assert "1 candidate(s) still pending" in message
     assert "1 unreadable" in message
 
-    # The pending candidate becomes adoptable once its metadata flushes.
+    # The pending candidate flushes its metadata — but the unreadable
+    # sibling still blocks adoption of anything.
     _seed_session_store(tmp_path / "xdg", pending_dir.name, workspace_root=str(worktree))
+    with pytest.raises(muse_session_store.MuseSessionStoreUnavailable) as still_blocked:
+        muse_session_store.discover_new_session_id(
+            snapshot,
+            working_directory=str(worktree),
+            deadline_monotonic=time.monotonic() + 0.3,
+            poll_seconds=0.05,
+        )
+    assert "1 unreadable" in str(still_blocked.value)
+
+    # The garbage write completes into a valid non-match; the set resolves
+    # and exactly our session is adopted.
+    _seed_session_store(tmp_path / "xdg", garbage_dir.name, workspace_root="/elsewhere")
     found = muse_session_store.discover_new_session_id(
         snapshot,
         working_directory=str(worktree),
         deadline_monotonic=time.monotonic() + 2,
     )
     assert found["session_id"] == pending_dir.name
+
+
+def test_session_store_discovery_waits_for_sibling_dirs_to_resolve(tmp_path, monkeypatch, worktree):
+    """A matching candidate never adopts while a sibling dir is unresolved.
+
+    A concurrent launch in this workspace registers the same kind of
+    directory ours does; whichever flushes first must not be adopted as
+    THIS pane's identity merely because it won the flush race.  The match
+    stays unadopted for the whole window, and resolves to exactly ours
+    once the sibling's own metadata lands as a non-match.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    snapshot = muse_session_store.snapshot_known_session_ids()
+    our_id = _uuid()
+    _seed_session_store(tmp_path / "xdg", our_id, workspace_root=str(worktree))
+
+    # A sibling new directory whose log has not flushed yet.
+    sibling_dir = tmp_path / "xdg" / "muse" / "sessions" / "2026" / "08" / "22" / _uuid()
+    sibling_dir.mkdir(parents=True)
+
+    # No adoption inside the window, even though exactly one match exists.
+    with pytest.raises(muse_session_store.MuseSessionStoreUnavailable) as refused:
+        muse_session_store.discover_new_session_id(
+            snapshot,
+            working_directory=str(worktree),
+            deadline_monotonic=time.monotonic() + 0.3,
+            poll_seconds=0.05,
+        )
+    assert "1 candidate(s) still pending" in str(refused.value)
+
+    # Once the sibling resolves as a NON-match, exactly-one is adoptable —
+    # and it must be OURS, not whichever registered first.
+    _seed_session_store(tmp_path / "xdg", sibling_dir.name, workspace_root="/somewhere/else")
+    found = muse_session_store.discover_new_session_id(
+        snapshot,
+        working_directory=str(worktree),
+        deadline_monotonic=time.monotonic() + 2,
+    )
+    assert found["session_id"] == our_id
 
 
 @pytest.mark.asyncio
@@ -2131,6 +2248,33 @@ async def test_muse_launch_fast_fails_when_the_render_is_never_recognized(
     assert "0.1.0" in detail
     assert "sha256:" in detail
     assert elapsed < 10
+
+
+@pytest.mark.asyncio
+async def test_muse_launch_keeps_the_full_runway_for_a_clipped_boxed_panel(
+    isolated_memory_db, worktree, tmp_path, muse_harness, monkeypatch
+):
+    """A shape-detected but incomplete box polls the full runway, not 15s.
+
+    The strict parse never succeeds (USAGE/SESSION rows are outside the
+    captured viewport), but the capture IS the pane's panel: refusing it
+    as unrecognized content would fast-fail a healthy launch mid-render.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-xdg"))
+    monkeypatch.setattr(v2, "MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(v2, "NATIVE_PANE_READY_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(v2, "_NATIVE_PANE_READY_POLL_SECONDS", 0.005)
+    full = boxed_status_rows(worktree, PROBE_SESSION_ID)
+    muse_harness.captures.append(full[: full.index(next(row for row in full if "USAGE" in row))])
+    started = time.monotonic()
+    _record, result = await _launch(worktree, tmp_path, muse_harness)
+    elapsed = time.monotonic() - started
+    assert result["state"] == "preflight_blocked"
+    detail = result["preflight_failure"]["detail"]
+    # The FULL-runway refusal fired, not the unrecognized fast-fail.
+    assert "never produced recognized content" not in detail
+    assert "never described the claimed pre-task session within 0.4 seconds" in detail
+    assert elapsed >= 0.4
 
 
 @pytest.mark.asyncio

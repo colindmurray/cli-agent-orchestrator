@@ -200,6 +200,23 @@ def _is_boxed_panel(rows: Sequence[str]) -> bool:
     return has_box_border and labeled >= 2
 
 
+def is_recognized_shape(rows: Sequence[str]) -> bool:
+    """Whether the capture carries a recognizable ``/status`` rendering.
+
+    Shape detection is deliberately weaker than the strict parse: a box
+    the viewport clipped mid-render is still this pane's panel, and
+    counting it as unrecognized would fast-fail a healthy launch that is
+    one frame away from its evidence.  Callers use this only to keep
+    polling on the full runway; nothing is admitted until the strict
+    parse succeeds.
+    """
+    if _is_boxed_panel(rows):
+        return True
+    return any(
+        _strip_panel_row(raw).startswith(_REQUIRED_LABELS + _REASONING_LABELS) for raw in rows
+    )
+
+
 def _split_dot_segments(value: str) -> Optional[list[str]]:
     """Split an exact `` · ``-separated value, or None if it has none."""
     if "·" not in value:
@@ -242,7 +259,11 @@ def _parse_boxed_panel(rows: Sequence[str]) -> dict[str, Any]:
         if last_label is not None:
             continuations.setdefault(last_label, []).append(row)
 
-    duplicates = [label for label, values in fields.items() if len(values) > 1]
+    # Every singleton among the REQUIRED labels is a one-value fact; a
+    # second one is ambiguity, never a value to pick.  Chrome labels
+    # (CONTEXT, ACCESS, ACTIVITY) are deliberately outside this check: a
+    # repeated chrome row says nothing about which session this is.
+    duplicates = [label for label in _BOXED_PANEL_REQUIRED if len(fields.get(label, [])) > 1]
     if duplicates:
         raise MuseStatusParseError(
             "the /status panel renders more than one "
