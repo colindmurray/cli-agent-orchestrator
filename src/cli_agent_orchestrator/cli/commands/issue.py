@@ -22,7 +22,9 @@ import click
 from cli_agent_orchestrator.cli.commands.search_index import search_index
 from cli_agent_orchestrator.clients.database import ensure_tracker_schema
 from cli_agent_orchestrator.services import issue_tracker as tracker
+from cli_agent_orchestrator.services import tracker_ranked_search as ranked
 from cli_agent_orchestrator.services.issue_tracker import TrackerError
+from cli_agent_orchestrator.services.tracker_ranked_search import TrackerRankedSearchError
 
 
 def _fail(exc: TrackerError) -> None:
@@ -490,6 +492,165 @@ def issue_list(
             click.echo(f"-- {page['total']} issue(s)")
 
     _emit(page, as_json, render)
+
+
+@issue.command(name="search")
+@click.argument("query")
+@click.option(
+    "--tracker-project",
+    "project_ids",
+    multiple=True,
+    help="tracker project to search (repeatable); exactly one scope form is required",
+)
+@click.option(
+    "--all-projects",
+    is_flag=True,
+    help="search every tracker project; exactly one scope form is required",
+)
+@click.option(
+    "--under",
+    "subtree_roots",
+    multiple=True,
+    help="restrict to the part-of subtree rooted at this issue key (repeatable)",
+)
+@click.option("--kind", "kinds", multiple=True, help="item kind filter (repeatable)")
+@click.option("--status", "statuses", multiple=True, help="status filter (repeatable)")
+@click.option("--severity", "severities", multiple=True, help="severity filter (repeatable)")
+@click.option("--component", "components", multiple=True, help="exact component (repeatable)")
+@click.option(
+    "--observed-revision",
+    "observed_revisions",
+    multiple=True,
+    help="exact observed revision, e.g. a commit or build id (repeatable)",
+)
+@click.option(
+    "--label",
+    "labels",
+    multiple=True,
+    help="required exact label; repeats AND together (repeatable)",
+)
+@click.option(
+    "--without-label",
+    "without_labels",
+    multiple=True,
+    help="exclude issues carrying this exact label (repeatable)",
+)
+@click.option("--assignee", default=None)
+@click.option("--reporter", default=None)
+@click.option("--open-only", is_flag=True, help="exclude closed/wontfix/duplicate/resolved")
+@click.option("--unlabeled", is_flag=True, help="only issues with no labels")
+@click.option(
+    "--include-comments/--no-comments",
+    default=True,
+    help="whether comment documents may match and contribute",
+)
+@click.option(
+    "--mode",
+    default="lexical",
+    help="lexical|semantic|hybrid; modes whose lanes are not installed degrade visibly",
+)
+@click.option("--limit", default=ranked.DEFAULT_LIMIT, show_default=True, type=int)
+@click.option("--offset", default=0, show_default=True, type=int)
+@click.option("--json", "as_json", is_flag=True)
+def issue_search(
+    query,
+    project_ids,
+    all_projects,
+    subtree_roots,
+    kinds,
+    statuses,
+    severities,
+    components,
+    observed_revisions,
+    labels,
+    without_labels,
+    assignee,
+    reporter,
+    open_only,
+    unlabeled,
+    include_comments,
+    mode,
+    limit,
+    offset,
+    as_json,
+):
+    """Ranked search over issues and their comments, with explanations.
+
+    QUERY is literal free-form text — shell commands, paths, and operator
+    words never act as search syntax; wrap segments in double quotes to pin
+    them as phrases. Exactly one scope form is required: --tracker-project
+    (repeatable) or --all-projects.
+    """
+    request = ranked.RankedSearchRequest(
+        query=query,
+        project_ids=tuple(project_ids),
+        all_projects=bool(all_projects),
+        subtree_roots=tuple(subtree_roots),
+        kinds=tuple(kinds),
+        statuses=tuple(statuses),
+        severities=tuple(severities),
+        components=tuple(components),
+        observed_revisions=tuple(observed_revisions),
+        labels=tuple(labels),
+        without_labels=tuple(without_labels),
+        assignee=assignee,
+        reporter=reporter,
+        open_only=bool(open_only),
+        unlabeled=bool(unlabeled),
+        include_comments=bool(include_comments),
+        mode=mode,
+        limit=limit,
+        offset=offset,
+    )
+    try:
+        payload = ranked.ranked_search(request)
+    except TrackerRankedSearchError as exc:
+        _fail(TrackerError(exc.code, exc.message))
+    except TrackerError as exc:
+        _fail(exc)
+
+    def render(payload):
+        degradation = payload["degradation"]
+        click.echo(
+            f"{payload['total']} hit(s) for \"{payload['query']}\" "
+            f"· mode {payload['mode_effective']}"
+        )
+        for reason in degradation["reasons"]:
+            click.echo(f"degraded: {reason}")
+        if not payload["results"]:
+            return
+        for position, row in enumerate(payload["results"], start=payload["offset"] + 1):
+            issue = row["issue"] or {}
+            severity = issue.get("severity") or "unset"
+            lanes = " ".join(f"{lane['lane']}#{lane['rank']}" for lane in row["contributing_lanes"])
+            matched = ",".join(row["matched_fields"]) or "-"
+            click.echo(
+                f"{position:>4}. {issue.get('key', '-'):<12} "
+                f"{'--' if severity == 'unset' else severity:<4} "
+                f"{issue.get('status', '-'):<10} {issue.get('title', '')}"
+            )
+            click.echo(
+                f"      score {row['rank_score']:.4f} · lanes {lanes or '-'} · matched {matched}"
+            )
+            for field_name, snippet in sorted(row["snippets"].items()):
+                click.echo(f"      {field_name}: {snippet}")
+            winner = row["winning_comment"]
+            if winner:
+                flag = " [important]" if winner["important"] else ""
+                click.echo(
+                    f"      comment #{winner['comment_id']}{flag} "
+                    f"({winner['retained_hits']} retained hit(s))"
+                )
+        shown = len(payload["results"])
+        if shown < payload["total"]:
+            click.echo(
+                f"-- showing {payload['offset'] + 1}-{payload['offset'] + shown} "
+                f"of {payload['total']}"
+            )
+        else:
+            click.echo(f"-- {payload['total']} hit(s)")
+
+    _emit(payload, as_json, render)
 
 
 @issue.command(name="show")

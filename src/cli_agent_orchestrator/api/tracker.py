@@ -27,6 +27,7 @@ from cli_agent_orchestrator.security.auth import (
 )
 from cli_agent_orchestrator.services import issue_tracker as tracker
 from cli_agent_orchestrator.services import project_dashboard
+from cli_agent_orchestrator.services import tracker_ranked_search as ranked
 
 logger = logging.getLogger(__name__)
 
@@ -551,6 +552,77 @@ async def list_issues(
             order=order,
             kind=effective_kind,
         )
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/tracker/issues/search")
+async def search_issues(
+    q: str = Query(..., description="free-form ranked-search text"),
+    project_id: Optional[List[str]] = Query(None, description="tracker project id, repeatable"),
+    all_projects: bool = Query(False, description="search every tracker project"),
+    under: Optional[List[str]] = Query(
+        None, description="restrict to the part-of subtree rooted at this issue key, repeatable"
+    ),
+    kind: Optional[List[str]] = Query(None, description="item kind filter, repeatable"),
+    status_filter: Optional[List[str]] = Query(None, alias="status", description="repeatable"),
+    severity: Optional[List[str]] = Query(None, description="repeatable"),
+    component: Optional[List[str]] = Query(None, description="exact component, repeatable"),
+    observed_revision: Optional[List[str]] = Query(
+        None, description="exact observed revision, repeatable"
+    ),
+    label: Optional[List[str]] = Query(
+        None, description="required exact label, repeatable (AND-composed)"
+    ),
+    without_label: Optional[List[str]] = Query(
+        None, description="excluded exact label, repeatable (none-of)"
+    ),
+    assignee: Optional[str] = Query(None),
+    reporter: Optional[str] = Query(None),
+    open_only: bool = Query(False),
+    unlabeled: bool = Query(False),
+    include_comments: bool = Query(True),
+    mode: str = Query("lexical", description="lexical|semantic|hybrid; uninstalled modes degrade"),
+    limit: int = Query(ranked.DEFAULT_LIMIT, ge=ranked.MIN_LIMIT, le=ranked.MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    """Explained ranked search over issues and their comments.
+
+    Declared before ``/tracker/issues/{issue_key}`` so the literal path wins
+    over the parameterised one — ``search`` would otherwise be swallowed as an
+    issue key, exactly as ``resolve`` and ``stats`` are protected below.
+
+    The route is a thin adapter: every filter family forwards to the shared
+    ranked-search service request, repeated query parameters become repeated
+    filter values, and scope is exactly one of ``project_id`` (one or more) or
+    ``all_projects`` — both or neither is a typed invalid request. The service
+    owns validation, bounds, degradation metadata, and the refusal codes this
+    boundary maps onto HTTP statuses.
+    """
+    request = ranked.RankedSearchRequest(
+        query=q,
+        project_ids=tuple(project_id or ()),
+        all_projects=all_projects,
+        subtree_roots=tuple(under or ()),
+        kinds=tuple(kind or ()),
+        statuses=tuple(status_filter or ()),
+        severities=tuple(severity or ()),
+        components=tuple(component or ()),
+        observed_revisions=tuple(observed_revision or ()),
+        labels=tuple(label or ()),
+        without_labels=tuple(without_label or ()),
+        assignee=assignee,
+        reporter=reporter,
+        open_only=open_only,
+        unlabeled=unlabeled,
+        include_comments=include_comments,
+        mode=mode,
+        limit=limit,
+        offset=offset,
+    )
+    try:
+        return ranked.ranked_search(request)
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
