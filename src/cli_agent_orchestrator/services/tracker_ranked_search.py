@@ -1,11 +1,25 @@
-"""Ranked lexical issue search (design §10.3–§10.5, milestone M1.3).
+"""Ranked issue search across lexical and semantic lanes (design §10.3–§10.5).
 
 Comments are documents; issues are results. This service retrieves bounded
-candidates independently from three lexical lanes — field-weighted issue BM25,
-comment BM25, and exact technical-string matching — aggregates comment hits at
-issue level (best two retained, contribution capped, ``important`` boosted),
-fuses lane ranks with weighted reciprocal-rank fusion (constant 60), and
-returns a complete explanation for every result.
+candidates independently from five lanes — field-weighted issue BM25, comment
+BM25, exact technical-string matching, semantic issue documents, and semantic
+comment documents — aggregates comment hits at issue level (best two retained,
+contribution capped, ``important`` boosted), fuses lane ranks with weighted
+reciprocal-rank fusion (constant 60), and returns a complete explanation for
+every result.
+
+Semantic lanes (M2.3). The query embeds through the prepared local model, and
+the scan runs an exact sqlite-vec scalar distance computation over the active
+generation — no ANN, no index training (§10.3). Metric (cosine/L2),
+normalization, and element encoding are read from the generation's persisted
+row, never from mutable process defaults. A vector row is eligible only when
+its source still exists, its stored ``content_version`` equals the current FTS
+document's version, and no dirty row exists for that ``(generation,
+document_key)``; these freshness joins, not the presence of a BLOB, decide
+what retrieval may serve (§9.3/§10.3). A ``semantic``/``hybrid`` request first
+drains one bounded refresh batch (§9.2) and degrades visibly to lexical —
+through typed reasons in the response — whenever any leg is unavailable
+(§13.5).
 
 Structured filtering and subtree scoping are not reimplemented here: candidate
 issues come from :mod:`services.tracker_filters`, the same builder ``issue
@@ -19,10 +33,10 @@ reaches FTS5, so shell commands, stack traces, paths, and stray operator words
 (``AND``, ``OR``, ``NOT``, ``NEAR``, ``*``) can never act as query syntax.
 Explicitly double-quoted segments are preserved as deliberate phrases.
 
-The starting weights below are hypotheses (§10.3) recorded for tuning from the
-relevance fixture only — they are deliberately not policy. Semantic lanes and
-the ``hybrid`` default arrive at M2; requests asking for them degrade visibly
-to lexical through the response's degradation metadata rather than silently.
+Connection boundaries (§7.2): authoritative reads go through the pooled
+``SessionLocal`` engine; every ``vec_*``-carrying connection comes from
+:func:`services.search_engine_factory.open_search_connection` against the same
+store file. Model weights load once per process and embed outside SQLite.
 """
 
 from __future__ import annotations
@@ -61,6 +75,8 @@ RRF_K = 60
 LANE_WEIGHT_ISSUE_BM25 = 1.0
 LANE_WEIGHT_COMMENT_BM25 = 0.75
 LANE_WEIGHT_EXACT = 1.1
+LANE_WEIGHT_SEMANTIC_ISSUE = 0.95
+LANE_WEIGHT_SEMANTIC_COMMENT = 0.6
 
 #: Bounded additive boost when the whole query equals an issue key or the
 #: exact stored failing command (§10.4 "bounded deterministic boost").
@@ -109,10 +125,19 @@ MAX_COMMENT_HITS_PER_ISSUE = 2
 #: during aggregation: importance boosts, ordinariness does not.
 IMPORTANT_COMMENT_BONUS = -0.25
 
+#: Ordering-only adjustment applied to a semantic comment's distance (lower is
+#: better) during issue-level aggregation (§10.4: "important=true boosts the
+#: comment document during issue-level fusion"). Importance never alters or
+#: re-labels the reported vector distance — the raw diagnostic stays exact;
+#: the adjustment decides which hits are retained and where the issue ranks.
+SEMANTIC_IMPORTANT_COMMENT_BONUS = -0.05
+
 #: Per-lane retrieval caps — hypotheses like the weights, not policy.
 ISSUE_LANE_CANDIDATE_CAP = 250
 COMMENT_LANE_CANDIDATE_CAP = 400
 EXACT_LANE_ROW_CAP = 500
+SEMANTIC_ISSUE_LANE_CANDIDATE_CAP = 250
+SEMANTIC_COMMENT_LANE_HIT_CAP = 800
 
 #: Request bounds (§10.1 request-size bound; §10.5 pagination bounds).
 MAX_QUERY_CHARS = 1000
@@ -574,6 +599,315 @@ _DESC_MAX = str(10**20 - 1)
 
 
 # ---------------------------------------------------------------------------
+# Semantic candidate lanes (§10.3 lanes 4–5, M2.3)
+# ---------------------------------------------------------------------------
+
+
+#: Freshness joins required by §10.3/§19.3: a semantic row is eligible only
+#: when its source still exists (source join) and its stored
+#: ``content_version`` equals the current FTS document's version plus no dirty
+#: row exists for that ``(generation_id, document_key)`` (predicate). Module-
+#: level so the §19.7 mutation proof can drop them and watch a named test
+#: turn red.
+SEMANTIC_FRESHNESS_JOINS = (
+    "JOIN {source} AS s ON s.id = v.source_id\n"
+    "JOIN {fts} AS f ON f.rowid = v.source_id\n"
+)
+
+SEMANTIC_FRESHNESS_PREDICATE = (
+    "f.content_version = v.content_version\n"
+    "AND NOT EXISTS (\n"
+    "  SELECT 1 FROM {dirty} AS d\n"
+    "   WHERE d.generation_id = v.generation_id\n"
+    "     AND d.document_key = v.document_key)\n"
+)
+
+_SEMANTIC_SOURCE_TABLES = {"issue": "tracker_issues", "comment": "tracker_issue_comments"}
+
+
+@dataclass(frozen=True)
+class SemanticContext:
+    """Everything one query's semantic lanes need, resolved before ranking.
+
+    ``generation`` mirrors the persisted generation row verbatim — metric,
+    normalization, element encoding, and dimensions are read from HERE at
+    scan time, never from adapter or process defaults.
+    """
+
+    generation_id: str
+    generation: Dict[str, Any]
+    query_blob: bytes
+
+
+_EMBEDDER_CACHE: Dict[str, Any] = {}
+
+
+def _query_embedder(models_dir: Optional[str] = None) -> Any:
+    """The process-wide prepared embedder, loaded once and cached.
+
+    Model loading costs seconds; a cache keyed by the resolved models dir
+    keeps repeated queries on the loaded weights. Load failures are never
+    cached — the next call retries.
+    """
+    key = str(models_dir) if models_dir is not None else "<default>"
+    if key not in _EMBEDDER_CACHE:
+        from cli_agent_orchestrator.services.embedding_adapter import load_embedder
+
+        _EMBEDDER_CACHE[key] = load_embedder(models_dir)
+    return _EMBEDDER_CACHE[key]
+
+
+def reset_query_embedder_cache() -> None:
+    """Drop the cached embedder (tests, explicit re-prepare drills)."""
+    _EMBEDDER_CACHE.clear()
+
+
+def _open_search_engine(db_path: str) -> Any:
+    """Open one pinned sqlite-vec connection through the dedicated factory.
+
+    Indirection exists for tests and for the mutation proofs: the pooled
+    engine must never grow ``vec_*`` functions (§7.2), and this seam is where
+    that boundary is swapped under controlled conditions.
+    """
+    from cli_agent_orchestrator.services.search_engine_factory import open_search_connection
+
+    return open_search_connection(db_path=db_path)
+
+
+def _store_db_path(db: Any) -> Optional[str]:
+    """The filesystem path of the session's SQLite store, when it has one.
+
+    In-memory stores have no second-connection path, so semantic lanes cannot
+    see the same data; callers degrade visibly instead of scanning an empty
+    lookalike database.
+    """
+    bind = db.get_bind()
+    url = getattr(bind, "url", None)
+    database = getattr(url, "database", None)
+    if not database or database == ":memory:":
+        return None
+    return str(database)
+
+
+def _distance_expression(metric: str) -> str:
+    """The sqlite-vec scalar distance function the persisted metric selects."""
+    if metric == "cosine":
+        return "vec_distance_cosine(v.embedding, :query_vec)"
+    if metric == "l2":
+        return "vec_distance_l2(v.embedding, :query_vec)"
+    raise TrackerRankedSearchError(
+        "configuration",
+        f"generation declares unsupported distance_metric {metric!r}; "
+        "refusing to decode distances with guessed semantics",
+    )
+
+
+def _rankable_distance_clause(metric: str) -> str:
+    """Exclude rows whose distance is undefined under the persisted metric.
+
+    A zero embedding carries no direction, so its cosine distance is NULL —
+    unrankable, not closest. L2 defines every distance, so this clause filters
+    nothing there. The filter lives in the scan so the candidate window is
+    spent on rankable rows rather than consuming it before Python drops
+    NULLs.
+    """
+    if metric == "cosine":
+        return f"  AND {_distance_expression(metric)} IS NOT NULL\n"
+    return ""
+
+
+def resolve_semantic_context(
+    conn: Any,
+    meta: Dict[str, Any],
+    raw_query: str,
+    reasons: List[str],
+) -> Optional[SemanticContext]:
+    """Resolve everything the semantic lanes need, or record why not.
+
+    Every refusal appends a typed reason to ``reasons`` and leaves the lanes
+    unavailable — the caller degrades visibly (§13.5) instead of failing the
+    whole query. Order matters: pointer, generation state, model load,
+    dimension agreement, element encoding, then the query embedding itself.
+    """
+    pointer = meta.get("active_vector_generation")
+    if not pointer:
+        reasons.append(
+            "no active vector generation: build and activate one with the "
+            "search-index model verbs before requesting semantic retrieval"
+        )
+        return None
+    row = _exec(
+        conn,
+        f"SELECT generation_id, state, model_id, model_revision, dimensions,\n"
+        f"       element_type, distance_metric, normalized, document_schema_version\n"
+        f"FROM {tracker_search_schema.VECTOR_GENERATIONS_TABLE}\n"
+        " WHERE generation_id = :pointer",
+        {"pointer": pointer},
+    ).fetchone()
+    if row is None or str(row[1]) != "active":
+        observed = str(row[1]) if row is not None else "absent"
+        reasons.append(
+            f"active generation pointer {pointer!r} names no active generation "
+            f"(observed state: {observed})"
+        )
+        return None
+    generation = {
+        "generation_id": str(row[0]),
+        "state": str(row[1]),
+        "model_id": str(row[2]),
+        "model_revision": str(row[3]),
+        "dimensions": int(row[4]),
+        "element_type": str(row[5]),
+        "distance_metric": str(row[6]),
+        "normalized": bool(row[7]),
+        "document_schema_version": int(row[8]),
+    }
+    try:
+        embedder = _query_embedder()
+    except Exception as exc:  # noqa: BLE001 - any capability refusal degrades visibly
+        reasons.append(f"embedding model unavailable: {exc}")
+        return None
+    declared_dimensions = int(generation["dimensions"])
+    embedder_dims = getattr(embedder, "dimensions", None)
+    if embedder_dims is not None and int(embedder_dims) != declared_dimensions:
+        reasons.append(
+            f"prepared model binds {int(embedder_dims)} dimensions but generation "
+            f"{generation['generation_id']!r} declares {declared_dimensions}; "
+            "refusing to mix generations"
+        )
+        return None
+    if generation["element_type"] != "float32":
+        reasons.append(
+            f"generation {generation['generation_id']!r} declares element_type "
+            f"{generation['element_type']!r}; this build serves float32 only"
+        )
+        return None
+    try:
+        blobs = embedder.embed([raw_query])
+    except Exception as exc:  # noqa: BLE001 - embed failure is degradation, not failure
+        reasons.append(f"query embedding failed: {exc}")
+        return None
+    if len(blobs) != 1 or not blobs[0]:
+        reasons.append("query embedding returned no vector")
+        return None
+    query_blob = bytes(blobs[0])
+    if len(query_blob) != declared_dimensions * 4:
+        reasons.append(
+            f"query vector is {len(query_blob)} bytes; generation "
+            f"{generation['generation_id']!r} binds float32 x {declared_dimensions}"
+        )
+        return None
+    return SemanticContext(
+        generation_id=generation["generation_id"],
+        generation=generation,
+        query_blob=query_blob,
+    )
+
+
+def run_semantic_issue_lane(
+    vec_conn: Any,
+    context: SemanticContext,
+    candidate_sql: str,
+    candidate_params: Dict[str, Any],
+) -> List[Tuple[str, float]]:
+    """Semantic issue documents (lane 4): exact scan, best distance first.
+
+    Freshness joins decide eligibility before any distance is computed;
+    lower distance ranks better.
+    """
+    sql = (
+        "SELECT v.issue_key,\n"
+        f"       {_distance_expression(context.generation['distance_metric'])} AS distance\n"
+        f"FROM {tracker_search_schema.SEARCH_VECTORS_TABLE} AS v\n"
+        + SEMANTIC_FRESHNESS_JOINS.format(
+            source=_SEMANTIC_SOURCE_TABLES["issue"],
+            fts=tracker_search_schema.ISSUE_FTS_TABLE,
+        )
+        + "WHERE "
+        + SEMANTIC_FRESHNESS_PREDICATE.format(dirty=tracker_search_schema.VECTOR_DIRTY_TABLE)
+        + _rankable_distance_clause(context.generation["distance_metric"])
+        + f"  AND v.generation_id = :gen AND v.document_kind = 'issue'{candidate_sql}\n"
+        "ORDER BY distance, v.issue_key\n"
+        f"LIMIT {SEMANTIC_ISSUE_LANE_CANDIDATE_CAP}"
+    )
+    rows = vec_conn.execute(
+        sql,
+        {"gen": context.generation_id, "query_vec": context.query_blob, **candidate_params},
+    ).fetchall()
+    return [(str(row[0]), float(row[1])) for row in rows]
+
+
+def run_semantic_comment_lane(
+    vec_conn: Any,
+    context: SemanticContext,
+    candidate_sql: str,
+    candidate_params: Dict[str, Any],
+    *,
+    include_comments: bool,
+) -> Tuple[List[Tuple[str, float]], Dict[str, Dict[str, Any]]]:
+    """Semantic comment documents (lane 5), aggregated at issue level (§10.4).
+
+    Mirrors the lexical comment lane's aggregation: hits group by issue, at
+    most two contribute, importance adjusts ordering only. The reported
+    distance of every retained hit stays the raw scalar distance.
+    """
+    if not include_comments:
+        return [], {}
+    sql = (
+        "SELECT v.source_id, v.issue_key, src.important, src.body,\n"
+        f"       {_distance_expression(context.generation['distance_metric'])} AS distance\n"
+        f"FROM {tracker_search_schema.SEARCH_VECTORS_TABLE} AS v\n"
+        + SEMANTIC_FRESHNESS_JOINS.format(
+            source=_SEMANTIC_SOURCE_TABLES["comment"],
+            fts=tracker_search_schema.COMMENT_FTS_TABLE,
+        )
+        + "JOIN tracker_issue_comments AS src ON src.id = v.source_id\n"
+        "WHERE "
+        + SEMANTIC_FRESHNESS_PREDICATE.format(dirty=tracker_search_schema.VECTOR_DIRTY_TABLE)
+        + _rankable_distance_clause(context.generation["distance_metric"])
+        + f"  AND v.generation_id = :gen AND v.document_kind = 'comment'{candidate_sql}\n"
+        "ORDER BY distance, v.source_id\n"
+        f"LIMIT {SEMANTIC_COMMENT_LANE_HIT_CAP}"
+    )
+    best_per_issue: Dict[str, List[Tuple[float, int, str, bool, float]]] = {}
+    for source_id, issue_key, important, body, distance in vec_conn.execute(
+        sql,
+        {"gen": context.generation_id, "query_vec": context.query_blob, **candidate_params},
+    ).fetchall():
+        key = str(issue_key)
+        raw_distance = float(distance)
+        order_score = raw_distance + (
+            SEMANTIC_IMPORTANT_COMMENT_BONUS if int(important) else 0.0
+        )
+        best_per_issue.setdefault(key, []).append(
+            (
+                order_score,
+                int(source_id),
+                str(body or ""),
+                bool(int(important)),
+                raw_distance,
+            )
+        )
+    ranked: List[Tuple[str, float]] = []
+    winning: Dict[str, Dict[str, Any]] = {}
+    for issue_key, hits in best_per_issue.items():
+        hits.sort(key=lambda hit: (hit[0], hit[1]))
+        retained = hits[:MAX_COMMENT_HITS_PER_ISSUE]
+        best = retained[0]
+        ranked.append((issue_key, best[0]))
+        winning[issue_key] = {
+            "comment_id": best[1],
+            "body": best[2],
+            "important": best[3],
+            "raw_distance": best[4],
+            "retained_hits": len(retained),
+            "additional_comment_ids": [hit[1] for hit in retained[1:]],
+        }
+    ranked.sort(key=lambda pair: (pair[1], pair[0]))
+    return ranked, winning
+
+
+# ---------------------------------------------------------------------------
 # Fusion and service entry point
 # ---------------------------------------------------------------------------
 
@@ -582,6 +916,8 @@ _LANE_WEIGHTS = {
     "issue-bm25": LANE_WEIGHT_ISSUE_BM25,
     "comment-bm25": LANE_WEIGHT_COMMENT_BM25,
     "exact": LANE_WEIGHT_EXACT,
+    "semantic-issue": LANE_WEIGHT_SEMANTIC_ISSUE,
+    "semantic-comment": LANE_WEIGHT_SEMANTIC_COMMENT,
 }
 
 
@@ -624,7 +960,7 @@ def _meta_snapshot(conn: Any) -> Dict[str, Any]:
 
 
 def ranked_search(request: RankedSearchRequest) -> Dict[str, Any]:
-    """Execute one ranked lexical search request and return explained results."""
+    """Execute one ranked search request and return fully explained results."""
     from cli_agent_orchestrator.services.issue_tracker import TrackerError, _issue_row
 
     started = time.perf_counter()
@@ -636,12 +972,6 @@ def ranked_search(request: RankedSearchRequest) -> Dict[str, Any]:
         raise TrackerError(exc.code, exc.message) from exc
 
     reasons: List[str] = []
-    effective_mode = "lexical"
-    if request.mode in ("semantic", "hybrid"):
-        reasons.append(
-            f"requested mode {request.mode!r}: semantic lanes install at milestone M2; "
-            "degraded visibly to lexical"
-        )
 
     filters = StructuredFilters(
         kinds=request.kinds,
@@ -704,34 +1034,177 @@ def ranked_search(request: RankedSearchRequest) -> Dict[str, Any]:
             if candidate_keys
             else (" AND 1 = 0", {})
         )
+        # Semantic lanes scan the vectors table aliased ``v``, not the FTS
+        # tables aliased ``c``: same key set, its own chunked fragment.
+        semantic_candidate_sql, semantic_candidate_params = (
+            _chunked_in_sql("v.issue_key", sorted(candidate_keys), "sv")
+            if candidate_keys
+            else (" AND 1 = 0", {})
+        )
 
         lane_timings: Dict[str, float] = {}
 
-        t0 = time.perf_counter()
-        issue_ranking = run_issue_bm25_lane(conn, match_expr, candidate_sql, candidate_params)
-        lane_timings["issue-bm25"] = (time.perf_counter() - t0) * 1000.0
+        # --- Semantic leg setup (§10.3 lanes 4–5, §9.2 drain, §13.5 degrade) ---
+        semantic_context: Optional[SemanticContext] = None
+        semantic_reasons: List[str] = []
+        drain_info: Optional[Dict[str, Any]] = None
+        wants_semantic = request.mode in ("semantic", "hybrid")
+        if wants_semantic:
+            semantic_context = resolve_semantic_context(conn, meta, raw_query, semantic_reasons)
 
-        t0 = time.perf_counter()
-        comment_ranking, winning_comments = run_comment_bm25_lane(
-            conn,
-            match_expr,
-            candidate_sql,
-            candidate_params,
-            include_comments=request.include_comments,
-        )
-        lane_timings["comment-bm25"] = (time.perf_counter() - t0) * 1000.0
+        db_path: Optional[str] = None
+        if semantic_context is not None:
+            db_path = _store_db_path(db)
+            if db_path is None:
+                semantic_reasons.append(
+                    "the session store has no filesystem path; the dedicated "
+                    "vector engine cannot open a second connection to it"
+                )
+                semantic_context = None
+        if semantic_context is not None and db_path is not None:
+            # §9.2: a semantic/hybrid query drains one bounded refresh batch
+            # for the active generation before vector retrieval. A skipped
+            # refresh leg is a visible partial (§13.5), never a failed query.
+            try:
+                from cli_agent_orchestrator.services.vector_lifecycle import (
+                    BOUNDED_REFRESH_BATCH,
+                    drain_bounded_batch,
+                )
 
-        t0 = time.perf_counter()
-        exact_ranking, exact_facts = run_exact_lane(conn, raw_query, scoped)
-        lane_timings["exact"] = (time.perf_counter() - t0) * 1000.0
+                drain_info = dict(
+                    drain_bounded_batch(
+                        limit=BOUNDED_REFRESH_BATCH,
+                        embedder=_query_embedder(),
+                        db_path=db_path,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - refresh unavailability degrades
+                drain_info = None
+                semantic_reasons.append(f"query-time refresh skipped: {exc}")
 
-        fused = _fuse_lane_ranks(
-            {
-                "issue-bm25": issue_ranking,
-                "comment-bm25": comment_ranking,
-                "exact": exact_ranking,
+        serve_semantic = semantic_context is not None
+        effective_mode = request.mode if serve_semantic else "lexical"
+        # §13.5: ``semantic`` serves lanes 4–5 only, ``hybrid`` fuses all five,
+        # and a degraded semantic request falls back to the full lexical set.
+        serve_lexical_lanes = request.mode != "semantic" or not serve_semantic
+
+        semantic_issue_ranking: List[Tuple[str, float]] = []
+        semantic_comment_ranking: List[Tuple[str, float]] = []
+        semantic_comment_wins: Dict[str, Dict[str, Any]] = {}
+        if serve_semantic and db_path is not None:
+            t0 = time.perf_counter()
+            try:
+                with _open_search_engine(db_path=db_path) as search_engine:
+                    vec_conn = search_engine.connection
+                    semantic_issue_ranking = run_semantic_issue_lane(
+                        vec_conn,
+                        semantic_context,
+                        semantic_candidate_sql,
+                        semantic_candidate_params,
+                    )
+                    semantic_comment_ranking, semantic_comment_wins = run_semantic_comment_lane(
+                        vec_conn,
+                        semantic_context,
+                        semantic_candidate_sql,
+                        semantic_candidate_params,
+                        include_comments=request.include_comments,
+                    )
+            except Exception as exc:  # noqa: BLE001 - scan failure degrades visibly
+                semantic_issue_ranking = []
+                semantic_comment_ranking = []
+                semantic_comment_wins = {}
+                serve_semantic = False
+                effective_mode = "lexical"
+                semantic_reasons.append(f"vector scan unavailable: {exc}")
+            finally:
+                lane_timings["semantic-scan"] = (time.perf_counter() - t0) * 1000.0
+
+        reasons.extend(semantic_reasons)
+
+        lane_availability: Dict[str, Dict[str, Any]] = {}
+        if serve_lexical_lanes:
+            lane_availability.update(
+                {
+                    "issue-bm25": {"available": True},
+                    "comment-bm25": {"available": True},
+                    "exact": {"available": True},
+                }
+            )
+        else:
+            lexical_note = "not requested (semantic mode)"
+            lane_availability.update(
+                {
+                    "issue-bm25": {"available": False, "reason": lexical_note},
+                    "comment-bm25": {"available": False, "reason": lexical_note},
+                    "exact": {"available": False, "reason": lexical_note},
+                }
+            )
+        if wants_semantic:
+            if serve_semantic:
+                lane_availability["semantic-issue"] = {"available": True}
+                lane_availability["semantic-comment"] = {"available": True}
+            else:
+                unavailable_reason = (
+                    "; ".join(semantic_reasons)
+                    or "semantic lanes are unavailable in this build state"
+                )
+                lane_availability["semantic-issue"] = {
+                    "available": False,
+                    "reason": unavailable_reason,
+                }
+                lane_availability["semantic-comment"] = {
+                    "available": False,
+                    "reason": unavailable_reason,
+                }
+        else:
+            lexical_note = "not requested (lexical mode)"
+            lane_availability["semantic-issue"] = {
+                "available": False,
+                "reason": lexical_note,
             }
-        )
+            lane_availability["semantic-comment"] = {
+                "available": False,
+                "reason": lexical_note,
+            }
+
+        issue_ranking: List[Tuple[str, float]] = []
+        comment_ranking: List[Tuple[str, float]] = []
+        winning_comments: Dict[str, Dict[str, Any]] = {}
+        exact_facts: Dict[str, Dict[str, Any]] = {}
+        if serve_lexical_lanes:
+            t0 = time.perf_counter()
+            issue_ranking = run_issue_bm25_lane(conn, match_expr, candidate_sql, candidate_params)
+            lane_timings["issue-bm25"] = (time.perf_counter() - t0) * 1000.0
+
+            t0 = time.perf_counter()
+            comment_ranking, winning_comments = run_comment_bm25_lane(
+                conn,
+                match_expr,
+                candidate_sql,
+                candidate_params,
+                include_comments=request.include_comments,
+            )
+            lane_timings["comment-bm25"] = (time.perf_counter() - t0) * 1000.0
+
+            t0 = time.perf_counter()
+            exact_facts: Dict[str, Dict[str, Any]]
+            exact_ranking, exact_facts = run_exact_lane(conn, raw_query, scoped)
+            lane_timings["exact"] = (time.perf_counter() - t0) * 1000.0
+
+        lanes_to_fuse: Dict[str, List[Tuple[str, float]]] = {}
+        if serve_lexical_lanes:
+            lanes_to_fuse.update(
+                {
+                    "issue-bm25": issue_ranking,
+                    "comment-bm25": comment_ranking,
+                    "exact": exact_ranking,
+                }
+            )
+        if serve_semantic:
+            lanes_to_fuse["semantic-issue"] = semantic_issue_ranking
+            lanes_to_fuse["semantic-comment"] = semantic_comment_ranking
+
+        fused = _fuse_lane_ranks(lanes_to_fuse)
 
         boosted = _apply_exact_fingerprint_boosts(conn, raw_query, fused)
 
@@ -765,6 +1238,7 @@ def ranked_search(request: RankedSearchRequest) -> Dict[str, Any]:
                 rows_by_key.get(issue_key),
                 exact_facts,
                 winning_comments,
+                semantic_comment_wins if serve_semantic else {},
                 boosted,
                 terms,
                 raw_query,
@@ -773,6 +1247,21 @@ def ranked_search(request: RankedSearchRequest) -> Dict[str, Any]:
         ]
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
+        generations_block = dict(meta)
+        if serve_semantic:
+            generations_block["vector_generation"] = dict(semantic_context.generation)
+        diagnostics: Dict[str, Any] = {
+            "lane_elapsed_ms": {k: round(v, 3) for k, v in lane_timings.items()},
+            "total_elapsed_ms": round(elapsed_ms, 3),
+        }
+        if wants_semantic:
+            diagnostics["semantic"] = {
+                "served": serve_semantic,
+                "generation_id": semantic_context.generation_id if serve_semantic else None,
+                "issue_vectors_returned": len(semantic_issue_ranking),
+                "comment_issues_returned": len(semantic_comment_wins) if serve_semantic else 0,
+                "query_refresh": drain_info,
+            }
         return {
             "query": raw_query,
             "scope": {
@@ -787,19 +1276,10 @@ def ranked_search(request: RankedSearchRequest) -> Dict[str, Any]:
                 "requested_mode": request.mode,
                 "effective_mode": effective_mode,
                 "reasons": reasons,
-                "lanes": {
-                    "issue-bm25": {"available": True},
-                    "comment-bm25": {"available": True},
-                    "exact": {"available": True},
-                    "semantic-issue": {"available": False, "reason": "installs at M2"},
-                    "semantic-comment": {"available": False, "reason": "installs at M2"},
-                },
+                "lanes": lane_availability,
             },
-            "generations": dict(meta),
-            "diagnostics": {
-                "lane_elapsed_ms": {k: round(v, 3) for k, v in lane_timings.items()},
-                "total_elapsed_ms": round(elapsed_ms, 3),
-            },
+            "generations": generations_block,
+            "diagnostics": diagnostics,
             "total": total,
             "limit": request.limit,
             "offset": request.offset,
@@ -865,6 +1345,7 @@ def _build_explanation(
     row: Optional[TrackerIssueModel],
     exact_facts: Dict[str, Dict[str, Any]],
     winning_comments: Dict[str, Dict[str, Any]],
+    semantic_comment_wins: Dict[str, Dict[str, Any]],
     boosted: Dict[str, List[str]],
     terms: Sequence[str],
     raw_query: str,
@@ -889,18 +1370,47 @@ def _build_explanation(
     if fact:
         matched_fields.add(fact["matched_field"])
         snippets[fact["matched_field"]] = fact["snippet"]
-    win = winning_comments.get(issue_key)
-    if win:
+
+    def _lane_rank(lane_name: str) -> Optional[int]:
+        for entry in payload["lanes"]:
+            if entry["lane"] == lane_name:
+                return int(entry["rank"])
+        return None
+
+    lexical_win = winning_comments.get(issue_key)
+    semantic_win = semantic_comment_wins.get(issue_key)
+    win: Optional[Dict[str, Any]] = None
+    source_lane: Optional[str] = None
+    if lexical_win is not None or semantic_win is not None:
+        # Both comment lanes may hit the same issue; the lane that ranked it
+        # better owns the navigation target (ties favor the lexical lane).
+        lex_rank = _lane_rank("comment-bm25")
+        sem_rank = _lane_rank("semantic-comment")
+        if semantic_win is not None and (
+            lexical_win is None
+            or (sem_rank is not None and (lex_rank is None or sem_rank < lex_rank))
+        ):
+            win, source_lane = semantic_win, "semantic-comment"
+        else:
+            win, source_lane = lexical_win, "comment-bm25"
+    if win is not None:
         matched_fields.add("comments")
         if "comments" not in snippets:
             snippets["comments"] = _snippet(win.get("body", ""), terms)
-        explanation["winning_comment"] = {
+        winning_entry: Dict[str, Any] = {
             "comment_id": win["comment_id"],
             "important": win["important"],
             "retained_hits": win["retained_hits"],
             "additional_comment_ids": win["additional_comment_ids"],
-            "total_matching_comments": win["total_matching_comments"],
+            "source_lane": source_lane,
         }
+        if source_lane == "semantic-comment":
+            # Raw scalar distance as measured at scan time; importance never
+            # altered this value (§10.4).
+            winning_entry["raw_distance"] = win["raw_distance"]
+        else:
+            winning_entry["total_matching_comments"] = win["total_matching_comments"]
+        explanation["winning_comment"] = winning_entry
     if row is not None:
         for field_name in EXACT_SEARCH_FIELDS:
             if field_name == "key" or field_name in matched_fields:
@@ -992,6 +1502,26 @@ def search_status() -> Dict[str, Any]:
             vectors = raw.execute(
                 f"SELECT COUNT(*) FROM {tracker_search_schema.SEARCH_VECTORS_TABLE}"
             ).fetchone()[0]
+            active_generation: Dict[str, Any] = {"active_generation": meta["active_vector_generation"]}
+            if meta["active_vector_generation"]:
+                gen_row = raw.execute(
+                    f"SELECT state, model_id, model_revision, dimensions,\n"
+                    f"       element_type, distance_metric, normalized\n"
+                    f"FROM {tracker_search_schema.VECTOR_GENERATIONS_TABLE}\n"
+                    " WHERE generation_id = ?",
+                    (meta["active_vector_generation"],),
+                ).fetchone()
+                if gen_row is not None:
+                    active_generation = {
+                        "active_generation": meta["active_vector_generation"],
+                        "state": str(gen_row[0]),
+                        "model_id": str(gen_row[1]),
+                        "model_revision": str(gen_row[2]),
+                        "dimensions": int(gen_row[3]),
+                        "element_type": str(gen_row[4]),
+                        "distance_metric": str(gen_row[5]),
+                        "normalized": bool(int(gen_row[6])),
+                    }
             return {
                 "installed": True,
                 **meta,
@@ -1004,7 +1534,7 @@ def search_status() -> Dict[str, Any]:
                     ),
                 },
                 "semantic": {
-                    "active_generation": meta["active_vector_generation"],
+                    **active_generation,
                     "dirty_documents": int(dirty_total),
                     "failed_documents": int(dirty_failed),
                     "vectors": int(vectors),
@@ -1016,9 +1546,14 @@ def search_status() -> Dict[str, Any]:
 
 __all__ = [
     "RankedSearchRequest",
+    "SemanticContext",
     "TrackerRankedSearchError",
     "build_fts_match_query",
     "normalize_query_units",
     "ranked_search",
+    "reset_query_embedder_cache",
+    "resolve_semantic_context",
+    "run_semantic_comment_lane",
+    "run_semantic_issue_lane",
     "search_status",
 ]
