@@ -124,26 +124,31 @@ def corpus_store(tmp_path_factory):
     engine.dispose()
 
 
-def _run_case(engine, case):
-    """Run one fixture case through the service; return (RankedIssue list, ms)."""
+def _request_for(case, mode, limit=100):
+    """One fixture case as a service request, with the shared scope default."""
     scope = case.get("scope", {})
     projects = tuple(scope.get("tracker_projects") or ())
     all_projects = bool(scope.get("all_projects", False))
     if not projects and not all_projects:
         projects = ("cao-system",)
-    request = RankedSearchRequest(
+    return RankedSearchRequest(
         query=case["query"],
         project_ids=projects,
         all_projects=all_projects,
         subtree_roots=tuple(scope.get("subtree_roots") or ()),
-        limit=100,
+        limit=limit,
+        mode=mode,
     )
+
+
+def _run_case(engine, case, mode="lexical"):
+    """Run one fixture case through the service; return (RankedIssue list, ms)."""
     with_session = sessionmaker(bind=engine)
     original = rsearch.SessionLocal
     rsearch.SessionLocal = with_session
     try:
         started = time.perf_counter()
-        response = rsearch.ranked_search(request)
+        response = rsearch.ranked_search(_request_for(case, mode=mode))
         elapsed_ms = (time.perf_counter() - started) * 1000.0
     finally:
         rsearch.SessionLocal = original
@@ -262,3 +267,144 @@ class TestHarnessGateAgainstRankedService:
             "ranked fusion should beat the substring baseline's MRR "
             f"({base_metrics['mrr']}), got {lane_metrics.mrr}"
         )
+
+
+HYBRID_LANE = "ranked-hybrid"
+_EXACT_CLASSES = frozenset(
+    {"exact-command", "exact-symbol", "exact-error", "exact-path"}
+)
+
+
+class TestHybridVersusLexicalHarnessComparison:
+    """§16.1 gate: the fixture corpus through hybrid mode, recorded against
+    lexical-only.
+
+    This class REPORTS; it does not gate the ranking comparison and does not
+    flip any default — whether hybrid becomes the default is an operator
+    decision taken from the recorded numbers. The assertions are structural:
+    both modes ran every case, and the semantic legs genuinely served.
+
+    Requires a prepared embedding model (the suite's scratch state root has
+    none): run with ``CAO_SEARCH_MODELS_DIR=<prepared dir>`` pointing at the
+    operator's prepared model, following the offline-drill convention.
+    """
+
+    @pytest.fixture(scope="class")
+    def hybrid_corpus(self, corpus_store):
+        """The lexical corpus plus one active generation over the prepared model."""
+        pytest.importorskip("sentence_transformers")
+        pytest.importorskip("sqlite_vec")
+        from cli_agent_orchestrator.services.embedding_adapter import (
+            default_models_dir,
+            load_embedder,
+            read_metadata,
+        )
+        from cli_agent_orchestrator.services.vector_lifecycle import (
+            activate_generation,
+            create_generation,
+            refresh_generation,
+        )
+
+        models_dir = default_models_dir()
+        metadata = read_metadata(models_dir)
+        if metadata is None:
+            pytest.skip(
+                f"no prepared generation at {models_dir}; run `cao issue search-index "
+                "model prepare` first (or point CAO_SEARCH_MODELS_DIR at one)"
+            )
+        engine = corpus_store["engine"]
+        db_path = str(engine.url.database)
+        created = create_generation(metadata=metadata, target_engine=engine)
+        refresh_generation(
+            generation_id=created["generation_id"],
+            embedder=load_embedder(models_dir),
+            db_path=db_path,
+        )
+        activate_generation(created["generation_id"], target_engine=engine)
+        return {"engine": engine, "generation_id": created["generation_id"]}
+
+    @staticmethod
+    def _run_all(engine, mode):
+        snapshot = load_snapshot(EVALS_DIR / "snapshots")
+        fixture = load_fixture(FIXTURE_PATH)
+        issue_status = {issue.key: issue.status for issue in snapshot.issues}
+        results = []
+        served = 0
+        for case in fixture["cases"]:
+            ranked, elapsed_ms = _run_case(engine, case, mode=mode)
+            results.append(
+                evaluate_case(
+                    case_id=case["id"],
+                    case_class=case["class"],
+                    expectation=CaseExpectation(
+                        primary=tuple(case["expected"]["primary"]),
+                        acceptable=tuple(case["expected"].get("acceptable", [])),
+                        hard_negatives=tuple(case["expected"].get("hard_negatives", [])),
+                    ),
+                    ranked=ranked,
+                    issue_status=issue_status,
+                    latency_ms=elapsed_ms,
+                )
+            )
+        return results
+
+    @pytest.fixture(scope="class")
+    def comparison(self, hybrid_corpus):
+        engine = hybrid_corpus["engine"]
+        out: dict = {}
+        for mode, lane in (("lexical", SERVICE_LANE), ("hybrid", HYBRID_LANE)):
+            results = self._run_all(engine, mode)
+            exact = [r for r in results if r.case_class in _EXACT_CLASSES]
+            out[mode] = {
+                "overall": aggregate(lane, results),
+                "exact": aggregate(lane, exact) if exact else None,
+            }
+        return out
+
+    def test_hybrid_served_every_case_with_semantic_legs(self, hybrid_corpus):
+        """Every hybrid request resolved a generation and scanned vectors."""
+        engine = hybrid_corpus["engine"]
+        fixture = load_fixture(FIXTURE_PATH)
+        original = rsearch.SessionLocal
+        rsearch.SessionLocal = sessionmaker(bind=engine)
+        try:
+            for case in fixture["cases"]:
+                response = rsearch.ranked_search(_request_for(case, mode="hybrid", limit=10))
+                assert response["mode_effective"] == "hybrid", (
+                    f"case {case['id']} degraded: {response['degradation']['reasons']}"
+                )
+                assert response["diagnostics"]["semantic"]["served"] is True
+        finally:
+            rsearch.SessionLocal = original
+
+    def test_comparison_report_records_both_modes(self, comparison, capsys):
+        """Record recall/MRR/hard-negative load per mode, overall and for the
+        exact-string classes; printed whole so the ticket comment can carry
+        it verbatim. Metric deltas are recorded, never gated here — whether
+        hybrid becomes the default is an operator decision (§16.1)."""
+
+        def block(metrics):
+            if metrics is None:
+                return None
+            return {
+                "recall_at_5": round(metrics.recall_at_5, 4),
+                "recall_at_10": round(metrics.recall_at_10, 4),
+                "mrr": round(metrics.mrr, 4),
+                "mrr_primary": round(metrics.mrr_primary, 4),
+                "hard_negative_load_at_5": metrics.hard_negative_load_at_5,
+                "hard_negative_load_at_10": metrics.hard_negative_load_at_10,
+                "hard_negative_case_rate": round(metrics.hard_negative_case_rate, 4),
+            }
+
+        report = {
+            mode: {
+                scope: block(values[scope]) for scope in ("overall", "exact")
+            }
+            for mode, values in comparison.items()
+        }
+        print("\n=== M2.3 harness comparison (fixture corpus.v1) ===")
+        print(json.dumps(report, indent=1))
+        for mode in ("lexical", "hybrid"):
+            assert comparison[mode]["overall"] is not None
+        assert comparison["lexical"]["exact"] is not None
+        assert comparison["hybrid"]["exact"] is not None
