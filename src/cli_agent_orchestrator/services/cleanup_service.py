@@ -7,15 +7,30 @@ from pathlib import Path
 from cli_agent_orchestrator.clients.database import (
     CallbackRecoveryModel,
     InboxModel,
+    RegisteredWaitModel,
+    RegisteredWaitMonitorModel,
+    ReincarnationOperationModel,
+    RestoreContractModel,
+    RouteObservationOperationModel,
     SessionLocal,
+    StableAgentIncarnationModel,
     TerminalModel,
+    WaitMessageAdmissionModel,
 )
 from cli_agent_orchestrator.constants import (
+    COMPANION_DIR,
+    COMPANION_RECEIPT_RETENTION_DAYS,
     LOG_DIR,
     MEMORY_BASE_DIR,
+    REGISTERED_WAIT_RETENTION_DAYS,
+    RESTORE_CONTRACT_RETENTION_DAYS,
     RETENTION_DAYS,
+    ROUTE_OBSERVATION_RETENTION_DAYS,
     TERMINAL_LOG_DIR,
+    WAKE_RECEIPT_DIR,
+    WAKE_RECEIPT_RETENTION_DAYS,
 )
+from cli_agent_orchestrator.models.inbox import MessageStatus
 from cli_agent_orchestrator.services.fifo_reader import fifo_manager
 from cli_agent_orchestrator.services.memory_format import parse_index_entry
 from cli_agent_orchestrator.services.status_monitor import status_monitor
@@ -163,6 +178,312 @@ def _legacy_file_delete_blocked(log_file: Path, v2_ids: set, registry) -> bool:
     return terminal_id is not None and terminal_id in v2_ids
 
 
+# =============================================================================
+# Lane X2 — campaign-era store enrollment
+# =============================================================================
+# Four stores added by recent merged work had no deletion path.  They are
+# enrolled in this same startup retention pass, each with its own retention
+# rule and fail-closed behavior: a store that cannot be read preserves
+# everything, and a row/file whose ownership or liveness cannot be verified
+# is never deleted on doubt.
+
+
+def _table_absent(exc: Exception, table: str) -> bool:
+    """Whether an exception is SQLite reporting a missing table.
+
+    Older databases legitimately predate a table; the shape guard applies
+    and the store is skipped, so the failure mode is preservation, never
+    deletion.
+    """
+    return f"no such table: {table}" in str(exc).lower()
+
+
+def _iso_z_cutoff(days: int) -> str:
+    """An ISO-8601 UTC ``Z`` cutoff string, byte-comparable to the stores.
+
+    Every enrolled store stamps ``created_at``/``updated_at`` as
+    ``datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")``, so a
+    same-format cutoff compares lexically (== chronologically) with them.
+    """
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+
+def _prune_route_observation_operations() -> int:
+    """Retention for the dark M10 route-observation journal.
+
+    Only a closed-vocabulary terminal result (``observed-closed`` /
+    ``zero-effect-refusal`` / ``ambiguous-after-possible-effect``) older
+    than ``ROUTE_OBSERVATION_RETENTION_DAYS`` is removable, and only once
+    its deterministic inbox wake claim has left ``pending``.  Per the M10
+    definition (spec §5/§8), the conductor's route-completion consumer
+    (dark) consumes the wake claim from the inbox and keeps its own
+    receiver-owned ack store keyed by the fork's operation id; it never
+    re-reads the fork's operation row after ingest, so once the wake claim
+    is no longer pending (delivered / failed / aged out of inbox retention)
+    no live consumer can read the operation row.  A row whose wake claim is
+    still pending is preserved: the wake may still be delivered, and a
+    response-loss replay must be able to re-read the stored result.
+    Nonterminal (``requested``) rows are the one live owner of an exact
+    target tuple and are never retention candidates.
+    """
+    from cli_agent_orchestrator.services import route_observation
+
+    cutoff = _iso_z_cutoff(ROUTE_OBSERVATION_RETENTION_DAYS)
+    try:
+        with SessionLocal() as db:
+            pending_wake_ids = {
+                row[0]
+                for row in db.query(InboxModel.id).filter(
+                    InboxModel.status == MessageStatus.PENDING.value
+                )
+            }
+            candidates = (
+                db.query(RouteObservationOperationModel)
+                .filter(
+                    RouteObservationOperationModel.state.in_(
+                        sorted(route_observation.TERMINAL_RESULTS)
+                    )
+                )
+                .filter(RouteObservationOperationModel.updated_at < cutoff)
+                .all()
+            )
+            deleted = 0
+            for row in candidates:
+                if row.inbox_message_id is not None and row.inbox_message_id in pending_wake_ids:
+                    continue
+                db.delete(row)
+                deleted += 1
+            db.commit()
+            return deleted
+    except Exception as exc:  # noqa: BLE001 - shape guard; never delete on doubt
+        if _table_absent(exc, RouteObservationOperationModel.__tablename__):
+            return 0
+        logger.warning("route-observation retention failed; preserving all rows", exc_info=True)
+        return 0
+
+
+def _prune_restore_contracts() -> int:
+    """Retention for the append-only restore-contract history.
+
+    A contract is pruned only when the authoritative M3-A roster proves its
+    source incarnation is both retired and superseded: the incarnation's
+    disposition is ``retired`` AND a newer restore contract exists for the
+    same stable agent (the agent was re-incarnated, so this source
+    incarnation's native session is definitively dead) AND the contract is
+    older than ``RESTORE_CONTRACT_RETENTION_DAYS``.  A contract whose source
+    incarnation still has a live reincarnation operation (``result_state``
+    not in the final vocabulary) is preserved — the B2 exact executor
+    re-reads the B1 contract at execution time
+    (``exact_executor._execute_locked``) and deleting it mid-operation would
+    strand a lawful exact resume.  Any roster or lookup failure preserves.
+    """
+    from cli_agent_orchestrator.services import operation_journal, stable_agent_roster
+
+    cutoff = _iso_z_cutoff(RESTORE_CONTRACT_RETENTION_DAYS)
+    try:
+        with SessionLocal() as db:
+            candidates = (
+                db.query(RestoreContractModel)
+                .filter(RestoreContractModel.created_at < cutoff)
+                .all()
+            )
+            deleted = 0
+            for row in candidates:
+                incarnation_query = db.query(StableAgentIncarnationModel).filter(
+                    StableAgentIncarnationModel.terminal_id == row.terminal_id
+                )
+                if row.generation is None:
+                    incarnation_query = incarnation_query.filter(
+                        StableAgentIncarnationModel.generation.is_(None)
+                    )
+                else:
+                    incarnation_query = incarnation_query.filter(
+                        StableAgentIncarnationModel.generation == row.generation
+                    )
+                incarnation = incarnation_query.one_or_none()
+                if incarnation is None:
+                    continue
+                if incarnation.disposition != stable_agent_roster.INCARNATION_RETIRED:
+                    continue
+                newer = (
+                    db.query(RestoreContractModel)
+                    .filter(
+                        RestoreContractModel.agent_id == row.agent_id,
+                        RestoreContractModel.contract_id != row.contract_id,
+                        RestoreContractModel.created_at > row.created_at,
+                    )
+                    .first()
+                )
+                if newer is None:
+                    continue
+                live_reincarnation = (
+                    db.query(ReincarnationOperationModel)
+                    .filter(
+                        ReincarnationOperationModel.prior_incarnation_id
+                        == incarnation.incarnation_id,
+                        (ReincarnationOperationModel.result_state.is_(None))
+                        | (
+                            ReincarnationOperationModel.result_state.notin_(
+                                sorted(operation_journal.RESULT_FINAL_STATES)
+                            )
+                        ),
+                    )
+                    .first()
+                )
+                if live_reincarnation is not None:
+                    continue
+                db.delete(row)
+                deleted += 1
+            db.commit()
+            return deleted
+    except Exception as exc:  # noqa: BLE001 - shape guard; never delete on doubt
+        if _table_absent(exc, RestoreContractModel.__tablename__):
+            return 0
+        logger.warning("restore-contract retention failed; preserving all rows", exc_info=True)
+        return 0
+
+
+def _prune_registered_waits() -> int:
+    """Retention for terminal registered waits and their admission verdicts.
+
+    A wait in a terminal state (``resolved`` / ``cancelled`` / ``invalid`` /
+    ``interrupted-by-stop``) older than ``REGISTERED_WAIT_RETENTION_DAYS``
+    is removable when its inbox wake is no longer pending.  Adapter waits
+    (those bound to a registered monitor) are deliberately left alone: they
+    carry a live helper/run-dir lifecycle owned by the monitor consumer, not
+    by this retention pass.  A wait's ``wait_message_admissions`` verdicts
+    follow the wait's fate: they are keyed by the wait's expiry operation id
+    and are removed in the same deletion as the wait.
+    """
+    from cli_agent_orchestrator.services import registered_waits
+
+    cutoff = _iso_z_cutoff(REGISTERED_WAIT_RETENTION_DAYS)
+    try:
+        with SessionLocal() as db:
+            candidates = (
+                db.query(RegisteredWaitModel)
+                .filter(RegisteredWaitModel.state.in_(sorted(registered_waits.TERMINAL_STATES)))
+                .filter(RegisteredWaitModel.updated_at < cutoff)
+                .all()
+            )
+            deleted = 0
+            for row in candidates:
+                if row.wake_message_id is not None:
+                    inbox = db.get(InboxModel, row.wake_message_id)
+                    if inbox is not None and inbox.status == MessageStatus.PENDING.value:
+                        continue
+                if (
+                    db.query(RegisteredWaitMonitorModel)
+                    .filter(RegisteredWaitMonitorModel.wait_id == row.wait_id)
+                    .first()
+                    is not None
+                ):
+                    continue
+                db.query(WaitMessageAdmissionModel).filter(
+                    WaitMessageAdmissionModel.operation_id == row.expiry_operation_id
+                ).delete(synchronize_session=False)
+                db.delete(row)
+                deleted += 1
+            db.commit()
+            return deleted
+    except Exception as exc:  # noqa: BLE001 - shape guard; never delete on doubt
+        if _table_absent(exc, RegisteredWaitModel.__tablename__):
+            return 0
+        logger.warning("registered-wait retention failed; preserving all rows", exc_info=True)
+        return 0
+
+
+def _sweep_wake_receipts() -> int:
+    """Retention for terminal unmanaged wake-receipt sidecars.
+
+    Only records in a terminal state (``wake_confirmed`` /
+    ``wake_unconfirmed``) older than ``WAKE_RECEIPT_RETENTION_DAYS`` are
+    removed; a ``watching`` record is a live watcher that may still finalize
+    and is preserved.  Age is the file mtime, which reflects the last state
+    transition (the terminal write), mirroring the log-file sweeps above.  A
+    terminal record is never re-written, so unlinking it cannot race a
+    watcher's write.
+    """
+    from cli_agent_orchestrator.services import wake_receipts
+
+    cutoff_ts = (datetime.now() - timedelta(days=WAKE_RECEIPT_RETENTION_DAYS)).timestamp()
+    if not WAKE_RECEIPT_DIR.exists():
+        return 0
+    terminal_states = {wake_receipts.WAKE_CONFIRMED, wake_receipts.WAKE_UNCONFIRMED}
+    deleted = 0
+    for path in WAKE_RECEIPT_DIR.glob("*.json"):
+        try:
+            record = wake_receipts._load(path)
+        except Exception:  # noqa: BLE001 - an unreadable record is preserved
+            continue
+        if record.get("state") not in terminal_states:
+            continue
+        if path.stat().st_mtime >= cutoff_ts:
+            continue
+        try:
+            path.unlink()
+            deleted += 1
+        except FileNotFoundError:
+            continue
+    return deleted
+
+
+def _sweep_companion_receipts() -> int:
+    """Retention for generation-bound companion receipt sidecars.
+
+    A receipt file for a ``(terminal, generation)`` whose authoritative
+    roster incarnation is retired (disposition ``retired``) older than
+    ``COMPANION_RECEIPT_RETENTION_DAYS`` is dead: readers are
+    generation-bound and never serve a retired generation, so no live
+    consumer reads it.  Any roster lookup that cannot prove retirement
+    preserves the file (fail-closed); a generation absent from the roster is
+    unverifiable and preserved.  The identity is read from the record body,
+    never parsed off the sanitised filename.
+    """
+    from cli_agent_orchestrator.services import companion_receipts, stable_agent_roster
+
+    cutoff_ts = (datetime.now() - timedelta(days=COMPANION_RECEIPT_RETENTION_DAYS)).timestamp()
+    if not COMPANION_DIR.exists():
+        return 0
+    try:
+        with SessionLocal() as db:
+            deleted = 0
+            for path in COMPANION_DIR.glob("*.json"):
+                if path.stat().st_mtime >= cutoff_ts:
+                    continue
+                record = companion_receipts._load(path)
+                terminal_id = record.get("terminal_id")
+                generation = record.get("generation")
+                if not terminal_id or not generation:
+                    # A sidecar that never recorded its exact identity cannot
+                    # be matched to a roster incarnation; preserve it.
+                    continue
+                incarnation = (
+                    db.query(StableAgentIncarnationModel)
+                    .filter(
+                        StableAgentIncarnationModel.terminal_id == terminal_id,
+                        StableAgentIncarnationModel.generation == generation,
+                    )
+                    .one_or_none()
+                )
+                if incarnation is None:
+                    continue
+                if incarnation.disposition != stable_agent_roster.INCARNATION_RETIRED:
+                    continue
+                try:
+                    path.unlink()
+                    deleted += 1
+                except FileNotFoundError:
+                    continue
+            db.commit()
+            return deleted
+    except Exception as exc:  # noqa: BLE001 - shape guard; never delete on doubt
+        if _table_absent(exc, StableAgentIncarnationModel.__tablename__):
+            return 0
+        logger.warning("companion-receipt retention failed; preserving all files", exc_info=True)
+        return 0
+
+
 def cleanup_old_data():
     """Clean up terminals, inbox messages, and log files older than RETENTION_DAYS."""
     try:
@@ -287,6 +608,24 @@ def cleanup_old_data():
                     log_file.unlink()
                     server_logs_deleted += 1
         logger.info(f"Deleted {server_logs_deleted} old server log files")
+
+        # Lane X2: campaign-era stores enrolled in this startup pass.  Each
+        # store is fail-closed on its own — an unreadable or absent store
+        # preserves everything and reports zero — so a single store's trouble
+        # cannot abort the rest of the pass.
+        for store_name, store_fn in (
+            ("route-observation operations", _prune_route_observation_operations),
+            ("restore contracts", _prune_restore_contracts),
+            ("registered waits", _prune_registered_waits),
+            ("wake-receipt sidecars", _sweep_wake_receipts),
+            ("companion-receipt sidecars", _sweep_companion_receipts),
+        ):
+            try:
+                deleted = store_fn()
+            except Exception:  # noqa: BLE001 - the retention pass never blocks startup
+                logger.warning(f"cleanup of {store_name} failed; preserving", exc_info=True)
+                continue
+            logger.info(f"Deleted {deleted} aged {store_name} record(s)")
 
         logger.info("Cleanup completed successfully")
 
