@@ -557,13 +557,15 @@ def run_exact_lane(
 def _desc_key(iso: str) -> str:
     """A key sorting NEWER strings first when the outer sort is ascending.
 
-    Digits keep full timestamp precision (including fractional seconds), so
-    sub-second ``updated_at`` differences still order before the key falls
-    through, per the §10.5 tie-break.
+    Digits keep full timestamp precision, and an absent fraction is treated
+    as ``.000000`` by RIGHT-padding — left-padding would make every
+    fraction-bearing timestamp outrank every second-precision one regardless
+    of date. Per the §10.5 tie-break, only an equal instant falls through
+    to the key.
     """
     if not iso:
         return _DESC_MAX
-    digits = re.sub(r"[^0-9]", "", iso)[:20].zfill(20)
+    digits = re.sub(r"[^0-9]", "", iso)[:20].ljust(20, "0")
     # 10^20-1 minus the digits: bigger timestamps become smaller keys.
     return str(int(_DESC_MAX) - int(digits)).zfill(20)
 
