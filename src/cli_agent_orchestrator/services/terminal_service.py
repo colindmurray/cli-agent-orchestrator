@@ -79,7 +79,7 @@ from cli_agent_orchestrator.plugins import (
     PostSendMessageEvent,
 )
 from cli_agent_orchestrator.providers.manager import provider_manager
-from cli_agent_orchestrator.services import unmanaged_native_identity
+from cli_agent_orchestrator.services import restore_contract, unmanaged_native_identity
 from cli_agent_orchestrator.services.fifo_reader import fifo_manager
 from cli_agent_orchestrator.services.herdr_inbox_registry import get_herdr_inbox_service
 from cli_agent_orchestrator.services.memory_service import MemoryService
@@ -1368,15 +1368,53 @@ def _admit_session_creation(session_name: str) -> str:
     return canonical
 
 
+def _reservation_launch_facts(row: Any) -> Dict[str, Any]:
+    """The launch facts one managed reservation row supplies to a teardown.
+
+    The two canonical path facts are always recorded on the reservation row.
+    Model/effort/executable are present only when the row was admitted after
+    the launch-facts column existed (the values pinned at reservation time
+    and re-verified at launch); an older row carries NULL and the caller
+    publishes those facts as typed ``unavailable`` — never inferred.  An
+    unreadable or partial facts payload degrades the same way: the whole
+    durable set is either present and complete or truthfully unavailable.
+    """
+    facts: Dict[str, Any] = {
+        "working_directory": row.working_directory,
+        "trusted_project_root": row.trusted_project_root,
+    }
+    stored = getattr(row, "launch_facts_json", None)
+    if not stored:
+        return facts
+    try:
+        launch_facts = json.loads(stored)
+    except (TypeError, ValueError):
+        return facts
+    if not isinstance(launch_facts, dict):
+        return facts
+    model = launch_facts.get("model")
+    effort = launch_facts.get("effort")
+    executable = launch_facts.get("provider_executable")
+    digest = launch_facts.get("provider_executable_sha256")
+    if all(isinstance(value, str) and value for value in (model, effort, executable, digest)):
+        facts["model"] = model
+        facts["effort"] = effort
+        facts["provider_executable"] = executable
+        facts["provider_executable_sha256"] = digest
+    return facts
+
+
 def _teardown_launch_facts(terminal_id: str, generation: Optional[str]) -> Optional[Dict[str, Any]]:
     """The durable launch facts a teardown-time restore contract needs.
 
     Only the managed-launch reservations record the canonical working
-    directory and trusted project root durably.  An unmanaged launch
-    resolved those facts at launch and never persisted them, and the pane
-    that could report them is already dead by the time teardown retires
-    the roster — so ``None`` is the truthful "cannot publish here" answer
-    for everything except a managed incarnation, never a fabricated path.
+    directory and trusted project root durably, and (for rows admitted after
+    the launch-facts column existed) the model/effort/executable identity
+    pinned at reservation time.  An unmanaged launch resolved those facts at
+    launch and never persisted them, and the pane that could report them is
+    already dead by the time teardown retires the roster — so ``None`` is the
+    truthful "cannot publish here" answer for everything except a managed
+    incarnation, never a fabricated path.
     """
     from cli_agent_orchestrator.clients import database
 
@@ -1388,10 +1426,7 @@ def _teardown_launch_facts(terminal_id: str, generation: Optional[str]) -> Optio
             v2 = v2.filter(database.ManagedLaunchV2ReservationModel.generation == generation)
         v2_row = v2.one_or_none()
         if v2_row is not None:
-            return {
-                "working_directory": v2_row.working_directory,
-                "trusted_project_root": v2_row.trusted_project_root,
-            }
+            return _reservation_launch_facts(v2_row)
         v1 = session.query(database.ManagedLaunchReservationModel).filter(
             database.ManagedLaunchReservationModel.terminal_id == terminal_id
         )
@@ -1399,11 +1434,34 @@ def _teardown_launch_facts(terminal_id: str, generation: Optional[str]) -> Optio
             v1 = v1.filter(database.ManagedLaunchReservationModel.generation == generation)
         v1_row = v1.one_or_none()
         if v1_row is not None:
-            return {
-                "working_directory": v1_row.working_directory,
-                "trusted_project_root": v1_row.trusted_project_root,
-            }
+            return _reservation_launch_facts(v1_row)
     return None
+
+
+def _contract_model_fact(facts: Dict[str, Any]) -> "restore_contract.ContractFact":
+    if facts.get("model"):
+        return restore_contract.ContractFact.present(facts["model"])
+    return restore_contract.ContractFact.unavailable(
+        "the observed/assigned model was not durably recorded at launch"
+    )
+
+
+def _contract_effort_fact(facts: Dict[str, Any]) -> "restore_contract.ContractFact":
+    if facts.get("effort"):
+        return restore_contract.ContractFact.present(facts["effort"])
+    return restore_contract.ContractFact.unavailable(
+        "the observed/assigned effort was not durably recorded at launch"
+    )
+
+
+def _contract_executable_fact(facts: Dict[str, Any]) -> "restore_contract.ContractFact":
+    path = facts.get("provider_executable")
+    digest = facts.get("provider_executable_sha256")
+    if isinstance(path, str) and path and isinstance(digest, str) and digest:
+        return restore_contract.ContractFact.present({"path": path, "sha256": digest})
+    return restore_contract.ContractFact.unavailable(
+        "the exact resolved executable identity was not durably recorded at launch"
+    )
 
 
 def _retire_incarnation_dormant(terminal_id: str, generation: Optional[str]) -> bool:
@@ -1413,13 +1471,17 @@ def _retire_incarnation_dormant(terminal_id: str, generation: Optional[str]) -> 
     seam — no roster incarnation, an identity-pending lineage, an
     incarnation retired before this seam existed (it stays contract-free),
     or no durably recorded launch facts — so the caller degrades to the
-    ordinary contract-free retirement.  Provider facts teardown cannot
-    truthfully supply (model, effort, executable, profile/provider-home
-    material) are recorded as typed ``unavailable`` facts, never inferred;
-    roster facts all come from the authoritative roster rows themselves.
-    Errors propagate to the caller's best-effort wrapper.
+    ordinary contract-free retirement.  Provider facts the reservation row
+    records durably at admission (model, effort, executable identity) are
+    published as present facts; facts teardown cannot truthfully supply
+    (profile/provider-home material) are recorded as typed ``unavailable``
+    facts, never inferred.  A managed row that predates the launch-facts
+    column publishes the model/effort/executable facts as unavailable too,
+    keeping those agents non-resurrectable until re-launched once.  Roster
+    facts all come from the authoritative roster rows themselves.  Errors
+    propagate to the caller's best-effort wrapper.
     """
-    from cli_agent_orchestrator.services import restore_contract, stable_agent_roster
+    from cli_agent_orchestrator.services import stable_agent_roster
 
     incarnation = stable_agent_roster.get_incarnation_by_terminal(terminal_id, generation)
     if incarnation is None:
@@ -1453,17 +1515,11 @@ def _retire_incarnation_dormant(terminal_id: str, generation: Optional[str]) -> 
         provider=(metadata or {}).get("provider"),
         route_provenance=lineage.get("route_provenance"),
         execution_mode=incarnation.get("execution_mode"),
-        model=restore_contract.ContractFact.unavailable(
-            "the observed/assigned model was not durably recorded at launch"
-        ),
-        effort=restore_contract.ContractFact.unavailable(
-            "the observed/assigned effort was not durably recorded at launch"
-        ),
+        model=_contract_model_fact(facts),
+        effort=_contract_effort_fact(facts),
         working_directory=facts["working_directory"],
         trusted_project_root=facts["trusted_project_root"],
-        executable=restore_contract.ContractFact.unavailable(
-            "the exact resolved executable identity was not durably recorded at launch"
-        ),
+        executable=_contract_executable_fact(facts),
         profile_material=restore_contract.ContractFact.unavailable(
             "profile material references were not durably recorded at launch"
         ),

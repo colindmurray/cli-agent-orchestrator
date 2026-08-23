@@ -604,6 +604,12 @@ class ManagedLaunchReservationModel(Base):
     caller_id = Column(Text, nullable=False)
     working_directory = Column(Text, nullable=False)
     trusted_project_root = Column(Text, nullable=True)
+    #: The durable launch facts consumed by the teardown seam into the
+    #: restore contract (model, effort, provider executable path + sha256
+    #: digest), recorded at reservation time.  Additive and nullable: a
+    #: row written before this column existed carries NULL and the teardown
+    #: seam truthfully publishes those facts as ``unavailable``.
+    launch_facts_json = Column(Text, nullable=True)
     state = Column(Text, nullable=False)
     request_json = Column(Text, nullable=False)
     observations_json = Column(Text, nullable=False, default="[]")
@@ -684,6 +690,12 @@ class ManagedLaunchV2ReservationModel(Base):
     # original cause, not the last one to fail.  NULL for any row that
     # never blocked.
     preflight_failure_json = Column(Text, nullable=True)
+    # The durable launch facts consumed by the teardown seam into the
+    # restore contract (model, effort, provider executable path + sha256
+    # digest), recorded at reservation time.  Additive and nullable: a
+    # row written before this column existed carries NULL and the teardown
+    # seam truthfully publishes those facts as ``unavailable``.
+    launch_facts_json = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False)
     updated_at = Column(Text, nullable=False)
 
@@ -4774,6 +4786,7 @@ def _migrate_managed_launch_reservations() -> None:
                 "caller_id TEXT NOT NULL, "
                 "working_directory TEXT NOT NULL, "
                 "trusted_project_root TEXT, "
+                "launch_facts_json TEXT, "
                 "state TEXT NOT NULL, "
                 "request_json TEXT NOT NULL, "
                 "observations_json TEXT NOT NULL DEFAULT '[]', "
@@ -4783,6 +4796,12 @@ def _migrate_managed_launch_reservations() -> None:
                 "created_at TEXT NOT NULL, "
                 "updated_at TEXT NOT NULL"
                 ")"
+            )
+            # Additive launch-facts column on an in-place store: a fresh
+            # database already carries it from the DDL above, an existing
+            # store gains it without touching rows, and a rerun is a no-op.
+            _add_columns_if_missing(
+                conn, "managed_launch_reservations", {"launch_facts_json": "TEXT"}
             )
     except Exception as e:  # noqa: BLE001 - the operation path fails closed
         logger.warning(f"managed-launch migration failed: {e}")
