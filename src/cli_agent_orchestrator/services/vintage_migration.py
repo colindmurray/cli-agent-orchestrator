@@ -62,6 +62,7 @@ _V2_RESERVATIONS_DDL = (
     "execution_mode TEXT, "
     "execution_mode_source TEXT, "
     "preflight_failure_json TEXT, "
+    "launch_facts_json TEXT, "
     "created_at TEXT NOT NULL, "
     "updated_at TEXT NOT NULL"
     ")"
@@ -80,6 +81,7 @@ _V2_RESERVATIONS_ADDITIVE_COLUMNS = (
     ("cleanup_json", "TEXT"),
     ("stable_agent_id", "TEXT"),
     ("task_occurrence_id", "TEXT"),
+    ("launch_facts_json", "TEXT"),
 )
 
 _V2_TERMINALS_DDL = (

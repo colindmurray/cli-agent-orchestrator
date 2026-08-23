@@ -497,6 +497,25 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _launch_facts_payload(request: Any) -> dict[str, Any]:
+    """The durable launch facts a teardown-time restore contract needs.
+
+    Model, effort, and the provider executable path + sha256 digest are all
+    pinned by the conductor at reservation time and re-verified at launch
+    (``_executable_identity``), so the reservation row is the one durable,
+    honest source for them.  Kept together in one JSON column so the teardown
+    seam either reads a complete fact set or truthfully degrades to
+    ``unavailable`` for a row that predates this column — never a partial or
+    inferred set.
+    """
+    return {
+        "model": request["expected_model"],
+        "effort": request["expected_effort"],
+        "provider_executable": request["provider_executable"],
+        "provider_executable_sha256": request["provider_executable_sha256"],
+    }
+
+
 def _parse_json(value: Optional[str], default: Any) -> Any:
     if value is None:
         return default
@@ -769,6 +788,7 @@ def _row_dict(row: Any) -> dict[str, Any]:
         "caller_id": row.caller_id,
         "working_directory": row.working_directory,
         "trusted_project_root": row.trusted_project_root,
+        "launch_facts": _parse_json(getattr(row, "launch_facts_json", None), None),
         "obligation_generation": row.obligation_generation,
         "task_id": row.task_id,
         "run_id": row.run_id,
@@ -1431,6 +1451,7 @@ def reserve(request: ManagedLaunchV2ReserveRequest) -> tuple[dict[str, Any], boo
                 caller_id=request.caller_id,
                 working_directory=request.working_directory,
                 trusted_project_root=request.trusted_project_root,
+                launch_facts_json=_canonical_json(_launch_facts_payload(payload)),
                 obligation_generation=request.obligation_generation,
                 task_id=request.task_id,
                 task_occurrence_id=getattr(request, "task_occurrence_id", None),
