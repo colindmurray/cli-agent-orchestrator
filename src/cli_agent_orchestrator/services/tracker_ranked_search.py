@@ -610,8 +610,7 @@ _DESC_MAX = str(10**20 - 1)
 #: level so the §19.7 mutation proof can drop them and watch a named test
 #: turn red.
 SEMANTIC_FRESHNESS_JOINS = (
-    "JOIN {source} AS s ON s.id = v.source_id\n"
-    "JOIN {fts} AS f ON f.rowid = v.source_id\n"
+    "JOIN {source} AS s ON s.id = v.source_id\n" "JOIN {fts} AS f ON f.rowid = v.source_id\n"
 )
 
 SEMANTIC_FRESHNESS_PREDICATE = (
@@ -876,9 +875,7 @@ def run_semantic_comment_lane(
     ).fetchall():
         key = str(issue_key)
         raw_distance = float(distance)
-        order_score = raw_distance + (
-            SEMANTIC_IMPORTANT_COMMENT_BONUS if int(important) else 0.0
-        )
+        order_score = raw_distance + (SEMANTIC_IMPORTANT_COMMENT_BONUS if int(important) else 0.0)
         best_per_issue.setdefault(key, []).append(
             (
                 order_score,
@@ -1502,7 +1499,9 @@ def search_status() -> Dict[str, Any]:
             vectors = raw.execute(
                 f"SELECT COUNT(*) FROM {tracker_search_schema.SEARCH_VECTORS_TABLE}"
             ).fetchone()[0]
-            active_generation: Dict[str, Any] = {"active_generation": meta["active_vector_generation"]}
+            active_generation: Dict[str, Any] = {
+                "active_generation": meta["active_vector_generation"]
+            }
             if meta["active_vector_generation"]:
                 gen_row = raw.execute(
                     f"SELECT state, model_id, model_revision, dimensions,\n"
