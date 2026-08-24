@@ -2253,18 +2253,20 @@ async def test_muse_store_fallback_refuses_a_footer_that_disagrees_with_the_requ
 
 
 @pytest.mark.asyncio
-async def test_muse_launch_fast_fails_when_the_render_is_never_recognized(
+async def test_muse_launch_resubmits_status_until_the_runway_is_spent_on_an_unrecognized_render(
     isolated_memory_db, worktree, tmp_path, muse_harness, monkeypatch
 ):
-    """Zero recognized rows refuse in seconds, naming version + fingerprint.
+    """A render no known shape ever matches holds the runway, resending /status.
 
-    A build whose screen never matches any known shape must not hold the
-    full cold-start runway: the refusal carries the installed version and
-    the last screen's fingerprint so the operator can act on it instead
-    of watching bind-timeout storms.
+    Muse 0.2.1 silently swallows a ``/status`` submitted during cold start,
+    so a silent pane is not evidence of an incompatible build — discovery
+    resends the literal command until the cold-start runway is spent, and
+    the refusal names exactly what was observed: how many submits were
+    typed, how many captures were read, the installed version, and the
+    last screen's fingerprint.
     """
-    monkeypatch.setattr(v2, "MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr(v2, "NATIVE_PANE_READY_TIMEOUT_SECONDS", 30)
+    monkeypatch.setattr(v2, "MUSE_STATUS_RETYPE_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(v2, "NATIVE_PANE_READY_TIMEOUT_SECONDS", 0.3)
     monkeypatch.setattr(v2, "_NATIVE_PANE_READY_POLL_SECONDS", 0.005)
     muse_harness.captures.append(["Muse Code 0.2.1", "", "⟫ garbage render ⟪", "⟩"])
     started = time.monotonic()
@@ -2272,11 +2274,19 @@ async def test_muse_launch_fast_fails_when_the_render_is_never_recognized(
     elapsed = time.monotonic() - started
     assert result["state"] == "preflight_blocked"
     detail = result["preflight_failure"]["detail"]
-    assert "never produced recognized content" in detail
-    # The installed provider_version the bootstrap recorded, named verbatim.
-    assert "0.1.0" in detail
+    # The full-runway refusal fired after the retries were exhausted, not a
+    # fast-fail: the launch held its whole runway resending the command.
+    assert "never described the claimed pre-task session within 0.3 seconds" in detail
+    assert elapsed >= 0.3
+    # The refusal states what was observed: submits, captures, version, sha.
+    attempts = int(detail.split("status_submit_attempts=")[1].split(",")[0])
+    assert attempts > 1, detail
+    assert "captures=" in detail
+    assert "installed 0.1.0" in detail
     assert "sha256:" in detail
-    assert elapsed < 10
+    # The counted submits are exactly the Enters that were really typed.
+    typed_enters = sum(1 for event in muse_harness.typed if event["kind"] == "enter")
+    assert attempts == typed_enters
 
 
 @pytest.mark.asyncio
@@ -2290,7 +2300,7 @@ async def test_muse_launch_keeps_the_full_runway_for_a_clipped_boxed_panel(
     as unrecognized content would fast-fail a healthy launch mid-render.
     """
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-xdg"))
-    monkeypatch.setattr(v2, "MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(v2, "MUSE_STATUS_RETYPE_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr(v2, "NATIVE_PANE_READY_TIMEOUT_SECONDS", 0.4)
     monkeypatch.setattr(v2, "_NATIVE_PANE_READY_POLL_SECONDS", 0.005)
     full = boxed_status_rows(worktree, PROBE_SESSION_ID)
@@ -2300,10 +2310,13 @@ async def test_muse_launch_keeps_the_full_runway_for_a_clipped_boxed_panel(
     elapsed = time.monotonic() - started
     assert result["state"] == "preflight_blocked"
     detail = result["preflight_failure"]["detail"]
-    # The FULL-runway refusal fired, not the unrecognized fast-fail.
+    # The FULL-runway refusal fired, not an early exhaustion.
     assert "never produced recognized content" not in detail
     assert "never described the claimed pre-task session within 0.4 seconds" in detail
     assert elapsed >= 0.4
+    # The clipped box was panel-shaped on the first capture, so no /status
+    # was ever resent: a second landed panel would stack duplicate evidence.
+    assert "status_submit_attempts=1," in detail
 
 
 @pytest.mark.asyncio
@@ -2313,12 +2326,11 @@ async def test_muse_launch_keeps_the_full_runway_once_content_is_recognized(
     """Recognized-but-incomplete content waits the full bound, then refuses.
 
     The footer alone is recognized content, so the observation holds the
-    whole cold-start runway even though the unrecognized bound has long
-    passed — it is waiting on evidence known to arrive (the panel or a
-    store registration), not on an unrecognizable screen.
+    whole cold-start runway even though nothing panel-shaped has rendered —
+    it is waiting on evidence known to arrive (the panel or a store
+    registration), not on an unrecognizable screen.
     """
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-xdg"))
-    monkeypatch.setattr(v2, "MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(v2, "NATIVE_PANE_READY_TIMEOUT_SECONDS", 0.4)
     monkeypatch.setattr(v2, "_NATIVE_PANE_READY_POLL_SECONDS", 0.005)
     # The footer IS recognized content; nothing else ever renders.
