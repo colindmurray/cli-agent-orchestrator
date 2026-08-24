@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import uuid
 
@@ -38,6 +40,13 @@ _B3_COLUMNS = {
     "result_detail",
     "result_evidence_json",
     "result_at",
+}
+
+#: The additive N-hop launch-facts column (cond-0573 P0-A follow-up 3): a
+#: successor's own durable launch facts, recorded at launch from the restore
+#: contract the executor verified, read at its teardown for the next hop.
+_NHOP_COLUMNS = {
+    "successor_launch_facts_json",
 }
 
 _B3_INDEXES = {
@@ -134,6 +143,7 @@ def test_create_all_carries_the_b3_successor_result_schema(tmp_path):
     conn = sqlite3.connect(str(tmp_path / "meta.db"))
     try:
         assert _B3_COLUMNS <= _b3_columns_present(conn)
+        assert _NHOP_COLUMNS <= _b3_columns_present(conn), "missing N-hop facts column"
         present = set(_index_ddl(conn, "ix_reincarnation_operations_successor%"))
         assert _B3_INDEXES <= present, f"missing B3 indexes: {_B3_INDEXES - present}"
         with engine.begin() as connection:
@@ -206,13 +216,14 @@ def test_migration_adds_b3_columns_idempotently(tmp_path, monkeypatch):
     conn = sqlite3.connect(str(db_path))
     try:
         assert _B3_COLUMNS <= _b3_columns_present(conn)
+        assert _NHOP_COLUMNS <= _b3_columns_present(conn), "missing N-hop facts column"
         present = set(_index_ddl(conn, "ix_reincarnation_operations_successor%"))
         assert _B3_INDEXES <= present
         row = conn.execute(
-            "SELECT successor_terminal_id, result_state FROM reincarnation_operations "
-            "WHERE operation_id = 'legacy-op'"
+            "SELECT successor_terminal_id, result_state, successor_launch_facts_json "
+            "FROM reincarnation_operations WHERE operation_id = 'legacy-op'"
         ).fetchone()
-        assert row == (None, None)
+        assert row == (None, None, None)
     finally:
         conn.close()
 
@@ -261,6 +272,8 @@ def test_migration_adds_b3_columns_idempotently(tmp_path, monkeypatch):
         }
         assert set(raw_cols) == set(orm_cols)
         for column in _B3_COLUMNS:
+            assert raw_cols[column] == orm_cols[column], column
+        for column in _NHOP_COLUMNS:
             assert raw_cols[column] == orm_cols[column], column
         raw_indexes = _index_ddl(raw_conn, "ix_reincarnation_operations_successor%")
         orm_indexes = _index_ddl(orm_conn, "ix_reincarnation_operations_successor%")
@@ -348,5 +361,94 @@ def test_successor_reservation_and_result_survive_restart(tmp_path, monkeypatch)
             request.operation_id, xe.OUTCOME_REFUSED, detail="late refusal", evidence={}
         )
         assert oj.get_operation(request.operation_id)["result_state"] == xe.OUTCOME_ACCEPTED
+    finally:
+        engine2.dispose()
+
+
+def test_successor_launch_facts_record_and_survive_restart(tmp_path, monkeypatch):
+    """The N-hop launch-facts column round-trips through the journal and
+    survives a simulated restart; an unknown operation is a typed NotFound."""
+    db_path = tmp_path / "nhop.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
+
+    agent_id = roster.derive_initial_agent_id("a1b2c3d4", "00000000-0000-4000-8000-000000000001")
+    bind = roster.bind_generation(
+        _worker_binding(agent_id, "a1b2c3d4", "00000000-0000-4000-8000-000000000001")
+    )
+    contract = _contract_for(bind, tmp_path)
+    rc.publish_contract(contract)
+    roster.transition_dormant(
+        terminal_id=contract.terminal_id,
+        generation=contract.generation,
+        agent_id=contract.agent_id,
+        lineage_id=contract.lineage_id,
+        contract_digest=contract.digest(),
+        reason="pane lost",
+    )
+    agent = roster.get_agent(agent_id)
+    request = oj.OperationRequest(
+        operation_id=str(uuid.uuid4()),
+        session_name="cao-campaign-a",
+        agent_id=agent_id,
+        roster_revision=agent["revision"],
+        role=agent["role"],
+        profile_family=agent["profile_family"],
+        lineage_id=bind["lineage"]["lineage_id"],
+        harness="claude_code",
+        native_session_id=bind["lineage"]["native_session_id"],
+        prior_terminal_id=bind["incarnation"]["terminal_id"],
+        prior_generation=bind["incarnation"]["generation"],
+        prior_incarnation_id=bind["incarnation"]["incarnation_id"],
+        lifecycle_epoch=0,
+        lifecycle_observation=sl.WORKING,
+        restore_contract_id=rc.get_contract_by_incarnation(
+            terminal_id=bind["incarnation"]["terminal_id"],
+            generation=bind["incarnation"]["generation"],
+        )["contract_id"],
+        restore_contract_digest=contract.digest(),
+        restore_contract_schema=rc.SCHEMA_VERSION,
+        route_provider="claude_code",
+        model_requested="claude-sonnet-4-5",
+        effort_requested="high",
+        execution_mode_requested="native_tui",
+        compatibility_cell_ref="claude_code:anthropic:native_tui",
+        compatibility_cell_digest="c" * 64,
+    )
+    oj.claim_operation(request)
+    oj.reserve_successor(request.operation_id, "cccc3333", "g-nhop-1")
+
+    facts = {
+        "working_directory": os.path.realpath(str(tmp_path)),
+        "trusted_project_root": None,
+        "model": "claude-sonnet-4-5",
+        "effort": "high",
+        "provider_executable": os.path.realpath(str(tmp_path / "claude")),
+        "provider_executable_sha256": "b" * 64,
+        "provider_executable_version": "muse-spark-1.2-contributor (banner)",
+    }
+    stored = oj.record_successor_launch_facts(request.operation_id, facts)
+    assert stored["operation"]["successor_launch_facts_json"] is not None
+    with database.SessionLocal() as session:
+        row = (
+            session.query(database.ReincarnationOperationModel)
+            .filter(database.ReincarnationOperationModel.operation_id == request.operation_id)
+            .one()
+        )
+        assert json.loads(row.successor_launch_facts_json) == facts
+
+    # A replay writes the same bytes idempotently.
+    oj.record_successor_launch_facts(request.operation_id, facts)
+
+    engine.dispose()
+    engine2 = create_engine(f"sqlite:///{db_path}")
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine2))
+    try:
+        stored = oj.get_operation(request.operation_id)
+        assert json.loads(stored["successor_launch_facts_json"]) == facts
+        # An unknown operation is a typed NotFound, never a silent no-op.
+        with pytest.raises(oj.OperationJournalNotFound):
+            oj.record_successor_launch_facts(str(uuid.uuid4()), facts)
     finally:
         engine2.dispose()

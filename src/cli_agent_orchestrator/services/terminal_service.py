@@ -1417,17 +1417,70 @@ def _reservation_launch_facts(row: Any) -> Dict[str, Any]:
     return facts
 
 
+def _successor_launch_facts(row: Any) -> Optional[Dict[str, Any]]:
+    """The launch facts one exact-executor operation row supplies to a teardown.
+
+    The reincarnation operation that launched a successor records the
+    successor's launch facts durably at launch (``successor_launch_facts_json``,
+    cond-0573 N-hop exact resume), sourced from the restore-contract facts the
+    executor verified.  The stored payload mirrors a reservation row's facts
+    exactly: working directory and trusted project root always, and
+    model/effort/executable identity only when all four are present, with the
+    version banner riding additively.  A row that predates the lane (or a
+    launch that never recorded facts) carries NULL, and ``None`` is the
+    truthful "cannot publish here" answer — the teardown degrades to today's
+    contract-free retirement, never a fabricated or partial fact set.
+    """
+    stored = getattr(row, "successor_launch_facts_json", None)
+    if not stored:
+        return None
+    try:
+        launch_facts = json.loads(stored)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(launch_facts, dict):
+        return None
+    working_directory = launch_facts.get("working_directory")
+    if not isinstance(working_directory, str) or not working_directory:
+        return None
+    trusted_project_root = launch_facts.get("trusted_project_root")
+    if trusted_project_root is not None and not isinstance(trusted_project_root, str):
+        return None
+    facts: Dict[str, Any] = {
+        "working_directory": working_directory,
+        "trusted_project_root": trusted_project_root,
+    }
+    model = launch_facts.get("model")
+    effort = launch_facts.get("effort")
+    executable = launch_facts.get("provider_executable")
+    digest = launch_facts.get("provider_executable_sha256")
+    if all(isinstance(value, str) and value for value in (model, effort, executable, digest)):
+        facts["model"] = model
+        facts["effort"] = effort
+        facts["provider_executable"] = executable
+        facts["provider_executable_sha256"] = digest
+        version = launch_facts.get("provider_executable_version")
+        if isinstance(version, str) and version:
+            facts["provider_executable_version"] = version
+    return facts
+
+
 def _teardown_launch_facts(terminal_id: str, generation: Optional[str]) -> Optional[Dict[str, Any]]:
     """The durable launch facts a teardown-time restore contract needs.
 
-    Only the managed-launch reservations record the canonical working
-    directory and trusted project root durably, and (for rows admitted after
-    the launch-facts column existed) the model/effort/executable identity
-    pinned at reservation time.  An unmanaged launch resolved those facts at
+    The managed-launch reservations record the canonical working directory and
+    trusted project root durably, and (for rows admitted after the launch-facts
+    column existed) the model/effort/executable identity pinned at reservation
+    time.  A successor launched by the exact executor records the same fact set
+    on its reincarnation operation row, so its OWN teardown (one exact-resume
+    hop later) publishes a complete restore contract from exactly the facts its
+    launch used — the N-hop chain.  An unmanaged launch resolved those facts at
     launch and never persisted them, and the pane that could report them is
     already dead by the time teardown retires the roster — so ``None`` is the
     truthful "cannot publish here" answer for everything except a managed
-    incarnation, never a fabricated path.
+    incarnation or a facts-recording successor, never a fabricated path.  The
+    operation-journal source is read AFTER the managed reservations so a
+    managed row always wins exactly as before.
     """
     from cli_agent_orchestrator.clients import database
 
@@ -1448,6 +1501,21 @@ def _teardown_launch_facts(terminal_id: str, generation: Optional[str]) -> Optio
         v1_row = v1.one_or_none()
         if v1_row is not None:
             return _reservation_launch_facts(v1_row)
+        # The exact executor's successor journal: the successor terminal id +
+        # generation this operation reserved are exactly the incarnation being
+        # torn down, and the recorded facts are the ones its launch verified.
+        # NULL successor facts (a pre-lane successor, or a launch that never
+        # recorded) return None -> the same contract-free retirement as today.
+        operation = session.query(database.ReincarnationOperationModel).filter(
+            database.ReincarnationOperationModel.successor_terminal_id == terminal_id
+        )
+        if generation is not None:
+            operation = operation.filter(
+                database.ReincarnationOperationModel.successor_generation == generation
+            )
+        operation_row = operation.one_or_none()
+        if operation_row is not None:
+            return _successor_launch_facts(operation_row)
     return None
 
 
