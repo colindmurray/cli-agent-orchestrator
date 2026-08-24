@@ -124,6 +124,7 @@ class T2Harness:
         self.incidents_dir = self.state_root / CONDUCTOR_STATE_SUBDIR / "fire-marshal" / "incidents"
         self.attested = attested_bin_dir()
         self._stub_backup: Optional[_StubBackup] = None
+        self._stub_backup_was_leftover = False
         self._stub_installed = False
         self._tmux_env_restore: dict[str, Optional[str]] = {}
         # Every fake headless launcher's mktemp'd RUN_DIR is appended here so
@@ -157,6 +158,8 @@ class T2Harness:
             finally:
                 try:
                     self.uninstall_stub()
+                except Exception as error:  # noqa: BLE001 - teardown is best-effort
+                    teardown_error = teardown_error or error
                 finally:
                     try:
                         shutil.rmtree(self.tmux_tmp, ignore_errors=True)
@@ -212,21 +215,32 @@ class T2Harness:
         The pre-existing target (bytes, mode, and symlink-ness) is backed up
         BEFORE the destructive unlink, and the installed flag is set before
         anything is removed, so a mid-write failure still leaves a restorable
-        backup instead of a deleted target nobody can recover."""
+        backup instead of a deleted target nobody can recover.
+
+        A leftover copy of OUR OWN stub (a crashed run that never cleaned up)
+        is NOT backed up: it carries the ``T2_SYNTHLIVE`` guard marker, so it
+        is detected by content and simply removed on teardown, instead of
+        being mistaken for a real pre-existing binary and restored forever."""
         self.attested.mkdir(parents=True, exist_ok=True)
         target = self.stub_bin()
         backup: Optional[_StubBackup] = None
+        self._stub_backup_was_leftover = False
         if target.is_symlink() or target.exists():
             st = target.lstat()
-            backup = _StubBackup(
-                mode=stat.S_IMODE(st.st_mode),
-                is_symlink=stat.S_ISLNK(st.st_mode),
-                link_target=os.readlink(target) if stat.S_ISLNK(st.st_mode) else None,
-                data=None if stat.S_ISLNK(st.st_mode) else target.read_bytes(),
-            )
+            is_symlink = stat.S_ISLNK(st.st_mode)
+            data = None if is_symlink else target.read_bytes()
+            if is_symlink or not _looks_like_leftover_stub(data):
+                backup = _StubBackup(
+                    mode=stat.S_IMODE(st.st_mode),
+                    is_symlink=is_symlink,
+                    link_target=os.readlink(target) if is_symlink else None,
+                    data=data,
+                )
+            else:
+                self._stub_backup_was_leftover = True
         self._stub_backup = backup
         self._stub_installed = True
-        if backup is not None:
+        if backup is not None or self._stub_backup_was_leftover:
             target.unlink()
         from test.e2e.route_observation_canary import fixtures as fx
 
@@ -262,6 +276,7 @@ class T2Harness:
         finally:
             self._stub_installed = False
             self._stub_backup = None
+            self._stub_backup_was_leftover = False
 
     # -- tmux ------------------------------------------------------------------
 
@@ -460,6 +475,21 @@ def _read_file_quietly(path: Path) -> Optional[str]:
 
 def _garbage_rows() -> list[str]:
     return [f"garbage-line-{index:02d}: not-a-codex-status-panel" for index in range(30)]
+
+
+def _looks_like_leftover_stub(data: Optional[bytes]) -> bool:
+    """Whether ``data`` is a leftover copy of our own stub, by content.
+
+    The installed stub always carries the ``T2_SYNTHLIVE`` guard marker and
+    the refusal message; a real pre-existing ``codex`` binary never does.  A
+    leaked stub from a crashed run is therefore recognised (not mistaken for a
+    real binary to back up and restore forever) and simply removed on
+    teardown.  ``None`` (a symlink, or an unreadable target) is never treated
+    as our stub.
+    """
+    if not data:
+        return False
+    return b"T2_SYNTHLIVE" in data and b"refusing to fabricate provider output" in data
 
 
 def _positive_panel_rows(fx) -> list[str]:

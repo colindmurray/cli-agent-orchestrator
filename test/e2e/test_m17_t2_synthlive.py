@@ -422,7 +422,7 @@ class TestPaneDeathMidObservation:
     def test_restart_recovery_on_real_pane_death(
         self, h: th.T2Harness, installed_stub: Path, isolated_memory_db
     ) -> None:
-        # DEATH RUN.  The echo stub with a 1s delayed redraw opens a wide,
+        # DEATH RUN.  The echo stub with a 3.0s delayed redraw opens a wide,
         # deterministic window: the barrier genuinely passes compose-visible
         # (the typed /status echoes) and Enter, then the pane's REAL shell is
         # killed before the delayed redraw clears the composer — so the death,
@@ -456,12 +456,13 @@ class TestPaneDeathMidObservation:
         record = ro.get(request.operation_id)
         assert record["pre_probe_intent_json"] is not None
 
-        # CONTROL RUN.  The SAME echo stub with the SAME delayed redraw, NOT
-        # killed, must reach observed-closed — proving the death-run outcome
-        # differs only because the pane really died (a plain settle timeout
-        # could never produce observed-closed here).
+        # CONTROL RUN.  The same echo stub, NOT killed, must reach
+        # observed-closed — proving the death-run outcome differs only because
+        # the pane really died (a plain settle timeout could never produce
+        # observed-closed here).  A short 1.5s redraw is enough: the barrier's
+        # post-Enter bound is 5.0s, so the redraw lands with ~3.5s slack.
         control_pane = h.new_pane(
-            width=100, height=31, command=f"exec {installed_stub} --redraw-delay 3.0"
+            width=100, height=31, command=f"exec {installed_stub} --redraw-delay 1.5"
         )
         try:
             _wait_capture(h, control_pane)
@@ -513,3 +514,57 @@ class TestConcurrentSecondLauncher:
             assert "Two agents resuming one session interleave" in second.output
         finally:
             h.kill_tmux_server()
+
+
+# ---------------------------------------------------------------------------
+# harness unit checks — stub install must not restore a leaked copy forever
+# ---------------------------------------------------------------------------
+
+
+class TestHarnessStubInstallLifecycle:
+    """Both branches of ``install_stub``'s pre-existing-target handling: a
+    REAL pre-existing binary is backed up and restored exactly; a leftover
+    copy of our own stub (carrying the ``T2_SYNTHLIVE`` guard marker) is
+    recognised by content, never backed up, and simply removed on teardown —
+    so a crashed run's leaked stub cannot become the next run's 'real'
+    binary and be restored forever."""
+
+    def _scratch(self, tmp_path: Path, name: str) -> th.T2Harness:
+        h = th.T2Harness(tmp_path / name)
+        h.attested = tmp_path / f"{name}-attested"
+        h.attested.mkdir(parents=True, exist_ok=True)
+        return h
+
+    def test_real_pre_existing_binary_is_backed_up_and_restored(self, tmp_path: Path) -> None:
+        h = self._scratch(tmp_path, "real")
+        try:
+            real = h.stub_bin()
+            real.write_text("#!/bin/sh\necho real-codex\n", encoding="utf-8")
+            real.chmod(0o755)
+            h.install_stub()
+            assert h._stub_backup is not None
+            assert h._stub_backup_was_leftover is False
+            assert h._stub_backup.data == b"#!/bin/sh\necho real-codex\n"
+            h.uninstall_stub()
+            assert real.read_text(encoding="utf-8") == "#!/bin/sh\necho real-codex\n"
+            assert (real.stat().st_mode & 0o777) == 0o755
+        finally:
+            shutil.rmtree(h.tmux_tmp, ignore_errors=True)
+
+    def test_leftover_stub_is_removed_not_backed_up(self, tmp_path: Path) -> None:
+        h = self._scratch(tmp_path, "leftover")
+        try:
+            leftover = h.stub_bin()
+            leftover.write_text(
+                "#!/usr/bin/env python3\n# T2_SYNTHLIVE=1 stub codex; refusing to "
+                "fabricate provider output\n",
+                encoding="utf-8",
+            )
+            leftover.chmod(0o755)
+            h.install_stub()
+            assert h._stub_backup is None
+            assert h._stub_backup_was_leftover is True
+            h.uninstall_stub()
+            assert not leftover.exists()
+        finally:
+            shutil.rmtree(h.tmux_tmp, ignore_errors=True)
