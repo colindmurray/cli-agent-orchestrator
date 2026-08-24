@@ -427,7 +427,7 @@ class TestPaneDeathMidObservation:
         # (the typed /status echoes) and Enter, then the pane's REAL shell is
         # killed before the delayed redraw clears the composer — so the death,
         # not a settle timeout, is what interrupts the observation.
-        pane = h.new_pane(width=100, height=31, command=f"exec {installed_stub} --redraw-delay 1.0")
+        pane = h.new_pane(width=100, height=31, command=f"exec {installed_stub} --redraw-delay 3.0")
         _wait_capture(h, pane)
         request = _request()
         holder: dict[str, Any] = {}
@@ -461,7 +461,7 @@ class TestPaneDeathMidObservation:
         # differs only because the pane really died (a plain settle timeout
         # could never produce observed-closed here).
         control_pane = h.new_pane(
-            width=100, height=31, command=f"exec {installed_stub} --redraw-delay 1.0"
+            width=100, height=31, command=f"exec {installed_stub} --redraw-delay 3.0"
         )
         try:
             _wait_capture(h, control_pane)

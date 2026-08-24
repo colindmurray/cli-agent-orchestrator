@@ -126,6 +126,10 @@ class T2Harness:
         self._stub_backup: Optional[_StubBackup] = None
         self._stub_installed = False
         self._tmux_env_restore: dict[str, Optional[str]] = {}
+        # Every fake headless launcher's mktemp'd RUN_DIR is appended here so
+        # teardown can remove it (best-effort), instead of leaking
+        # /tmp/t2-launch-* dirs.
+        self._launch_dirs_file = workdir / "launch-dirs.txt"
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -157,10 +161,26 @@ class T2Harness:
                     try:
                         shutil.rmtree(self.tmux_tmp, ignore_errors=True)
                     finally:
-                        self._restore_env()
+                        try:
+                            self._cleanup_launch_dirs()
+                        finally:
+                            self._restore_env()
         finally:
             if exc is None and teardown_error is not None:
                 raise teardown_error
+
+    def _cleanup_launch_dirs(self) -> None:
+        """Best-effort removal of every RUN_DIR the fake headless launchers
+        mktemp'd (``/tmp/t2-launch-*``); never raises."""
+        try:
+            if not self._launch_dirs_file.exists():
+                return
+            for line in self._launch_dirs_file.read_text(encoding="utf-8").splitlines():
+                path = Path(line.strip())
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+        except Exception:  # noqa: BLE001 - teardown is best-effort
+            pass
 
     def _restore_env(self) -> None:
         for key, value in self._tmux_env_restore.items():
@@ -375,6 +395,7 @@ class T2Harness:
             "CHECK_AI_QUOTA_SKILL": str(self.quota_skill),
             "TMUX_TMPDIR": str(self.tmux_tmp),
             T2_SYNTHLIVE: T2_SYNTHLIVE_VALUE,
+            "T2_LAUNCH_DIRS_FILE": str(self._launch_dirs_file),
         }
 
     def launch_marshal(
@@ -460,6 +481,9 @@ def _codex_headless_stub(stub_bin: Path) -> str:
     single-root holder see a real process with a real start marker."""
     return f"""#!/bin/sh
 RD=$(mktemp -d "${{TMPDIR:-/tmp}}/t2-launch-XXXXXX")
+# Record the RUN_DIR so the harness teardown can remove it (best-effort);
+# appending to /dev/null is the no-op when the tracking file is unset.
+printf '%s\\n' "$RD" >> "${{T2_LAUNCH_DIRS_FILE:-/dev/null}}"
 SESS=$(tmux new-session -d -P -F '#{{session_name}}' -s "fm-$$" -x 100 -y 31 "exec {stub_bin}" 2>/dev/null)
 PANE_ID=$(tmux display -p -t "$SESS:.0" '#{{pane_id}}' 2>/dev/null)
 PID=$(tmux display -p -t "$PANE_ID" '#{{pane_pid}}' 2>/dev/null)
