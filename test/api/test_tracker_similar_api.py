@@ -170,3 +170,34 @@ class TestRefusalsAndReadPosture:
         assert response.status_code == 200
         assert _keys(response) == [filed["key"]]
         assert client.get(f"/tracker/issues/{filed['key']}").json() == before
+
+
+class TestNonGating:
+    def test_similarity_failure_cannot_block_issue_creation(self, client, project, monkeypatch):
+        """NON-GATING proof (cond-0645): the create path must not depend on
+        the similar-issue service. With the service wired to explode on any
+        call — a raw runtime bomb here, and typed refusals in the sibling
+        cases — filing an issue still succeeds untouched."""
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("similarity service is on fire")
+
+        monkeypatch.setattr(similar, "find_similar_issues", explode)
+
+        filed = _issue(client, title="deploy pipeline bounces")
+        assert filed["key"].startswith("cond-")
+
+        # The probe surface itself reports the explosion instead of lying.
+        with pytest.raises(RuntimeError, match="similarity service is on fire"):
+            _similar(client, draft={"title": "deploy pipeline bounces"}, all_projects=True)
+
+    @pytest.mark.parametrize("code", ["invalid", "not-found", "invalid-query"])
+    def test_typed_similarity_refusals_never_touch_the_create_path(
+        self, client, project, monkeypatch, code
+    ):
+        def refuse(*args, **kwargs):
+            raise tracker.TrackerError(code, f"similarity refused: {code}")
+
+        monkeypatch.setattr(similar, "find_similar_issues", refuse)
+        filed = _issue(client, title="deploy pipeline bounces")
+        assert filed["key"].startswith("cond-")
