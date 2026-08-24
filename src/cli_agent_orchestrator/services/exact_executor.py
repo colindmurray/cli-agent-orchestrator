@@ -2016,10 +2016,16 @@ def _successor_launch_facts(
     directory and trusted project root, the effective model/effort it pinned
     on the resume argv, the exact executable path + sha256 the contract
     carries, and the effective provider version banner.  Never re-probed,
-    never ambient, never inferred from argv/env — a fact the source contract
-    did not carry is recorded as its absence (``None``), so a successor whose
-    source predates a fact keeps publishing the same typed ``unavailable`` the
-    source would have, and the next hop refuses fail-closed exactly as today.
+    never ambient, never inferred from argv/env.
+
+    A successor whose source contract LACKED the executable fact is not a
+    reachable state here: ``_fact_refusal`` refuses such a contract (a
+    pre-P0-A chain) before any successor is created, so this helper only ever
+    runs with the executable fact present.  The ``None`` branches below exist
+    for reader-side degradation only — a journal row that predates this lane,
+    or an operation that never launched a successor, carries NULL, and the
+    teardown seam degrades exactly those rows to today's contract-free
+    retirement, never a fabricated or partial fact set.
     """
     executable = (
         dict(contract.executable.value)

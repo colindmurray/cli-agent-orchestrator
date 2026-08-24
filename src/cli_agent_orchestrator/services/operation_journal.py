@@ -1710,16 +1710,31 @@ def _record_successor_launch_facts_once(
 ) -> dict[str, Any]:
     """One successor launch-facts pass inside the caller's transaction.
 
-    The write is a plain overwrite of the nullable column — the facts are
-    deterministic for one operation (the same restore contract and request
-    produce the same payload), so an exact replay and a concurrent duplicate
-    write the same bytes and nothing is ever hidden.  A final result does not
-    gate this: the executor records the facts before binding, and a duplicate
-    that lands after a concurrent bind overwrites with the identical payload.
+    Before a final result the write is a plain overwrite of the nullable
+    column — the facts are deterministic for one operation (the same restore
+    contract and request produce the same payload), so an exact replay and a
+    concurrent duplicate write the same bytes and nothing is ever hidden.
+    Once the operation reached a final result with a payload already stored,
+    the write turns adopt-or-conflict: an identical payload is adopted
+    idempotently, and a DIFFERENT payload is a typed conflict, never an
+    overwrite — the executor records the facts before binding, so a stored
+    payload under a final result is the fact set the bound successor actually
+    launched with, and the version banner (derived from caller-supplied
+    launch material, not covered by the request digest) must never drift
+    under an already-finished operation.
     """
     row = _operation_by_id(db, operation_id)
     if row is None:
         raise OperationJournalNotFound(f"unknown operation: {operation_id}")
+    if row.result_state in RESULT_FINAL_STATES and row.successor_launch_facts_json is not None:
+        if row.successor_launch_facts_json == facts_json:
+            return {"operation": _operation_row_dict(row), "adopted": True}
+        raise OperationJournalConflict(
+            f"operation {operation_id} already has the final result "
+            f"{row.result_state!r} with successor launch facts recorded; a "
+            "finished operation's recorded launch facts never change — adopt "
+            "the durable payload"
+        )
     row.successor_launch_facts_json = facts_json
     row.updated_at = _now()
     db.flush()
@@ -1738,10 +1753,14 @@ def record_successor_launch_facts(
     root, model, effort, executable path + sha256, and the version banner when
     one was durably established) — so a successor's own teardown can publish a
     complete restore contract for the next exact-resume hop.  Never re-probed,
-    never ambient: the caller supplies exactly what it launched with.  An
-    absent fact is recorded as its absence (``None`` / omitted), so a successor
-    whose source predates the fact keeps publishing typed ``unavailable``.
-    ``db`` and race semantics follow ``claim_operation``.
+    never ambient: the caller supplies exactly what it launched with.  A
+    successor whose source contract lacked the executable fact is NOT a
+    reachable state — the executor's fact gate refuses such a contract before
+    any successor is created — so a NULL or partial payload here is
+    reader-side degradation only (a pre-lane row, or an operation that never
+    launched a successor), and the teardown seam keeps degrading it to today's
+    contract-free retirement.  ``db`` and race semantics follow
+    ``claim_operation``.
     """
     _require_text(operation_id, field="operation_id", max_len=MAX_AGENT_ID_LEN)
     if not isinstance(facts, dict):

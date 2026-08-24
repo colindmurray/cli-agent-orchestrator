@@ -16,11 +16,12 @@ What is proven here:
   retire -> exact-resume successor A -> retire A -> A's teardown publishes
   COMPLETE facts -> exact-resume successor B accepted, and B's launch
   consumes A's facts.  Two hops past the original, indefinitely repeatable.
-- **Back-compat negative**: a successor whose recorded facts truthfully
-  record absence (its source predated the fact) publishes teardown
-  typed-unavailable IDENTICAL to today's managed pre-P0-A output — the exact
-  refusal strings are pinned, and the next hop stays refused fail-closed with
-  no crash and no partial acceptance.
+- **Back-compat negative**: a journal row whose stored facts record absence
+  (constructed directly — the executor's fact gate refuses a pre-P0-A source
+  contract before any successor is created, so this state is reader-side
+  degradation only) publishes teardown typed-unavailable IDENTICAL to today's
+  managed pre-P0-A output — the exact refusal strings are pinned, and the
+  next hop stays refused fail-closed with no crash and no partial acceptance.
 - **One-hop unchanged**: a managed reservation row always wins over the
   operation-journal source, so every existing managed teardown behaves
   identically; order of checks preserved.
@@ -440,21 +441,25 @@ def test_two_hops_past_a_managed_original_publish_complete_facts(
 def test_successor_recording_absence_publishes_identical_typed_unavailable(
     isolated_memory_db, launch_root
 ):
-    """A successor whose recorded facts truthfully record absence — its source
-    predated P0-A, so the executor had no executable fact to record — publishes
-    a contract whose model/effort/executable are typed unavailable with the
-    EXACT same reason strings a managed pre-P0-A reservation produces today,
-    and the exact-resume gate refuses it fail-closed with no partial
-    acceptance.  The successor never invents facts."""
+    """A journal row whose stored facts record absence — model/effort/
+    executable all None, as a pre-P0-A-sourced successor WOULD record if one
+    could exist — publishes a contract whose model/effort/executable are
+    typed unavailable with the EXACT same reason strings a managed pre-P0-A
+    reservation produces today, and the exact-resume gate refuses it
+    fail-closed with no partial acceptance.  The row is constructed directly:
+    the executor's fact gate refuses a contract lacking the executable fact
+    before any successor is created, so this state is reader-side degradation
+    only — and the teardown never invents facts for it."""
     # The successor terminal/generation the operation reserved.
     a_terminal = "cccc1111"
     a_generation = "00000000-0000-4000-8000-000000000099"
     agent_id = str(uuid.uuid4())
 
     # The successor's operation row, recording ABSENCE: working directory and
-    # trusted root present, model/effort/executable absent because the source
-    # contract predated those facts.  This is exactly what the executor writes
-    # for a successor whose prior contract lacked the facts.
+    # trusted root present, model/effort/executable absent.  Inserted directly
+    # because the executor never reaches this state (its fact gate refuses a
+    # pre-P0-A source contract before successor creation); the teardown's
+    # handling of such a payload is the reader-side degradation pinned here.
     _insert_successor_operation(
         a_terminal,
         a_generation,

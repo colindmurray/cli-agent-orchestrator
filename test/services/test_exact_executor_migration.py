@@ -452,3 +452,105 @@ def test_successor_launch_facts_record_and_survive_restart(tmp_path, monkeypatch
             oj.record_successor_launch_facts(str(uuid.uuid4()), facts)
     finally:
         engine2.dispose()
+
+
+def test_successor_launch_facts_adopt_or_conflict_after_final(tmp_path, monkeypatch):
+    """The launch-facts write is adopt-or-conflict once the operation reached
+    a final result with a payload already stored: an identical re-record
+    adopts idempotently, and a drifted provider_executable_version (the one
+    field derived from caller-supplied launch material, not covered by the
+    request digest) is a typed conflict that leaves the stored payload
+    unchanged.  Before-final overwrite behavior is unchanged."""
+    db_path = tmp_path / "nhop-final.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
+
+    agent_id = roster.derive_initial_agent_id("a1b2c3d4", "00000000-0000-4000-8000-000000000001")
+    bind = roster.bind_generation(
+        _worker_binding(agent_id, "a1b2c3d4", "00000000-0000-4000-8000-000000000001")
+    )
+    contract = _contract_for(bind, tmp_path)
+    rc.publish_contract(contract)
+    roster.transition_dormant(
+        terminal_id=contract.terminal_id,
+        generation=contract.generation,
+        agent_id=contract.agent_id,
+        lineage_id=contract.lineage_id,
+        contract_digest=contract.digest(),
+        reason="pane lost",
+    )
+    agent = roster.get_agent(agent_id)
+    request = oj.OperationRequest(
+        operation_id=str(uuid.uuid4()),
+        session_name="cao-campaign-a",
+        agent_id=agent_id,
+        roster_revision=agent["revision"],
+        role=agent["role"],
+        profile_family=agent["profile_family"],
+        lineage_id=bind["lineage"]["lineage_id"],
+        harness="claude_code",
+        native_session_id=bind["lineage"]["native_session_id"],
+        prior_terminal_id=bind["incarnation"]["terminal_id"],
+        prior_generation=bind["incarnation"]["generation"],
+        prior_incarnation_id=bind["incarnation"]["incarnation_id"],
+        lifecycle_epoch=0,
+        lifecycle_observation=sl.WORKING,
+        restore_contract_id=rc.get_contract_by_incarnation(
+            terminal_id=bind["incarnation"]["terminal_id"],
+            generation=bind["incarnation"]["generation"],
+        )["contract_id"],
+        restore_contract_digest=contract.digest(),
+        restore_contract_schema=rc.SCHEMA_VERSION,
+        route_provider="claude_code",
+        model_requested="claude-sonnet-4-5",
+        effort_requested="high",
+        execution_mode_requested="native_tui",
+        compatibility_cell_ref="claude_code:anthropic:native_tui",
+        compatibility_cell_digest="c" * 64,
+    )
+    oj.claim_operation(request)
+    oj.reserve_successor(request.operation_id, "cccc3333", "g-nhop-final")
+
+    facts = {
+        "working_directory": os.path.realpath(str(tmp_path)),
+        "trusted_project_root": None,
+        "model": "claude-sonnet-4-5",
+        "effort": "high",
+        "provider_executable": os.path.realpath(str(tmp_path / "claude")),
+        "provider_executable_sha256": "b" * 64,
+        "provider_executable_version": "muse-spark-1.2-contributor (banner)",
+    }
+
+    # Before a final result the write stays a plain overwrite: a corrected
+    # payload replaces the earlier one.
+    oj.record_successor_launch_facts(
+        request.operation_id, dict(facts, provider_executable_version="banner-superseded")
+    )
+    oj.record_successor_launch_facts(request.operation_id, facts)
+    stored = oj.get_operation(request.operation_id)
+    assert json.loads(stored["successor_launch_facts_json"]) == facts
+
+    # Drive the operation to a final result.
+    oj.record_result(
+        request.operation_id,
+        xe.OUTCOME_ACCEPTED,
+        detail="final probe",
+        evidence={"successor_incarnation_id": "i1"},
+        successor_incarnation_id=str(uuid.uuid4()),
+    )
+
+    # An identical re-record after final adopts idempotently.
+    adopted = oj.record_successor_launch_facts(request.operation_id, facts)
+    assert adopted["adopted"] is True
+    assert json.loads(adopted["operation"]["successor_launch_facts_json"]) == facts
+
+    # A drifted banner after final is a typed conflict, never an overwrite.
+    with pytest.raises(oj.OperationJournalConflict):
+        oj.record_successor_launch_facts(
+            request.operation_id,
+            dict(facts, provider_executable_version="muse-spark-9.9-drifted (banner)"),
+        )
+    stored = oj.get_operation(request.operation_id)
+    assert stored["result_state"] == xe.OUTCOME_ACCEPTED
+    assert json.loads(stored["successor_launch_facts_json"]) == facts
