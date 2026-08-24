@@ -420,6 +420,46 @@ def test_status_parser_accepts_the_coordinator_canary_panel():
     assert required["idle"] is True
 
 
+def test_the_panel_tilde_abbreviation_is_not_a_cwd_mismatch(tmp_path):
+    """Muse abbreviates the home directory to ``~``; the claim does not.
+
+    Live-proven on the installed build (cond-0713): the pane rendered
+    ``~/Projects/cao-smoke`` while the bound claim was
+    ``/Users/colin/Projects/cao-smoke``, so an exact-string comparison
+    refused the one panel that proved everything else. The comparison
+    must expand both sides.
+    """
+    session_id = _uuid()
+    home = tmp_path / "home"
+    home.mkdir()
+    worktree = home / "Projects" / "cao-smoke"
+    worktree.mkdir(parents=True)
+    monkey_home = str(home)
+    import os as _os
+
+    original = _os.environ.get("HOME")
+    _os.environ["HOME"] = monkey_home
+    try:
+        parsed = muse_native_status.parse_status_panel(
+            status_panel_rows(None, session_id, directory="~/Projects/cao-smoke")
+        )
+        assert parsed["directory"] == "~/Projects/cao-smoke"
+        required = muse_native_status.require_pre_task_status(
+            parsed,
+            session_id=session_id,
+            expected_model=MUSE_MODEL,
+            expected_effort=MUSE_EFFORT,
+            working_directory=str(worktree),
+            expected_profile_identity="native-basic",
+        )
+    finally:
+        if original is None:
+            _os.environ.pop("HOME", None)
+        else:
+            _os.environ["HOME"] = original
+    assert required["directory_matches"] is True
+
+
 def test_status_parser_splits_the_combined_model_reasoning_line():
     """The installed meta panel renders effort inside the Model line."""
     session_id = _uuid()

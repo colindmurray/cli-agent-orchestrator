@@ -47,6 +47,7 @@ admitted on it.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Mapping, Optional, Sequence
 
@@ -636,7 +637,16 @@ def require_pre_task_status(
         mismatches.append(f"provider: the panel names {observed_provider!r}, not 'meta'")
 
     observed_directory = str(parsed.get("directory") or "")
-    directory_matches = observed_directory == working_directory
+    # The panel renders the workspace the way muse names it, which
+    # abbreviates the home directory to ``~`` (live-proven: the pane shows
+    # ``~/Projects/cao-smoke`` while the bound claim is the absolute path).
+    # Compare expanded paths; the rendered abbreviation is not a mismatch.
+    directory_matches = (
+        observed_directory == working_directory
+        or os.path.expanduser(observed_directory) == working_directory
+        or observed_directory == os.path.expanduser(working_directory)
+        or os.path.expanduser(observed_directory) == os.path.expanduser(working_directory)
+    )
     if not directory_matches:
         mismatches.append(
             f"cwd: the panel names {observed_directory!r}, not the bound " f"{working_directory!r}"
