@@ -68,6 +68,13 @@ DEFAULT_PROVIDER = ProviderType.KIRO_CLI.value
 # Higher values provide more context but increase memory usage
 TMUX_HISTORY_LINES = 200
 
+# Forced UTF-8 locale for provider panes (cond-0713)
+# Bisection proved: launchd strips LANG/LC_CTYPE → Muse 0.2.1 renders ASCII
+# fallback chrome (no │ borders) → boxed-panel parser starves (footer-only).
+# Single source of truth for the forced value; drift risk noted here rather
+# than via three independent literals. P3-1: was triplicated _FORCED_LOCALE.
+FORCED_LOCALE = "en_US.UTF-8"
+
 # =============================================================================
 # Application Directory Structure
 # =============================================================================

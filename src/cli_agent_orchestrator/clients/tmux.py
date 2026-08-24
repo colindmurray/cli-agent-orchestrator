@@ -12,7 +12,11 @@ from typing import Dict, List, Optional
 
 import libtmux
 
-from cli_agent_orchestrator.constants import TMUX_HISTORY_LINES
+from cli_agent_orchestrator.constants import FORCED_LOCALE, TMUX_HISTORY_LINES
+
+# Backward-compat alias for tests referencing the old local name; canonical
+# source is constants.FORCED_LOCALE (P3-1 single-source drift guard).
+_FORCED_LOCALE = FORCED_LOCALE
 from cli_agent_orchestrator.services.control_input_contract import (
     SEQUENCE_KEY_NAMES,
     contains_bracketed_paste_sentinel,
@@ -75,6 +79,15 @@ _TMUX_SEQUENCE_KEY_NAMES = {
 assert set(_TMUX_SEQUENCE_KEY_NAMES) == set(SEQUENCE_KEY_NAMES)
 
 _TMUX_BINARY: Optional[str] = None
+
+# Forced UTF-8 locale so Muse (and other TUIs) never fall back to ASCII
+# box-drawing when cao-server runs under launchd with a stripped env.
+# The bisection in cond-0713 proved: launchd no LANG → Muse renders footer-only
+# (no │ borders) → boxed-panel parser starves. Forcing here at the final
+# tmux -e construction seam guarantees every tmux pane inherits UTF-8 regardless
+# of host env or tmux global/session inheritance (herdr path also forced via
+# HerdrBackend._inject_env_vars).
+# Canonical value lives in constants.FORCED_LOCALE; see alias above.
 
 # Immutable pane facts, tab-separated.  The two variable-content fields
 # (session and window name) come last so a tab inside a foreign window's
@@ -416,6 +429,26 @@ class TmuxClient:
             environment[key] = value
 
     @classmethod
+    def _ensure_utf8_locale(cls, env: Dict[str, str]) -> None:
+        """Force UTF-8 locale into the child pane env at creation time.
+
+        Muse 0.2.1 renders ASCII fallback chrome (no │ borders) when
+        LANG/LC_CTYPE is absent — which happens when cao-server runs under
+        launchd with a stripped env — causing the boxed-panel parser to
+        starve. Forcing here at the final tmux -e construction seam
+        guarantees every tmux pane inherits UTF-8 regardless of host env or
+        tmux global/session inheritance (herdr path also forced via
+        HerdrBackend._inject_env_vars). LC_ALL overrides LANG/LC_CTYPE,
+        so it is removed — LANG then controls. Popping LC_ALL so LANG
+        controls; still UTF-8 so Muse renders, collation shift documented
+        (P2-3). If host carried ja_JP.UTF-8 in LC_ALL, forcing en_US.UTF-8
+        changes collation but preserves UTF-8 rendering — intentional.
+        """
+        env["LANG"] = FORCED_LOCALE
+        env["LC_CTYPE"] = FORCED_LOCALE
+        env.pop("LC_ALL", None)
+
+    @classmethod
     def _filtered_child_environment(
         cls,
         extra_env: Optional[Dict[str, str]] = None,
@@ -460,6 +493,7 @@ class TmuxClient:
         cls._merge_extra_env(environment, extra_env)
         if terminal_id is not None:
             environment["CAO_TERMINAL_ID"] = terminal_id
+        cls._ensure_utf8_locale(environment)
         return environment
 
     def create_session(
@@ -528,6 +562,7 @@ class TmuxClient:
             window_env: dict[str, str] = {}
             self._merge_extra_env(window_env, extra_env)
             window_env["CAO_TERMINAL_ID"] = terminal_id
+            self._ensure_utf8_locale(window_env)
 
             kwargs: dict = {
                 "window_name": window_name,
@@ -574,6 +609,7 @@ class TmuxClient:
         window_env: dict[str, str] = {}
         self._merge_extra_env(window_env, extra_env)
         window_env["CAO_TERMINAL_ID"] = terminal_id
+        self._ensure_utf8_locale(window_env)
         cmd = [tmux_binary(), "new-window", "-d", "-n", window_name, "-c", working_directory]
         for key, value in window_env.items():
             cmd += ["-e", f"{key}={value}"]

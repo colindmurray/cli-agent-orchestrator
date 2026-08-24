@@ -32,7 +32,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from cli_agent_orchestrator.constants import CAO_HOME_DIR, SECURITY_PROMPT
+from cli_agent_orchestrator.constants import CAO_HOME_DIR, FORCED_LOCALE, SECURITY_PROMPT
+
+# Backward-compat alias; canonical is constants.FORCED_LOCALE (P3-1).
+_FORCED_LOCALE = FORCED_LOCALE
 from cli_agent_orchestrator.providers.codex import (
     _toml_override,
     _toml_scalar,
@@ -129,6 +132,28 @@ LAUNCH_FAILURE_SCHEMA = "cao-managed-bridge-launch-failure-v1"
 LAUNCH_FAILURE_DIGEST_DOMAIN = "cao-managed-bridge-launch-failure-evidence-v1"
 _BOUND_PROVIDER_ENV: Optional[dict[str, str]] = None
 
+# Forced UTF-8 locale — same bisection-proven guarantee as TmuxClient.
+# Muse 0.2.1 renders ASCII fallback without LANG/LC_CTYPE; launchd has
+# none, so every provider child must be forced here regardless of host.
+# Canonical value lives in constants.FORCED_LOCALE; alias above for compat.
+
+
+def _ensure_locale_env(env: dict[str, str]) -> None:
+    """Force UTF-8 locale into the provider child env at creation time.
+
+    Mirrors TmuxClient._ensure_utf8_locale at the provider-env seam so
+    the guarantee holds even if the tmux seam is bypassed (e.g. direct
+    subprocess --version probe, bootstrap). LC_ALL is removed so LANG
+    controls — it overrides everything otherwise. Popping LC_ALL so LANG
+    controls; still UTF-8 so Muse renders, collation shift documented
+    (P2-3) — forcing en_US.UTF-8 even if host had ja_JP.UTF-8.
+    """
+
+    env["LANG"] = FORCED_LOCALE
+    env["LC_CTYPE"] = FORCED_LOCALE
+    env.pop("LC_ALL", None)
+
+
 # Variables that must never steer a managed provider from the ambient
 # environment: quota bypass, conductor control, and route control. Route
 # identity (model/effort/config home) comes ONLY from the reservation request.
@@ -208,6 +233,8 @@ def _provider_bound_environments(
             # added explicitly by the provider adapter.
             if name not in _PROTECTED_ENV_EXACT:
                 provider_env[name] = value
+    _ensure_locale_env(bridge_env)
+    _ensure_locale_env(provider_env)
     inventory = _environment_inventory(provider, list(provider_env))
     return bridge_env, provider_env, inventory
 
@@ -230,6 +257,7 @@ def _provider_env(overrides: Optional[dict[str, str]] = None) -> dict[str, str]:
     else:
         env = dict(_BOUND_PROVIDER_ENV)
     env.update(overrides or {})
+    _ensure_locale_env(env)
     return env
 
 
@@ -313,6 +341,7 @@ def _provider_child_environment(
         for name, value in verified.items():
             if name.startswith("CAO_CONDUCTOR_") or name == "ZDOTDIR":
                 env[name] = value
+        _ensure_locale_env(env)
         return env
     if request.get("provider_route", "anthropic") == deepseek_acp_route.PROVIDER_ROUTE_DEEPSEEK:
         # The DeepSeek ACP child gets the bounded conductor route environment
@@ -344,6 +373,7 @@ def _provider_child_environment(
         env["CAO_CONDUCTOR_SHIM_DIR"] = shim_dir
         env["CAO_CONDUCTOR_REAL_CLAUDE"] = envelope["inner_executable"]
         env.update(_provider_route_environment(request))
+        _ensure_locale_env(env)
         return env
     return _provider_env(_provider_route_environment(request))
 
