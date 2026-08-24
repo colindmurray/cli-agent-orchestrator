@@ -185,6 +185,33 @@ class TestCandidateSemantics:
         assert terminal_bug["key"] in keys
         assert outside["key"] in keys
 
+    def test_limit_one_still_returns_the_near_duplicate_when_self_ranks_first(self):
+        tracker.create_project(name="CAO System", project_id="cao-system", issue_prefix="cond")
+        # The near-duplicate is created first, so the source's later
+        # updated_at wins the shared score tie: the source is its own top
+        # hit and the near-duplicate sits at rank two.
+        near_dup = tracker.create_issue(
+            project_id="cao-system",
+            key="cond-0001",
+            title="deploy pipeline bounces on dry run during rollback",
+            force=True,
+        )
+        source = tracker.create_issue(
+            project_id="cao-system",
+            key="cond-0002",
+            title="deploy pipeline bounces on dry run",
+            force=True,
+        )
+        payload = similar.find_similar_issues(
+            similar.SimilarIssuesRequest(
+                issue_key=source["key"],
+                project_ids=("cao-system",),
+                limit=1,
+            )
+        )
+        assert payload["limit"] == 1
+        assert _keys(payload) == [near_dup["key"]]
+
     def test_unknown_issue_key_is_a_typed_not_found(self):
         with pytest.raises(tracker.TrackerError) as excinfo:
             similar.find_similar_issues(

@@ -185,6 +185,12 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
         effective_kind = str(fields.get("kind") or DEFAULT_DRAFT_KIND)
 
     query_text = _compose_query(fields)
+    # Self-exclusion runs after retrieval, so issue-key mode fetches one
+    # extra candidate: when the source itself ranks within ``limit``, a
+    # near-duplicate just outside it still survives exclusion.
+    fetch_limit = (
+        min(request.limit + 1, ranked.MAX_LIMIT) if source_key else request.limit
+    )
     response = ranked.ranked_search(
         ranked.RankedSearchRequest(
             query=query_text,
@@ -192,7 +198,7 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
             all_projects=request.all_projects,
             kinds=(effective_kind,),
             include_comments=request.include_comments,
-            limit=request.limit,
+            limit=fetch_limit,
         )
     )
 
@@ -202,6 +208,8 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
         if source_key and str(issue.get("key", "")).casefold() == source_key.casefold():
             continue
         candidates.append(result)
+    if source_key:
+        candidates = candidates[: request.limit]
 
     hit_keys = [
         str((candidate.get("issue") or {}).get("key"))
