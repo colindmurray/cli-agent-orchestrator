@@ -1071,6 +1071,15 @@ class ReincarnationOperationModel(Base):
     #: values.
     result_evidence_json = Column(Text, nullable=True)
     result_at = Column(Text, nullable=True)
+    #: The durable launch facts of the successor this operation launched
+    #: (cond-0573 P0-A follow-up 3, N-hop exact resume).  Canonical JSON
+    #: recorded at launch from the restore-contract facts the executor
+    #: verified — the same fields a managed reservation row pins — so a
+    #: successor's own teardown can publish a complete restore contract for
+    #: the next hop.  Nullable: an operation that never launched a successor
+    #: (refused pre-effect), or that predates this lane, carries none, and a
+    #: successor's teardown degrades to today's contract-free retirement.
+    successor_launch_facts_json = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False)
     updated_at = Column(Text, nullable=False)
 
@@ -3773,6 +3782,10 @@ def _migrate_operation_journal() -> None:
                     "result_detail": "TEXT",
                     "result_evidence_json": "TEXT",
                     "result_at": "TEXT",
+                    # N-hop exact resume (cond-0573 P0-A follow-up 3): the
+                    # successor's own durable launch facts, recorded at launch
+                    # from the restore contract the executor verified.
+                    "successor_launch_facts_json": "TEXT",
                 },
             )
             # One successor terminal id / generation per store; SQLite

@@ -1652,6 +1652,24 @@ async def _execute_locked(
     window = managed_window_name(successor_terminal_id, successor_generation)
     execution.evidence["successor_window"] = window
 
+    # 4b. Durable successor launch facts, from the verified contract.  The
+    #      successor's OWN teardown reads these from this operation row (the
+    #      journal is the successor's persistence: same terminal id +
+    #      generation the reservation wrote), so the next exact-resume hop
+    #      launches from exactly the facts THIS launch used.  Recorded before
+    #      any physical effect and deterministically idempotent (same
+    #      contract, same request -> same payload), so a replay re-writes the
+    #      same bytes.  A store refusal is a retryable typed refusal — the
+    #      successor is never launched with its resume facts unrecorded.
+    try:
+        operation_journal.record_successor_launch_facts(
+            request.operation_id, _successor_launch_facts(execution, contract)
+        )
+    except operation_journal.OperationJournalError as exc:
+        refusal = _classify_journal_conflict(execution, exc)
+        execution.record_refused(str(refusal))
+        raise refusal from exc
+
     # 5. fence_prior — establish the retired prior incarnation is the exact
     #    fenced source (the seam re-verifies it on every intent).
     try:
@@ -1986,6 +2004,44 @@ async def _await_concurrent_launch_owner(
         if remaining <= 0:
             return False
         await asyncio.sleep(min(native_tui_launch.INNER_EXEC_CONVERGENCE_POLL_SECONDS, remaining))
+
+
+def _successor_launch_facts(
+    execution: _Execution, contract: restore_contract.RestoreContract
+) -> dict[str, Any]:
+    """The successor's durable launch facts, from the verified contract.
+
+    Everything a teardown-time restore contract needs is taken from the facts
+    the executor already verified for THIS launch: the contract's working
+    directory and trusted project root, the effective model/effort it pinned
+    on the resume argv, the exact executable path + sha256 the contract
+    carries, and the effective provider version banner.  Never re-probed,
+    never ambient, never inferred from argv/env.
+
+    A successor whose source contract LACKED the executable fact is not a
+    reachable state here: ``_fact_refusal`` refuses such a contract (a
+    pre-P0-A chain) before any successor is created, so this helper only ever
+    runs with the executable fact present.  The ``None`` branches below exist
+    for reader-side degradation only — a journal row that predates this lane,
+    or an operation that never launched a successor, carries NULL, and the
+    teardown seam degrades exactly those rows to today's contract-free
+    retirement, never a fabricated or partial fact set.
+    """
+    executable = (
+        dict(contract.executable.value)
+        if contract.executable.state == restore_contract.FACT_PRESENT
+        and isinstance(contract.executable.value, Mapping)
+        else {}
+    )
+    return {
+        "working_directory": contract.working_directory,
+        "trusted_project_root": contract.trusted_project_root,
+        "model": execution.effective_model,
+        "effort": execution.effective_effort,
+        "provider_executable": executable.get("path"),
+        "provider_executable_sha256": executable.get("sha256"),
+        "provider_executable_version": execution.effective_provider_version,
+    }
 
 
 async def _launch_successor(

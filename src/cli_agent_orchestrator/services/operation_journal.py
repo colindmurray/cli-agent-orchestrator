@@ -641,6 +641,8 @@ def _operation_row_dict(row: Any) -> dict[str, Any]:
         "result_evidence": _parse_json(row.result_evidence_json),
         "result_evidence_json": row.result_evidence_json,
         "result_at": row.result_at,
+        "successor_launch_facts": _parse_json(row.successor_launch_facts_json),
+        "successor_launch_facts_json": row.successor_launch_facts_json,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -1692,6 +1694,115 @@ def reserve_successor(
     raise OperationJournalUnavailable(
         f"concurrent successor reservations kept conflicting; refusing after retry: "
         f"{last_error}"
+    )
+
+
+#: The bounded size of the successor launch-facts payload.  The facts are a
+#: handful of reference strings (working directory, optional trusted root,
+#: model, effort, executable path + sha256, optional version banner), so a
+#: four-kilobyte ceiling is generous and still stops a corrupt payload from
+#: bloating the journal row.
+MAX_LAUNCH_FACTS_BYTES = 4096
+
+
+def _record_successor_launch_facts_once(
+    db: Any, operation_id: str, facts_json: str
+) -> dict[str, Any]:
+    """One successor launch-facts pass inside the caller's transaction.
+
+    Before a final result the write is a plain overwrite of the nullable
+    column — the facts are deterministic for one operation (the same restore
+    contract and request produce the same payload), so an exact replay and a
+    concurrent duplicate write the same bytes and nothing is ever hidden.
+    Once the operation reached a final result with a payload already stored,
+    the write turns adopt-or-conflict: an identical payload is adopted
+    idempotently, and a DIFFERENT payload is a typed conflict, never an
+    overwrite — the executor records the facts before binding, so a stored
+    payload under a final result is the fact set the bound successor actually
+    launched with, and the version banner (derived from caller-supplied
+    launch material, not covered by the request digest) must never drift
+    under an already-finished operation.
+    """
+    row = _operation_by_id(db, operation_id)
+    if row is None:
+        raise OperationJournalNotFound(f"unknown operation: {operation_id}")
+    if row.result_state in RESULT_FINAL_STATES and row.successor_launch_facts_json is not None:
+        if row.successor_launch_facts_json == facts_json:
+            return {"operation": _operation_row_dict(row), "adopted": True}
+        raise OperationJournalConflict(
+            f"operation {operation_id} already has the final result "
+            f"{row.result_state!r} with successor launch facts recorded; a "
+            "finished operation's recorded launch facts never change — adopt "
+            "the durable payload"
+        )
+    row.successor_launch_facts_json = facts_json
+    row.updated_at = _now()
+    db.flush()
+    return {"operation": _operation_row_dict(row), "adopted": False}
+
+
+def record_successor_launch_facts(
+    operation_id: str,
+    facts: Any,
+    db: Any = None,
+) -> dict[str, Any]:
+    """Durably record the launch facts of the successor this operation launches.
+
+    The exact executor writes the facts its successor launch USED — the
+    restore-contract facts it verified (working directory, trusted project
+    root, model, effort, executable path + sha256, and the version banner when
+    one was durably established) — so a successor's own teardown can publish a
+    complete restore contract for the next exact-resume hop.  Never re-probed,
+    never ambient: the caller supplies exactly what it launched with.  A
+    successor whose source contract lacked the executable fact is NOT a
+    reachable state — the executor's fact gate refuses such a contract before
+    any successor is created — so a NULL or partial payload here is
+    reader-side degradation only (a pre-lane row, or an operation that never
+    launched a successor), and the teardown seam keeps degrading it to today's
+    contract-free retirement.  ``db`` and race semantics follow
+    ``claim_operation``.
+    """
+    _require_text(operation_id, field="operation_id", max_len=MAX_AGENT_ID_LEN)
+    if not isinstance(facts, dict):
+        raise OperationJournalInvalid(f"successor launch facts must be a mapping; got {facts!r}")
+    try:
+        facts_json = _canonical_json(facts)
+    except (TypeError, ValueError) as exc:
+        raise OperationJournalInvalid(
+            f"successor launch facts must be canonical-JSON serializable: {exc}"
+        ) from exc
+    if len(facts_json) > MAX_LAUNCH_FACTS_BYTES:
+        raise OperationJournalInvalid(
+            f"successor launch facts serialize to {len(facts_json)} bytes, "
+            f"exceeding the {MAX_LAUNCH_FACTS_BYTES}-byte ceiling"
+        )
+
+    def _record(session: Any) -> dict[str, Any]:
+        return _record_successor_launch_facts_once(session, operation_id, facts_json)
+
+    if db is not None:
+        try:
+            return _record(db)
+        except (IntegrityError, OperationalError) as exc:
+            raise OperationJournalUnavailable(
+                f"concurrent successor launch-facts write refused; the caller's "
+                f"transaction may be unusable after the race — roll it back and "
+                f"retry the whole caller-owned call: {exc}"
+            ) from exc
+
+    last_error: Optional[BaseException] = None
+    for _attempt in range(5):
+        try:
+            with database.SessionLocal() as session:
+                result = _record(session)
+                session.commit()
+                return result
+        except (IntegrityError, OperationalError) as exc:
+            last_error = exc
+            time.sleep(0.05)
+    raise OperationJournalUnavailable(
+        f"concurrent successor launch-facts writes kept conflicting; refusing "
+        f"after retry: {last_error}"
     )
 
 
