@@ -26,6 +26,7 @@ from cli_agent_orchestrator.security.auth import (
     require_any_scope,
 )
 from cli_agent_orchestrator.services import issue_tracker as tracker
+from cli_agent_orchestrator.services import issue_similar as similar
 from cli_agent_orchestrator.services import project_dashboard
 from cli_agent_orchestrator.services import tracker_ranked_search as ranked
 
@@ -268,6 +269,23 @@ class ClaimBody(StrictBody):
 
 class UnclaimBody(StrictBody):
     actor: Optional[str] = None
+
+
+class SimilarIssuesBody(StrictBody):
+    """POST /tracker/issues/similar — an advisory duplicate probe.
+
+    Exactly one of ``issue_key`` / ``draft`` and exactly one of
+    ``project_ids`` / ``all_projects``; both XOR rules are validated by the
+    service so the CLI refuses with the same typed codes. ``draft`` is a free
+    dict at this boundary because its allowed-field set is owned by the
+    service, which refuses undeclared fields by name instead of ignoring them.
+    """
+
+    issue_key: Optional[str] = None
+    draft: Optional[Dict[str, Any]] = None
+    project_ids: Optional[List[str]] = None
+    all_projects: bool = False
+    limit: int = Field(ranked.DEFAULT_LIMIT, ge=ranked.MIN_LIMIT, le=ranked.MAX_LIMIT)
 
 
 # --------------------------------------------------------------------------
@@ -623,6 +641,33 @@ async def search_issues(
     )
     try:
         return ranked.ranked_search(request)
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/tracker/issues/similar")
+async def similar_issues(
+    body: SimilarIssuesBody,
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    """Explained similar-issue candidates for an existing issue or a draft.
+
+    Declared before ``/tracker/issues/{issue_key}`` so the literal path wins
+    over the parameterised one — ``similar`` would otherwise be swallowed as
+    an issue key, exactly as ``search``, ``resolve``, and ``stats`` are
+    protected above. Read-scoped and advisory by contract: nothing here sits
+    in the create path, so a similarity failure can never block filing.
+    """
+    try:
+        return similar.find_similar_issues(
+            similar.SimilarIssuesRequest(
+                issue_key=body.issue_key,
+                draft=body.draft,
+                project_ids=tuple(body.project_ids or ()),
+                all_projects=body.all_projects,
+                limit=body.limit,
+            )
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
