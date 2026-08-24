@@ -25,8 +25,8 @@ from cli_agent_orchestrator.security.auth import (
     SCOPE_WRITE,
     require_any_scope,
 )
-from cli_agent_orchestrator.services import issue_tracker as tracker
 from cli_agent_orchestrator.services import issue_similar as similar
+from cli_agent_orchestrator.services import issue_tracker as tracker
 from cli_agent_orchestrator.services import project_dashboard
 from cli_agent_orchestrator.services import tracker_ranked_search as ranked
 
