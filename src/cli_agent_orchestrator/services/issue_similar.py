@@ -188,9 +188,7 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
     # Self-exclusion runs after retrieval, so issue-key mode fetches one
     # extra candidate: when the source itself ranks within ``limit``, a
     # near-duplicate just outside it still survives exclusion.
-    fetch_limit = (
-        min(request.limit + 1, ranked.MAX_LIMIT) if source_key else request.limit
-    )
+    fetch_limit = min(request.limit + 1, ranked.MAX_LIMIT) if source_key else request.limit
     response = ranked.ranked_search(
         ranked.RankedSearchRequest(
             query=query_text,
