@@ -4297,9 +4297,11 @@ async def _launch_native_tui(
             # publish it into the restore contract and an exact resume can
             # revalidate the profile carrier.  Best-effort: a row that does
             # not persist the version keeps the pre-change fail-closed refusal
-            # on Muse restore; the launch itself is never gated on it.
+            # on Muse restore; the launch itself is never gated on it.  The
+            # banner is read defensively so an absent key degrades to no
+            # version instead of raising inside this launch's preflight scope.
             _record_launch_executable_version(
-                record["reservation_id"], bootstrap["profile_carrier_full_banner"]
+                record["reservation_id"], bootstrap.get("profile_carrier_full_banner") or ""
             )
         else:
             bootstrap = await asyncio.to_thread(
