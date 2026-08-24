@@ -1378,6 +1378,12 @@ def _reservation_launch_facts(row: Any) -> Dict[str, Any]:
     publishes those facts as typed ``unavailable`` — never inferred.  An
     unreadable or partial facts payload degrades the same way: the whole
     durable set is either present and complete or truthfully unavailable.
+
+    A recorded ``provider_executable_version`` (the wrapper's full version
+    banner, captured at launch for Muse) rides additively on the present
+    executable facts: surfaced only when the facts set is complete and the
+    banner is a non-empty string, so pre-capture rows keep exactly today's
+    ``{path, sha256}`` executable fact.
     """
     facts: Dict[str, Any] = {
         "working_directory": row.working_directory,
@@ -1401,6 +1407,13 @@ def _reservation_launch_facts(row: Any) -> Dict[str, Any]:
         facts["effort"] = effort
         facts["provider_executable"] = executable
         facts["provider_executable_sha256"] = digest
+        # The probed provider version banner rides additively on the present
+        # executable facts: included only when a non-empty banner was durably
+        # recorded at launch, never invented for a row that predates the
+        # capture or whose launch did not establish one.
+        version = launch_facts.get("provider_executable_version")
+        if isinstance(version, str) and version:
+            facts["provider_executable_version"] = version
     return facts
 
 
@@ -1458,7 +1471,15 @@ def _contract_executable_fact(facts: Dict[str, Any]) -> "restore_contract.Contra
     path = facts.get("provider_executable")
     digest = facts.get("provider_executable_sha256")
     if isinstance(path, str) and path and isinstance(digest, str) and digest:
-        return restore_contract.ContractFact.present({"path": path, "sha256": digest})
+        value: Dict[str, str] = {"path": path, "sha256": digest}
+        # Additive-optional: the full version banner is carried only when a
+        # non-empty banner was durably recorded at launch.  The executable
+        # fact stays PRESENT on path+sha256 alone, so rows admitted before
+        # the version capture keep working exactly as before.
+        version = facts.get("provider_executable_version")
+        if isinstance(version, str) and version:
+            value["version"] = version
+        return restore_contract.ContractFact.present(value)
     return restore_contract.ContractFact.unavailable(
         "the exact resolved executable identity was not durably recorded at launch"
     )

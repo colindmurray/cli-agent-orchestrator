@@ -525,6 +525,47 @@ def _parse_json(value: Optional[str], default: Any) -> Any:
         raise ManagedLaunchUnavailable("managed-launch v2 record contains invalid JSON") from exc
 
 
+def _record_launch_executable_version(reservation_id: str, version: str) -> None:
+    """Record the probed provider executable version on the reservation row.
+
+    The launch facts are pinned at reserve, when the wrapper's version banner
+    is not yet observable.  The Muse full banner is only known at launch, after
+    the digest pin verifies and the carrier gate accepts the wrapper/banner
+    pair, so this additive ``provider_executable_version`` key is written back
+    here — never inferred from a pin constant or an ambient-PATH probe.
+
+    Best-effort by design: a row that fails to persist the version simply
+    carries none, and Muse exact-restore on it keeps the pre-change fail-closed
+    refusal.  Recording is never a launch gate.
+    """
+    if not isinstance(version, str) or not version.strip():
+        return
+    try:
+        with database.SessionLocal() as db:
+            row = _query(db, reservation_id)
+            if row is None:
+                return
+            stored = getattr(row, "launch_facts_json", None)
+            if not stored:
+                return
+            try:
+                facts = json.loads(stored)
+            except (TypeError, ValueError):
+                return
+            if not isinstance(facts, dict):
+                return
+            facts["provider_executable_version"] = version
+            row.launch_facts_json = _canonical_json(facts)
+            row.updated_at = _now()
+            db.commit()
+    except Exception as exc:  # noqa: BLE001 - additive durability, never a launch gate
+        logger.warning(
+            "could not durably record provider_executable_version for reservation " "%s: %s",
+            reservation_id,
+            exc,
+        )
+
+
 def _mode_record(row: Any) -> dict[str, Any]:
     """The execution-mode fields of a row, tolerant of pre-contract rows.
 
@@ -4250,6 +4291,16 @@ async def _launch_native_tui(
             environment[muse_native_launch.PROFILE_SYSTEM_PROMPT_ENV] = bootstrap[
                 "profile_system_prompt_path"
             ]
+            # The full version banner is now established: the digest pin
+            # verified, the wrapper probed, and the carrier gate accepted the
+            # banner/.muse-version pair.  Record it durably so teardown can
+            # publish it into the restore contract and an exact resume can
+            # revalidate the profile carrier.  Best-effort: a row that does
+            # not persist the version keeps the pre-change fail-closed refusal
+            # on Muse restore; the launch itself is never gated on it.
+            _record_launch_executable_version(
+                record["reservation_id"], bootstrap["profile_carrier_full_banner"]
+            )
         else:
             bootstrap = await asyncio.to_thread(
                 _mint_native_session,

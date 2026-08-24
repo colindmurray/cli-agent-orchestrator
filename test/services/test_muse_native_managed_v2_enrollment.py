@@ -882,6 +882,35 @@ async def test_muse_probe_disables_updater_before_wrapper_execution_and_mismatch
 
 
 @pytest.mark.asyncio
+async def test_muse_launch_records_the_provider_executable_version_durably(
+    isolated_memory_db, worktree, tmp_path, muse_harness
+):
+    """The probed full version banner rides in the reservation launch facts.
+
+    The banner is the exact wrapper ``--version`` output the launch observed
+    (and the carrier gate accepted); it is recorded durably on the
+    reservation row so teardown can publish it into the restore contract and
+    an exact resume can revalidate the profile carrier.
+    """
+    muse_harness.captures.append(status_panel_rows(worktree, PROVIDER_SESSION_ID))
+    record, result = await _launch(worktree, tmp_path, muse_harness)
+    assert result["state"] == "launching"
+
+    facts = v2.get(record["reservation_id"])["launch_facts"]
+    assert facts["provider_executable_version"] == MUSE_BANNER
+    with database.SessionLocal() as session:
+        row = (
+            session.query(database.ManagedLaunchV2ReservationModel)
+            .filter(
+                database.ManagedLaunchV2ReservationModel.reservation_id == record["reservation_id"]
+            )
+            .one()
+        )
+        stored = json.loads(row.launch_facts_json)
+        assert stored["provider_executable_version"] == MUSE_BANNER
+
+
+@pytest.mark.asyncio
 async def test_muse_launch_discovers_the_provider_generated_session(
     isolated_memory_db, worktree, tmp_path, muse_harness
 ):
