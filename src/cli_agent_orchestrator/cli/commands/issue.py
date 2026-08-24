@@ -21,6 +21,7 @@ import click
 
 from cli_agent_orchestrator.cli.commands.search_index import search_index
 from cli_agent_orchestrator.clients.database import ensure_tracker_schema
+from cli_agent_orchestrator.services import issue_similar as similar
 from cli_agent_orchestrator.services import issue_tracker as tracker
 from cli_agent_orchestrator.services import tracker_ranked_search as ranked
 from cli_agent_orchestrator.services.issue_tracker import TrackerError
@@ -649,6 +650,89 @@ def issue_search(
             )
         else:
             click.echo(f"-- {payload['total']} hit(s)")
+
+    _emit(payload, as_json, render)
+
+
+@issue.command(name="similar")
+@click.option("--issue-key", default=None, help="find issues similar to this existing issue")
+@click.option(
+    "--draft-file",
+    "draft_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="JSON file holding a create-shaped draft to probe before filing",
+)
+@click.option(
+    "--tracker-project",
+    "project_ids",
+    multiple=True,
+    help="tracker project to search (repeatable); exactly one scope form is required",
+)
+@click.option(
+    "--all-tracker-projects",
+    "all_projects",
+    is_flag=True,
+    help="search every tracker project; exactly one scope form is required",
+)
+@click.option("--limit", default=ranked.DEFAULT_LIMIT, show_default=True, type=int)
+@click.option("--json", "as_json", is_flag=True)
+def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, as_json):
+    """Advisory similar-issue lookup: what already exists that looks like this?
+
+    Exactly one of --issue-key or --draft-file, and exactly one of
+    --tracker-project (repeatable) or --all-tracker-projects. A draft carries
+    only create/search fields; server-owned identity, status, and relation
+    fields are refused by name. Advisory by contract: a similarity failure
+    never blocks issue creation.
+    """
+    draft = None
+    if draft_file is not None:
+        try:
+            with open(draft_file, "r", encoding="utf-8") as handle:
+                draft = jsonlib.load(handle)
+        except (OSError, jsonlib.JSONDecodeError) as exc:
+            _fail(TrackerError("invalid", f"unreadable draft file {draft_file}: {exc}"))
+    try:
+        payload = similar.find_similar_issues(
+            similar.SimilarIssuesRequest(
+                issue_key=issue_key,
+                draft=draft,
+                project_ids=tuple(project_ids),
+                all_projects=bool(all_projects),
+                limit=limit,
+            )
+        )
+    except TrackerError as exc:
+        _fail(exc)
+
+    def render(payload):
+        source = payload["query_source"]
+        origin = source["issue_key"] or "the draft"
+        click.echo(f"{payload['total']} similar issue(s) for {origin} · kind {source['kind']}")
+        for position, row in enumerate(payload["candidates"], start=1):
+            issue = row["issue"] or {}
+            severity = issue.get("severity") or "unset"
+            lanes = " ".join(f"{lane['lane']}#{lane['rank']}" for lane in row["contributing_lanes"])
+            matched = ",".join(row["matched_fields"]) or "-"
+            click.echo(
+                f"{position:>4}. {issue.get('key', '-'):<12} "
+                f"{'--' if severity == 'unset' else severity:<4} "
+                f"{issue.get('status', '-'):<10} {issue.get('title', '')}"
+            )
+            click.echo(
+                f"      score {row['rank_score']:.4f} · lanes {lanes or '-'} · matched {matched}"
+            )
+            for field_name, snippet in sorted(row["snippets"].items()):
+                click.echo(f"      {field_name}: {snippet}")
+        if payload["duplicate_expansions"]:
+            click.echo("confirmed duplicates of hits:")
+            for row in payload["duplicate_expansions"]:
+                dup = row["issue"] or {}
+                click.echo(
+                    f"      {row['duplicate_of']} <- {dup.get('key', '-')} "
+                    f"[{dup.get('status', '-')}] {dup.get('title', '')}"
+                )
 
     _emit(payload, as_json, render)
 
