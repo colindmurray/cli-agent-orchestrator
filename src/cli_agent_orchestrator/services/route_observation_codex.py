@@ -87,7 +87,10 @@ CLOSE_INDETERMINATE = "indeterminate"
 
 #: The exact reasoning-effort vocabulary the installed build accepts for the
 #: ``model_reasoning_effort`` route.  A suffix outside this set is malformed
-#: evidence and is refused, never guessed.
+#: evidence and is refused, never guessed — but the refusal accounts for what
+#: was actually rendered: the verbatim suffix text is recorded on the
+#: inconclusive observation so the operator's vocabulary decision (CP1) has
+#: the real observed values to decide from.
 _CODEX_EFFORT_VOCABULARY = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "ultra"})
 
 #: The exact trailing `` (reasoning <effort>)`` suffix on the Model value.
@@ -95,6 +98,20 @@ _REASONING_SUFFIX = re.compile(r"^(.*?)\s+\(reasoning\s+([^()]*)\)$")
 
 #: A Codex composer prompt row (the live composer, not the printed panel).
 _CODEX_COMPOSER_PROMPT = re.compile(r"^\s*(?:›|❯|codex>)(?:\s|$)")
+
+
+class _MalformedReasoningSuffix(nsr.PanelParseError):
+    """A Model row whose reasoning suffix is outside the closed vocabulary.
+
+    Same refusal as any ``PanelParseError`` — every existing handler catches
+    it unchanged — but it carries the verbatim parenthetical text (outer
+    whitespace trimmed only, never normalized, split, or guessed) so the
+    inconclusive observation can durably account for what the build rendered.
+    """
+
+    def __init__(self, message: str, *, observed_reasoning_suffix: str) -> None:
+        super().__init__(message)
+        self.observed_reasoning_suffix = observed_reasoning_suffix
 
 
 class CodexPaneSurface(Protocol):
@@ -261,7 +278,9 @@ def _parse_model_row(normalized: Sequence[str]) -> tuple[Optional[str], Optional
     effort; any other complete parenthetical stays part of the model.  A second
     Model row, a suffix carrying an unknown effort, or a value cut off
     mid-parenthetical at the pane edge is refused rather than guessed: a
-    truncated value is a truncated capture, never a bare model.
+    truncated value is a truncated capture, never a bare model.  The
+    out-of-vocabulary refusal carries the verbatim suffix text on the raised
+    ``_MalformedReasoningSuffix`` so the observation can account for it.
     """
     model_rows = [row for row in normalized if row.lstrip().startswith("Model:")]
     if not model_rows:
@@ -279,9 +298,10 @@ def _parse_model_row(normalized: Sequence[str]) -> tuple[Optional[str], Optional
         return value, None
     model, effort = match.group(1).strip(), match.group(2).strip()
     if not effort or effort not in _CODEX_EFFORT_VOCABULARY:
-        raise nsr.PanelParseError(
+        raise _MalformedReasoningSuffix(
             f"the Codex status Model row carries a malformed reasoning suffix; refusing "
-            "rather than guessing an effort from arbitrary parenthetical text"
+            "rather than guessing an effort from arbitrary parenthetical text",
+            observed_reasoning_suffix=effort,
         )
     return model, effort
 
@@ -300,7 +320,9 @@ def parse_codex_route_panel(
     lacks the Model row is a truncated/different panel, not an observation.
     The session identity is taken from the same branded parser
     (``codex-status-v1``) the identity repair uses, so there is exactly one
-    description of what a Codex status panel means.
+    description of what a Codex status panel means.  A Model row refused for
+    an out-of-vocabulary reasoning suffix additionally carries that verbatim
+    suffix text as the additive optional ``observed_reasoning_suffix`` key.
 
     Returns ``kind`` in {``observed``, ``partial``, ``inconclusive``}.
     """
@@ -337,8 +359,8 @@ def parse_codex_route_panel(
         }
     try:
         model, effort = _parse_model_row(normalized)
-    except nsr.PanelParseError:
-        return {
+    except nsr.PanelParseError as exc:
+        fact: dict[str, Any] = {
             "kind": "inconclusive",
             "reason": "model-row-unparsed",
             "session_id": status["session_id"],
@@ -347,6 +369,12 @@ def parse_codex_route_panel(
             "pane_width": floor["width"],
             "evidence_sha256": evidence,
         }
+        # An out-of-vocabulary reasoning suffix is still refused, but the
+        # verbatim text the build rendered is accounted for on the fact.
+        observed_suffix = getattr(exc, "observed_reasoning_suffix", None)
+        if observed_suffix is not None:
+            fact["observed_reasoning_suffix"] = observed_suffix
+        return fact
     if model is None:
         return {
             "kind": "inconclusive",
@@ -405,9 +433,13 @@ def _close_proof(outcome: str) -> dict[str, Any]:
 
 
 def _inconclusive_observation(
-    request: ro.RouteObservationRequest, *, reason: str, evidence_sha256: Optional[str] = None
+    request: ro.RouteObservationRequest,
+    *,
+    reason: str,
+    evidence_sha256: Optional[str] = None,
+    observed_reasoning_suffix: Optional[str] = None,
 ) -> dict[str, Any]:
-    return {
+    observation: dict[str, Any] = {
         "kind": "provider-surface",
         "observation_kind": PARSER_KEY,
         "observed_state": "inconclusive",
@@ -422,6 +454,9 @@ def _inconclusive_observation(
         "render_floor": None,
         "evidence_sha256": evidence_sha256,
     }
+    if observed_reasoning_suffix is not None:
+        observation["observed_reasoning_suffix"] = observed_reasoning_suffix
+    return observation
 
 
 def _observation_from_parse(
@@ -446,7 +481,7 @@ def _observation_from_parse(
             "evidence_sha256": parsed["evidence_sha256"],
         }
     session_id = parsed.get("session_id")
-    return {
+    observation: dict[str, Any] = {
         "kind": "provider-surface",
         "observation_kind": PARSER_KEY,
         "observed_state": "inconclusive",
@@ -461,6 +496,13 @@ def _observation_from_parse(
         "render_floor": {"width": parsed.get("pane_width")},
         "evidence_sha256": parsed.get("evidence_sha256"),
     }
+    # The verbatim out-of-vocabulary reasoning suffix, when the parse recorded
+    # one, surfaces on the durable observation fact for the CP1 vocabulary
+    # decision; every other path leaves the key absent.
+    observed_suffix = parsed.get("observed_reasoning_suffix")
+    if observed_suffix is not None:
+        observation["observed_reasoning_suffix"] = observed_suffix
+    return observation
 
 
 def _final_event(
