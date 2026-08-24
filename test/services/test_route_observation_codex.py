@@ -503,6 +503,8 @@ class TestRenderFloor:
         outcome = roc.CodexRouteObserver(surface=surface).observe(request)
         assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
         assert outcome["observation"]["reason"] == "model-row-unparsed"
+        # the refusal is unchanged, and the verbatim suffix is accounted for
+        assert outcome["observation"]["observed_reasoning_suffix"] == "turbo"
 
     def test_a_truncated_model_row_at_full_width_is_not_reported_observed(self, _db):
         """P2 (round 2): a known width is not enough — the Model row's own
@@ -539,6 +541,128 @@ class TestRenderFloor:
         assert outcome["observation"]["reason"] == "render-floor-model"
         assert outcome["observation"]["model"] is None
         assert outcome["observation"]["effort"] is None
+
+
+# ---------------------------------------------------------------------------
+# out-of-vocabulary reasoning suffixes are refused AND accounted verbatim
+# ---------------------------------------------------------------------------
+
+
+class TestObservedReasoningSuffixAccounting:
+    """P0-A follow-up: a Model row that parses structurally but carries a
+    reasoning suffix outside the closed effort vocabulary is still refused
+    (``inconclusive / model-row-unparsed``, model/effort None) — but the
+    verbatim suffix text is recorded as the additive optional
+    ``observed_reasoning_suffix`` key on the durable observation, so the CP1
+    vocabulary decision has accounted evidence to decide from.  Every other
+    path leaves the key absent; nothing is normalized, split, or guessed."""
+
+    REAL_CAPTURED_SUFFIX = "medium, summaries auto"
+
+    def test_the_real_captured_suffix_is_refused_and_recorded_verbatim(self, _db):
+        """(a) the real build's ``(reasoning medium, summaries auto)`` render:
+        the refusal is unchanged and the exact suffix lands on the observation
+        and on the durable stage fact."""
+        request = _request()
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(
+                model=f"gpt-5.6-sol (reasoning {self.REAL_CAPTURED_SUFFIX})", effort=None
+            )
+        )
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert surface.status_commands_sent == 1
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        observation = outcome["observation"]
+        assert observation["observed_state"] == "inconclusive"
+        assert observation["reason"] == "model-row-unparsed"
+        assert observation["model"] is None
+        assert observation["effort"] is None
+        assert observation["observed_reasoning_suffix"] == self.REAL_CAPTURED_SUFFIX
+        # the durable stage fact carries the same verbatim bytes
+        record = ro.get(request.operation_id)
+        stored = json.loads(record["observation_json"])
+        assert stored["observed_reasoning_suffix"] == self.REAL_CAPTURED_SUFFIX
+
+    def test_the_parse_fact_carries_the_verbatim_suffix(self):
+        parsed = roc.parse_codex_route_panel(
+            codex_panel_rows(model="gpt-5.6-sol (reasoning medium, summaries auto)", effort=None),
+            pane_width=100,
+        )
+        assert parsed["kind"] == "inconclusive"
+        assert parsed["reason"] == "model-row-unparsed"
+        assert parsed["observed_reasoning_suffix"] == "medium, summaries auto"
+
+    def test_the_suffix_is_verbatim_never_normalized(self, _db):
+        """Inner whitespace and punctuation are preserved exactly; only outer
+        whitespace of the parenthetical text is trimmed."""
+        request = _request()
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(
+                model="gpt-5.6-sol (reasoning  medium,  summaries auto )", effort=None
+            )
+        )
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["observation"]["reason"] == "model-row-unparsed"
+        assert outcome["observation"]["observed_reasoning_suffix"] == "medium,  summaries auto"
+
+    @pytest.mark.parametrize("effort", sorted(roc._CODEX_EFFORT_VOCABULARY))
+    def test_every_vocabulary_member_observes_without_the_accounting_key(self, _db, effort):
+        """(b) every member of the closed vocabulary is a positive observation
+        and the accounting key stays absent."""
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(effort=effort))
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        observation = outcome["observation"]
+        assert observation["observed_state"] == "observed"
+        assert observation["effort"] == effort
+        assert "observed_reasoning_suffix" not in observation
+        stored = json.loads(ro.get(request.operation_id)["observation_json"])
+        assert "observed_reasoning_suffix" not in stored
+
+    def test_a_truncated_parenthetical_fabricates_no_suffix(self, _db):
+        """(c) a value cut mid-parenthetical keeps its unchanged refusal path
+        and no key value is fabricated from the half-rendered text."""
+        request = _request()
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(model="gpt-5.4-codex (reasoning h", effort=None),
+            pane_width=roc.MODEL_RENDER_FLOOR_COLUMNS,
+        )
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        observation = outcome["observation"]
+        assert observation["reason"] == "model-row-unparsed"
+        assert observation["model"] is None
+        assert observation["effort"] is None
+        assert "observed_reasoning_suffix" not in observation
+        stored = json.loads(ro.get(request.operation_id)["observation_json"])
+        assert "observed_reasoning_suffix" not in stored
+
+    def test_two_model_rows_stay_unchanged_without_the_key(self, _db):
+        """(d) the multiple-Model-row refusal is byte-identical: same reason,
+        no accounting key."""
+        request = _request()
+        rows = codex_panel_rows() + ["Model: gpt-5.4-codex (reasoning low)"]
+        surface = FakeCodexPaneSurface(rows=rows)
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        observation = outcome["observation"]
+        assert observation["observed_state"] == "inconclusive"
+        assert observation["reason"] == "model-row-unparsed"
+        assert observation["model"] is None
+        assert observation["effort"] is None
+        assert "observed_reasoning_suffix" not in observation
+        stored = json.loads(ro.get(request.operation_id)["observation_json"])
+        assert "observed_reasoning_suffix" not in stored
+
+    def test_send_failure_and_unproven_submission_carry_no_suffix(self, _db):
+        """The no-panel inconclusive paths never carry the accounting key."""
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), submission_proven=False)
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["observation"]["reason"] == "submission-unproven"
+        assert "observed_reasoning_suffix" not in outcome["observation"]
 
 
 # ---------------------------------------------------------------------------
