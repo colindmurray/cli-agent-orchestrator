@@ -458,6 +458,13 @@ _NATIVE_PANE_READY_POLL_SECONDS = 0.1
 #: :data:`NATIVE_PANE_READY_TIMEOUT_SECONDS`.
 MUSE_STATUS_RETYPE_INTERVAL_SECONDS = 4.0
 
+#: Settle time between typing the ``/status`` literal and pressing Enter.
+#: 0.2.1's composer reads a rapid follow-up Enter as part of the paste
+#: (a newline) rather than a submission; the delay lets the composer
+#: finish ingesting the literal first. Proven live on the installed build
+#: alongside the retype interval it accompanies (cond-0713).
+MUSE_SUBMIT_SETTLE_SECONDS = 0.6
+
 #: Machine-readable reasons for a native admission that wrote no bytes.
 #:
 #: Recorded on the reservation rather than only in an HTTP body a lost
@@ -4829,6 +4836,12 @@ def _observe_muse_status_panel(
 
     def _submit_status() -> None:
         typed_input.send_literal(muse_native_status.STATUS_COMMAND)
+        # 0.2.1's composer treats an Enter that arrives inside the paste
+        # window of the just-typed literal as a newline (live-proven
+        # 2026-08-24: back-to-back literal+Enter stacked eleven unsubmitted
+        # "/status" lines; a >=0.5s settle submitted every time). The delay
+        # is part of the submit, not a retry-policy concern.
+        time.sleep(MUSE_SUBMIT_SETTLE_SECONDS)
         typed_input.send_enter()
 
     status_submit_attempts = 1

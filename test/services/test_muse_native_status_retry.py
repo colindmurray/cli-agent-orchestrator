@@ -48,6 +48,42 @@ class RecordingPaneInput:
         self.enters += 1
 
 
+@pytest.fixture(autouse=True)
+def _no_real_settle(monkeypatch):
+    """Keep the composer settle out of wall-clock while tests run.
+
+    The production submit sleeps :data:`v2.MUSE_SUBMIT_SETTLE_SECONDS`
+    between the literal and its Enter; the scenarios here assert on what
+    was typed, not on how long typing took.
+    """
+    monkeypatch.setattr(v2, "MUSE_SUBMIT_SETTLE_SECONDS", 0.0)
+
+
+def test_the_submit_settles_between_the_literal_and_its_enter(
+    recording_input, monkeypatch, tmp_path
+):
+    """A rapid Enter lands inside 0.2.1's paste window as a newline.
+
+    The live capture of a managed attempt showed eleven unsubmitted
+    "/status" lines stacking in the composer when literal and Enter were
+    sent back-to-back; the settle delay is what makes Enter a submission,
+    so it is pinned as part of every submit, not left to the retry clock.
+    """
+    settle = 0.42
+    monkeypatch.setattr(v2, "MUSE_SUBMIT_SETTLE_SECONDS", settle)
+    slept: list[float] = []
+    monkeypatch.setattr(v2.time, "sleep", slept.append)
+    screen = ScriptedScreen(
+        GARBAGE_ROWS,
+        boxed_status_rows(str(tmp_path)),
+        render_when=lambda: recording_input[-1].enters >= 1,
+    )
+    _observe(screen, str(tmp_path))
+    assert settle in slept, (
+        f"the submit must settle {settle}s between literal and Enter; " f"sleeps observed: {slept}"
+    )
+
+
 class ScriptedScreen:
     """Serve one screen until a condition holds, then another forever.
 
