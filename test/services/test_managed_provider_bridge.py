@@ -810,6 +810,10 @@ def test_bridge_environment_is_pruned_to_minimal_allowlist(monkeypatch):
         "CAO_TERMINAL_ID": "deadbeef",
         "CAO_CONDUCTOR_SHIM_DIR": "/pinned/shim",
         "CAO_WORKFLOW_RUN_ID": "run-1",
+        # cond-0713: the UTF-8 locale guarantee is part of the bounded
+        # allowlist — forced, never inherited from ambient.
+        "LANG": "en_US.UTF-8",
+        "LC_CTYPE": "en_US.UTF-8",
     }
     assert provider_env == {
         **bridge_env,

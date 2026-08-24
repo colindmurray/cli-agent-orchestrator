@@ -57,7 +57,10 @@ from typing import Any, Optional
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from cli_agent_orchestrator.clients import database
-from cli_agent_orchestrator.constants import COMPANION_DIR
+from cli_agent_orchestrator.constants import COMPANION_DIR, FORCED_LOCALE
+
+# Backward-compat alias; canonical is constants.FORCED_LOCALE (P3-1).
+_FORCED_LOCALE = FORCED_LOCALE
 from cli_agent_orchestrator.models.managed_launch_v2 import (
     PROTOCOL_VERSION_V2,
     ManagedLaunchV2AdmitRequest,
@@ -108,6 +111,25 @@ from cli_agent_orchestrator.services.provider_contracts import (
 from cli_agent_orchestrator.utils.terminal import generate_terminal_id, managed_window_name
 
 logger = logging.getLogger(__name__)
+
+# Forced UTF-8 locale — mirrors TmuxClient and managed_provider_bridge.
+# Bisection in cond-0713 proved launchd-stripped env → Muse ASCII fallback
+# → boxed panel starvation; this seam guarantees the native pane env carries
+# UTF-8 even if the host or an intermediate env builder did not. Canonical
+# value lives in constants.FORCED_LOCALE; alias above for compat.
+
+
+def _ensure_locale_env(env: dict[str, str]) -> None:
+    """Force UTF-8 locale into the child pane env; pop LC_ALL so LANG wins.
+
+    Popping LC_ALL so LANG controls; still UTF-8 so Muse renders, collation
+    shift documented (P2-3) — forcing en_US.UTF-8 even if host had ja_JP.UTF-8.
+    """
+
+    env["LANG"] = FORCED_LOCALE
+    env["LC_CTYPE"] = FORCED_LOCALE
+    env.pop("LC_ALL", None)
+
 
 _READINESS_RECEIPT_KINDS = {
     "codex": "codex-thread-start",
@@ -4017,6 +4039,7 @@ async def _launch_native_tui(
             )
         if provider_route == glm_native_launch.PROVIDER_ROUTE_GLM:
             environment = native_child_environment(bridge_request, session_env=stored_session_env)
+            _ensure_locale_env(environment)
             # Version probing targets the inner binary. Probing the wrapper
             # would consume the one-shot token before the launch that needs it.
             version_output = await asyncio.to_thread(
@@ -4029,6 +4052,7 @@ async def _launch_native_tui(
                 # profile material is written. Disable the wrapper's updater
                 # so it cannot switch binaries after that decision.
                 environment["MUSE_NO_AUTO_UPDATE"] = "1"
+            _ensure_locale_env(environment)
             # Use precisely the environment that will reach the pane.  In
             # particular, Muse's update-capable wrapper must see its update
             # suppression before this first wrapper execution, not merely at
@@ -4056,6 +4080,7 @@ async def _launch_native_tui(
                 profile_material=profile_material,
                 base_environment=environment,
             )
+            _ensure_locale_env(environment)
             # Kimi's v2 TUI asks for workspace trust before it accepts any
             # input, even when the project has no MCP servers.  Pre-authorize
             # the exact canonical leased worktree through Kimi's own durable
@@ -4386,6 +4411,7 @@ async def _launch_native_tui(
                     bootstrap=bootstrap,
                     request=request,
                     store_snapshot=muse_store_snapshot,
+                    environment=environment,
                 ),
                 build_intent=partial(
                     _muse_bootstrap_intent, bootstrap, reservation_id=reservation_id
@@ -5009,6 +5035,7 @@ def _discover_muse_session(
     bootstrap: dict[str, Any],
     request: dict[str, Any],
     store_snapshot: Optional[frozenset[str]] = None,
+    environment: Optional[dict[str, str]] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Wait for the composer, type ``/status`` once, and discover the id.
 
@@ -5025,7 +5052,34 @@ def _discover_muse_session(
     session-store fallback: when the capture only ever renders the
     route-only inline footer, identity is adopted from the exactly-one new
     session the provider registered on disk for this workspace.
+
+    ``environment`` is the pane's forced env dict (LANG/LC_CTYPE) that was
+    passed to the transport. Logging it rather than os.environ proves the
+    pane's actual locale; os.environ may be launchd-stripped and lies.
     """
+    # Log pane environment (the forced UTF-8 dict) alongside the server's
+    # ambient env with distinct labels so a debug grep proves the pane
+    # actually received LANG=en_US.UTF-8 even when launchd stripped the
+    # server process. P2-1 fix: previously logged only os.environ.
+    if environment is not None:
+        logger.debug(
+            "Muse /status discovery pane_env LANG=%r LC_CTYPE=%r LC_ALL=%r server_env LANG=%r LC_CTYPE=%r LC_ALL=%r pane=%s",
+            environment.get("LANG"),
+            environment.get("LC_CTYPE"),
+            environment.get("LC_ALL"),
+            os.environ.get("LANG"),
+            os.environ.get("LC_CTYPE"),
+            os.environ.get("LC_ALL"),
+            pane_id,
+        )
+    else:
+        logger.debug(
+            "Muse /status discovery env LANG=%r LC_CTYPE=%r LC_ALL=%r pane=%s (no pane_env)",
+            os.environ.get("LANG"),
+            os.environ.get("LC_CTYPE"),
+            os.environ.get("LC_ALL"),
+            pane_id,
+        )
     readiness = _await_native_pane_input_ready(record, pane_id)
     if not readiness.get("input_ready"):
         raise ManagedLaunchConflict(

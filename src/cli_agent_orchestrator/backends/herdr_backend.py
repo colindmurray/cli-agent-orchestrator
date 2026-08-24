@@ -8,6 +8,11 @@ Design decisions:
 - terminal_id is the stable identifier; pane_id is resolved before each operation
 - Resolution cache with 5s TTL reduces redundant herdr pane list calls
 - CAO_TERMINAL_ID and CAO_SESSION_NAME injected via command prefix
+- Locale guarantee (cond-0713): every tmux pane is forced via TmuxClient's
+  -e seam; herdr has no create_window_with_argv, so its equivalent seam is
+  HerdrBackend._inject_env_vars which exports LANG/LC_CTYPE and unsets LC_ALL
+  (tmux claim "every pane" is now "every tmux pane plus herdr via
+  _inject_env_vars").
 """
 
 import json
@@ -25,6 +30,7 @@ from cli_agent_orchestrator.backends.base import (
     TerminalBackendError,
     TerminalNotFoundError,
 )
+from cli_agent_orchestrator.constants import FORCED_LOCALE
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 
 logger = logging.getLogger(__name__)
@@ -826,11 +832,35 @@ class HerdrBackend(TerminalBackend):
                     f"export CAO_SESSION_NAME={session_name}",
                 ]
                 exports.extend(self._build_extra_env_exports(extra_env))
+                # cond-0713: force UTF-8 locale so Muse never falls back to
+                # ASCII under launchd. Herdr has no tmux -e seam; this typed
+                # export is its equivalent. Must come after extra_env so an
+                # operator LC_ALL cannot reintroduce a non-UTF-8 override.
+                # Popping LC_ALL so LANG controls; still UTF-8 so Muse renders,
+                # collation shift documented (P2-3).
+                exports.append(f"export LANG={shlex.quote(FORCED_LOCALE)}")
+                exports.append(f"export LC_CTYPE={shlex.quote(FORCED_LOCALE)}")
+                exports.append("unset LC_ALL")
                 env_cmd = "; ".join(exports)
                 self._run_herdr(["pane", "send-text", target_pane_id, env_cmd])
                 self._run_herdr(["pane", "send-keys", target_pane_id, "Enter"])
         except (TerminalBackendError, json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Failed to inject env vars for {terminal_id}: {e}")
+
+    @staticmethod
+    def _ensure_utf8_locale(env: Dict[str, str]) -> None:
+        """Force UTF-8 locale into the child env dict (herdr path).
+
+        Mirrors TmuxClient._ensure_utf8_locale for callers that build an env
+        dict before injection; the pane itself is forced via _inject_env_vars'
+        typed exports. Kept for symmetry and test pinning (P2-2).
+        Popping LC_ALL so LANG controls; still UTF-8 so Muse renders,
+        collation shift documented (P2-3).
+        """
+
+        env["LANG"] = FORCED_LOCALE
+        env["LC_CTYPE"] = FORCED_LOCALE
+        env.pop("LC_ALL", None)
 
     @staticmethod
     def _build_extra_env_exports(extra_env: Optional[Dict[str, str]]) -> List[str]:

@@ -250,8 +250,13 @@ class TestCreateSessionEnvironmentFiltering:
         )
         assert env["HOME"] == "/home/user"
         assert env["PATH"] == "/usr/bin" * 500  # large PATH not dropped
-        assert env["LC_ALL"] == "en_US.UTF-8"
-        assert env["LC_CTYPE"] == "UTF-8"
+        # cond-0713: LANG/LC_CTYPE forced to en_US.UTF-8 and LC_ALL removed
+        # so Muse never falls back to ASCII chrome under launchd-stripped env.
+        # Even when host carries LC_ALL=en_US.UTF-8, the pane is forced to
+        # rely on LANG — LC_ALL would otherwise shadow it.
+        assert env["LANG"] == "en_US.UTF-8"
+        assert env["LC_CTYPE"] == "en_US.UTF-8"
+        assert "LC_ALL" not in env
 
     def test_blocked_prefixes_filtered(self, tmux, tmp_path):
         env = self._get_passed_environment(
