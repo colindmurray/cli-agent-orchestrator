@@ -99,16 +99,26 @@ def installed_stub(h: th.T2Harness) -> Path:
 
 @pytest.fixture()
 def conductor(h: th.T2Harness) -> Path:
-    """The conductor checkout; skips when it is unreachable."""
+    """The conductor checkout; skips when it is unreachable.  Adds it to
+    ``sys.path`` for the import of ``conduct.lib.*`` and removes it on
+    teardown so no later test module inherits the cross-repo import path."""
     if h.conductor is None:
         pytest.skip(
             "conductor checkout unreachable (set T2_CONDUCTOR_REPO or use "
             "~/Projects/cao-conductor); the consumer/launch legs skip"
         )
     root = str(h.conductor)
-    if root not in sys.path:
+    inserted = root not in sys.path
+    if inserted:
         sys.path.insert(0, root)
-    return h.conductor
+    try:
+        yield h.conductor
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(root)
+            except ValueError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +162,24 @@ def _wait_capture(
             return last
         time.sleep(0.1)
     return last
+
+
+def _wait_for_composer_entered(h: th.T2Harness, pane_id: str, *, timeout: float = 5.0) -> None:
+    """Wait until the REAL pane shows a typed ``/status`` in the composer
+    followed by the Enter echo (a blank line below) — i.e. the submission
+    barrier has genuinely passed compose-visible AND the Enter was sent,
+    while the stub's delayed redraw still holds the pane content."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = h.capture(pane_id)
+        for index, row in enumerate(rows):
+            if "› /status" in row and index + 1 < len(rows) and not rows[index + 1].strip():
+                return
+        time.sleep(0.1)
+    raise AssertionError(
+        f"the pane never showed '› /status' followed by the Enter echo within "
+        f"{timeout}s; last capture rows={rows!r}"
+    )
 
 
 def _incident_evidence(incident_id: str) -> dict:
@@ -289,7 +317,7 @@ class TestStubBinaryRendersFixtures:
 
 
 class TestPositiveLoop:
-    @pytest.mark.parametrize("bash", BASHS, ids=lambda path: path.name)
+    @pytest.mark.parametrize("bash", BASHS, ids=str)
     def test_positive_loop_end_to_end(
         self,
         bash: Path,
@@ -299,8 +327,11 @@ class TestPositiveLoop:
         isolated_memory_db,
         tmp_path: Path,
     ) -> None:
-        if not BASHS:
-            pytest.skip("neither supported bash is present here")
+        if len(BASHS) < 2:
+            pytest.skip(
+                "acceptance 6 needs BOTH /bin/bash (3.2, macOS-sealed) and "
+                "Homebrew bash (5.3); one is missing here"
+            )
         incident_id = f"t2-{uuid.uuid4().hex[:8]}"
         h.write_incident(incident_id, _incident_evidence(incident_id))
         env = h.setup_launch_surface(stub_bin=installed_stub)
@@ -391,7 +422,12 @@ class TestPaneDeathMidObservation:
     def test_restart_recovery_on_real_pane_death(
         self, h: th.T2Harness, installed_stub: Path, isolated_memory_db
     ) -> None:
-        pane = h.new_pane(width=100, height=31, command=f"exec {installed_stub} --raw")
+        # DEATH RUN.  The echo stub with a 1s delayed redraw opens a wide,
+        # deterministic window: the barrier genuinely passes compose-visible
+        # (the typed /status echoes) and Enter, then the pane's REAL shell is
+        # killed before the delayed redraw clears the composer — so the death,
+        # not a settle timeout, is what interrupts the observation.
+        pane = h.new_pane(width=100, height=31, command=f"exec {installed_stub} --redraw-delay 1.0")
         _wait_capture(h, pane)
         request = _request()
         holder: dict[str, Any] = {}
@@ -401,32 +437,48 @@ class TestPaneDeathMidObservation:
 
         thread = threading.Thread(target=drive)
         thread.start()
-        # The raw-mode stub holds the submission barrier open; kill the pane's
-        # REAL shell mid-observation.
-        time.sleep(0.8)
+        _wait_for_composer_entered(h, pane)
         assert h.pane_alive(pane), "the pane must be alive before the kill"
-        h.kill_pane(pane)
+        h.kill_pane(pane)  # REAL process death, mid-observation
         thread.join(timeout=30)
         assert not thread.is_alive(), "the observer must terminate after pane death"
 
         first = holder["outcome"]
+        # (a) the pane really died: it is not alive at join time.
+        assert not h.pane_alive(pane)
+        # The interrupted observation is honest: ambiguous, never observed-
+        # closed, never a fabricated receipt.
         assert first["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
         assert first["terminal"] is True
         assert first["receipt_digest"] is None
         assert first["observation"]["observed_state"] == "inconclusive"
+        # The one /status WAS genuinely probed before the pane died.
+        record = ro.get(request.operation_id)
+        assert record["pre_probe_intent_json"] is not None
 
-        # Restart on a FRESH real pane with the SAME operation id: the durable
-        # facts reconcile, the terminal result replays, and no second /status
-        # ever reaches a pane.
+        # CONTROL RUN.  The SAME echo stub with the SAME delayed redraw, NOT
+        # killed, must reach observed-closed — proving the death-run outcome
+        # differs only because the pane really died (a plain settle timeout
+        # could never produce observed-closed here).
+        control_pane = h.new_pane(
+            width=100, height=31, command=f"exec {installed_stub} --redraw-delay 1.0"
+        )
+        try:
+            _wait_capture(h, control_pane)
+            control = _observe(h, control_pane, _request())
+            assert control["result"] == ro.RESULT_OBSERVED_CLOSED
+            assert control["receipt_digest"]
+        finally:
+            h.kill_pane(control_pane)
+
+        # RESTART.  The same operation as the death run replays the durable
+        # result on a fresh real pane, without a second /status.
         pane2 = h.new_pane(width=100, height=31, command=f"exec {installed_stub}")
         try:
             _wait_capture(h, pane2)
             second = _observe(h, pane2, request)
             assert second["replayed"] is True
             assert second["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
-            record = ro.get(request.operation_id)
-            assert record["observation_json"] is not None
-            assert record["close_proof_json"] is not None
             pane2_rows = "\n".join(h.capture(pane2))
             assert "› /status" not in pane2_rows, (
                 "the restarted operation must not type a second /status into " "the composer"
@@ -444,15 +496,18 @@ class TestConcurrentSecondLauncher:
     def test_second_launcher_is_single_root_held(
         self, h: th.T2Harness, installed_stub: Path, conductor: Path
     ) -> None:
+        if not BASHS:
+            pytest.skip("no supported bash is present here")
+        bash = BASHS[0]
         incident_id = f"t2-{uuid.uuid4().hex[:8]}"
         h.write_incident(incident_id, _incident_evidence(incident_id))
         env = h.setup_launch_surface(stub_bin=installed_stub)
-        first = h.launch_marshal(bash=th.HOMEBREW_BASH, incident_id=incident_id, extra_env=env)
+        first = h.launch_marshal(bash=bash, incident_id=incident_id, extra_env=env)
         try:
             assert first.exit_code == 0, first.output
             assert first.pane_id, first.output
             assert first.launch_dir is not None
-            second = h.launch_marshal(bash=th.HOMEBREW_BASH, incident_id=incident_id, extra_env=env)
+            second = h.launch_marshal(bash=bash, incident_id=incident_id, extra_env=env)
             assert second.exit_code == 2
             assert "already running on the root session" in second.output
             assert "Two agents resuming one session interleave" in second.output

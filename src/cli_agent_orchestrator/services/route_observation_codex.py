@@ -168,10 +168,11 @@ def _composer_prompt_present(rows: Sequence[str]) -> bool:
 class RealCodexPaneSurface:
     """The live Codex pane transport: ``npi`` captures, ``TmuxPaneInput`` writes.
 
-    Never exercised by this dark slice's tests — the fake surface drives the
-    observer end to end — but this is the pinned delivery seam: the literal
-    ``/status`` write and its single Enter through ``TmuxPaneInput``, the
-    cond-0026 submission barrier, the escape-free capture, and the Codex
+    Exercised against REAL panes by the M17 T2 synthetic-live suite
+    (``test/e2e/test_m17_t2_synthlive.py``); the fake surface drives the
+    observer in the unit mirrors.  This is the pinned delivery seam: the
+    literal ``/status`` write and its single Enter through ``TmuxPaneInput``,
+    the cond-0026 submission barrier, the escape-free capture, and the Codex
     turn-state observer for the composer-restored close proof.
     """
 

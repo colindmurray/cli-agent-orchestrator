@@ -7,6 +7,10 @@ synthetic-live lane installs at the attested
 **stub of the provider binary only**: every pane byte it renders is REAL tmux
 content, and nothing in it calls a model, an API, or spends quota.
 
+The stub refuses to run unless ``T2_SYNTHLIVE=1`` is set: a leaked copy must
+never be a working ``codex`` that fabricates provider output outside the T2
+harness.  The harness sets the guard for every pane and every launch it makes.
+
 The captured-render fixtures (``CAPTURED_STATUS_80X30_ROWS`` /
 ``CAPTURED_STATUS_100X30_ROWS``) and the synthetic positive panel are embedded
 by the test at install time by replacing the four ``_STUB_*_ROWS_`` markers
@@ -21,9 +25,10 @@ Modes (argv):
   context with a parseable ``Model:`` row plus the ``› `` composer prompt,
   and redraw on every submitted line so a submitted ``/status`` leaves the
   composer region (the submission-observation seam the real adapter relies
-  on).  ``--raw`` runs the same renderer with the terminal in raw mode (no
-  echo), which the pane-death mid-observation case uses to hold the
-  submission barrier open while the pane's shell is really killed.
+  on).  ``--redraw-delay <seconds>`` inserts that pause between a submitted
+  line and its redraw, which the pane-death mid-observation case uses to
+  open a wide, deterministic window in which the pane's shell is really
+  killed after the submission barrier has genuinely passed.
 - ``codex garbage`` — render 30 rows of text that is NOT a codex status
   panel (the negative render case), then stay alive.
 """
@@ -33,6 +38,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 # Replaced by the test with ``repr(...)`` of the real fixture content.  The
 # committed names are intentionally undefined: they are markers, and only the
@@ -42,11 +48,20 @@ _FIX80_ROWS: list[str] = _STUB_FIX80_ROWS_
 _FIX100_ROWS: list[str] = _STUB_FIX100_ROWS_
 _GARBAGE_ROWS: list[str] = _STUB_GARBAGE_ROWS_
 
+#: The only environment that may run the stub.  Anything else is a leaked
+#: copy and must fail closed rather than fabricate provider output.
+GUARD_ENV = "T2_SYNTHLIVE"
+GUARD_VALUE = "1"
+
 #: The narrowest width that picks the 100-column capture over the 80-column
 #: one.  Between the 76-column Session floor and the 87-column Model floor,
 #: which fixture renders is the pane's business; the adapter re-derives the
 #: floors itself from ``#{pane_width}``.
 _FIX100_AT_LEAST = 90
+
+
+def guard_ok() -> bool:
+    return os.environ.get(GUARD_ENV) == GUARD_VALUE
 
 
 def pane_width() -> int:
@@ -89,66 +104,64 @@ def _draw(rows: list[str]) -> None:
     sys.stdout.flush()
 
 
-def _redraw_on_submit(rows: list[str], *, raw: bool) -> None:
+def _redraw_on_submit(rows: list[str], *, redraw_delay: float) -> None:
     """Draw ``rows`` and redraw on every submitted line so a submitted
     ``/status`` leaves the composer region (the submission-observation seam
-    the adapter's barrier relies on).  ``raw`` disables terminal echo so the
-    pane-death case can hold the barrier open while the shell is killed."""
+    the adapter's barrier relies on).  ``redraw_delay`` pauses between the
+    submitted line and the redraw, giving the pane-death case a wide window
+    to really kill the pane after the barrier has passed."""
     _draw(rows)
-    if not raw:
-        line = b""
-        while True:
-            try:
-                chunk = sys.stdin.buffer.read(1)
-            except Exception:
-                break
-            if not chunk:
-                break
-            line += chunk
-            if chunk == b"\n":
-                line = b""
-                _draw(rows)
-        return
-    import termios
-    import tty
-
-    fd = sys.stdin.fileno()
-    saved = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        line = b""
-        while True:
+    line = b""
+    while True:
+        try:
             chunk = sys.stdin.buffer.read(1)
-            if not chunk:
-                break
-            line += chunk
-            if chunk == b"\n":
-                line = b""
-                _draw(rows)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-        _draw(rows)
+        except Exception:
+            break
+        if not chunk:
+            break
+        line += chunk
+        if chunk == b"\n":
+            line = b""
+            if redraw_delay > 0:
+                time.sleep(redraw_delay)
+            _draw(rows)
 
 
-def interactive(*, raw: bool) -> None:
+def interactive(*, redraw_delay: float) -> None:
     """Render the positive panel plus composer; redraw on each submitted line."""
-    _redraw_on_submit(_POSITIVE_ROWS, raw=raw)
+    _redraw_on_submit(_POSITIVE_ROWS, redraw_delay=redraw_delay)
 
 
 def render_garbage() -> None:
     """Render rows that cannot parse as a codex status panel; redraw on
     submit so the adapter's submission barrier still resolves and reaches
     the (failed) parse — the negative-render observation."""
-    _redraw_on_submit(_GARBAGE_ROWS, raw=False)
+    _redraw_on_submit(_GARBAGE_ROWS, redraw_delay=0.0)
+
+
+def _redraw_delay_argv(argv: list[str]) -> float:
+    if "--redraw-delay" in argv:
+        try:
+            index = argv.index("--redraw-delay")
+            return float(argv[index + 1])
+        except (IndexError, ValueError):
+            pass
+    return 0.0
 
 
 def main() -> None:
+    if not guard_ok():
+        sys.stderr.write(
+            f"stub codex: {GUARD_ENV}={GUARD_VALUE} is required; refusing to "
+            "fabricate provider output outside the T2 synthetic-live harness\n"
+        )
+        sys.exit(3)
     if len(sys.argv) > 1 and sys.argv[1] == "status":
         render_status()
     elif len(sys.argv) > 1 and sys.argv[1] == "garbage":
         render_garbage()
     else:
-        interactive(raw="--raw" in sys.argv[1:])
+        interactive(redraw_delay=_redraw_delay_argv(sys.argv[1:]))
 
 
 if __name__ == "__main__":

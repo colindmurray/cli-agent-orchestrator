@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -40,6 +41,12 @@ SEALED_BASH = Path("/bin/bash")
 XDG_STATE_HOME = "XDG_STATE_HOME"
 CONDUCTOR_STATE_SUBDIR = "cao-conductor"
 
+#: The env guard every stub ``codex`` invocation requires (see stub_codex).
+#: The harness sets it for every pane and every launch it makes, so a leaked
+#: stub copy can never fabricate provider output on its own.
+T2_SYNTHLIVE = "T2_SYNTHLIVE"
+T2_SYNTHLIVE_VALUE = "1"
+
 
 @dataclasses.dataclass(frozen=True)
 class LaunchResult:
@@ -50,6 +57,17 @@ class LaunchResult:
     launch_dir: Optional[Path]
     pane_id: Optional[str]
     session_name: Optional[str]
+
+
+@dataclasses.dataclass
+class _StubBackup:
+    """What existed at the attested ``codex`` path before the stub install,
+    enough to restore it byte-, mode-, and symlink-exactly."""
+
+    mode: int
+    is_symlink: bool
+    link_target: Optional[str]
+    data: Optional[bytes]
 
 
 def conductor_root() -> Optional[Path]:
@@ -105,30 +123,54 @@ class T2Harness:
         self.fakes_root = workdir / "fakes"
         self.incidents_dir = self.state_root / CONDUCTOR_STATE_SUBDIR / "fire-marshal" / "incidents"
         self.attested = attested_bin_dir()
-        self._stub_backup: Optional[bytes] = None
+        self._stub_backup: Optional[_StubBackup] = None
         self._stub_installed = False
         self._tmux_env_restore: dict[str, Optional[str]] = {}
 
     # -- lifecycle ------------------------------------------------------------
 
     def __enter__(self) -> "T2Harness":
-        for key in ("TMUX_TMPDIR", "TMUX", XDG_STATE_HOME, "CAO_STATE_ROOT"):
+        for key in ("TMUX_TMPDIR", "TMUX", XDG_STATE_HOME, "CAO_STATE_ROOT", T2_SYNTHLIVE):
             self._tmux_env_restore[key] = os.environ.get(key)
         os.environ["TMUX_TMPDIR"] = str(self.tmux_tmp)
+        os.environ[T2_SYNTHLIVE] = T2_SYNTHLIVE_VALUE
         os.environ.pop("TMUX", None)
         self.state_root.mkdir(parents=True, exist_ok=True)
         self.cao_home.mkdir(parents=True, exist_ok=True)
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        self.kill_tmux_server()
-        self.uninstall_stub()
-        shutil.rmtree(self.tmux_tmp, ignore_errors=True)
+        # Teardown must never leak the stub, the socket dir, or a mutated env,
+        # and it must never mask the body's own exception.  Every step runs
+        # even when a previous one fails; only a teardown failure with a
+        # healthy body is surfaced.
+        teardown_error: Optional[BaseException] = None
+        try:
+            try:
+                self.kill_tmux_server()
+            except Exception as error:  # noqa: BLE001 - teardown is best-effort
+                teardown_error = error
+            finally:
+                try:
+                    self.uninstall_stub()
+                finally:
+                    try:
+                        shutil.rmtree(self.tmux_tmp, ignore_errors=True)
+                    finally:
+                        self._restore_env()
+        finally:
+            if exc is None and teardown_error is not None:
+                raise teardown_error
+
+    def _restore_env(self) -> None:
         for key, value in self._tmux_env_restore.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+            try:
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            except Exception:  # noqa: BLE001 - restoring the env is best-effort
+                pass
 
     # -- the stub binary -------------------------------------------------------
 
@@ -145,11 +187,26 @@ class T2Harness:
 
     def install_stub(self) -> Path:
         """Render the committed stub template with the real fixtures and
-        install it at the attested layout.  Returns the installed path."""
+        install it at the attested layout.  Returns the installed path.
+
+        The pre-existing target (bytes, mode, and symlink-ness) is backed up
+        BEFORE the destructive unlink, and the installed flag is set before
+        anything is removed, so a mid-write failure still leaves a restorable
+        backup instead of a deleted target nobody can recover."""
         self.attested.mkdir(parents=True, exist_ok=True)
         target = self.stub_bin()
-        if target.exists():
-            self._stub_backup = target.read_bytes()
+        backup: Optional[_StubBackup] = None
+        if target.is_symlink() or target.exists():
+            st = target.lstat()
+            backup = _StubBackup(
+                mode=stat.S_IMODE(st.st_mode),
+                is_symlink=stat.S_ISLNK(st.st_mode),
+                link_target=os.readlink(target) if stat.S_ISLNK(st.st_mode) else None,
+                data=None if stat.S_ISLNK(st.st_mode) else target.read_bytes(),
+            )
+        self._stub_backup = backup
+        self._stub_installed = True
+        if backup is not None:
             target.unlink()
         from test.e2e.route_observation_canary import fixtures as fx
 
@@ -171,10 +228,17 @@ class T2Harness:
             return
         target = self.stub_bin()
         try:
-            if self._stub_backup is not None:
-                target.write_bytes(self._stub_backup)
-            elif target.exists():
-                target.unlink()
+            backup = self._stub_backup
+            if backup is not None:
+                target.unlink(missing_ok=True)
+                if backup.is_symlink:
+                    os.symlink(backup.link_target, target)
+                else:
+                    target.write_bytes(backup.data)
+                    os.chmod(target, backup.mode)
+            else:
+                if target.is_symlink() or target.exists():
+                    target.unlink()
         finally:
             self._stub_installed = False
             self._stub_backup = None
@@ -184,6 +248,7 @@ class T2Harness:
     def _env(self, extra: Optional[dict[str, str]] = None) -> dict[str, str]:
         env = dict(os.environ)
         env["TMUX_TMPDIR"] = str(self.tmux_tmp)
+        env[T2_SYNTHLIVE] = T2_SYNTHLIVE_VALUE
         env.pop("TMUX", None)
         if extra:
             env.update(extra)
@@ -309,6 +374,7 @@ class T2Harness:
             "HEADLESS_SKILLS_ROOT": str(self.fakes_root),
             "CHECK_AI_QUOTA_SKILL": str(self.quota_skill),
             "TMUX_TMPDIR": str(self.tmux_tmp),
+            T2_SYNTHLIVE: T2_SYNTHLIVE_VALUE,
         }
 
     def launch_marshal(
