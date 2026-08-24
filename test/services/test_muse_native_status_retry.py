@@ -80,8 +80,7 @@ def test_the_submit_settles_between_the_literal_and_its_enter(
     )
     _observe(screen, str(tmp_path))
     assert settle in slept, (
-        f"the submit must settle {settle}s between literal and Enter; "
-        f"sleeps observed: {slept}"
+        f"the submit must settle {settle}s between literal and Enter; " f"sleeps observed: {slept}"
     )
 
 
