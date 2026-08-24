@@ -158,6 +158,13 @@ def attest_muse_route(
     return {
         "probe_version": PROBE_VERSION,
         "muse_version": normalized,
+        # This banner comes from the wrapper resolved on the ambient PATH by
+        # ``shutil.which`` above — NOT the reserve-pinned provider_executable
+        # that a managed launch re-verifies by digest.  It must therefore never
+        # be recorded as the durable ``provider_executable_version`` in the
+        # launch facts: that would be exactly the forbidden ambient inference.
+        # v1 Muse rows stay non-resurrectable by design; only the v2 native
+        # launch records its digest-verified wrapper's banner (managed_launch_v2).
         "full_banner": banner,
         "wrapper_executable": wrapper,
         "inner_executable": capability.inner_executable,
