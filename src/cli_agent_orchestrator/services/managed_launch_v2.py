@@ -447,17 +447,16 @@ _PINNED_PROVIDER = {
 NATIVE_PANE_READY_TIMEOUT_SECONDS = native_tui_launch.NATIVE_COLD_START_RUNWAY_SECONDS
 _NATIVE_PANE_READY_POLL_SECONDS = 0.1
 
-#: How long the Muse /status observation may keep polling a capture that
-#: has produced ZERO recognizable content — no labeled panel, no boxed
-#: panel, not even the persistent inline footer.  A pane whose render is
-#: entirely unrecognized for this long is not a slow cold start (the
-#: footer appears within seconds of the composer); it is an incompatible
-#: build or a lost keystroke, and holding the launch's full cold-start
-#: runway on it only converts one blocked spawn into a bind-timeout storm.
-#: Once ANY recognized shape has been seen, the full
-#: :data:`NATIVE_PANE_READY_TIMEOUT_SECONDS` runway applies again, because
-#: then the observation is waiting on evidence that is known to arrive.
-MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS = 15.0
+#: How long one ``/status`` submission may stay silent before the Muse
+#: observation resends the literal command into the pane.  Muse 0.2.1
+#: silently swallows a ``/status`` submitted during cold start: the
+#: composer consumes the input near input-ready and no panel ever
+#: renders, while an identical resubmit once idle renders the full boxed
+#: panel within seconds (live-proven cond-0713 on the installed build).
+#: The interval sits well above the ~2 s a landed panel needs to render,
+#: so a healthy pane is never re-driven, and every retry stays inside
+#: :data:`NATIVE_PANE_READY_TIMEOUT_SECONDS`.
+MUSE_STATUS_RETYPE_INTERVAL_SECONDS = 4.0
 
 #: Machine-readable reasons for a native admission that wrote no bytes.
 #:
@@ -4775,7 +4774,8 @@ def _observe_muse_status_panel(
     request: Optional[dict[str, Any]] = None,
     store_discovery: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Type ``/status`` once into the pane, then capture until it parses.
+    """Type ``/status`` into the pane and observe until it parses, resending
+    the command while the pane stays silent.
 
     ``session_id`` is ``None`` on a fresh launch, where the id is
     *discovered*: the panel's session id is validated as a canonical UUID
@@ -4787,21 +4787,33 @@ def _observe_muse_status_panel(
     footer-only capture on a fresh launch means *route observed, identity
     absent*: with ``store_discovery`` wired, identity is then adopted from
     the exactly-one new session the provider registered on disk for this
-    workspace (the snapshot must predate the pane process).  A capture
-    that produces NO recognized content is bounded by
-    :data:`MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS` — an entirely
-    unrecognized render is refused in seconds with the installed version
-    and the last screen's fingerprint instead of holding the launch's full
-    cold-start runway — while recognized-but-incomplete content keeps the
-    full :data:`NATIVE_PANE_READY_TIMEOUT_SECONDS` bound, because it is
-    waiting on evidence known to arrive.
+    workspace (the snapshot must predate the pane process).
 
-    The observation is bounded and never retyped: a second ``/status``
+    A ``/status`` submitted during cold start can be silently swallowed:
+    Muse 0.2.1 consumes the composer input near input-ready and no panel
+    ever renders, while an identical resubmit once idle renders the full
+    boxed panel within seconds (live-proven cond-0713).  While NO
+    panel-shaped content has been seen, the observation therefore resends
+    the literal ``/status`` + Enter every
+    :data:`MUSE_STATUS_RETYPE_INTERVAL_SECONDS` until the runway in
+    :data:`NATIVE_PANE_READY_TIMEOUT_SECONDS` is spent.  The persistent
+    inline footer never suppresses a resend — it renders whether or not
+    the command landed, so it is not evidence the submit was taken.  Once
+    panel-shaped content IS seen, resends stop: a second ``/status``
     after a first landed would render a second panel and make the capture
-    ambiguous, which the parser refuses rather than guesses at.  Every
-    outcome that is not a clean parse of exactly the claimed pre-task
-    session raises, and the caller maps the raise to a preflight block
-    with zero task bytes.
+    ambiguous, which the parser refuses rather than guesses at, and the
+    remaining runway observes evidence known to arrive.
+
+    When the runway is spent without a clean parse of exactly the claimed
+    pre-task session, this observation raises
+    :class:`ManagedLaunchConflict` naming what it observed — how many
+    times ``/status`` was submitted, how many captures were read, the
+    installed version, and the fingerprint of the last screen — and the
+    caller maps that raise to a preflight block with zero task bytes.
+    Failures on the way there are not rewritten into that refusal: a pane
+    input that cannot be typed into, a store snapshot that cannot be
+    read, and a store diff that is ambiguous or proves no admissible
+    identity propagate their own errors as-is.
 
     The capture reads the composited viewport (no escape sequences), which
     is how the installed panels render.
@@ -4814,15 +4826,20 @@ def _observe_muse_status_panel(
             "the launch outcome names no pane, so the /status observation could not be made"
         )
     typed_input = TmuxPaneInput(pane_id)
-    typed_input.send_literal(muse_native_status.STATUS_COMMAND)
-    typed_input.send_enter()
+
+    def _submit_status() -> None:
+        typed_input.send_literal(muse_native_status.STATUS_COMMAND)
+        typed_input.send_enter()
+
+    status_submit_attempts = 1
+    _submit_status()
+    last_submitted_at = time.monotonic()
 
     deadline = time.monotonic() + NATIVE_PANE_READY_TIMEOUT_SECONDS
-    unrecognized_deadline = time.monotonic() + MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS
     last_error: Optional[str] = None
     captures = 0
     last_rows: list[str] = []
-    recognized_any = False
+    panel_shape_seen = False
     while True:
         captures += 1
         try:
@@ -4842,15 +4859,15 @@ def _observe_muse_status_panel(
                 last_error = str(exc)
                 # A shape-detected panel that still fails the strict parse
                 # (a viewport-clipped box mid-render, say) is recognized
-                # content on its way to completeness: it keeps the full
-                # runway instead of tripping the unrecognized bound.
+                # content on its way to completeness: it keeps polling on
+                # the full runway and stops any resend, because the landed
+                # panel is already rendering.
                 if muse_native_status.is_recognized_shape(rows):
-                    recognized_any = True
+                    panel_shape_seen = True
             if parsed is not None and parsed.get("partial"):
                 # Route observed, identity absent.  On a fresh launch with
                 # the store wired, adopt the identity from the exactly-one
                 # new session the provider registered for this workspace.
-                recognized_any = True
                 if session_id is None and store_discovery is not None and request is not None:
                     found = muse_session_store.discover_new_session_id(
                         store_discovery["snapshot"],
@@ -4864,7 +4881,7 @@ def _observe_muse_status_panel(
                         working_directory=working_directory,
                     )
             elif parsed is not None:
-                recognized_any = True
+                panel_shape_seen = True
                 try:
                     return muse_native_status.require_pre_task_status(
                         parsed,
@@ -4878,21 +4895,23 @@ def _observe_muse_status_panel(
                     last_error = str(exc)
         now = time.monotonic()
         rows_sha = hashlib.sha256("\n".join(last_rows).encode("utf-8")).hexdigest()[:12]
-        if not recognized_any and now >= unrecognized_deadline:
-            raise ManagedLaunchConflict(
-                f"the Muse /status observation never produced recognized content "
-                f"within {MUSE_STATUS_UNRECOGNIZED_TIMEOUT_SECONDS:g} seconds "
-                f"(installed {muse_version or 'unknown version'}; {captures} captures, "
-                f"last screen sha256:{rows_sha} over {len(last_rows)} rows); refusing "
-                "fast rather than holding the launch through the cold-start runway. "
-                f"Last observation: {last_error or 'no capture was ever made'}"
-            )
         if now >= deadline:
             raise ManagedLaunchConflict(
                 f"the /status panel never described the claimed pre-task session within "
-                f"{NATIVE_PANE_READY_TIMEOUT_SECONDS:g} seconds; last observation: "
-                f"{last_error or 'no capture was ever made'}"
+                f"{NATIVE_PANE_READY_TIMEOUT_SECONDS:g} seconds "
+                f"(installed {muse_version or 'unknown version'}; "
+                f"status_submit_attempts={status_submit_attempts}, captures={captures}, "
+                f"last screen sha256:{rows_sha} over {len(last_rows)} rows); "
+                f"last observation: {last_error or 'no capture was ever made'}"
             )
+        # No panel has ever rendered, so nothing on screen contradicts a
+        # resubmit: the earlier /status was swallowed by the cold-start
+        # composer, not rendered.  The footer alone does not count as a
+        # panel — it renders whether or not the command landed.
+        if not panel_shape_seen and now - last_submitted_at >= MUSE_STATUS_RETYPE_INTERVAL_SECONDS:
+            _submit_status()
+            status_submit_attempts += 1
+            last_submitted_at = time.monotonic()
         time.sleep(_NATIVE_PANE_READY_POLL_SECONDS)
 
 
