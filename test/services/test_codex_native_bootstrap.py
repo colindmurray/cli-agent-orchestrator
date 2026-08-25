@@ -21,23 +21,23 @@ def codex_binary(tmp_path):
     return path, hashlib.sha256(binary.read_bytes()).hexdigest()
 
 
+@pytest.fixture(autouse=True)
+def isolated_capability_probe(monkeypatch):
+    cnb._CAPABILITY_VERDICTS.clear()
+    monkeypatch.setattr(
+        cnb,
+        "_probe_schema_capability",
+        lambda *_args, **_kwargs: {"schema": cnb.SCHEMA_PROBE_SCHEMA},
+    )
+
+
 def _response(request_id, result):
     return json.dumps({"id": request_id, "result": result})
 
 
-def test_zero_turn_bootstrap_capability_is_narrower_than_provider_capability():
-    """0.147 has the bootstrap proof without changing the broad version table."""
-    assert cnb.BOOTSTRAP_CAPABLE_VERSIONS == ("0.146.0", "0.147.0")
-    # One literal, two consumers: the bootstrap that mints the native id and
-    # the managed bind seam that accepts it read the same table object, so
-    # the two surfaces cannot drift back into disagreement — which is the
-    # reproduced failure where mint accepted 0.147.0 and bind refused it.
-    assert (
-        cnb.BOOTSTRAP_CAPABLE_VERSIONS
-        is provider_contracts.NATIVE_BIND_CAPABLE_VERSIONS[provider_contracts.PROVIDER_CODEX]
-    )
-    assert cnb.is_bootstrap_capable_build("codex-cli 0.147.0") is True
-    assert cnb.is_bootstrap_capable_build("codex-cli 0.148.0") is False
+def test_unlisted_builds_are_not_withheld_by_a_version_allowlist():
+    assert not hasattr(cnb, "BOOTSTRAP_CAPABLE_VERSIONS")
+    assert not hasattr(cnb, "is_bootstrap_capable_build")
     assert (
         provider_contracts.is_listed_version(provider_contracts.PROVIDER_CODEX, "codex-cli 0.147.0")
         is False
@@ -50,6 +50,18 @@ def test_bootstrap_materializes_a_resumable_zero_turn_thread(tmp_path, codex_bin
     codex_home.mkdir()
 
     def exchange(argv, requests, timeout, *, env=None, followup_factory=None):
+        if followup_factory is None:
+            seen["adoption_requests"] = requests
+            return (
+                "\n".join(
+                    [
+                        _response(1, {"userAgent": "codex-test"}),
+                        _response(2, {"thread": {"id": SESSION, "ephemeral": False}}),
+                    ]
+                ),
+                "",
+                0,
+            )
         seen["argv"] = argv
         seen["requests"] = requests
         seen["env"] = env
@@ -120,6 +132,13 @@ def test_bootstrap_materializes_a_resumable_zero_turn_thread(tmp_path, codex_bin
     assert receipt["detached_before_launch"] is True
     assert receipt["exit_proof"]["reaped"] is True
     assert seen["argv"][-2:] == ["app-server", "--stdio"]
+    assert [request["method"] for request in seen["adoption_requests"]] == [
+        "initialize",
+        "initialized",
+        "thread/resume",
+    ]
+    assert seen["adoption_requests"][-1]["params"] == {"threadId": SESSION}
+    assert "turn/start" not in [request["method"] for request in seen["adoption_requests"]]
 
     intent = cnb.bootstrap_intent(receipt)
     assert intent["acquisition_method"] == native_attachment.ACQUISITION_ZERO_TURN_BOOTSTRAP
@@ -133,6 +152,17 @@ def test_default_route_omits_model_and_records_provider_observation(
     codex_home.mkdir()
 
     def exchange(argv, requests, _timeout, *, env=None, followup_factory=None):
+        if followup_factory is None:
+            return (
+                "\n".join(
+                    [
+                        _response(1, {"userAgent": "codex-test"}),
+                        _response(2, {"thread": {"id": SESSION, "ephemeral": False}}),
+                    ]
+                ),
+                "",
+                0,
+            )
         seen["argv"] = argv
         seen["requests"] = requests
         start_response = {
@@ -209,6 +239,17 @@ def test_route_drift_is_refused(tmp_path, codex_binary, monkeypatch):
     codex_home.mkdir()
 
     def exchange(_argv, requests, _timeout, *, env=None, followup_factory=None):
+        if followup_factory is None:
+            return (
+                "\n".join(
+                    [
+                        _response(1, {}),
+                        _response(2, {"thread": {"id": SESSION, "ephemeral": False}}),
+                    ]
+                ),
+                "",
+                0,
+            )
         seen["requests"] = requests
         start_response = {
             "id": 3,
@@ -264,6 +305,17 @@ def test_bootstrap_refuses_when_materialization_leaves_no_rollout(
     codex_home.mkdir()
 
     def exchange(_argv, _requests, _timeout, *, env=None, followup_factory=None):
+        if followup_factory is None:
+            return (
+                "\n".join(
+                    [
+                        _response(1, {}),
+                        _response(2, {"thread": {"id": SESSION, "ephemeral": False}}),
+                    ]
+                ),
+                "",
+                0,
+            )
         start_response = {
             "id": 3,
             "result": {
@@ -348,3 +400,46 @@ def test_bootstrap_intent_refuses_an_unmaterialized_legacy_receipt():
                 "exit_proof": {"reaped": True},
             }
         )
+
+
+def _schema_fixture():
+    definitions = {}
+    requests = []
+    for method, (params, response, fields) in cnb._SCHEMA_REQUIREMENTS.items():
+        definitions[params] = {"properties": {field: {} for field in fields}}
+        definitions[response] = {
+            "properties": {"thread": {}} if "thread" in response.lower() else {}
+        }
+        requests.append(
+            {
+                "properties": {
+                    "method": {"enum": [method]},
+                    "params": {"$ref": f"#/definitions/v2/{params}"},
+                }
+            }
+        )
+    return {"definitions": {"v2": definitions}, "oneOf": requests}
+
+
+def test_schema_probe_requires_every_load_bearing_method_and_field():
+    assert set(cnb._validate_schema_bundle(_schema_fixture())["methods"]) == set(
+        cnb._SCHEMA_REQUIREMENTS
+    )
+    broken = _schema_fixture()
+    del broken["definitions"]["v2"]["ThreadResumeParams"]["properties"]["threadId"]
+    with pytest.raises(cnb.CodexBootstrapError, match="thread/resume.*threadId"):
+        cnb._validate_schema_bundle(broken)
+
+
+def test_schema_capability_is_cached_by_binary_digest(tmp_path, codex_binary, monkeypatch):
+    path, digest = codex_binary
+    calls = []
+
+    def probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"schema": cnb.SCHEMA_PROBE_SCHEMA}
+
+    monkeypatch.setattr(cnb, "_probe_schema_capability", probe)
+    assert cnb._validate_binary(path, digest, "codex-cli 99.99.0") == digest
+    assert cnb._validate_binary(path, digest, "codex-cli 99.99.0") == digest
+    assert len(calls) == 1
