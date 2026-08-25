@@ -17,6 +17,7 @@ summaries auto)`` suffix yields effort ``medium`` and ignores its annotation.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import uuid
 from test.e2e.route_observation_canary import cases
@@ -794,6 +795,56 @@ class TestRunnerEntryPoints:
             )
 
         assert surface.status_commands_sent == 0
+
+    def test_ambiguous_close_refuses_an_inconclusive_observation(self, _db, tmp_path, monkeypatch):
+        case = cases.AMBIGUOUS_CLOSE
+        spec_path = tmp_path / "spec.json"
+        prepared_path = tmp_path / "prepared.json"
+        event_log = tmp_path / "events.jsonl"
+        spec = _runner_spec(str(uuid.uuid4()))
+        spec["runtime"] = {"pane_id": "%99", "event_log": str(event_log)}
+        spec_path.write_text(json.dumps(spec, sort_keys=True), encoding="utf-8")
+
+        class InconclusiveRealSurface:
+            def __init__(self, *args, **kwargs):
+                self.pane_id = args[0]
+
+            def pane_width(self):
+                return 100
+
+            def capture_screen(self):
+                return ["not a Codex status panel"]
+
+            def send_status_command(self):
+                return True
+
+            def composer_restored(self):
+                raise RuntimeError("pane was killed")
+
+        monkeypatch.setattr(
+            canary_runner.roc,
+            "RealCodexPaneSurface",
+            InconclusiveRealSurface,
+        )
+        monkeypatch.setattr(
+            canary_runner.subprocess,
+            "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+        )
+        canary_runner._prepare(case.runner_key, spec_path, prepared_path)
+
+        with pytest.raises(canary_runner.LiveCanaryInvalid, match="ambiguous-close"):
+            canary_runner._execute(
+                case.runner_key,
+                prepared_path,
+                tmp_path / "evidence.json",
+            )
+
+    def test_inbox_status_refuses_missing_or_untyped_rows(self, _db):
+        with pytest.raises(canary_runner.LiveCanaryInvalid, match="did not name"):
+            canary_runner._inbox_status(None)
+        with pytest.raises(canary_runner.LiveCanaryInvalid, match="absent inbox row"):
+            canary_runner._inbox_status(999_999)
 
     def test_delivery_driver_selects_the_existing_exact_wake_row(self, _db, tmp_path, monkeypatch):
         request = _request()

@@ -93,13 +93,7 @@ def _git_head(path: Path) -> str:
     return result.stdout.strip()
 
 
-def _conductor_source() -> Path:
-    value = os.environ.get(CONDUCTOR_ENV)
-    if not value:
-        pytest.skip(f"{CONDUCTOR_ENV} must name the exact clean conductor installation")
-    path = Path(value)
-    if not (path / "conduct" / "lib" / "route_completion_consumer.py").is_file():
-        pytest.fail(f"{CONDUCTOR_ENV} does not contain the route consumer: {path}")
+def _require_clean_worktree(path: Path, label: str) -> None:
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=path,
@@ -108,7 +102,23 @@ def _conductor_source() -> Path:
         timeout=20,
         check=True,
     ).stdout
-    assert not status.strip(), "the T3 conductor installation must be clean"
+    assert not status.strip(), f"{label} must be clean"
+
+
+def _require_empty_evidence_root(path: Path) -> None:
+    if path.exists() and any(path.iterdir()):
+        raise AssertionError(f"{EVIDENCE_ENV} must name a new or empty evidence directory")
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _conductor_source() -> Path:
+    value = os.environ.get(CONDUCTOR_ENV)
+    if not value:
+        pytest.skip(f"{CONDUCTOR_ENV} must name the exact clean conductor installation")
+    path = Path(value)
+    if not (path / "conduct" / "lib" / "route_completion_consumer.py").is_file():
+        pytest.fail(f"{CONDUCTOR_ENV} does not contain the route consumer: {path}")
+    _require_clean_worktree(path, "the T3 conductor installation")
     return path
 
 
@@ -287,6 +297,32 @@ def _shareable_json(sanitizer: EvidenceSanitizer, value: Any) -> Any:
         return item
 
     return sanitizer.sanitize_json(convert(value))
+
+
+def _shareable_installed_codex(installed: Mapping[str, str]) -> dict[str, str]:
+    """Keep the installed-build attestation without publishing its local path."""
+    executable = installed["path"]
+    return {
+        "executable_basename": Path(executable).name,
+        "executable_path_sha256": _sha256_text(executable),
+        "sha256": installed["sha256"],
+        "banner": installed["banner"],
+        "version": installed["version"],
+    }
+
+
+def _write_bounded_server_log(
+    sanitizer: EvidenceSanitizer,
+    source: Path,
+    destination: Path,
+) -> None:
+    try:
+        content = "\n".join(
+            source.read_text(encoding="utf-8", errors="replace").splitlines()[-500:]
+        )
+    except OSError as exc:
+        content = f"<server log read failed: {exc}>"
+    sanitizer.write_text(destination, content + "\n")
 
 
 def _deliver(
@@ -484,15 +520,17 @@ def _run_case(
                     os.environ.get("USER", ""): "<USER>",
                 }
             )
-            server = _start_cao_server(
-                scratch / "server-home",
-                _pick_free_port(),
-                extra_env=child_env,
-                deadline=30,
-            )
-            child_env["CAO_API_HOST"] = "127.0.0.1"
-            child_env["CAO_API_PORT"] = str(server.port)
+            server_home = scratch / "server-home"
+            server = None
             try:
+                server = _start_cao_server(
+                    server_home,
+                    _pick_free_port(),
+                    extra_env=child_env,
+                    deadline=30,
+                )
+                child_env["CAO_API_HOST"] = "127.0.0.1"
+                child_env["CAO_API_PORT"] = str(server.port)
                 target = _launch_bound(
                     server_url=server.url,
                     session_name=target_session,
@@ -712,16 +750,13 @@ def _run_case(
                 }
                 return _shareable_json(sanitizer, result)
             finally:
-                server.stop()
-                try:
-                    server_log = "\n".join(
-                        server.log_path.read_text(encoding="utf-8", errors="replace").splitlines()[
-                            -500:
-                        ]
-                    )
-                except OSError as exc:
-                    server_log = f"<server log read failed: {exc}>"
-                sanitizer.write_text(case_dir / "server.log", server_log + "\n")
+                if server is not None:
+                    server.stop()
+                _write_bounded_server_log(
+                    sanitizer,
+                    server.log_path if server is not None else server_home / "server.log",
+                    case_dir / "server.log",
+                )
                 with contextlib.suppress(Exception):
                     tmux.kill_session(target_session, check=False)
                 with contextlib.suppress(Exception):
@@ -803,6 +838,148 @@ def test_shareable_json_hashes_session_ids_and_redacts_local_paths(tmp_path: Pat
     }
 
 
+def test_installed_codex_rollup_hashes_the_local_executable_path() -> None:
+    installed = {
+        "path": "/Users/operator/bin/codex",
+        "sha256": "a" * 64,
+        "banner": "codex-cli 0.149.0",
+        "version": "0.149.0",
+    }
+
+    shared = _shareable_installed_codex(installed)
+
+    assert "path" not in shared
+    assert shared["executable_basename"] == "codex"
+    assert shared["executable_path_sha256"] == _sha256_text(installed["path"])
+
+
+def test_bounded_server_log_is_sanitized_and_limited(tmp_path: Path) -> None:
+    source = tmp_path / "server-home" / "server.log"
+    source.parent.mkdir()
+    source.write_text(
+        "discarded\n" * 4 + "/Users/operator/private\n" * 500,
+        encoding="utf-8",
+    )
+    destination = tmp_path / "case" / "server.log"
+
+    _write_bounded_server_log(
+        EvidenceSanitizer({"/Users/operator": "<HOME>"}),
+        source,
+        destination,
+    )
+
+    lines = destination.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 500
+    assert set(lines) == {"<HOME>/private"}
+
+
+def test_server_start_failure_preserves_its_sanitized_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_home = tmp_path / "operator-home"
+    real_home.mkdir()
+    owned_root = tmp_path / "tmux-owned"
+    owned_root.mkdir()
+
+    class FakeTmux:
+        socket_path = tmp_path / "tmux.sock"
+
+        def __init__(self) -> None:
+            self.owned_root = owned_root
+
+        def write_shim(self, path: Path) -> str:
+            path.mkdir(parents=True)
+            return str(path / "tmux")
+
+        def new_session(self, *args: Any) -> None:
+            return None
+
+        def subprocess_env(self, shim: str) -> dict[str, str]:
+            return {}
+
+        def kill_session(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    @contextlib.contextmanager
+    def fake_shared_server_sentinel(name: str):
+        yield object(), "shared-session", {"generation": "shared"}
+
+    @contextlib.contextmanager
+    def fake_isolated_tmux_server(name: str):
+        yield FakeTmux()
+
+    def fail_server_start(home: Path, *args: Any, **kwargs: Any) -> None:
+        home.mkdir(parents=True)
+        (home / "server.log").write_text(
+            f"startup failed under {real_home}\n",
+            encoding="utf-8",
+        )
+        raise RuntimeError("server health check failed")
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "shared_server_sentinel",
+        fake_shared_server_sentinel,
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "isolated_tmux_server",
+        fake_isolated_tmux_server,
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_start_cao_server", fail_server_start)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_build_codex_home",
+        lambda home, scratch: str(scratch / "codex-home"),
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_git_worktree",
+        lambda path: str(path),
+    )
+    case_dir = tmp_path / "case"
+
+    with pytest.raises(RuntimeError, match="health check failed"):
+        _run_case(
+            case=cases.POSITIVE_PATH,
+            case_dir=case_dir,
+            installed={
+                "path": "/opt/codex",
+                "sha256": "a" * 64,
+                "version": "0.149.0",
+            },
+            conductor=tmp_path / "conductor",
+            real_home=real_home,
+        )
+
+    assert (case_dir / "server.log").read_text(encoding="utf-8") == (
+        "startup failed under <HOME>\n"
+    )
+
+
+def test_evidence_root_and_worktree_preconditions_are_mutation_pinned(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence"
+    _require_empty_evidence_root(evidence)
+    (evidence / "prior.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="new or empty"):
+        _require_empty_evidence_root(evidence)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
+    _require_clean_worktree(repo, "test repo")
+    tracked.write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="test repo must be clean"):
+        _require_clean_worktree(repo, "test repo")
+
+
 def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
     if os.environ.get(LIVE_ENV) != "1":
         pytest.skip(f"set {LIVE_ENV}=1 only after the CP1 live-testing checkpoint")
@@ -810,9 +987,7 @@ def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
     if not evidence_value:
         pytest.skip(f"{EVIDENCE_ENV} must name the preserved T3 evidence directory")
     evidence_root = Path(evidence_value)
-    if evidence_root.exists() and any(evidence_root.iterdir()):
-        pytest.fail(f"{EVIDENCE_ENV} must name a new or empty evidence directory")
-    evidence_root.mkdir(parents=True, exist_ok=True)
+    _require_empty_evidence_root(evidence_root)
     conductor = _conductor_source()
     installed = _installed_codex()
     real_home_value = os.environ.get("HOME")
@@ -821,15 +996,7 @@ def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
     real_home = Path(real_home_value)
 
     fork_root = Path(__file__).resolve().parents[2]
-    harness_status = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=fork_root,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=True,
-    ).stdout
-    assert not harness_status.strip(), "the T3 fork test installation must be clean"
+    _require_clean_worktree(fork_root, "the T3 fork test installation")
     source_diff = subprocess.run(
         ["git", "diff", "--quiet", "origin/main", "--", "src"], cwd=fork_root
     )
@@ -891,7 +1058,7 @@ def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
             check=True,
         ).stdout.strip(),
         "conductor_source_head": _git_head(conductor),
-        "installed_codex": installed,
+        "installed_codex": _shareable_installed_codex(installed),
         "case_order": [case.runner_key for case in cases.CANARY_CASES],
         "paid_turn_count": 4,
         "stale_requester_turn_count": 0,
