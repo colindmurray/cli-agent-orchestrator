@@ -86,32 +86,19 @@ CLOSE_NOT_RESTORED = "not-restored"
 CLOSE_INDETERMINATE = "indeterminate"
 
 #: The exact reasoning-effort vocabulary the installed build accepts for the
-#: ``model_reasoning_effort`` route.  A suffix outside this set is malformed
-#: evidence and is refused, never guessed — but the refusal accounts for what
-#: was actually rendered: the verbatim suffix text is recorded on the
-#: inconclusive observation so the operator's vocabulary decision (CP1) has
-#: the real observed values to decide from.
+#: ``model_reasoning_effort`` route.  A token outside this set is malformed
+#: evidence and is refused, never guessed.
 _CODEX_EFFORT_VOCABULARY = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "ultra"})
 
-#: The exact trailing `` (reasoning <effort>)`` suffix on the Model value.
-_REASONING_SUFFIX = re.compile(r"^(.*?)\s+\(reasoning\s+([^()]*)\)$")
+#: The reasoning effort starts the parenthetical detail.  Any comma-delimited
+#: display annotations after it are non-authoritative and intentionally ignored.
+_REASONING_SUFFIX = re.compile(r"^(.*?)\s+\(reasoning\s+([^\s(),]+)(?:\s*,[^()]*)?\)$")
+# A reasoning parenthetical with no effort token is malformed authoritative
+# structure, not a model name with an incidental parenthetical.
+_EMPTY_REASONING_SUFFIX = re.compile(r"^(.*?)\s+\(reasoning\s*\)$")
 
 #: A Codex composer prompt row (the live composer, not the printed panel).
 _CODEX_COMPOSER_PROMPT = re.compile(r"^\s*(?:›|❯|codex>)(?:\s|$)")
-
-
-class _MalformedReasoningSuffix(nsr.PanelParseError):
-    """A Model row whose reasoning suffix is outside the closed vocabulary.
-
-    Same refusal as any ``PanelParseError`` — every existing handler catches
-    it unchanged — but it carries the verbatim parenthetical text (outer
-    whitespace trimmed only, never normalized, split, or guessed) so the
-    inconclusive observation can durably account for what the build rendered.
-    """
-
-    def __init__(self, message: str, *, observed_reasoning_suffix: str) -> None:
-        super().__init__(message)
-        self.observed_reasoning_suffix = observed_reasoning_suffix
 
 
 class CodexPaneSurface(Protocol):
@@ -278,9 +265,9 @@ def _parse_model_row(normalized: Sequence[str]) -> tuple[Optional[str], Optional
     effort; any other complete parenthetical stays part of the model.  A second
     Model row, a suffix carrying an unknown effort, or a value cut off
     mid-parenthetical at the pane edge is refused rather than guessed: a
-    truncated value is a truncated capture, never a bare model.  The
-    out-of-vocabulary refusal carries the verbatim suffix text on the raised
-    ``_MalformedReasoningSuffix`` so the observation can account for it.
+    truncated value is a truncated capture, never a bare model.  Once the
+    effort token is validated, any comma-delimited display annotation is
+    ignored completely.
     """
     model_rows = [row for row in normalized if row.lstrip().startswith("Model:")]
     if not model_rows:
@@ -290,6 +277,10 @@ def _parse_model_row(normalized: Sequence[str]) -> tuple[Optional[str], Optional
     value = model_rows[0].split(":", 1)[1].strip()
     match = _REASONING_SUFFIX.fullmatch(value)
     if match is None:
+        if _EMPTY_REASONING_SUFFIX.fullmatch(value):
+            raise nsr.PanelParseError(
+                "the Codex status Model row has an empty reasoning effort; refusing"
+            )
         if value.count("(") > value.count(")"):
             raise nsr.PanelParseError(
                 "the Codex status Model row is truncated mid-parenthetical; refusing "
@@ -298,12 +289,32 @@ def _parse_model_row(normalized: Sequence[str]) -> tuple[Optional[str], Optional
         return value, None
     model, effort = match.group(1).strip(), match.group(2).strip()
     if not effort or effort not in _CODEX_EFFORT_VOCABULARY:
-        raise _MalformedReasoningSuffix(
+        raise nsr.PanelParseError(
             f"the Codex status Model row carries a malformed reasoning suffix; refusing "
             "rather than guessing an effort from arbitrary parenthetical text",
-            observed_reasoning_suffix=effort,
         )
     return model, effort
+
+
+def _evidence_rows(normalized: Sequence[str]) -> list[str]:
+    """Canonicalize non-authoritative Model-row decoration out of evidence.
+
+    The existing evidence digest remains useful for the authoritative panel
+    facts, but changing ignored display text must not change its input.  Only a
+    structurally complete reasoning suffix is canonicalized; malformed or
+    truncated rows stay untouched and therefore retain refusal evidence.
+    """
+    rows = list(normalized)
+    model_rows = [index for index, row in enumerate(rows) if row.lstrip().startswith("Model:")]
+    if len(model_rows) != 1:
+        return rows
+    index = model_rows[0]
+    value = rows[index].split(":", 1)[1].strip()
+    match = _REASONING_SUFFIX.fullmatch(value)
+    if match is not None:
+        model, effort = match.group(1).strip(), match.group(2).strip()
+        rows[index] = f"Model: {model} (reasoning {effort})"
+    return rows
 
 
 def parse_codex_route_panel(
@@ -320,15 +331,14 @@ def parse_codex_route_panel(
     lacks the Model row is a truncated/different panel, not an observation.
     The session identity is taken from the same branded parser
     (``codex-status-v1``) the identity repair uses, so there is exactly one
-    description of what a Codex status panel means.  A Model row refused for
-    an out-of-vocabulary reasoning suffix additionally carries that verbatim
-    suffix text as the additive optional ``observed_reasoning_suffix`` key.
+    description of what a Codex status panel means.  Only the session ID,
+    model, and reasoning effort become observation facts.
 
     Returns ``kind`` in {``observed``, ``partial``, ``inconclusive``}.
     """
     floor = _render_floor(pane_width)
     normalized = nsr.normalize_capture_rows(rows)
-    evidence = nsr.evidence_digest(rows)
+    evidence = nsr.evidence_digest(_evidence_rows(normalized))
     if not floor["session_assertable"]:
         return {
             "kind": "inconclusive",
@@ -359,8 +369,8 @@ def parse_codex_route_panel(
         }
     try:
         model, effort = _parse_model_row(normalized)
-    except nsr.PanelParseError as exc:
-        fact: dict[str, Any] = {
+    except nsr.PanelParseError:
+        return {
             "kind": "inconclusive",
             "reason": "model-row-unparsed",
             "session_id": status["session_id"],
@@ -369,12 +379,6 @@ def parse_codex_route_panel(
             "pane_width": floor["width"],
             "evidence_sha256": evidence,
         }
-        # An out-of-vocabulary reasoning suffix is still refused, but the
-        # verbatim text the build rendered is accounted for on the fact.
-        observed_suffix = getattr(exc, "observed_reasoning_suffix", None)
-        if observed_suffix is not None:
-            fact["observed_reasoning_suffix"] = observed_suffix
-        return fact
     if model is None:
         return {
             "kind": "inconclusive",
@@ -437,7 +441,6 @@ def _inconclusive_observation(
     *,
     reason: str,
     evidence_sha256: Optional[str] = None,
-    observed_reasoning_suffix: Optional[str] = None,
 ) -> dict[str, Any]:
     observation: dict[str, Any] = {
         "kind": "provider-surface",
@@ -454,8 +457,6 @@ def _inconclusive_observation(
         "render_floor": None,
         "evidence_sha256": evidence_sha256,
     }
-    if observed_reasoning_suffix is not None:
-        observation["observed_reasoning_suffix"] = observed_reasoning_suffix
     return observation
 
 
@@ -496,12 +497,6 @@ def _observation_from_parse(
         "render_floor": {"width": parsed.get("pane_width")},
         "evidence_sha256": parsed.get("evidence_sha256"),
     }
-    # The verbatim out-of-vocabulary reasoning suffix, when the parse recorded
-    # one, surfaces on the durable observation fact for the CP1 vocabulary
-    # decision; every other path leaves the key absent.
-    observed_suffix = parsed.get("observed_reasoning_suffix")
-    if observed_suffix is not None:
-        observation["observed_reasoning_suffix"] = observed_suffix
     return observation
 
 
