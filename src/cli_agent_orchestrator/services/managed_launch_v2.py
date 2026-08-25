@@ -2372,7 +2372,8 @@ def _validate_readiness_for_bind(row: Any, receipt: dict[str, Any]) -> None:
     ):
         raise ManagedLaunchConflict(
             "native readiness proof is unavailable for this provider build; "
-            "stage-verify it before native bind"
+            "repeat provider bootstrap or use an established legacy capability "
+            "override before native bind"
         )
 
 

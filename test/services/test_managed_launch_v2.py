@@ -344,13 +344,11 @@ def test_bind_accepts_a_stage_proven_0147_native_readiness_receipt(
     A real 0.147.0 managed native launch completed the zero-turn bootstrap
     (the narrow build capability the launcher consults), exposed the exact
     provider session identity, reported ``input_ready``, and was then
-    refused here — "native readiness proof is unavailable for this provider
-    build; stage-verify it before native bind" — because this seam
-    re-consulted the *broad* provider-version table, which 0.147.0 is
-    deliberately not in. The capability bind asks about is the narrow one
-    the launch already proved: pre-turn native identity plus the input
-    path. The broad table stays untouched, so every advanced gate that
-    independently reads it keeps refusing 0.147.0.
+    refused here because this seam re-consulted the *broad* provider-version
+    table, which 0.147.0 is deliberately not in. The capability bind asks
+    about is the narrow one the launch already proved: pre-turn native
+    identity plus the input path. The broad table stays untouched, so every
+    advanced gate that independently reads it keeps refusing 0.147.0.
     """
     request = _reserve_request(worktree, tmp_path, execution_mode="native_tui")
     record, _ = v2.reserve(request)
