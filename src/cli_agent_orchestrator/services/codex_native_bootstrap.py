@@ -506,10 +506,6 @@ def mint_session(
         argv, native_id, timeout, env=child_env, config_path=config_path
     )
     schema_capability = _CAPABILITY_VERDICTS[digest]
-    _CAPABILITY_VERDICTS[digest] = {
-        "schema": schema_capability,
-        "behavior": resume_adoption,
-    }
 
     return {
         "schema": BOOTSTRAP_SCHEMA,

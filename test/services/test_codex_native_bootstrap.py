@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -443,3 +444,79 @@ def test_schema_capability_is_cached_by_binary_digest(tmp_path, codex_binary, mo
     assert cnb._validate_binary(path, digest, "codex-cli 99.99.0") == digest
     assert cnb._validate_binary(path, digest, "codex-cli 99.99.0") == digest
     assert len(calls) == 1
+
+
+def test_repeated_mints_keep_the_digest_schema_verdict_and_bindable_proofs(
+    tmp_path, codex_binary, monkeypatch
+):
+    path, digest = codex_binary
+    schema_verdict = cnb._validate_schema_bundle(_schema_fixture())
+    monkeypatch.setattr(cnb, "_probe_schema_capability", lambda *_a, **_k: schema_verdict)
+    homes = [tmp_path / "codex-home-one", tmp_path / "codex-home-two"]
+    for home in homes:
+        home.mkdir()
+    ids = [SESSION, "01a01a53-0000-7000-8000-000000000000"]
+
+    def exchange(_argv, requests, _timeout, *, env=None, followup_factory=None):
+        index = 0 if env["CODEX_HOME"] == str(homes[0]) else 1
+        native_id = ids[index]
+        if followup_factory is None:
+            return (
+                "\n".join(
+                    [
+                        _response(1, {}),
+                        _response(2, {"thread": {"id": native_id, "ephemeral": False}}),
+                    ]
+                ),
+                "",
+                0,
+            )
+        start = {
+            "id": 3,
+            "result": {
+                "thread": {"id": native_id},
+                "model": "gpt-5.6-sol",
+                "reasoningEffort": "xhigh",
+                "cwd": os.path.realpath(tmp_path),
+            },
+        }
+        followup_factory({3: start})
+        rollout = Path(env["CODEX_HOME"]) / "sessions" / "2026" / "08" / "25"
+        rollout.mkdir(parents=True)
+        (rollout / f"rollout-test-{native_id}.jsonl").write_text("{}\n")
+        return (
+            "\n".join(
+                [
+                    _response(1, {}),
+                    _response(
+                        2,
+                        {
+                            "config": {
+                                "projects": {os.path.realpath(tmp_path): {"trust_level": "trusted"}}
+                            }
+                        },
+                    ),
+                    json.dumps(start),
+                    _response(4, {}),
+                ]
+            ),
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(cnb, "_run_app_server_probe", exchange)
+    receipts = [
+        cnb.mint_session(
+            codex_binary=path,
+            binary_sha256=digest,
+            version_output="codex-cli 0.999.0",
+            working_directory=os.path.realpath(tmp_path),
+            model="gpt-5.6-sol",
+            effort="xhigh",
+            profile_args=[],
+            environment={"CODEX_HOME": str(home)},
+        )
+        for home in homes
+    ]
+    assert all(receipt["capability_proof"]["schema"] == schema_verdict for receipt in receipts)
+    assert [receipt["resume_adoption_proof"]["adopted_session_id"] for receipt in receipts] == ids
