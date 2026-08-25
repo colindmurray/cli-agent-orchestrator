@@ -649,10 +649,11 @@ def is_listed_version(provider: str, installed_version: str | None) -> bool:
     return bool(normalized and normalized in SUPPORTED_VERSIONS[provider])
 
 
-#: The exact builds stage-proven for the *native bind/admission* contract:
-#: the pre-turn native identity a managed generation binds against — the
-#: zero-turn bootstrap that mints the id, the exact resume that adopts
-#: it, and the input-ready observation the readiness receipt carries.
+#: Legacy fallback builds accepted by the *native bind/admission* contract
+#: when a provider has no runtime capability receipt. Codex launches now
+#: carry a digest-scoped schema plus fresh-process resume proof, which is the
+#: authority for a proven Codex receipt; this table remains only for older
+#: receipts and providers whose runtime proof is not digest-scoped.
 #:
 #: This is a capability table in its own right, deliberately NOT a view
 #: of ``SUPPORTED_VERSIONS``.  The two answer different questions and
@@ -666,12 +667,9 @@ def is_listed_version(provider: str, installed_version: str | None) -> bool:
 #: ``codex_native_control._PROVEN_COMPOSER_NEWLINE`` table; that narrower
 #: fact does not widen the broad table.
 #:
-#: Codex's cell is the same fact as
-#: ``codex_native_bootstrap.BOOTSTRAP_CAPABLE_VERSIONS``; the canonical
-#: literal lives here so the mint that produces a native id and the bind
-#: seam that accepts it cannot drift into the state where one accepts a
-#: build the other refuses — which is exactly the reproduced failure
-#: this table exists to close.
+#: Codex's cell is retained as that legacy fallback. A current Codex
+#: capability receipt is checked by the bootstrap proof itself, so the
+#: fallback cannot withhold an otherwise proven unlisted executable.
 #:
 #: Kimi, Claude, and Muse have no separate narrow proof: their native
 #: identity paths (ACP ``session/new``, the ``--session-id`` mint, the
@@ -698,12 +696,11 @@ assert all(
 def is_native_bind_capable(provider: str, installed_version: str | None) -> bool:
     """Return whether an exact build is proven for the native bind seam.
 
-    The acceptance authority for managed native bind/admission: a readiness
-    receipt from a build outside this table cannot become a generation's
-    bound native identity, whatever the launch enforcement mode admits.
-    Independent of :func:`is_listed_version` in both directions — a build
-    may hold this narrow proof without the broad one (Codex 0.147.0) — so
-    neither predicate may stand in for the other at a call site.
+    Return the legacy version fallback for managed native bind/admission.
+
+    Current Codex receipts carry a stronger digest-scoped runtime proof and
+    are validated at the managed bind seam before this fallback is consulted.
+    Other providers continue to use their configured narrow capability cells.
     """
     if provider not in NATIVE_BIND_CAPABLE_VERSIONS or not isinstance(installed_version, str):
         return False

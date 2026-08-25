@@ -24,20 +24,12 @@ only bind what was provably bound at launch; an unbound admission would
 be unrecoverable except by blind respawn.
 
 Version capability: the Codex cell mints its pre-turn identity through
-the zero-turn app-server bootstrap, which accepts only an installed
-build stage-verified for the exact resume contract
-(``codex_native_bootstrap.BOOTSTRAP_CAPABLE_VERSIONS`` — currently
-0.146.0 and 0.147.0; see also ``docs/provider-version-policy.md``).
-This is a narrow capability table, not the launch-mode policy: an open
-launch-mode build outside the table cannot supply a resumable id and
-the reservation fails closed with zero task bytes rather than degrading
-to a session the TUI cannot resume.  The bind seam below asks the same
-capability question through ``provider_contracts.is_native_bind_capable``
-— whose Codex cell is that very table — so a build the bootstrap proved
-is exactly the build bind accepts, never a broader one.  The operator
-remedy is to install a bootstrap-capable build or stage-verify and add
-the new build to the table; unsupported builds never retain
-exact-session capture.
+the zero-turn app-server bootstrap's digest-scoped schema and fresh-process
+resume proof.  The readiness receipt carries that proof to bind, so an
+unlisted build that proves the exact contract is accepted while an absent
+or incomplete proof still fails closed with zero task bytes.  The broad
+provider version policy remains independent and does not authorize native
+bind by itself.
 """
 
 from __future__ import annotations
@@ -77,6 +69,7 @@ from cli_agent_orchestrator.providers.codex import (
 )
 from cli_agent_orchestrator.services import (
     claude_exact_resume,
+    codex_native_bootstrap,
 )
 from cli_agent_orchestrator.services import execution_mode as em
 from cli_agent_orchestrator.services import (
@@ -2351,21 +2344,36 @@ def _validate_readiness_for_bind(row: Any, receipt: dict[str, Any]) -> None:
             "readiness receipt is not bound to the exact v2 reservation: "
             + _canonical_json(mismatches)
         )
-    # The capability question this seam asks is the NARROW native-bind one,
-    # not the broad provider-version one: a build may be stage-proven for
-    # the pre-turn identity/input contract bind binds against (Codex
-    # 0.147.0) while unrelated advanced surfaces stay unproven, and a build
-    # outside this table still fails closed here even when open launch
-    # policy admitted it. Composer delivery is gated separately by the
-    # provider adapter's per-build composer facts — the stage-proven table
-    # or, for a missing row, the version-bound read of the installed bundle
-    # — during admission.
-    if not provider_contracts.is_native_bind_capable(
+    # A Codex runtime proof is checked below before the legacy version
+    # fallback. If either proof is absent, relaunch after a fresh bootstrap;
+    # do not add a version to a capability table as a recovery action.
+    codex_proof = receipt.get("capability_proof") if row.provider == "codex" else None
+    codex_proof_valid = False
+    if isinstance(codex_proof, dict):
+        resume = codex_proof.get("resume_adoption")
+        schema = codex_proof.get("schema")
+        methods = schema.get("methods") if isinstance(schema, dict) else None
+        expected_digest = request.get("provider_executable_sha256")
+        codex_proof_valid = (
+            codex_proof.get("binary_sha256") == expected_digest
+            and isinstance(schema, dict)
+            and schema.get("schema") == codex_native_bootstrap.SCHEMA_PROBE_SCHEMA
+            and isinstance(methods, dict)
+            and set(methods) == set(codex_native_bootstrap._SCHEMA_REQUIREMENTS)
+            and isinstance(resume, dict)
+            and resume.get("schema") == codex_native_bootstrap.RESUME_ADOPTION_SCHEMA
+            and resume.get("method") == codex_native_bootstrap.RESUME_METHOD
+            and resume.get("adopted_session_id") == receipt.get("provider_session_id")
+            and resume.get("adopted_in_fresh_process") is True
+            and resume.get("sent_no_turn") is True
+        )
+    if not codex_proof_valid and not provider_contracts.is_native_bind_capable(
         _PINNED_PROVIDER[row.provider], receipt["provider_version"]
     ):
         raise ManagedLaunchConflict(
             "native readiness proof is unavailable for this provider build; "
-            "stage-verify it before native bind"
+            "repeat provider bootstrap or use an established legacy capability "
+            "override before native bind"
         )
 
 
@@ -5595,6 +5603,11 @@ def _native_readiness_receipt(
         "receipt_id": bootstrap["native_session_id"],
         "provider_session_id": bootstrap["native_session_id"],
         "provider_version": version_output,
+        # Codex's runtime capability proof is carried with the provider
+        # receipt so bind can rely on the exact digest that was exercised,
+        # rather than reintroducing a version allowlist at the seam.
+        "binary_sha256": bootstrap.get("binary_sha256"),
+        "capability_proof": bootstrap.get("capability_proof"),
         "provider_receipt_kind": _NATIVE_TUI_READINESS_RECEIPT_KINDS[record["provider"]],
         # Observed, never asserted. This field is what bind takes as
         # permission to admit a task, and it used to be a constant — so a

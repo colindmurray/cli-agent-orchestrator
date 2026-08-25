@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import pathlib
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -32,46 +34,37 @@ from cli_agent_orchestrator.services.codex_trust import (
 BOOTSTRAP_SCHEMA = "cao-codex-native-bootstrap-v1"
 EXIT_PROOF_SCHEMA = "cao-codex-native-bootstrap-exit-v1"
 MATERIALIZATION_METHOD = "thread/name/set"
+RESUME_ADOPTION_SCHEMA = "cao-codex-native-resume-adoption-v1"
+RESUME_METHOD = "thread/resume"
+RESUME_THREAD_ID_PARAM = "threadId"
+SCHEMA_PROBE_SCHEMA = "cao-codex-native-schema-probe-v1"
 
-#: The narrow set of Codex builds proven for the zero-turn bootstrap/resume
-#: contract — ``initialize -> initialized -> config/read ->
-#: thread/start(ephemeral=false) -> thread/name/set -> clean process exit`` with
-#: NO ``turn/*``, returning a canonical UUID, exact cwd/model/effort for an
-#: explicit route, one materialized rollout, and a fresh app-server process
-#: ``thread/resume`` adopting the same UUID.  The default-route probe on
-#: 0.147.0 returned ``model=gpt-5.6-sol`` and ``reasoningEffort=null``.
-#:
-#: This is deliberately NARROWER than the provider ``SUPPORTED_VERSIONS``:
-#: only the bootstrap/resume surface was stage-verified for 0.147.0, not the
-#: composer/control/force-pause and other advanced surfaces, so 0.147.0 stays
-#: out of the broad table until those are independently proven.  An
-#: authenticated visual TUI smoke remains an installed-E2E follow-up.
-#:
-#: The canonical literal lives in
-#: ``provider_contracts.NATIVE_BIND_CAPABLE_VERSIONS`` — the managed bind
-#: seam accepts exactly these builds through that table — and this name is
-#: the same object, so the mint that produces a native id and the bind that
-#: accepts it cannot disagree about which builds are proven.
-BOOTSTRAP_CAPABLE_VERSIONS = provider_contracts.NATIVE_BIND_CAPABLE_VERSIONS[
-    provider_contracts.PROVIDER_CODEX
-]
+# Capability evidence is scoped to the executable bytes. A vendor version is
+# only a label and cannot stand in for the exchange and rollout postconditions.
+_CAPABILITY_VERDICTS: dict[str, dict[str, Any]] = {}
 
-
-def is_bootstrap_capable_build(version_output: Optional[str]) -> bool:
-    """Whether an installed Codex build is proven for the zero-turn bootstrap.
-
-    Exact-set membership in :data:`BOOTSTRAP_CAPABLE_VERSIONS`, independent of
-    the provider-wide version-enforcement mode.  A build that launches in open
-    mode still may not inherit a neighbouring build's bootstrap/resume proof.
-    """
-    if not isinstance(version_output, str):
-        return False
-    normalized = provider_contracts.normalized_version(version_output)
-    return normalized in BOOTSTRAP_CAPABLE_VERSIONS
+_SCHEMA_REQUIREMENTS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "config/read": ("ConfigReadParams", "ConfigReadResponse", ("cwd",)),
+    "thread/start": (
+        "ThreadStartParams",
+        "ThreadStartResponse",
+        ("cwd", "ephemeral"),
+    ),
+    "thread/name/set": (
+        "ThreadSetNameParams",
+        "ThreadSetNameResponse",
+        ("threadId", "name"),
+    ),
+    "thread/resume": ("ThreadResumeParams", "ThreadResumeResponse", ("threadId",)),
+}
 
 
 class CodexBootstrapError(RuntimeError):
     """The Codex zero-turn bootstrap could not be proven safe."""
+
+
+class CodexSchemaProbeTransientError(CodexBootstrapError):
+    """The schema probe could not execute; retrying may change the result."""
 
 
 def _digest(value: Any) -> str:
@@ -80,7 +73,151 @@ def _digest(value: Any) -> str:
     ).hexdigest()
 
 
-def _validate_binary(binary: str, digest: str, version_output: str) -> str:
+def _find_schema_definition(schema: Mapping[str, Any], name: str) -> Optional[Mapping[str, Any]]:
+    """Find a named definition in either the v1 or v2 generated bundle."""
+    definitions = schema.get("definitions") or schema.get("$defs") or schema
+    if not isinstance(definitions, Mapping):
+        return None
+    candidate = definitions.get(name)
+    if isinstance(candidate, Mapping):
+        return candidate
+    for value in definitions.values():
+        if isinstance(value, Mapping):
+            nested = _find_schema_definition(value, name)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _find_method_request(value: Any, method: str) -> Optional[Mapping[str, Any]]:
+    """Find a JSON-RPC request shape carrying ``method``."""
+    if isinstance(value, Mapping):
+        properties = value.get("properties")
+        if isinstance(properties, Mapping):
+            method_shape = properties.get("method")
+            if isinstance(method_shape, Mapping):
+                values = method_shape.get("enum")
+                if method_shape.get("const") == method or (
+                    isinstance(values, list) and method in values
+                ):
+                    return value
+        for child in value.values():
+            found = _find_method_request(child, method)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_method_request(child, method)
+            if found is not None:
+                return found
+    return None
+
+
+def _schema_ref_name(value: Any) -> Optional[str]:
+    if not isinstance(value, Mapping):
+        return None
+    reference = value.get("$ref")
+    if not isinstance(reference, str):
+        return None
+    return reference.rsplit("/", 1)[-1]
+
+
+def _validate_schema_bundle(schema: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(schema, Mapping):
+        raise CodexBootstrapError("Codex schema probe failed: generated bundle is not an object")
+    methods: dict[str, dict[str, Any]] = {}
+    for method, (params_name, response_name, fields) in _SCHEMA_REQUIREMENTS.items():
+        request = _find_method_request(schema, method)
+        if request is None:
+            raise CodexBootstrapError(f"Codex schema probe failed: missing method {method!r}")
+        properties = request.get("properties")
+        params = properties.get("params") if isinstance(properties, Mapping) else None
+        if _schema_ref_name(params) != params_name:
+            raise CodexBootstrapError(
+                f"Codex schema probe failed: {method} params missing {params_name}"
+            )
+        params_schema = _find_schema_definition(schema, params_name)
+        response_schema = _find_schema_definition(schema, response_name)
+        if params_schema is None:
+            raise CodexBootstrapError(
+                f"Codex schema probe failed: {method} params definition missing {params_name}"
+            )
+        if response_schema is None:
+            raise CodexBootstrapError(
+                f"Codex schema probe failed: {method} response definition missing {response_name}"
+            )
+        parameter_properties = params_schema.get("properties")
+        if not isinstance(parameter_properties, Mapping) or any(
+            field not in parameter_properties for field in fields
+        ):
+            missing = [field for field in fields if field not in (parameter_properties or {})]
+            raise CodexBootstrapError(
+                f"Codex schema probe failed: {method} params missing field(s) {missing!r}"
+            )
+        if method in {"thread/start", "thread/resume"}:
+            response_properties = response_schema.get("properties")
+            if not isinstance(response_properties, Mapping) or "thread" not in response_properties:
+                raise CodexBootstrapError(
+                    f"Codex schema probe failed: {method} response missing field 'thread'"
+                )
+        methods[method] = {
+            "params": params_name,
+            "response": response_name,
+            "fields": list(fields),
+        }
+    return {"schema": SCHEMA_PROBE_SCHEMA, "methods": methods}
+
+
+def _probe_schema_capability(
+    binary: str, *, timeout: float = 30.0, environment: Optional[Mapping[str, str]] = None
+) -> dict[str, Any]:
+    """Prove the required app-server shape without opening a session."""
+    with tempfile.TemporaryDirectory(prefix="cao-codex-schema-") as directory:
+        output = Path(directory) / "schema"
+        try:
+            completed = subprocess.run(
+                [binary, "app-server", "generate-json-schema", "--out", str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=dict(environment) if environment is not None else None,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CodexSchemaProbeTransientError(
+                f"Codex schema probe failed: could not execute generate-json-schema: {exc}"
+            ) from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()[-500:]
+            raise CodexBootstrapError(
+                "Codex schema probe failed: generate-json-schema exited "
+                f"{completed.returncode}: {detail}"
+            )
+        bundle = output / "codex_app_server_protocol.schemas.json"
+        if not bundle.is_file():
+            bundle = output / "codex_app_server_protocol.v2.schemas.json"
+        if not bundle.is_file():
+            raise CodexBootstrapError(
+                "Codex schema probe failed: generate-json-schema did not produce "
+                "a protocol schema bundle"
+            )
+        try:
+            schema = json.loads(bundle.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CodexBootstrapError(
+                f"Codex schema probe failed: generated schema is unreadable: {exc}"
+            ) from exc
+    return _validate_schema_bundle(schema)
+
+
+def _validate_binary(
+    binary: str,
+    digest: str,
+    version_output: str,
+    *,
+    environment: Optional[Mapping[str, str]] = None,
+    timeout: float = 30.0,
+) -> str:
     if not isinstance(binary, str) or not os.path.isabs(binary):
         raise CodexBootstrapError("codex binary must be a canonical absolute path")
     if os.path.realpath(binary) != binary or not os.path.isfile(binary):
@@ -90,12 +227,19 @@ def _validate_binary(binary: str, digest: str, version_output: str) -> str:
         raise CodexBootstrapError(
             f"codex binary digest changed: expected {digest}, observed {observed}"
         )
-    if not is_bootstrap_capable_build(version_output):
-        raise CodexBootstrapError(
-            "Codex native bootstrap/resume capability is unproven for this build; "
-            f"accepted {list(BOOTSTRAP_CAPABLE_VERSIONS)}, installed "
-            f"{(version_output or '').strip()!r}"
-        )
+    verdict = _CAPABILITY_VERDICTS.get(observed)
+    if verdict is None:
+        try:
+            _CAPABILITY_VERDICTS[observed] = _probe_schema_capability(
+                binary, timeout=timeout, environment=environment
+            )
+        except CodexSchemaProbeTransientError:
+            raise
+        except CodexBootstrapError as exc:
+            _CAPABILITY_VERDICTS[observed] = {"error": str(exc)}
+            raise
+    elif "error" in verdict:
+        raise CodexBootstrapError(str(verdict["error"]))
     return observed
 
 
@@ -113,6 +257,73 @@ def _rollout_path(codex_home: Path, thread_id: str) -> Path:
             f"for {thread_id}: found {len(matches)} under {sessions}"
         )
     return matches[0]
+
+
+def _prove_resume_adoption(
+    argv: list[str],
+    native_id: str,
+    timeout: float,
+    *,
+    env: Optional[Mapping[str, str]],
+    config_path: pathlib.Path,
+) -> dict[str, Any]:
+    """Prove a fresh app-server process adopts the minted thread id."""
+    requests: list[dict[str, Any]] = [
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "cao-native-resume-adoption",
+                    "version": BOOTSTRAP_SCHEMA,
+                }
+            },
+        },
+        {"method": "initialized", "params": {}},
+        {
+            "id": 2,
+            "method": RESUME_METHOD,
+            "params": {RESUME_THREAD_ID_PARAM: native_id},
+        },
+    ]
+    before = _digest_or_absent(config_path)
+    try:
+        stdout, stderr, returncode = _run_app_server_probe(
+            argv, requests, timeout, env=dict(env) if env is not None else None
+        )
+    except Exception as exc:  # noqa: BLE001 - normalize the provider leg
+        raise CodexBootstrapError(
+            f"Codex {RESUME_METHOD} adoption probe failed for {native_id}: {exc}"
+        ) from exc
+    if _digest_or_absent(config_path) != before:
+        raise CodexBootstrapError(
+            "protected Codex user config changed during the resume-adoption probe"
+        )
+    if returncode not in (0, -15):
+        raise CodexBootstrapError(
+            f"codex app-server exited {returncode} during resume adoption: {stderr[-500:]}"
+        )
+    response = _response_by_id(stdout, 2)
+    if "error" in response or "result" not in response:
+        raise CodexBootstrapError(
+            f"codex {RESUME_METHOD} failed for {native_id}: {response.get('error')!r}"
+        )
+    thread = (response.get("result") or {}).get("thread") or {}
+    adopted = thread.get("id")
+    if adopted != native_id:
+        raise CodexBootstrapError(
+            f"codex {RESUME_METHOD} adopted {adopted!r}, not the minted {native_id!r}"
+        )
+    return {
+        "schema": RESUME_ADOPTION_SCHEMA,
+        "method": RESUME_METHOD,
+        "adopted_session_id": adopted,
+        "adopted_in_fresh_process": True,
+        "sent_no_turn": True,
+        "exit_status": returncode,
+        "exchange_sha256": _digest({"initialize": _response_by_id(stdout, 1), "resume": response}),
+        "protected_config_sha256": before,
+    }
 
 
 def mint_session(
@@ -141,7 +352,14 @@ def mint_session(
     supplied a non-empty expected value the exact equality check is retained.
     A sealed managed-v2 route still supplies non-empty values and stays strict.
     """
-    digest = _validate_binary(codex_binary, binary_sha256, version_output)
+    child_env = dict(environment) if environment is not None else None
+    digest = _validate_binary(
+        codex_binary,
+        binary_sha256,
+        version_output,
+        environment=child_env,
+        timeout=timeout,
+    )
     if (
         not isinstance(working_directory, str)
         or not os.path.isdir(working_directory)
@@ -213,7 +431,6 @@ def mint_session(
             }
         ]
 
-    child_env = dict(environment) if environment is not None else None
     configured_home = (child_env or os.environ).get("CODEX_HOME")
     effective_home = (child_env or os.environ).get("HOME")
     if configured_home:
@@ -291,6 +508,10 @@ def mint_session(
             + ", ".join(route_mismatch)
         )
     rollout_path = _rollout_path(codex_home, native_id)
+    resume_adoption = _prove_resume_adoption(
+        argv, native_id, timeout, env=child_env, config_path=config_path
+    )
+    schema_capability = _CAPABILITY_VERDICTS[digest]
 
     return {
         "schema": BOOTSTRAP_SCHEMA,
@@ -298,8 +519,13 @@ def mint_session(
         "native_session_id": native_id,
         "id_source": provider_contracts.native_id_source(provider_contracts.PROVIDER_CODEX),
         "provider_version": provider_contracts.normalized_version(version_output),
-        "bootstrap_capable_versions": list(BOOTSTRAP_CAPABLE_VERSIONS),
         "bootstrap_capability": "zero-turn-resume",
+        "capability_proof": {
+            "schema": schema_capability,
+            "binary_sha256": digest,
+            "resume_adoption": resume_adoption,
+        },
+        "resume_adoption_proof": resume_adoption,
         "binary_path": codex_binary,
         "binary_sha256": digest,
         "working_directory": working_directory,
