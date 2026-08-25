@@ -10,8 +10,8 @@ capability stays dark: ``route_observation.enabled()`` and
 
 The render-floor fixtures come from the retained cond-0230 M10-D0 exact-build
 capture (``codex-status-{80,100}x30.txt``): at 80 columns the truncated Model
-row is ``not-rendered`` and at 100 columns the captured ``(reasoning medium,
-summaries auto)`` suffix is ``model-unparsed`` — the model is never guessed.
+row is ``not-rendered``; at 100 columns the captured ``(reasoning medium,
+summaries auto)`` suffix yields effort ``medium`` and ignores its annotation.
 """
 
 from __future__ import annotations
@@ -338,7 +338,7 @@ class TestAmbiguousCloseNoSecondEscape:
         assert outcome["observation"]["effort"] is None
         assert outcome["close_proof"]["outcome"] == "composer-restored"
 
-    def test_captured_100x30_render_is_model_unparsed_and_ambiguous(self, _db):
+    def test_captured_100x30_render_ignores_trailing_annotation(self, _db):
         request = _request()
         surface = fixtures.FakeCodexPaneSurface(
             rows=list(fixtures.CAPTURED_STATUS_100X30_ROWS), pane_width=100
@@ -347,14 +347,14 @@ class TestAmbiguousCloseNoSecondEscape:
 
         assert surface.status_commands_sent == 1
         assert surface.key_events == []
-        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
         assert outcome["terminal"] is True
-        assert outcome["receipt_digest"] is None
-        assert outcome["observation"]["observed_state"] == "inconclusive"
-        assert outcome["observation"]["reason"] == "model-row-unparsed"
+        assert outcome["receipt_digest"]
+        assert outcome["observation"]["observed_state"] == "observed"
+        assert outcome["observation"]["reason"] is None
         assert outcome["observation"]["session_id"] == request.native_session_id
-        assert outcome["observation"]["model"] is None
-        assert outcome["observation"]["effort"] is None
+        assert outcome["observation"]["model"] == "gpt-5.6-luna"
+        assert outcome["observation"]["effort"] == "medium"
         assert outcome["close_proof"]["outcome"] == "composer-restored"
 
     def test_an_indeterminate_close_never_issues_a_second_escape(self, _db):
@@ -491,13 +491,14 @@ class TestCapturedRenderFloorFixtures:
         assert parsed["provider_version"] == fixtures.CODEX_PINNED_VERSION
         assert parsed["parser_key"] == nsr.PARSER_CODEX_STATUS
 
-    def test_100x30_render_is_model_unparsed_and_never_guessed(self):
+    def test_100x30_render_extracts_effort_before_trailing_annotation(self):
         parsed = roc.parse_codex_route_panel(
             list(fixtures.CAPTURED_STATUS_100X30_ROWS), pane_width=100
         )
-        assert parsed["kind"] == "inconclusive"
-        assert parsed["reason"] == "model-row-unparsed"
+        assert parsed["kind"] == "observed"
         assert parsed["session_id"] == fixtures.SESSION_ID
+        assert parsed["model"] == "gpt-5.6-luna"
+        assert parsed["effort"] == "medium"
         assert parsed["provider_version"] == fixtures.CODEX_PINNED_VERSION
         assert parsed["parser_key"] == nsr.PARSER_CODEX_STATUS
 

@@ -11,8 +11,9 @@ Two kinds of surface, both fake — nothing here touches a live pane:
   render-floor fixtures: at 80 columns (below the 87-column Model floor) the
   truncated ``Model:`` value is ``not-rendered`` and never asserted; at 100
   columns the captured ``(reasoning medium, summaries auto)`` suffix is
-  outside the adapter's closed effort vocabulary and is ``model-unparsed``.
-  In both cases the model is never guessed.
+  parsed as effort ``medium`` and its trailing display annotation is ignored.
+  At 80 columns the Model row remains not-rendered and the model is never
+  guessed.
 - **Synthetic pinned panels** — a full-width panel whose Model row carries an
   exactly-parseable reasoning suffix, used by the positive-path case.  It
   mirrors the captured build's layout (``>_ OpenAI Codex (v0.147.0)`` brand
@@ -35,9 +36,8 @@ SESSION_ID = "4f5f46c7-b660-4f6f-a144-d2c6dceccf95"
 
 #: Captured ``/status`` render at 100 columns (30 rows), faithful to
 #: ``codex-status-100x30.txt``.  The Model row is fully rendered and carries
-#: ``(reasoning medium, summaries auto)`` — a reasoning suffix outside the
-#: closed effort vocabulary, so the adapter reports ``model-row-unparsed`` and
-#: never guesses an effort from arbitrary parenthetical text.
+#: ``(reasoning medium, summaries auto)`` — effort ``medium`` followed by a
+#: non-authoritative display annotation that the adapter ignores completely.
 CAPTURED_STATUS_100X30_ROWS: tuple[str, ...] = (
     "╰─────────────────────────────────────────────────────╯",
     "",
@@ -127,8 +127,9 @@ def codex_route_panel_rows(
     Mirrors the captured build's layout — brand header ``>_ OpenAI Codex
     (v0.147.0)``, a ``Session:`` row, value column at index 39 — with a Model
     value whose reasoning suffix is exactly in the closed effort vocabulary.
-    The captured full-width render is deliberately NOT this panel: it carries
-    ``(reasoning medium, summaries auto)``, which the adapter refuses.
+    The captured full-width render carries
+    ``(reasoning medium, summaries auto)``; the adapter extracts ``medium``
+    and ignores the trailing annotation.
     ``effort=None`` omits the suffix; ``model=None`` omits the Model row
     entirely (a full-width panel that still lacks it is truncated/different,
     never a positive observation).
