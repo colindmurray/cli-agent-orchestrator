@@ -77,6 +77,7 @@ from cli_agent_orchestrator.providers.codex import (
 )
 from cli_agent_orchestrator.services import (
     claude_exact_resume,
+    codex_native_bootstrap,
 )
 from cli_agent_orchestrator.services import execution_mode as em
 from cli_agent_orchestrator.services import (
@@ -2360,7 +2361,27 @@ def _validate_readiness_for_bind(row: Any, receipt: dict[str, Any]) -> None:
     # provider adapter's per-build composer facts — the stage-proven table
     # or, for a missing row, the version-bound read of the installed bundle
     # — during admission.
-    if not provider_contracts.is_native_bind_capable(
+    codex_proof = receipt.get("capability_proof") if row.provider == "codex" else None
+    codex_proof_valid = False
+    if isinstance(codex_proof, dict):
+        resume = codex_proof.get("resume_adoption")
+        schema = codex_proof.get("schema")
+        methods = schema.get("methods") if isinstance(schema, dict) else None
+        expected_digest = request.get("provider_executable_sha256")
+        codex_proof_valid = (
+            codex_proof.get("binary_sha256") == expected_digest
+            and isinstance(schema, dict)
+            and schema.get("schema") == codex_native_bootstrap.SCHEMA_PROBE_SCHEMA
+            and isinstance(methods, dict)
+            and set(methods) == set(codex_native_bootstrap._SCHEMA_REQUIREMENTS)
+            and isinstance(resume, dict)
+            and resume.get("schema") == codex_native_bootstrap.RESUME_ADOPTION_SCHEMA
+            and resume.get("method") == codex_native_bootstrap.RESUME_METHOD
+            and resume.get("adopted_session_id") == receipt.get("provider_session_id")
+            and resume.get("adopted_in_fresh_process") is True
+            and resume.get("sent_no_turn") is True
+        )
+    if not codex_proof_valid and not provider_contracts.is_native_bind_capable(
         _PINNED_PROVIDER[row.provider], receipt["provider_version"]
     ):
         raise ManagedLaunchConflict(
@@ -5595,6 +5616,11 @@ def _native_readiness_receipt(
         "receipt_id": bootstrap["native_session_id"],
         "provider_session_id": bootstrap["native_session_id"],
         "provider_version": version_output,
+        # Codex's runtime capability proof is carried with the provider
+        # receipt so bind can rely on the exact digest that was exercised,
+        # rather than reintroducing a version allowlist at the seam.
+        "binary_sha256": bootstrap.get("binary_sha256"),
+        "capability_proof": bootstrap.get("capability_proof"),
         "provider_receipt_kind": _NATIVE_TUI_READINESS_RECEIPT_KINDS[record["provider"]],
         # Observed, never asserted. This field is what bind takes as
         # permission to admit a task, and it used to be a constant — so a

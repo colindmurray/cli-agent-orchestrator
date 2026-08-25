@@ -505,8 +505,9 @@ def mint_session(
     resume_adoption = _prove_resume_adoption(
         argv, native_id, timeout, env=child_env, config_path=config_path
     )
+    schema_capability = _CAPABILITY_VERDICTS[digest]
     _CAPABILITY_VERDICTS[digest] = {
-        "schema": SCHEMA_PROBE_SCHEMA,
+        "schema": schema_capability,
         "behavior": resume_adoption,
     }
 
@@ -517,6 +518,11 @@ def mint_session(
         "id_source": provider_contracts.native_id_source(provider_contracts.PROVIDER_CODEX),
         "provider_version": provider_contracts.normalized_version(version_output),
         "bootstrap_capability": "zero-turn-resume",
+        "capability_proof": {
+            "schema": schema_capability,
+            "binary_sha256": digest,
+            "resume_adoption": resume_adoption,
+        },
         "resume_adoption_proof": resume_adoption,
         "binary_path": codex_binary,
         "binary_sha256": digest,

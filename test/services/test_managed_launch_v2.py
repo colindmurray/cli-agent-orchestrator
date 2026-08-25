@@ -18,6 +18,7 @@ from cli_agent_orchestrator.models.managed_launch_v2 import (
     ManagedLaunchV2BindRequest,
     ManagedLaunchV2ReserveRequest,
 )
+from cli_agent_orchestrator.services import codex_native_bootstrap as cnb
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
 from cli_agent_orchestrator.services import managed_provider_bridge as bridge
 from cli_agent_orchestrator.services import terminal_projection
@@ -363,6 +364,37 @@ def test_bind_accepts_a_stage_proven_0147_native_readiness_receipt(
     bound = v2.bind_native(record["reservation_id"], _bind_request(record))
     assert bound["state"] == "bound"
     assert bound["binding"]["native_session_id"] == receipt["provider_session_id"]
+
+
+def test_bind_accepts_an_unlisted_codex_build_with_runtime_capability_proof(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    request = _reserve_request(worktree, tmp_path, execution_mode="native_tui")
+    record, _ = v2.reserve(request)
+    v2.claim_launch(record["reservation_id"])
+    receipt = _ready_bridge_state(
+        record,
+        monkeypatch,
+        provider_version="0.999.0",
+        provider_receipt_kind="codex-native-thread-start",
+    )
+    digest = request.provider_executable_sha256
+    receipt["capability_proof"] = {
+        "binary_sha256": digest,
+        "schema": {
+            "schema": cnb.SCHEMA_PROBE_SCHEMA,
+            "methods": {method: {} for method in cnb._SCHEMA_REQUIREMENTS},
+        },
+        "resume_adoption": {
+            "schema": cnb.RESUME_ADOPTION_SCHEMA,
+            "method": cnb.RESUME_METHOD,
+            "adopted_session_id": receipt["provider_session_id"],
+            "adopted_in_fresh_process": True,
+            "sent_no_turn": True,
+        },
+    }
+    bound = v2.bind_native(record["reservation_id"], _bind_request(record))
+    assert bound["state"] == "bound"
 
 
 def test_bind_accepts_the_long_proven_neighbor_at_the_native_seam(
