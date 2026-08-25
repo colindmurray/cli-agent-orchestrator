@@ -93,6 +93,9 @@ _CODEX_EFFORT_VOCABULARY = frozenset({"none", "minimal", "low", "medium", "high"
 #: The reasoning effort starts the parenthetical detail.  Any comma-delimited
 #: display annotations after it are non-authoritative and intentionally ignored.
 _REASONING_SUFFIX = re.compile(r"^(.*?)\s+\(reasoning\s+([^\s(),]+)(?:\s*,[^()]*)?\)$")
+# A reasoning parenthetical with no effort token is malformed authoritative
+# structure, not a model name with an incidental parenthetical.
+_EMPTY_REASONING_SUFFIX = re.compile(r"^(.*?)\s+\(reasoning\s*\)$")
 
 #: A Codex composer prompt row (the live composer, not the printed panel).
 _CODEX_COMPOSER_PROMPT = re.compile(r"^\s*(?:›|❯|codex>)(?:\s|$)")
@@ -274,6 +277,10 @@ def _parse_model_row(normalized: Sequence[str]) -> tuple[Optional[str], Optional
     value = model_rows[0].split(":", 1)[1].strip()
     match = _REASONING_SUFFIX.fullmatch(value)
     if match is None:
+        if _EMPTY_REASONING_SUFFIX.fullmatch(value):
+            raise nsr.PanelParseError(
+                "the Codex status Model row has an empty reasoning effort; refusing"
+            )
         if value.count("(") > value.count(")"):
             raise nsr.PanelParseError(
                 "the Codex status Model row is truncated mid-parenthetical; refusing "

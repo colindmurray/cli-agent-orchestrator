@@ -507,6 +507,18 @@ class TestRenderFloor:
         # is exposed as a parsed fact.
         assert outcome["observation"]["effort"] is None
 
+    def test_an_empty_reasoning_parenthetical_is_not_a_bare_model(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(model="gpt-5.4-codex (reasoning )", effort=None)
+        )
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert outcome["observation"]["reason"] == "model-row-unparsed"
+        assert outcome["observation"]["model"] is None
+        assert outcome["observation"]["effort"] is None
+
     def test_a_truncated_model_row_at_full_width_is_not_reported_observed(self, _db):
         """P2 (round 2): a known width is not enough — the Model row's own
         content must be complete.  A value cut mid-parenthetical at a width
