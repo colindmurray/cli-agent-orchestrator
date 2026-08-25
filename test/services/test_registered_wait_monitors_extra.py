@@ -698,6 +698,19 @@ def test_terminal_commit_racing_ready_adoption_cannot_be_overwritten(
         return True
 
     monkeypatch.setattr(monitors, "_helper_alive", paused_alive)
+    # The terminal side loses the lock race and therefore stops an ACTIVE
+    # monitor, which terminates the helper's process group for real. Fake the
+    # process table so the outcome cannot depend on whether pgid 1111 happens
+    # to exist on the host (cond-0745), and record the call to prove the
+    # terminal commit observed the adopted active monitor.
+    terminated = []
+    monkeypatch.setattr(monitors, "_group_absent", lambda _pgid: True)
+
+    def terminate(pgid, **_kwargs):
+        terminated.append(pgid)
+        return True
+
+    monkeypatch.setattr(monitors, "_terminate_pgid", terminate)
     adopter = threading.Thread(target=monitors.adopt_monitor_evidence, args=(record["wait_id"],))
     adopter.start()
     assert entered.wait(timeout=5)
@@ -718,6 +731,9 @@ def test_terminal_commit_racing_ready_adoption_cannot_be_overwritten(
     assert registered_waits.get(record["wait_id"])["state"] == terminal_state
     assert _monitor(record["wait_id"]).state == terminal_state
     assert serialized
+    # The terminal commit ran after the adoption commit and stopped the
+    # adopted helper; any other order never reaches _terminate_pgid.
+    assert terminated == [1111]
 
 
 @pytest.mark.parametrize(
