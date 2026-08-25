@@ -19,7 +19,9 @@ from __future__ import annotations
 import json
 import sys
 import uuid
-from test.e2e.route_observation_canary import cases, fixtures
+from test.e2e.route_observation_canary import cases
+from test.e2e.route_observation_canary import delivery as canary_delivery
+from test.e2e.route_observation_canary import fixtures
 from test.e2e.route_observation_canary import receipt as m10_receipt
 from test.e2e.route_observation_canary import runner as canary_runner
 
@@ -676,23 +678,83 @@ class TestRunnerEntryPoints:
             == ro.RouteObservationRequest(**record["request"]).request_digest()
         )
 
-    def test_execute_terminates_pending_live_consuming_the_prepared_output(self, tmp_path):
-        """The documented M17 flow — ``prepare`` writes the prepared record,
-        ``execute`` consumes that exact output and must reach the typed
-        ``PendingLiveExecution`` seam for the prepared case (never fabricating
-        a live result)."""
+    def test_execute_drives_the_prepared_request_and_writes_counted_evidence(
+        self, _db, tmp_path, monkeypatch
+    ):
+        """The activation runner consumes the prepared request and records the
+        one status authorization, terminal result, receipt, and wake."""
         case = cases.POSITIVE_PATH
         spec_path = tmp_path / "spec.json"
         prepared_path = tmp_path / "prepared.json"
+        evidence_path = tmp_path / "evidence.json"
+        event_log = tmp_path / "events.jsonl"
+        spec = _runner_spec(str(uuid.uuid4()))
+        spec["runtime"] = {
+            "pane_id": "%99",
+            "event_log": str(event_log),
+        }
         spec_path.write_text(
-            json.dumps(_runner_spec(str(uuid.uuid4())), sort_keys=True),
+            json.dumps(spec, sort_keys=True),
             encoding="utf-8",
         )
 
-        canary_runner._prepare(case.runner_key, spec_path, prepared_path)
+        class FakeRealSurface:
+            def __init__(self, *args, **kwargs):
+                self.pane_id = args[0]
 
-        with pytest.raises(canary_runner.PendingLiveExecution, match=case.case_id):
-            canary_runner._execute(case.runner_key, prepared_path, tmp_path / "evidence.json")
+            def pane_width(self):
+                return 100
+
+            def capture_screen(self):
+                return fixtures.codex_route_panel_rows()
+
+            def send_status_command(self):
+                return True
+
+            def composer_restored(self):
+                return True
+
+        monkeypatch.setattr(canary_runner.roc, "RealCodexPaneSurface", FakeRealSurface)
+        canary_runner._prepare(case.runner_key, spec_path, prepared_path)
+        canary_runner._execute(case.runner_key, prepared_path, evidence_path)
+
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        assert evidence["case_id"] == case.case_id
+        assert evidence["status_command_count"] == 1
+        assert evidence["outcome"]["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert evidence["outcome"]["receipt_digest"]
+        assert evidence["outcome"]["inbox_message_id"]
+
+    def test_delivery_driver_selects_the_existing_exact_wake_row(self, _db, tmp_path, monkeypatch):
+        request = _request()
+        outcome = roc.CodexRouteObserver(
+            surface=fixtures.FakeCodexPaneSurface(rows=fixtures.codex_route_panel_rows())
+        ).observe(request)
+        calls = []
+        monkeypatch.setattr(
+            canary_delivery.inbox_service,
+            "deliver_pending",
+            lambda receiver_id, **kwargs: calls.append((receiver_id, kwargs)),
+        )
+        output = tmp_path / "delivery.json"
+
+        canary_delivery.deliver(
+            request.requester_terminal_id,
+            int(outcome["inbox_message_id"]),
+            output,
+        )
+
+        assert calls == [
+            (
+                request.requester_terminal_id,
+                {"num_messages": 1, "required_message_id": outcome["inbox_message_id"]},
+            )
+        ]
+        evidence = json.loads(output.read_text(encoding="utf-8"))
+        assert evidence["message_id"] == outcome["inbox_message_id"]
+        assert evidence["receiver_id"] == request.requester_terminal_id
+        assert evidence["expected_receiver_generation"] == request.requester_generation
+        assert evidence["status"] == MessageStatus.PENDING.value
 
     def test_execute_refuses_a_prepared_record_for_a_different_case(self, tmp_path):
         case = cases.POSITIVE_PATH
