@@ -411,6 +411,10 @@ def _run_case(
     conductor: Path,
     real_home: Path,
 ) -> dict[str, Any]:
+    def progress(stage: str) -> None:
+        print(f"[m17-t3] {case.runner_key}: {stage}", flush=True)
+
+    progress("starting isolated runtime")
     case_dir.mkdir(parents=True)
     state_root = case_dir / "state"
     state_root.mkdir()
@@ -463,6 +467,7 @@ def _run_case(
                     mode="native_tui",
                     case_key=case.runner_key,
                 )
+                progress("native target bound")
                 requester = _launch_bound(
                     server_url=server.url,
                     session_name=requester_session,
@@ -471,6 +476,7 @@ def _run_case(
                     mode="acp",
                     case_key=case.runner_key,
                 )
+                progress("Luna requester bound without task input")
                 target_record = target["record"]
                 requester_record = requester["record"]
                 pane_id = target_record["pane_id"]
@@ -562,6 +568,7 @@ def _run_case(
                     )
                 evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
                 outcome = evidence["outcome"]
+                progress("route observation terminalized")
 
                 delivery = None
                 turn_receipt = None
@@ -581,6 +588,7 @@ def _run_case(
                         requester_record["terminal_id"],
                         int(outcome["inbox_message_id"]),
                     )
+                    progress("wake delivered and provider turn receipted")
                     route_receipt = outcome.get("receipt")
                     consumer_response, consumer_wakes, store, connection = _consume(
                         conductor,
@@ -612,14 +620,17 @@ def _run_case(
                             )
                             assert consumer_replay["outcome"] == "replayed"
                             assert len(consumer_wakes) == 1
+                        progress("conductor consumer verified")
                     finally:
                         connection.close()
                 else:
                     assert evidence["status_command_count"] == 0
                     assert outcome["disposition"] == "requester-stale"
                     assert retirement is not None
+                    progress("stale generation fenced with zero provider input")
 
                 assert_shared_server_untouched(shared, shared_session, shared_identity)
+                progress("passed")
                 return {
                     "case_id": case.case_id,
                     "case": case.runner_key,
@@ -656,6 +667,59 @@ def _run_case(
                     tmux.kill_session(requester_session, check=False)
 
 
+def _preserve_case(
+    run_dir: Path,
+    preserved: Path,
+    *,
+    result: Mapping[str, Any] | None = None,
+) -> None:
+    """Preserve the bounded case record even when the live attempt fails."""
+    preserved.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "spec.json",
+        "prepared.json",
+        "fork-evidence.json",
+        "fork-events.jsonl",
+        "pane-before.txt",
+        "delivery.json",
+        "restart-interrupt.json",
+        "consumer.sqlite3",
+    ):
+        source = run_dir / name
+        if source.is_file():
+            shutil.copy2(source, preserved / name)
+    project_state = run_dir / "project-state"
+    if project_state.is_dir():
+        shutil.copytree(
+            project_state,
+            preserved / "project-state",
+            dirs_exist_ok=True,
+        )
+    if result is not None:
+        (preserved / "summary.json").write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+
+def test_partial_case_evidence_is_preserved_without_an_outcome(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "fork-events.jsonl").write_text('{"kind":"status-authorized"}\n', encoding="utf-8")
+    project_state = run_dir / "project-state"
+    project_state.mkdir()
+    (project_state / "control.json").write_text("{}\n", encoding="utf-8")
+    preserved = tmp_path / "preserved"
+
+    _preserve_case(run_dir, preserved)
+
+    assert (preserved / "fork-events.jsonl").read_text(encoding="utf-8") == (
+        '{"kind":"status-authorized"}\n'
+    )
+    assert (preserved / "project-state" / "control.json").read_text(encoding="utf-8") == "{}\n"
+    assert not (preserved / "summary.json").exists()
+
+
 def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
     if os.environ.get(LIVE_ENV) != "1":
         pytest.skip(f"set {LIVE_ENV}=1 only after the CP1 live-testing checkpoint")
@@ -663,6 +727,8 @@ def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
     if not evidence_value:
         pytest.skip(f"{EVIDENCE_ENV} must name the preserved T3 evidence directory")
     evidence_root = Path(evidence_value)
+    if evidence_root.exists() and any(evidence_root.iterdir()):
+        pytest.fail(f"{EVIDENCE_ENV} must name a new or empty evidence directory")
     evidence_root.mkdir(parents=True, exist_ok=True)
     conductor = _conductor_source()
     installed = _installed_codex()
@@ -682,40 +748,38 @@ def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
     results = []
     for case in cases.CANARY_CASES:
         run_dir = tmp_path / case.runner_key
-        result = _run_case(
-            case=case,
-            case_dir=run_dir,
-            installed=installed,
-            conductor=conductor,
-            real_home=real_home,
-        )
-        results.append(result)
         preserved = evidence_root / "cases" / case.runner_key
-        preserved.mkdir(parents=True, exist_ok=True)
-        for name in (
-            "spec.json",
-            "prepared.json",
-            "fork-evidence.json",
-            "fork-events.jsonl",
-            "pane-before.txt",
-            "delivery.json",
-            "restart-interrupt.json",
-            "consumer.sqlite3",
-        ):
-            source = run_dir / name
-            if source.is_file():
-                shutil.copy2(source, preserved / name)
-        project_state = run_dir / "project-state"
-        if project_state.is_dir():
-            shutil.copytree(
-                project_state,
-                preserved / "project-state",
-                dirs_exist_ok=True,
+        result = None
+        try:
+            result = _run_case(
+                case=case,
+                case_dir=run_dir,
+                installed=installed,
+                conductor=conductor,
+                real_home=real_home,
             )
-        (preserved / "summary.json").write_text(
-            json.dumps(result, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+            results.append(result)
+        except BaseException as exc:
+            preserved.mkdir(parents=True, exist_ok=True)
+            (preserved / "failure.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "cao-m17-t3-case-failure-v1",
+                        "case": case.runner_key,
+                        "exception_type": type(exc).__name__,
+                        "recorded_at": datetime.now(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            raise
+        finally:
+            _preserve_case(run_dir, preserved, result=result)
 
     assert [item["case"] for item in results] == [case.runner_key for case in cases.CANARY_CASES]
     assert sum(item["status_command_count"] for item in results) == 4
