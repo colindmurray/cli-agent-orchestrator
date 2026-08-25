@@ -149,8 +149,8 @@ def test_sanitizer_redacts_known_paths_accounts_and_common_secret_shapes(tmp_pat
 
 
 def test_installed_cell_matrix_uses_the_provider_proof_gates():
-    assert matrix.assess_cell("codex", normalized_version="0.147.0").runnable
-    assert not matrix.assess_cell("codex", normalized_version="0.145.0").runnable
+    assert not matrix.assess_cell("codex", normalized_version="0.147.0").runnable
+    assert "self-proof" in matrix.assess_cell("codex", normalized_version="0.145.0").reason
     assert matrix.assess_cell("kimi_cli", normalized_version="0.34.0").runnable
     assert not matrix.assess_cell("kimi_cli", normalized_version="0.30.0").runnable
     assert not matrix.assess_cell(

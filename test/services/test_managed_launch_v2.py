@@ -457,7 +457,7 @@ def test_stubbed_codex_mint_receipt_reaches_the_real_bind_proof_validator(
     assert bound["state"] == "bound"
 
 
-@pytest.mark.parametrize("broken", ["digest", "method", "session", "turn"])
+@pytest.mark.parametrize("broken", ["digest", "method", "session", "turn", "fresh", "schema"])
 def test_bind_rejects_each_broken_runtime_codex_proof_conjunct(
     isolated_memory_db, worktree, tmp_path, monkeypatch, broken
 ):
@@ -485,8 +485,12 @@ def test_bind_rejects_each_broken_runtime_codex_proof_conjunct(
         del proof["schema"]["methods"]["thread/resume"]
     elif broken == "session":
         proof["resume_adoption"]["adopted_session_id"] = "other-session"
-    else:
+    elif broken == "turn":
         proof["resume_adoption"]["sent_no_turn"] = False
+    elif broken == "fresh":
+        proof["resume_adoption"]["adopted_in_fresh_process"] = False
+    else:
+        proof["schema"]["schema"] = "wrong-schema"
     receipt = _ready_bridge_state(
         record,
         monkeypatch,

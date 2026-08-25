@@ -2344,15 +2344,9 @@ def _validate_readiness_for_bind(row: Any, receipt: dict[str, Any]) -> None:
             "readiness receipt is not bound to the exact v2 reservation: "
             + _canonical_json(mismatches)
         )
-    # The capability question this seam asks is the NARROW native-bind one,
-    # not the broad provider-version one: a build may be stage-proven for
-    # the pre-turn identity/input contract bind binds against (Codex
-    # 0.147.0) while unrelated advanced surfaces stay unproven, and a build
-    # outside this table still fails closed here even when open launch
-    # policy admitted it. Composer delivery is gated separately by the
-    # provider adapter's per-build composer facts — the stage-proven table
-    # or, for a missing row, the version-bound read of the installed bundle
-    # — during admission.
+    # A Codex runtime proof is checked below before the legacy version
+    # fallback. If either proof is absent, relaunch after a fresh bootstrap;
+    # do not add a version to a capability table as a recovery action.
     codex_proof = receipt.get("capability_proof") if row.provider == "codex" else None
     codex_proof_valid = False
     if isinstance(codex_proof, dict):
