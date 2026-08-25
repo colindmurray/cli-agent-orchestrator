@@ -17,9 +17,12 @@ summaries auto)`` suffix yields effort ``medium`` and ignores its annotation.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import uuid
-from test.e2e.route_observation_canary import cases, fixtures
+from test.e2e.route_observation_canary import cases
+from test.e2e.route_observation_canary import delivery as canary_delivery
+from test.e2e.route_observation_canary import fixtures
 from test.e2e.route_observation_canary import receipt as m10_receipt
 from test.e2e.route_observation_canary import runner as canary_runner
 
@@ -676,23 +679,203 @@ class TestRunnerEntryPoints:
             == ro.RouteObservationRequest(**record["request"]).request_digest()
         )
 
-    def test_execute_terminates_pending_live_consuming_the_prepared_output(self, tmp_path):
-        """The documented M17 flow — ``prepare`` writes the prepared record,
-        ``execute`` consumes that exact output and must reach the typed
-        ``PendingLiveExecution`` seam for the prepared case (never fabricating
-        a live result)."""
+    def test_execute_drives_the_prepared_request_and_writes_counted_evidence(
+        self, _db, tmp_path, monkeypatch
+    ):
+        """The activation runner consumes the prepared request and records the
+        one status authorization, terminal result, receipt, and wake."""
         case = cases.POSITIVE_PATH
         spec_path = tmp_path / "spec.json"
         prepared_path = tmp_path / "prepared.json"
+        evidence_path = tmp_path / "evidence.json"
+        event_log = tmp_path / "events.jsonl"
+        spec = _runner_spec(str(uuid.uuid4()))
+        spec["runtime"] = {
+            "pane_id": "%99",
+            "event_log": str(event_log),
+        }
         spec_path.write_text(
-            json.dumps(_runner_spec(str(uuid.uuid4())), sort_keys=True),
+            json.dumps(spec, sort_keys=True),
             encoding="utf-8",
         )
 
+        class FakeRealSurface:
+            def __init__(self, *args, **kwargs):
+                self.pane_id = args[0]
+
+            def pane_width(self):
+                return 100
+
+            def capture_screen(self):
+                return fixtures.codex_route_panel_rows()
+
+            def send_status_command(self):
+                return True
+
+            def composer_restored(self):
+                return True
+
+        monkeypatch.setattr(canary_runner.roc, "RealCodexPaneSurface", FakeRealSurface)
+        canary_runner._prepare(case.runner_key, spec_path, prepared_path)
+        canary_runner._execute(case.runner_key, prepared_path, evidence_path)
+
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        assert evidence["case_id"] == case.case_id
+        assert evidence["status_command_count"] == 1
+        assert evidence["outcome"]["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert evidence["outcome"]["receipt_digest"]
+        assert evidence["outcome"]["inbox_message_id"]
+        assert evidence["inbox_message_status"] == MessageStatus.PENDING.value
+
+    def test_replay_execute_retries_the_terminal_operation_without_another_effect(
+        self, _db, tmp_path, monkeypatch
+    ):
+        case = cases.REPLAY_NO_DUPLICATE
+        spec_path = tmp_path / "spec.json"
+        prepared_path = tmp_path / "prepared.json"
+        initial_path = tmp_path / "initial.json"
+        retry_path = tmp_path / "retry.json"
+        event_log = tmp_path / "events.jsonl"
+        spec = _runner_spec(str(uuid.uuid4()))
+        spec["runtime"] = {
+            "pane_id": "%99",
+            "event_log": str(event_log),
+        }
+        spec_path.write_text(json.dumps(spec, sort_keys=True), encoding="utf-8")
+
+        class FakeRealSurface:
+            def __init__(self, *args, **kwargs):
+                self.pane_id = args[0]
+
+            def pane_width(self):
+                return 100
+
+            def capture_screen(self):
+                return fixtures.codex_route_panel_rows()
+
+            def send_status_command(self):
+                return True
+
+            def composer_restored(self):
+                return True
+
+        monkeypatch.setattr(canary_runner.roc, "RealCodexPaneSurface", FakeRealSurface)
+        canary_runner._prepare(case.runner_key, spec_path, prepared_path)
+        canary_runner._execute(
+            case.runner_key,
+            prepared_path,
+            initial_path,
+            replay_phase="initial",
+        )
+        canary_runner._execute(
+            case.runner_key,
+            prepared_path,
+            retry_path,
+            replay_phase="retry",
+        )
+
+        initial = json.loads(initial_path.read_text(encoding="utf-8"))
+        retry = json.loads(retry_path.read_text(encoding="utf-8"))
+        assert retry["outcome"]["replayed"] is True
+        assert retry["outcome"]["inbox_message_id"] == initial["outcome"]["inbox_message_id"]
+        assert retry["status_command_count"] == 1
+        assert retry["inbox_count"] == 1
+
+    def test_restart_interrupt_requires_the_exact_current_requester(self, _db):
+        request = _request()
+        surface = fixtures.FakeCodexPaneSurface(rows=fixtures.codex_route_panel_rows())
+        observer = roc.CodexRouteObserver(surface=surface)
+
+        with pytest.raises(canary_runner.LiveCanaryInvalid, match="stale requester"):
+            canary_runner._restart_interrupt(
+                request,
+                observer,
+                surface,
+                lambda terminal_id: "different-generation",
+            )
+
+        assert surface.status_commands_sent == 0
+
+    def test_ambiguous_close_refuses_an_inconclusive_observation(self, _db, tmp_path, monkeypatch):
+        case = cases.AMBIGUOUS_CLOSE
+        spec_path = tmp_path / "spec.json"
+        prepared_path = tmp_path / "prepared.json"
+        event_log = tmp_path / "events.jsonl"
+        spec = _runner_spec(str(uuid.uuid4()))
+        spec["runtime"] = {"pane_id": "%99", "event_log": str(event_log)}
+        spec_path.write_text(json.dumps(spec, sort_keys=True), encoding="utf-8")
+
+        class InconclusiveRealSurface:
+            def __init__(self, *args, **kwargs):
+                self.pane_id = args[0]
+
+            def pane_width(self):
+                return 100
+
+            def capture_screen(self):
+                return ["not a Codex status panel"]
+
+            def send_status_command(self):
+                return True
+
+            def composer_restored(self):
+                raise RuntimeError("pane was killed")
+
+        monkeypatch.setattr(
+            canary_runner.roc,
+            "RealCodexPaneSurface",
+            InconclusiveRealSurface,
+        )
+        monkeypatch.setattr(
+            canary_runner.subprocess,
+            "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+        )
         canary_runner._prepare(case.runner_key, spec_path, prepared_path)
 
-        with pytest.raises(canary_runner.PendingLiveExecution, match=case.case_id):
-            canary_runner._execute(case.runner_key, prepared_path, tmp_path / "evidence.json")
+        with pytest.raises(canary_runner.LiveCanaryInvalid, match="ambiguous-close"):
+            canary_runner._execute(
+                case.runner_key,
+                prepared_path,
+                tmp_path / "evidence.json",
+            )
+
+    def test_inbox_status_refuses_missing_or_untyped_rows(self, _db):
+        with pytest.raises(canary_runner.LiveCanaryInvalid, match="did not name"):
+            canary_runner._inbox_status(None)
+        with pytest.raises(canary_runner.LiveCanaryInvalid, match="absent inbox row"):
+            canary_runner._inbox_status(999_999)
+
+    def test_delivery_driver_selects_the_existing_exact_wake_row(self, _db, tmp_path, monkeypatch):
+        request = _request()
+        outcome = roc.CodexRouteObserver(
+            surface=fixtures.FakeCodexPaneSurface(rows=fixtures.codex_route_panel_rows())
+        ).observe(request)
+        calls = []
+        monkeypatch.setattr(
+            canary_delivery.inbox_service,
+            "deliver_pending",
+            lambda receiver_id, **kwargs: calls.append((receiver_id, kwargs)),
+        )
+        output = tmp_path / "delivery.json"
+
+        canary_delivery.deliver(
+            request.requester_terminal_id,
+            int(outcome["inbox_message_id"]),
+            output,
+        )
+
+        assert calls == [
+            (
+                request.requester_terminal_id,
+                {"num_messages": 1, "required_message_id": outcome["inbox_message_id"]},
+            )
+        ]
+        evidence = json.loads(output.read_text(encoding="utf-8"))
+        assert evidence["message_id"] == outcome["inbox_message_id"]
+        assert evidence["receiver_id"] == request.requester_terminal_id
+        assert evidence["expected_receiver_generation"] == request.requester_generation
+        assert evidence["status"] == MessageStatus.PENDING.value
 
     def test_execute_refuses_a_prepared_record_for_a_different_case(self, tmp_path):
         case = cases.POSITIVE_PATH

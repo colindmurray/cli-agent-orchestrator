@@ -49,7 +49,12 @@ from typing import Any, Optional
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from cli_agent_orchestrator.clients import database
-from cli_agent_orchestrator.constants import COMPANION_DIR, FORCED_LOCALE
+from cli_agent_orchestrator.constants import (
+    CAO_HOME_DIR,
+    COMPANION_DIR,
+    FORCED_LOCALE,
+    STATE_ROOT_ENV,
+)
 
 # Backward-compat alias; canonical is constants.FORCED_LOCALE (P3-1).
 _FORCED_LOCALE = FORCED_LOCALE
@@ -3737,6 +3742,12 @@ async def launch_reserved(reservation_id: str, *, registry=None) -> dict[str, An
                 "--reservation-id",
                 reservation_id,
             ],
+            # The bridge resolves its state directory during module import,
+            # before it can read the immutable request. Pin the server's
+            # already-resolved root into the pane itself: an existing tmux
+            # server may have been born under a different HOME/environment,
+            # which would make the bridge look where the request cannot exist.
+            env_vars={STATE_ROOT_ENV: str(CAO_HOME_DIR)},
             # v2 terminals persist only to the isolated v2 surface; the
             # shared terminals table (and every old cleanup/list path)
             # never sees them.

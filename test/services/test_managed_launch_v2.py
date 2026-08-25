@@ -817,7 +817,8 @@ def test_project_persists_to_bridge_handoff(isolated_memory_db, worktree, tmp_pa
     # ADM-1 durable regression: the immutable project identity survives the
     # reserve wire model, persists on the reservation, reaches the bridge
     # request verbatim (never silently substituted), and the v2 launch
-    # persists only to the isolated v2 vintage surface.
+    # persists only to the isolated v2 vintage surface. The bridge pane also
+    # receives that exact state root instead of inheriting one from tmux.
     import asyncio
 
     from cli_agent_orchestrator.services import managed_provider_bridge as bridge
@@ -849,6 +850,7 @@ def test_project_persists_to_bridge_handoff(isolated_memory_db, worktree, tmp_pa
     asyncio.run(v2.launch_reserved(record["reservation_id"]))
     assert captured["project"] == "actual-project-which-must-bind"
     assert create_calls["protocol_vintage"] == "v2"
+    assert create_calls["env_vars"] == {v2.STATE_ROOT_ENV: str(v2.CAO_HOME_DIR)}
 
 
 def test_admission_replay_binds_full_identity(isolated_memory_db, worktree, tmp_path, monkeypatch):
