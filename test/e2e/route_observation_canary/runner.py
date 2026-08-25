@@ -212,21 +212,38 @@ def _inbox_count() -> int:
         return int(session.query(database.InboxModel).count())
 
 
+def _inbox_status(message_id: Any) -> str:
+    if not isinstance(message_id, int):
+        raise LiveCanaryInvalid("terminal outcome did not name an inbox row")
+    with database.SessionLocal() as session:
+        row = session.get(database.InboxModel, message_id)
+        if row is None:
+            raise LiveCanaryInvalid(f"terminal outcome named absent inbox row {message_id}")
+        return str(row.status)
+
+
 def _restart_interrupt(
     request: ro.RouteObservationRequest,
     observer: roc.CodexRouteObserver,
     surface: _TracedRealSurface,
+    requester_generation_probe: Optional[Callable[[str], Optional[str]]],
 ) -> dict[str, Any]:
     """Stop after the real observation is durable, before close/result.
 
-    This is a process-boundary fixture, not a production monkeypatch: it calls
-    the same public stage verbs in their production order and exits after the
-    observation commit.  The later ``resume`` invocation uses the ordinary
-    observer, which must adopt those bytes and finish without another input.
+    This deliberately uses the stage primitives to create the otherwise tiny
+    process boundary after the durable observation commit.  Before entering
+    that boundary it repeats the production requester's exact-generation gate.
+    The later ``resume`` invocation uses the ordinary observer, which must
+    adopt those bytes and finish without another input.
     """
     claimed = ro.claim(request)
     if claimed["terminal"]:
         raise LiveCanaryInvalid("restart interrupt found an already-terminal operation")
+    if requester_generation_probe is None:
+        raise LiveCanaryInvalid("restart interrupt requires a requester generation probe")
+    current_requester_generation = requester_generation_probe(request.requester_terminal_id)
+    if current_requester_generation != request.requester_generation:
+        raise LiveCanaryInvalid("restart interrupt found a stale requester generation")
     probe = ro.pre_probe(
         request,
         intent=roc._pre_probe_intent(request, pane_id=surface.pane_id),
@@ -257,6 +274,8 @@ def _validate_case(
     status_count: int,
     inbox_before: int,
     inbox_after: int,
+    expected_inbox_delta: int,
+    inbox_message_status: str,
 ) -> None:
     expected = {
         "positive-path": ro.RESULT_OBSERVED_CLOSED,
@@ -272,9 +291,14 @@ def _validate_case(
         raise LiveCanaryInvalid(
             f"{case_key} authorized {status_count} status commands; expected {expected_status}"
         )
-    if inbox_after - inbox_before != 1:
+    if inbox_after - inbox_before != expected_inbox_delta:
         raise LiveCanaryInvalid(
-            f"{case_key} changed the inbox by {inbox_after - inbox_before} rows; expected one wake"
+            f"{case_key} changed the inbox by {inbox_after - inbox_before} rows; "
+            f"expected {expected_inbox_delta}"
+        )
+    if inbox_message_status != "pending":
+        raise LiveCanaryInvalid(
+            f"{case_key} terminal wake had status {inbox_message_status!r}; expected pending"
         )
     if (
         case_key == "stale-requester"
@@ -282,11 +306,17 @@ def _validate_case(
     ):
         raise LiveCanaryInvalid("stale-requester did not record requester-stale")
     if case_key == "ambiguous-close":
+        observation = outcome.get("observation") or {}
         proof = outcome.get("close_proof") or {}
-        if outcome.get("receipt_digest") is not None or proof.get("outcome") not in {
-            roc.CLOSE_INDETERMINATE,
-            roc.CLOSE_NOT_RESTORED,
-        }:
+        if (
+            observation.get("observed_state") != "observed"
+            or outcome.get("receipt_digest") is not None
+            or proof.get("outcome")
+            not in {
+                roc.CLOSE_INDETERMINATE,
+                roc.CLOSE_NOT_RESTORED,
+            }
+        ):
             raise LiveCanaryInvalid("ambiguous-close fabricated a positive close or receipt")
     elif case_key != "stale-requester" and not outcome.get("receipt_digest"):
         raise LiveCanaryInvalid(f"{case_key} did not mint its positive route receipt")
@@ -340,6 +370,7 @@ def _execute(
     output_path: Path,
     *,
     restart_phase: Optional[str] = None,
+    replay_phase: Optional[str] = None,
 ) -> None:
     """Drive one installed case and write fork-side evidence."""
     database.init_db()
@@ -356,14 +387,20 @@ def _execute(
         raise LiveCanaryInvalid("prepared spec has no runtime object")
     request = ro.RouteObservationRequest(**prepared["request"])
     surface = _surface(runtime, ambiguous=case_key == "ambiguous-close")
+    requester_generation_probe = _generation_probe(runtime)
     observer = roc.CodexRouteObserver(
         surface=surface,
-        requester_generation_probe=_generation_probe(runtime),
+        requester_generation_probe=requester_generation_probe,
     )
     inbox_before = _inbox_count()
 
     if case_key == "restart-recovery" and restart_phase == "interrupt":
-        outcome = _restart_interrupt(request, observer, surface)
+        outcome = _restart_interrupt(
+            request,
+            observer,
+            surface,
+            requester_generation_probe,
+        )
         if _status_count(runtime) != 1:
             raise LiveCanaryInvalid("restart interrupt did not authorize exactly one status")
         _write(
@@ -382,17 +419,26 @@ def _execute(
         return
     if case_key == "restart-recovery" and restart_phase != "resume":
         raise LiveCanaryInvalid("restart-recovery requires --restart-phase interrupt or resume")
+    if case_key != "restart-recovery" and restart_phase is not None:
+        raise LiveCanaryInvalid("--restart-phase is only valid for restart-recovery")
+    if case_key == "replay-no-duplicate" and replay_phase not in {"initial", "retry"}:
+        raise LiveCanaryInvalid("replay-no-duplicate requires --replay-phase initial or retry")
+    if case_key != "replay-no-duplicate" and replay_phase is not None:
+        raise LiveCanaryInvalid("--replay-phase is only valid for replay-no-duplicate")
 
-    first = observer.observe(request)
-    outcome = first
+    outcome = observer.observe(request)
+    expected_inbox_delta = 1
     if case_key == "replay-no-duplicate":
-        replay = observer.read_result(request.operation_id)
-        if replay is None or replay.get("inbox_message_id") != first.get("inbox_message_id"):
-            raise LiveCanaryInvalid("response-loss replay did not return the stored wake")
-        outcome = replay
+        if replay_phase == "initial" and outcome.get("replayed") is not False:
+            raise LiveCanaryInvalid("initial response-loss attempt unexpectedly replayed")
+        if replay_phase == "retry":
+            expected_inbox_delta = 0
+            if outcome.get("replayed") is not True:
+                raise LiveCanaryInvalid("terminal retry did not replay the stored result")
 
     status_count = _status_count(runtime)
     inbox_after = _inbox_count()
+    inbox_message_status = _inbox_status(outcome.get("inbox_message_id"))
     # Restart resume begins after the interrupt already wrote zero wakes; all
     # other cases begin in this process.  In either form exactly one wake must
     # exist when the terminal result commits.
@@ -404,6 +450,8 @@ def _execute(
         status_count=status_count,
         inbox_before=inbox_before,
         inbox_after=inbox_after,
+        expected_inbox_delta=expected_inbox_delta,
+        inbox_message_status=inbox_message_status,
     )
     _write(
         output_path,
@@ -412,8 +460,10 @@ def _execute(
             "case_id": case.case_id,
             "case": case_key,
             "restart_phase": restart_phase,
+            "replay_phase": replay_phase,
             "status_command_count": status_count,
             "inbox_count": inbox_after,
+            "inbox_message_status": inbox_message_status,
             "events": _read_events(Path(str(runtime["event_log"]))),
             "outcome": outcome,
             "recorded_at": _now(),
@@ -432,6 +482,7 @@ def main() -> None:
     execute.add_argument("--prepared", type=Path, required=True)
     execute.add_argument("--output", type=Path, required=True)
     execute.add_argument("--restart-phase", choices=("interrupt", "resume"))
+    execute.add_argument("--replay-phase", choices=("initial", "retry"))
     args = parser.parse_args()
     if args.command == "prepare":
         _prepare(args.case, args.spec, args.output)
@@ -441,6 +492,7 @@ def main() -> None:
             args.prepared,
             args.output,
             restart_phase=args.restart_phase,
+            replay_phase=args.replay_phase,
         )
 
 

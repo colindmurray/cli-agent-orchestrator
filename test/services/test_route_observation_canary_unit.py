@@ -724,6 +724,76 @@ class TestRunnerEntryPoints:
         assert evidence["outcome"]["result"] == ro.RESULT_OBSERVED_CLOSED
         assert evidence["outcome"]["receipt_digest"]
         assert evidence["outcome"]["inbox_message_id"]
+        assert evidence["inbox_message_status"] == MessageStatus.PENDING.value
+
+    def test_replay_execute_retries_the_terminal_operation_without_another_effect(
+        self, _db, tmp_path, monkeypatch
+    ):
+        case = cases.REPLAY_NO_DUPLICATE
+        spec_path = tmp_path / "spec.json"
+        prepared_path = tmp_path / "prepared.json"
+        initial_path = tmp_path / "initial.json"
+        retry_path = tmp_path / "retry.json"
+        event_log = tmp_path / "events.jsonl"
+        spec = _runner_spec(str(uuid.uuid4()))
+        spec["runtime"] = {
+            "pane_id": "%99",
+            "event_log": str(event_log),
+        }
+        spec_path.write_text(json.dumps(spec, sort_keys=True), encoding="utf-8")
+
+        class FakeRealSurface:
+            def __init__(self, *args, **kwargs):
+                self.pane_id = args[0]
+
+            def pane_width(self):
+                return 100
+
+            def capture_screen(self):
+                return fixtures.codex_route_panel_rows()
+
+            def send_status_command(self):
+                return True
+
+            def composer_restored(self):
+                return True
+
+        monkeypatch.setattr(canary_runner.roc, "RealCodexPaneSurface", FakeRealSurface)
+        canary_runner._prepare(case.runner_key, spec_path, prepared_path)
+        canary_runner._execute(
+            case.runner_key,
+            prepared_path,
+            initial_path,
+            replay_phase="initial",
+        )
+        canary_runner._execute(
+            case.runner_key,
+            prepared_path,
+            retry_path,
+            replay_phase="retry",
+        )
+
+        initial = json.loads(initial_path.read_text(encoding="utf-8"))
+        retry = json.loads(retry_path.read_text(encoding="utf-8"))
+        assert retry["outcome"]["replayed"] is True
+        assert retry["outcome"]["inbox_message_id"] == initial["outcome"]["inbox_message_id"]
+        assert retry["status_command_count"] == 1
+        assert retry["inbox_count"] == 1
+
+    def test_restart_interrupt_requires_the_exact_current_requester(self, _db):
+        request = _request()
+        surface = fixtures.FakeCodexPaneSurface(rows=fixtures.codex_route_panel_rows())
+        observer = roc.CodexRouteObserver(surface=surface)
+
+        with pytest.raises(canary_runner.LiveCanaryInvalid, match="stale requester"):
+            canary_runner._restart_interrupt(
+                request,
+                observer,
+                surface,
+                lambda terminal_id: "different-generation",
+            )
+
+        assert surface.status_commands_sent == 0
 
     def test_delivery_driver_selects_the_existing_exact_wake_row(self, _db, tmp_path, monkeypatch):
         request = _request()

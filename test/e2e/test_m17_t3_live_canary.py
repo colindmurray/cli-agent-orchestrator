@@ -251,6 +251,7 @@ def _runner(
     prepared: Path | None = None,
     output: Path,
     restart_phase: str | None = None,
+    replay_phase: str | None = None,
 ) -> None:
     args = [case_key, command]
     if command == "prepare":
@@ -261,7 +262,31 @@ def _runner(
         args.extend(["--prepared", str(prepared), "--output", str(output)])
         if restart_phase is not None:
             args.extend(["--restart-phase", restart_phase])
+        if replay_phase is not None:
+            args.extend(["--replay-phase", replay_phase])
     _run_module("test.e2e.route_observation_canary.runner", args, env=env)
+
+
+def _shareable_json(sanitizer: EvidenceSanitizer, value: Any) -> Any:
+    """Hash provider session ids, then apply the ordinary evidence redactions."""
+
+    def convert(item: Any) -> Any:
+        if isinstance(item, Mapping):
+            converted: dict[str, Any] = {}
+            for raw_key, child in item.items():
+                key = str(raw_key)
+                if isinstance(child, str) and (
+                    key.lower() == "session_id" or key.lower().endswith("_session_id")
+                ):
+                    converted[f"{key}_sha256"] = _sha256_text(child)
+                else:
+                    converted[key] = convert(child)
+            return converted
+        if isinstance(item, (list, tuple)):
+            return [convert(child) for child in item]
+        return item
+
+    return sanitizer.sanitize_json(convert(value))
 
 
 def _deliver(
@@ -450,6 +475,15 @@ def _run_case(
                     "PYTHONUNBUFFERED": "1",
                 }
             )
+            sanitizer = EvidenceSanitizer(
+                {
+                    str(real_home): "<HOME>",
+                    str(state_root): "<STATE_ROOT>",
+                    str(scratch): "<SCRATCH>",
+                    str(tmux.socket_path): "<TMUX_SOCKET>",
+                    os.environ.get("USER", ""): "<USER>",
+                }
+            )
             server = _start_cao_server(
                 scratch / "server-home",
                 _pick_free_port(),
@@ -483,15 +517,6 @@ def _run_case(
                 assert pane_id
                 window_name = tmux.out("display-message", "-p", "-t", pane_id, "#{window_name}")
                 pane_before = str(tmux.out("capture-pane", "-p", "-S-300", "-t", pane_id))
-                sanitizer = EvidenceSanitizer(
-                    {
-                        str(real_home): "<HOME>",
-                        str(state_root): "<STATE_ROOT>",
-                        str(scratch): "<SCRATCH>",
-                        str(tmux.socket_path): "<TMUX_SOCKET>",
-                        os.environ.get("USER", ""): "<USER>",
-                    }
-                )
                 sanitizer.write_text(case_dir / "pane-before.txt", pane_before)
 
                 retirement = None
@@ -557,6 +582,30 @@ def _run_case(
                         prepared=prepared_path,
                         output=evidence_path,
                         restart_phase="resume",
+                    )
+                elif case is cases.REPLAY_NO_DUPLICATE:
+                    replay_initial = case_dir / "replay-initial.json"
+                    _runner(
+                        case.runner_key,
+                        "execute",
+                        env=child_env,
+                        prepared=prepared_path,
+                        output=replay_initial,
+                        replay_phase="initial",
+                    )
+                    initial_evidence = json.loads(replay_initial.read_text(encoding="utf-8"))
+                    _runner(
+                        case.runner_key,
+                        "execute",
+                        env=child_env,
+                        prepared=prepared_path,
+                        output=evidence_path,
+                        replay_phase="retry",
+                    )
+                    replay_evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                    assert replay_evidence["outcome"]["replayed"] is True
+                    assert replay_evidence["outcome"]["inbox_message_id"] == (
+                        initial_evidence["outcome"]["inbox_message_id"]
                     )
                 else:
                     _runner(
@@ -626,12 +675,13 @@ def _run_case(
                 else:
                     assert evidence["status_command_count"] == 0
                     assert outcome["disposition"] == "requester-stale"
+                    assert evidence["inbox_message_status"] == "pending"
                     assert retirement is not None
                     progress("stale generation fenced with zero provider input")
 
                 assert_shared_server_untouched(shared, shared_session, shared_identity)
                 progress("passed")
-                return {
+                result = {
                     "case_id": case.case_id,
                     "case": case.runner_key,
                     "target": {
@@ -652,6 +702,7 @@ def _run_case(
                     "result": outcome["result"],
                     "route_receipt_digest": outcome.get("receipt_digest"),
                     "wake_message_id": outcome["inbox_message_id"],
+                    "wake_message_status": evidence["inbox_message_status"],
                     "status_command_count": evidence["status_command_count"],
                     "delivery": delivery,
                     "turn_receipt": turn_receipt,
@@ -659,8 +710,18 @@ def _run_case(
                     "consumer_wake_count": len(consumer_wakes),
                     "consumer_replay": consumer_replay,
                 }
+                return _shareable_json(sanitizer, result)
             finally:
                 server.stop()
+                try:
+                    server_log = "\n".join(
+                        server.log_path.read_text(encoding="utf-8", errors="replace").splitlines()[
+                            -500:
+                        ]
+                    )
+                except OSError as exc:
+                    server_log = f"<server log read failed: {exc}>"
+                sanitizer.write_text(case_dir / "server.log", server_log + "\n")
                 with contextlib.suppress(Exception):
                     tmux.kill_session(target_session, check=False)
                 with contextlib.suppress(Exception):
@@ -683,7 +744,9 @@ def _preserve_case(
         "pane-before.txt",
         "delivery.json",
         "restart-interrupt.json",
+        "replay-initial.json",
         "consumer.sqlite3",
+        "server.log",
     ):
         source = run_dir / name
         if source.is_file():
@@ -706,6 +769,7 @@ def test_partial_case_evidence_is_preserved_without_an_outcome(tmp_path: Path) -
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "fork-events.jsonl").write_text('{"kind":"status-authorized"}\n', encoding="utf-8")
+    (run_dir / "server.log").write_text("bounded server evidence\n", encoding="utf-8")
     project_state = run_dir / "project-state"
     project_state.mkdir()
     (project_state / "control.json").write_text("{}\n", encoding="utf-8")
@@ -717,7 +781,26 @@ def test_partial_case_evidence_is_preserved_without_an_outcome(tmp_path: Path) -
         '{"kind":"status-authorized"}\n'
     )
     assert (preserved / "project-state" / "control.json").read_text(encoding="utf-8") == "{}\n"
+    assert (preserved / "server.log").read_text(encoding="utf-8") == "bounded server evidence\n"
     assert not (preserved / "summary.json").exists()
+
+
+def test_shareable_json_hashes_session_ids_and_redacts_local_paths(tmp_path: Path) -> None:
+    sanitizer = EvidenceSanitizer({str(tmp_path): "<RUN_ROOT>"})
+    shared = _shareable_json(
+        sanitizer,
+        {
+            "provider_session_id": "provider-session",
+            "nested": {"native_session_id": "native-session"},
+            "path": str(tmp_path / "case"),
+        },
+    )
+
+    assert shared == {
+        "provider_session_id_sha256": _sha256_text("provider-session"),
+        "nested": {"native_session_id_sha256": _sha256_text("native-session")},
+        "path": "<RUN_ROOT>/case",
+    }
 
 
 def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
@@ -738,6 +821,15 @@ def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
     real_home = Path(real_home_value)
 
     fork_root = Path(__file__).resolve().parents[2]
+    harness_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=fork_root,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    ).stdout
+    assert not harness_status.strip(), "the T3 fork test installation must be clean"
     source_diff = subprocess.run(
         ["git", "diff", "--quiet", "origin/main", "--", "src"], cwd=fork_root
     )
@@ -784,6 +876,8 @@ def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
     assert [item["case"] for item in results] == [case.runner_key for case in cases.CANARY_CASES]
     assert sum(item["status_command_count"] for item in results) == 4
     assert sum(item["turn_receipt"] is not None for item in results) == 4
+    stale_result = next(item for item in results if item["case"] == "stale-requester")
+    assert stale_result["wake_message_status"] == "pending"
     manifest = {
         "schema": "cao-m17-t3-installed-canary-report-v1",
         "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
