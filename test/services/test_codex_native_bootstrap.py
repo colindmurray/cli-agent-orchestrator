@@ -446,6 +446,44 @@ def test_schema_capability_is_cached_by_binary_digest(tmp_path, codex_binary, mo
     assert len(calls) == 1
 
 
+def test_transient_schema_probe_failure_is_retried_for_the_same_digest(
+    tmp_path, codex_binary, monkeypatch
+):
+    path, digest = codex_binary
+    calls = []
+    transient = cnb.CodexSchemaProbeTransientError("timed out")
+
+    def probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) == 1:
+            raise transient
+        return {"schema": cnb.SCHEMA_PROBE_SCHEMA}
+
+    monkeypatch.setattr(cnb, "_probe_schema_capability", probe)
+    with pytest.raises(cnb.CodexSchemaProbeTransientError, match="timed out"):
+        cnb._validate_binary(path, digest, "codex-cli 99.99.0")
+    assert cnb._validate_binary(path, digest, "codex-cli 99.99.0") == digest
+    assert len(calls) == 2
+
+
+def test_deterministic_schema_probe_failure_is_cached_by_binary_digest(
+    tmp_path, codex_binary, monkeypatch
+):
+    path, digest = codex_binary
+    calls = []
+    deterministic = cnb.CodexBootstrapError("missing method thread/resume")
+
+    def probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise deterministic
+
+    monkeypatch.setattr(cnb, "_probe_schema_capability", probe)
+    for _ in range(2):
+        with pytest.raises(cnb.CodexBootstrapError, match="thread/resume"):
+            cnb._validate_binary(path, digest, "codex-cli 99.99.0")
+    assert len(calls) == 1
+
+
 def test_repeated_mints_keep_the_digest_schema_verdict_and_bindable_proofs(
     tmp_path, codex_binary, monkeypatch
 ):

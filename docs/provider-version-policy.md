@@ -145,10 +145,11 @@ reaches the pane. That is a capability claim about the exact binary: the full
 exchange — `initialize -> initialized -> config/read -> thread/start ->
 thread/name/set -> clean process exit`, canonical UUID, exact cwd/model/effort,
 one materialized rollout, fresh `thread/resume` adopting the same id — must have
-been verified for that build. Proven builds are in
-`NATIVE_BIND_CAPABLE_VERSIONS`, and `codex_native_bootstrap.BOOTSTRAP_CAPABLE_VERSIONS`
-is that same table's Codex cell, so the bootstrap that mints an id and the bind
-seam that accepts it cannot disagree.
+been verified for that build. Codex now proves this contract at runtime with a
+digest-scoped generated-schema check plus fresh-process `thread/resume` adoption.
+The readiness receipt carries that proof to bind, so the executable bytes that
+mint the id are the same bytes whose proof the bind seam accepts; the legacy
+version table is only a fallback for receipts without this runtime evidence.
 
 Today this is the §3 case: no conservative default exists, because there is no
 safe way to *pretend* a session is resumable, and degrading silently would produce
@@ -158,10 +159,10 @@ about the provider stays open.
 
 **That is a statement about the current technique, not about Codex.** The exchange
 is ordinary app-server protocol; nothing in it is documented as build-specific. The
-open question is which step actually varies between builds, and whether the
-contract can be *verified at runtime against the installed binary* instead of
-looked up in a table. A bootstrap that proves its own guarantee on the build in
-front of it needs no allowlist. Removing this gate is tracked work.
+open question was which step actually varies between builds. The contract is
+now *verified at runtime against the installed binary* instead of looked up in
+a Codex capability allowlist. A bootstrap that proves its own guarantee on the
+build in front of it needs no version listing.
 
 Two rules keep the exception from spreading:
 

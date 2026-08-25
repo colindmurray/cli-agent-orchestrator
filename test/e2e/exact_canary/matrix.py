@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from cli_agent_orchestrator.services import (
+    codex_native_bootstrap,
     kimi_native_launch,
     muse_native_launch,
     provider_contracts,
@@ -27,9 +28,11 @@ def assess_cell(
     version_banner: str | None = None,
 ) -> CellAssessment:
     if provider == "codex":
+        runnable = codex_native_bootstrap.is_bootstrap_capable_build(normalized_version)
         return CellAssessment(
-            False,
-            "Codex runtime self-proof is required before exact resume",
+            runnable,
+            "exact installed bootstrap gate" if runnable else "bootstrap build is not proven",
+            "argv" if runnable else None,
         )
     if provider == "kimi_cli":
         runnable = kimi_native_launch.rendered_session_proof_for(normalized_version) is not None

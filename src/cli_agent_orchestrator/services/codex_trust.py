@@ -17,11 +17,9 @@ from cli_agent_orchestrator.providers.codex import (
 )
 from cli_agent_orchestrator.services import provider_contracts
 
-#: The zero-task trust/route-attestation capability set.  The canonical
-#: literal lives in ``provider_contracts.ROUTE_ATTEST_CAPABLE_VERSIONS`` —
-#: exactly as the native-bind seam's ``BOOTSTRAP_CAPABLE_VERSIONS`` does —
-#: so this attestor and the provider-contract capability table cannot drift
-#: about which builds are proven.
+#: The zero-task trust/route-attestation capability set. This route probe
+#: remains a separate version-scoped surface; it is not the Codex native
+#: bootstrap's digest-scoped schema/resume proof used by native bind.
 ROUTE_ATTEST_CAPABLE_VERSIONS = provider_contracts.ROUTE_ATTEST_CAPABLE_VERSIONS[
     provider_contracts.PROVIDER_CODEX
 ]

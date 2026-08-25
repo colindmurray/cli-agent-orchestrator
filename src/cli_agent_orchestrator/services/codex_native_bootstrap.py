@@ -63,6 +63,10 @@ class CodexBootstrapError(RuntimeError):
     """The Codex zero-turn bootstrap could not be proven safe."""
 
 
+class CodexSchemaProbeTransientError(CodexBootstrapError):
+    """The schema probe could not execute; retrying may change the result."""
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -180,7 +184,7 @@ def _probe_schema_capability(
                 env=dict(environment) if environment is not None else None,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise CodexBootstrapError(
+            raise CodexSchemaProbeTransientError(
                 f"Codex schema probe failed: could not execute generate-json-schema: {exc}"
             ) from exc
         if completed.returncode != 0:
@@ -229,6 +233,8 @@ def _validate_binary(
             _CAPABILITY_VERDICTS[observed] = _probe_schema_capability(
                 binary, timeout=timeout, environment=environment
             )
+        except CodexSchemaProbeTransientError:
+            raise
         except CodexBootstrapError as exc:
             _CAPABILITY_VERDICTS[observed] = {"error": str(exc)}
             raise

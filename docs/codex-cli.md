@@ -199,10 +199,11 @@ harness-native session id BEFORE any real task input is admitted:
 1. A zero-turn app-server bootstrap (`thread/start` + `thread/name/set`, no
    `turn/*`) materializes one resumable rollout for the exact profile route
    and working directory. The bootstrap requires an installed build
-   stage-verified for that contract (`BOOTSTRAP_CAPABLE_VERSIONS`, currently
-   `0.146.0`/`0.147.0` — see [provider-version-policy.md](provider-version-policy.md));
-   an unproven build fails the launch closed with zero provider start and
-   zero task bytes rather than degrading to a session the TUI cannot resume.
+   proven at runtime for that contract by the digest-scoped schema and
+   fresh-process `thread/resume` checks (see
+   [provider-version-policy.md](provider-version-policy.md)); an unproven build
+   fails the launch closed with zero provider start and zero task bytes rather
+   than degrading to a session the TUI cannot resume.
 2. The captured id is bound durably (terminal row + stable-agent roster)
    BEFORE the provider starts.
 3. The resumed TUI launches with the EXACT digest-verified executable the

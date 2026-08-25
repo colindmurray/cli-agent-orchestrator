@@ -24,20 +24,12 @@ only bind what was provably bound at launch; an unbound admission would
 be unrecoverable except by blind respawn.
 
 Version capability: the Codex cell mints its pre-turn identity through
-the zero-turn app-server bootstrap, which accepts only an installed
-build stage-verified for the exact resume contract
-(``codex_native_bootstrap.BOOTSTRAP_CAPABLE_VERSIONS`` — currently
-0.146.0 and 0.147.0; see also ``docs/provider-version-policy.md``).
-This is a narrow capability table, not the launch-mode policy: an open
-launch-mode build outside the table cannot supply a resumable id and
-the reservation fails closed with zero task bytes rather than degrading
-to a session the TUI cannot resume.  The bind seam below asks the same
-capability question through ``provider_contracts.is_native_bind_capable``
-— whose Codex cell is that very table — so a build the bootstrap proved
-is exactly the build bind accepts, never a broader one.  The operator
-remedy is to install a bootstrap-capable build or stage-verify and add
-the new build to the table; unsupported builds never retain
-exact-session capture.
+the zero-turn app-server bootstrap's digest-scoped schema and fresh-process
+resume proof.  The readiness receipt carries that proof to bind, so an
+unlisted build that proves the exact contract is accepted while an absent
+or incomplete proof still fails closed with zero task bytes.  The broad
+provider version policy remains independent and does not authorize native
+bind by itself.
 """
 
 from __future__ import annotations

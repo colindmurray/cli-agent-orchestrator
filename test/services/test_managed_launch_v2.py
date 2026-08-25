@@ -397,6 +397,108 @@ def test_bind_accepts_an_unlisted_codex_build_with_runtime_capability_proof(
     assert bound["state"] == "bound"
 
 
+def test_stubbed_codex_mint_receipt_reaches_the_real_bind_proof_validator(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    request = _reserve_request(worktree, tmp_path, execution_mode="native_tui")
+    record, _ = v2.reserve(request)
+    v2.claim_launch(record["reservation_id"])
+    session_id = f"thr_{uuid.uuid4().hex[:16]}"
+    bootstrap = {
+        "native_session_id": session_id,
+        "binary_sha256": request.provider_executable_sha256,
+        "model": request.expected_model,
+        "effort": request.expected_effort,
+        "capability_proof": {
+            "binary_sha256": request.provider_executable_sha256,
+            "schema": {
+                "schema": cnb.SCHEMA_PROBE_SCHEMA,
+                "methods": {method: {} for method in cnb._SCHEMA_REQUIREMENTS},
+            },
+            "resume_adoption": {
+                "schema": cnb.RESUME_ADOPTION_SCHEMA,
+                "method": cnb.RESUME_METHOD,
+                "adopted_session_id": session_id,
+                "adopted_in_fresh_process": True,
+                "sent_no_turn": True,
+            },
+        },
+    }
+    monkeypatch.setattr(v2.codex_native_bootstrap, "mint_session", lambda **_kwargs: bootstrap)
+    minted = v2.codex_native_bootstrap.mint_session(
+        codex_binary=request.provider_executable,
+        binary_sha256=request.provider_executable_sha256,
+        version_output="codex-cli 0.999.0",
+        working_directory=str(worktree),
+        model=request.expected_model,
+        effort=request.expected_effort,
+        profile_args=[],
+    )
+    readiness = v2._native_readiness_receipt(
+        record=record,
+        request=record["request"],
+        bootstrap=minted,
+        outcome={
+            "outcome": "attached",
+            "launch_argv_sha256": "a" * 64,
+            "pane_observation": {"argv": [request.provider_executable]},
+            "attachment": {"owner": {"process_identity": "pid:stub"}},
+        },
+        version_output="codex-cli 0.999.0",
+        bridge_version=BRIDGE_VERSION,
+        readiness={"input_ready": True},
+    )
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.managed_provider_bridge.read_state",
+        lambda _rid: {"state": "ready", "readiness": readiness},
+        raising=False,
+    )
+    bound = v2.bind_native(record["reservation_id"], _bind_request(record))
+    assert bound["state"] == "bound"
+
+
+@pytest.mark.parametrize("broken", ["digest", "method", "session", "turn"])
+def test_bind_rejects_each_broken_runtime_codex_proof_conjunct(
+    isolated_memory_db, worktree, tmp_path, monkeypatch, broken
+):
+    request = _reserve_request(worktree, tmp_path, execution_mode="native_tui")
+    record, _ = v2.reserve(request)
+    v2.claim_launch(record["reservation_id"])
+    session_id = f"thr_{uuid.uuid4().hex[:16]}"
+    proof = {
+        "binary_sha256": request.provider_executable_sha256,
+        "schema": {
+            "schema": cnb.SCHEMA_PROBE_SCHEMA,
+            "methods": {method: {} for method in cnb._SCHEMA_REQUIREMENTS},
+        },
+        "resume_adoption": {
+            "schema": cnb.RESUME_ADOPTION_SCHEMA,
+            "method": cnb.RESUME_METHOD,
+            "adopted_session_id": session_id,
+            "adopted_in_fresh_process": True,
+            "sent_no_turn": True,
+        },
+    }
+    if broken == "digest":
+        proof["binary_sha256"] = "f" * 64
+    elif broken == "method":
+        del proof["schema"]["methods"]["thread/resume"]
+    elif broken == "session":
+        proof["resume_adoption"]["adopted_session_id"] = "other-session"
+    else:
+        proof["resume_adoption"]["sent_no_turn"] = False
+    receipt = _ready_bridge_state(
+        record,
+        monkeypatch,
+        provider_version="0.999.0",
+        provider_receipt_kind="codex-native-thread-start",
+        capability_proof=proof,
+    )
+    with pytest.raises(ManagedLaunchConflict, match="native readiness proof is unavailable"):
+        v2.bind_native(record["reservation_id"], _bind_request(record))
+    assert receipt["capability_proof"] == proof
+
+
 def test_bind_accepts_the_long_proven_neighbor_at_the_native_seam(
     isolated_memory_db, worktree, tmp_path, monkeypatch
 ):
