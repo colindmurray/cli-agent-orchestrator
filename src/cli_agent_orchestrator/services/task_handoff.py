@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 SCHEMA_VERSION = "cao-m3e-task-handoff-v1"
+OCCURRENCE_MOVE_SCHEMA = "cao-m3e-occurrence-move-v1"
 
 #: The handoff's own lifecycle. ``pending`` is the held window; every terminal
 #: state releases the holds and leaves the three partial unique indexes, so the
@@ -1384,6 +1385,59 @@ def complete_handoff(
         db,
         unavailable="concurrent handoff transfers kept conflicting",
     )
+
+
+def occurrence_move_id_for(handoff_id: str) -> str:
+    """Return the stable idempotency key for the fork-side occurrence move.
+
+    The conductor's handback registry writes its transfer intent before it
+    calls across the repository boundary.  A response can be lost after this
+    transaction commits, so the retry must name the same operation rather
+    than mint a second successor occurrence.  The handoff id is already the
+    immutable identity of this one transfer and is therefore the smallest
+    durable key; no second lease or claim is needed.
+    """
+    handoff_id = _require_uuid(handoff_id, field_name="handoff_id")
+    return f"m3e-occurrence-move:{handoff_id}"
+
+
+def reconcile_occurrence_move(
+    handoff_id: str,
+    *,
+    incarnation: occurrence.EffectIncarnation,
+    expected_revision: int,
+    completed_by: str,
+    db: Any = None,
+) -> dict[str, Any]:
+    """Reconcile the named cross-repository occurrence move.
+
+    This is the fork-side adapter for the conductor handback transfer
+    reconciler.  ``complete_handoff`` already performs the donor-finalize and
+    recipient-open writes in one SQLite transaction and adopts a repeated
+    handoff id after response loss.  Keeping this wrapper explicit gives the
+    conductor a stable operation name/schema and makes the cross-repository
+    boundary testable without coupling the conductor to SQLAlchemy models.
+    A pending handoff that settles as ``failed`` is returned as such; callers
+    must not record a conductor-side transfer receipt for that outcome.
+    """
+    handoff_id = _require_uuid(handoff_id, field_name="handoff_id")
+    record = complete_handoff(
+        handoff_id,
+        incarnation=incarnation,
+        expected_revision=expected_revision,
+        completed_by=completed_by,
+        db=db,
+    )
+    return {
+        "schema": OCCURRENCE_MOVE_SCHEMA,
+        "operation_id": occurrence_move_id_for(handoff_id),
+        "handoff_id": handoff_id,
+        "task_occurrence_id": record["task_occurrence_id"],
+        "state": record["state"],
+        "successor_occurrence_id": record.get("successor_occurrence_id"),
+        "receipt_digest": record.get("receipt_digest"),
+        "adopted": bool(record.get("adopted")),
+    }
 
 
 # ---------------------------------------------------------------------------

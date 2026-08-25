@@ -1331,6 +1331,36 @@ def test_a_transferred_handoff_is_never_rolled_back():
         )
 
 
+def test_named_occurrence_move_reconciler_adopts_response_loss():
+    """The cross-repo move has one operation id and a replayable receipt.
+
+    The conductor may lose its response after this SQLite transaction commits.
+    Retrying the named reconciler must adopt the existing successor instead of
+    finalizing the donor or opening another occurrence.
+    """
+    donor_agent, recipient_agent, donor = _pair()
+    handoff = _deliver(_begin(donor, recipient_agent))
+    first = th.reconcile_occurrence_move(
+        handoff["handoff_id"],
+        incarnation=_incarnation("2"),
+        expected_revision=0,
+        completed_by="supervisor",
+    )
+    replay = th.reconcile_occurrence_move(
+        handoff["handoff_id"],
+        incarnation=_incarnation("2"),
+        expected_revision=0,
+        completed_by="supervisor",
+    )
+    assert first["schema"] == th.OCCURRENCE_MOVE_SCHEMA
+    assert first["operation_id"] == th.occurrence_move_id_for(handoff["handoff_id"])
+    assert first["state"] == th.STATE_TRANSFERRED
+    assert first["successor_occurrence_id"]
+    assert replay["adopted"] is True
+    assert replay["successor_occurrence_id"] == first["successor_occurrence_id"]
+    assert len(occ.list_occurrences(SESSION, agent_id=recipient_agent)) == 1
+
+
 # ---------------------------------------------------------------------------
 # rolling back
 # ---------------------------------------------------------------------------
