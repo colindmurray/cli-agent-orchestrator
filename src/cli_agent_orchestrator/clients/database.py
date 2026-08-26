@@ -2016,10 +2016,11 @@ class RouteObservationOperationModel(Base):
     created_at = Column(Text, nullable=False)
     updated_at = Column(Text, nullable=False)
 
-    #: Exactly the read paths this operation performs: by operation id
-    #: (replay), by active target tuple (single nonterminal owner), and by
-    #: listing. ``inbox_message_id`` is deliberately not unique: no read
-    #: queries by it, and each operation mints its own inbox row.
+    #: The active-target index enforces the one nonterminal owner. Terminal
+    #: wake delivery also resolves by ``inbox_message_id`` and refuses if more
+    #: than one operation claims the row; each operation mints its own inbox
+    #: row, so no additional uniqueness mechanism is needed for the ordinary
+    #: cooperative failure model.
     __table_args__ = (
         Index(
             "ix_route_observation_operations_active_target",

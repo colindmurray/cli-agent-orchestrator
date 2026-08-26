@@ -13,6 +13,7 @@ import json
 import uuid
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.models.inbox import MessageStatus
@@ -61,6 +62,25 @@ def _stage(request, *, db=None, **overrides):
     ro.record_observation(request, observation=overrides.get("observation", _OBSERVATION), db=db)
     ro.pre_close(request, intent=overrides.get("pre_close", _PRE_CLOSE), db=db)
     ro.record_close_proof(request, proof=overrides.get("close_proof", _CLOSE_PROOF), db=db)
+
+
+def _terminal_wake(*, result=ro.RESULT_OBSERVED_CLOSED):
+    """Create one real terminal operation and its atomically linked wake."""
+    request = _request()
+    ro.claim(request)
+    if result == ro.RESULT_OBSERVED_CLOSED:
+        _stage(request)
+    terminal = ro.complete(request, result=result, final_event=_EVENT)
+    return request, terminal
+
+
+def _mutate_inbox(message_id, **changes):
+    with database.SessionLocal() as session:
+        row = session.get(database.InboxModel, message_id)
+        assert row is not None
+        for field, value in changes.items():
+            setattr(row, field, value)
+        session.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -692,6 +712,176 @@ class TestWakeClaim:
             count = session.query(database.InboxModel).count()
         assert count == 1
         assert first["inbox_message_id"] is not None
+
+
+# ---------------------------------------------------------------------------
+# exact terminal-wake resolution for the first requester turn
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePendingWake:
+    def test_an_exact_terminal_wake_resolves_from_its_durable_operation_link(self):
+        request, terminal = _terminal_wake()
+
+        resolved = ro.resolve_pending_wake(terminal["inbox_message_id"])
+
+        assert resolved is not None
+        assert resolved["operation_id"] == request.operation_id
+        assert resolved["request_digest"] == request.request_digest()
+        assert resolved["state"] == ro.RESULT_OBSERVED_CLOSED
+        assert resolved["terminal"] is True
+        assert resolved["wake"] == {
+            "message_id": terminal["inbox_message_id"],
+            "message": json.dumps(
+                {
+                    "wake_version": ro.WAKE_SCHEMA_VERSION,
+                    "operation_id": request.operation_id,
+                    "request_digest": request.request_digest(),
+                    "result_kind": ro.RESULT_OBSERVED_CLOSED,
+                    "requester_terminal_id": request.requester_terminal_id,
+                    "requester_generation": request.requester_generation,
+                    "target_terminal_id": request.target_terminal_id,
+                    "target_generation": request.target_generation,
+                    "native_session_id": request.native_session_id,
+                    "provider": request.provider,
+                    "provider_version": request.provider_version,
+                    "provider_artifact_sha256": request.provider_artifact_sha256,
+                    "final_event_digest": canonical_sha256(_EVENT),
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+            "message_sha256": canonical_sha256(
+                {
+                    "wake_version": ro.WAKE_SCHEMA_VERSION,
+                    "operation_id": request.operation_id,
+                    "request_digest": request.request_digest(),
+                    "result_kind": ro.RESULT_OBSERVED_CLOSED,
+                    "requester_terminal_id": request.requester_terminal_id,
+                    "requester_generation": request.requester_generation,
+                    "target_terminal_id": request.target_terminal_id,
+                    "target_generation": request.target_generation,
+                    "native_session_id": request.native_session_id,
+                    "provider": request.provider,
+                    "provider_version": request.provider_version,
+                    "provider_artifact_sha256": request.provider_artifact_sha256,
+                    "final_event_digest": canonical_sha256(_EVENT),
+                }
+            ),
+            "sender_id": request.target_terminal_id,
+            "sender_generation": request.target_generation,
+            "receiver_id": request.requester_terminal_id,
+            "receiver_generation": request.requester_generation,
+            "created_at": resolved["wake"]["created_at"],
+        }
+
+    def test_an_ordinary_inbox_row_has_no_route_observation_owner(self):
+        database.create_terminal(
+            "term-ordinary",
+            "cao-test",
+            "window-ordinary",
+            "codex",
+        )
+        ordinary = database.create_inbox_message(
+            "sender-ordinary",
+            "term-ordinary",
+            "ordinary inbox payload",
+        )
+
+        assert ro.resolve_pending_wake(ordinary.id) is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        (
+            ("message", "{}"),
+            ("message_sha256", "b" * 64),
+            ("sender_id", "term-other-sender"),
+            ("receiver_id", "term-other-receiver"),
+            ("sender_generation", "gen-other-sender"),
+            ("expected_receiver_generation", "gen-other-receiver"),
+            ("expected_provider_session_id", "session-that-does-not-belong"),
+            ("expected_execution_mode", "acp"),
+            ("expected_provider", "codex"),
+            ("callback_recovery_key", "recovery-that-does-not-belong"),
+            ("callback_completion_key", "completion-that-does-not-belong"),
+        ),
+    )
+    def test_any_inbox_identity_or_payload_tampering_conflicts(self, field, value):
+        _, terminal = _terminal_wake()
+        _mutate_inbox(terminal["inbox_message_id"], **{field: value})
+
+        with pytest.raises(ro.RouteObservationConflict, match="contradicts its inbox row"):
+            ro.resolve_pending_wake(terminal["inbox_message_id"])
+
+    def test_a_delivered_wake_is_not_a_pending_wake(self):
+        _, terminal = _terminal_wake()
+        _mutate_inbox(
+            terminal["inbox_message_id"],
+            status=MessageStatus.DELIVERED.value,
+        )
+
+        with pytest.raises(ro.RouteObservationConflict, match="contradicts its inbox row"):
+            ro.resolve_pending_wake(terminal["inbox_message_id"])
+
+    def test_a_nonterminal_operation_cannot_claim_an_inbox_row_as_its_wake(self):
+        request = _request()
+        ro.claim(request)
+        with database.SessionLocal() as session:
+            ordinary = database.InboxModel(
+                sender_id=request.target_terminal_id,
+                receiver_id=request.requester_terminal_id,
+                message="not a terminal wake",
+                status=MessageStatus.PENDING.value,
+            )
+            session.add(ordinary)
+            session.flush()
+            operation = session.get(database.RouteObservationOperationModel, request.operation_id)
+            assert operation is not None
+            operation.inbox_message_id = ordinary.id
+            message_id = ordinary.id
+            session.commit()
+
+        with pytest.raises(ro.RouteObservationConflict, match="not owned by a terminal"):
+            ro.resolve_pending_wake(message_id)
+
+    def test_a_terminal_operation_cannot_resolve_a_missing_linked_wake(self):
+        _, terminal = _terminal_wake()
+        message_id = terminal["inbox_message_id"]
+        with database.SessionLocal() as session:
+            inbox = session.get(database.InboxModel, message_id)
+            assert inbox is not None
+            session.delete(inbox)
+            session.commit()
+
+        with pytest.raises(ro.RouteObservationConflict, match="names a missing inbox wake"):
+            ro.resolve_pending_wake(message_id)
+
+    def test_a_tampered_operation_request_digest_conflicts_before_resolution(self):
+        request, terminal = _terminal_wake()
+        with database.SessionLocal() as session:
+            operation = session.get(database.RouteObservationOperationModel, request.operation_id)
+            assert operation is not None
+            operation.request_digest = "b" * 64
+            session.commit()
+
+        with pytest.raises(ro.RouteObservationConflict, match="divergent stored request digest"):
+            ro.resolve_pending_wake(terminal["inbox_message_id"])
+
+    def test_an_unreadable_database_is_unavailable_not_an_absent_wake(self, monkeypatch):
+        class UnreadableSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def query(self, _model):
+                raise OperationalError("select", {}, RuntimeError("database is locked"))
+
+        monkeypatch.setattr(database, "SessionLocal", UnreadableSession)
+
+        with pytest.raises(ro.RouteObservationUnavailable, match="wake resolution failed"):
+            ro.resolve_pending_wake(1)
 
 
 # ---------------------------------------------------------------------------

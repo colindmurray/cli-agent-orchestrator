@@ -1411,6 +1411,7 @@ def deliver_inbox_via_bridge(
     expected_provider_session_id: Optional[str] = None,
     expected_execution_mode: Optional[str] = None,
     recovery_operation_key: Optional[str] = None,
+    route_observation_operation_id: Optional[str] = None,
 ) -> bool:
     """P1-7 (final conformance §20.2f): deliver one exact queued inbox message
     through the receiver's live managed provider bridge, producing the
@@ -1423,12 +1424,91 @@ def deliver_inbox_via_bridge(
     and NO acknowledgement is inferred from it.
     """
     from cli_agent_orchestrator.services import cohort_journal
-    from cli_agent_orchestrator.services.managed_provider_bridge import request_bridge
+    from cli_agent_orchestrator.services.managed_provider_bridge import (
+        BridgeRequestRefused,
+        request_bridge,
+    )
 
+    first_inbox_claimed = False
+    first_inbox_admission = False
+    first_inbox_message_id = str(message_id)
+    first_inbox_reservation_id: Optional[str] = None
+    first_inbox_record: Optional[dict[str, Any]] = None
+    route_wake_claim: Optional[dict[str, Any]] = None
     try:
         identity = managed_control_identity(terminal_id)
-        if identity is None or identity["state"] != "admitted":
+        if identity is None:
             return False
+        route_wake_candidate = (
+            identity.get("vintage") == "v2"
+            and identity.get("execution_mode") == em.ACP
+            and identity.get("state") in {"bound", "admitting", "admitted"}
+            and isinstance(route_observation_operation_id, str)
+            and bool(route_observation_operation_id)
+        )
+        first_inbox_candidate = False
+        if route_wake_candidate:
+            from cli_agent_orchestrator.services import managed_launch_v2 as v2
+            from cli_agent_orchestrator.services import route_observation
+
+            first_inbox_record = v2.get(identity["reservation_id"])
+            existing_admission = first_inbox_record.get("admission")
+            matching_route_admission = bool(
+                isinstance(existing_admission, dict)
+                and existing_admission.get("admission_kind")
+                == v2.ROUTE_OBSERVATION_WAKE_ADMISSION_KIND
+                and existing_admission.get("message_id") == first_inbox_message_id
+                and existing_admission.get("route_observation_operation_id")
+                == route_observation_operation_id
+            )
+            first_inbox_candidate = bool(
+                (
+                    identity.get("state") == "bound"
+                    and (existing_admission is None or matching_route_admission)
+                )
+                or (identity.get("state") in {"admitting", "admitted"} and matching_route_admission)
+            )
+        if first_inbox_candidate:
+            assert first_inbox_record is not None
+            route_wake_claim = route_observation.resolve_pending_wake(message_id)
+            if (
+                route_wake_claim is None
+                or route_wake_claim.get("operation_id") != route_observation_operation_id
+            ):
+                return False
+            wake = route_wake_claim.get("wake") or {}
+            binding = first_inbox_record.get("binding") or {}
+            if (
+                wake.get("receiver_id") != identity.get("terminal_id")
+                or wake.get("receiver_generation") != identity.get("generation")
+                or wake.get("message") != message
+                or wake.get("sender_id") != sender_id
+                or wake.get("sender_generation") != sender_generation
+                or wake.get("created_at") != message_created_at
+            ):
+                return False
+            derived_expected = (
+                identity.get("generation"),
+                first_inbox_record.get("provider"),
+                binding.get("native_session_id"),
+                first_inbox_record.get("execution_mode"),
+            )
+            supplied_expected = (
+                expected_generation,
+                expected_provider,
+                expected_provider_session_id,
+                expected_execution_mode,
+            )
+            if any(value is not None for value in supplied_expected) and supplied_expected != (
+                derived_expected
+            ):
+                return False
+            (
+                expected_generation,
+                expected_provider,
+                expected_provider_session_id,
+                expected_execution_mode,
+            ) = derived_expected
         strict_expected = (
             expected_provider,
             expected_provider_session_id,
@@ -1451,7 +1531,22 @@ def deliver_inbox_via_bridge(
             assert isinstance(expected_execution_mode, str)
             from cli_agent_orchestrator.services import callback_recovery
 
-            if not callback_recovery.binding_matches(
+            if first_inbox_candidate:
+                assert first_inbox_record is not None
+                first_binding = first_inbox_record.get("binding") or {}
+                if (
+                    identity.get("generation"),
+                    identity.get("provider"),
+                    first_binding.get("native_session_id"),
+                    first_inbox_record.get("execution_mode"),
+                ) != (
+                    expected_generation,
+                    expected_provider,
+                    expected_provider_session_id,
+                    expected_execution_mode,
+                ):
+                    return False
+            elif not callback_recovery.binding_matches(
                 terminal_id,
                 generation=expected_generation,
                 provider=expected_provider,
@@ -1459,9 +1554,100 @@ def deliver_inbox_via_bridge(
                 execution_mode=expected_execution_mode,
             ):
                 return False
+        first_inbox_admission = (
+            first_inbox_candidate
+            and isinstance(sender_id, str)
+            and bool(sender_id)
+            and isinstance(sender_generation, str)
+            and bool(sender_generation)
+            and isinstance(message_created_at, datetime)
+            and expected_generation is not None
+            and all(isinstance(value, str) and bool(value) for value in strict_expected)
+        )
+        if identity["state"] != "admitted" and not first_inbox_admission:
+            return False
         reservation_id = identity["reservation_id"]
+        first_inbox_reservation_id = reservation_id if first_inbox_admission else None
         with cohort_journal.session_effect_admission(identity["session_name"]):
-            request_bridge(
+            if first_inbox_admission:
+                from cli_agent_orchestrator.services import generation_fence
+                from cli_agent_orchestrator.services import managed_launch_v2 as v2
+
+                record = first_inbox_record or v2.get(reservation_id)
+                binding = record.get("binding") or {}
+                attempt_id = binding.get("attempt_id")
+                fencing_token_id = binding.get("fencing_token_id")
+                if not isinstance(attempt_id, str) or not isinstance(fencing_token_id, str):
+                    raise ManagedLaunchConflict(
+                        "inbox first admission requires an immutable bound attempt and fencing token"
+                    )
+                created_at = message_created_at
+                assert isinstance(created_at, datetime)
+                assert isinstance(sender_id, str)
+                assert isinstance(sender_generation, str)
+                assert isinstance(route_observation_operation_id, str)
+                assert isinstance(expected_generation, str)
+                assert isinstance(expected_provider, str)
+                assert isinstance(expected_provider_session_id, str)
+                assert isinstance(expected_execution_mode, str)
+                assert route_wake_claim is not None
+                if created_at.utcoffset() is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                canonical_created_at = created_at.astimezone(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                )
+                with generation_fence.managed_admission_critical_section(
+                    v2.COMPANION_DIR,  # type: ignore[attr-defined]
+                    identity["terminal_id"],
+                    identity["generation"],
+                    attempt_id=attempt_id,
+                    fencing_token_id=fencing_token_id,
+                ):
+                    claimed_record, should_send = v2.claim_route_observation_wake_admission(
+                        reservation_id,
+                        message_id=first_inbox_message_id,
+                        message=message,
+                        message_sha256=hashlib.sha256(message.encode("utf-8")).hexdigest(),
+                        sender_id=sender_id,
+                        sender_generation=sender_generation,
+                        message_created_at=canonical_created_at,
+                        route_observation_operation_id=(route_observation_operation_id),
+                        route_observation_request_digest=(route_wake_claim["request_digest"]),
+                        route_observation_result_kind=route_wake_claim["state"],
+                        expected_generation=expected_generation,
+                        expected_provider=expected_provider,
+                        expected_provider_session_id=expected_provider_session_id,
+                        expected_execution_mode=expected_execution_mode,
+                    )
+                first_inbox_claimed = True
+                existing_ack = companion_receipts.get_strict_message_ack(
+                    identity["terminal_id"],
+                    identity["generation"],
+                    first_inbox_message_id,
+                )
+                if existing_ack is not None:
+                    v2.complete_route_observation_wake_admission(
+                        reservation_id, first_inbox_message_id, existing_ack
+                    )
+                    return True
+                claimed_admission = claimed_record.get("admission") or {}
+                if not should_send:
+                    # The exact wake already owns this reservation.  A
+                    # provider acknowledgement may arrive late and is
+                    # adopted above; without one, an ambiguous or permanent
+                    # pre-submit outcome must never cross the bridge again.
+                    if claimed_admission.get("status") in {
+                        "ambiguous_preserved",
+                        "refused",
+                    }:
+                        return False
+                    if claimed_admission.get("status") == "io-attempted":
+                        # Another exact sweeper owns the in-flight attempt.
+                        # It may still publish the strict acknowledgement;
+                        # this observer neither resends nor terminalizes it.
+                        return False
+                    raise ManagedLaunchConflict("inbox first admission has an invalid status")
+            response = request_bridge(
                 reservation_id,
                 {
                     "bridge_version": "cao-native-provider-bridge-v1",
@@ -1473,6 +1659,17 @@ def deliver_inbox_via_bridge(
                     "expected_provider_session_id": expected_provider_session_id,
                     "expected_execution_mode": expected_execution_mode,
                     "recovery_operation_key": recovery_operation_key,
+                    "route_observation_operation_id": (
+                        route_observation_operation_id if first_inbox_admission else None
+                    ),
+                    "route_observation_request_digest": (
+                        route_wake_claim.get("request_digest")
+                        if route_wake_claim is not None
+                        else None
+                    ),
+                    "route_observation_result_kind": (
+                        route_wake_claim.get("state") if route_wake_claim is not None else None
+                    ),
                     "message_id": str(message_id),
                     "message": message,
                     "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
@@ -1486,6 +1683,31 @@ def deliver_inbox_via_bridge(
                 },
                 timeout=30.0,
             )
+            if first_inbox_admission:
+                from cli_agent_orchestrator.services import managed_launch_v2 as v2
+
+                ack = companion_receipts.get_strict_message_ack(
+                    identity["terminal_id"],
+                    identity["generation"],
+                    first_inbox_message_id,
+                )
+                if ack is None:
+                    candidate = response.get("receipt")
+                    if isinstance(candidate, dict):
+                        from cli_agent_orchestrator.services import model_turn_receipt_contract
+
+                        try:
+                            ack = model_turn_receipt_contract.validate_receipt(candidate)
+                        except model_turn_receipt_contract.ReceiptValidationError:
+                            ack = None
+                if ack is None:
+                    raise ManagedLaunchUnavailable(
+                        "provider bridge accepted the first inbox turn without publishing its "
+                        "strict model-turn acknowledgement"
+                    )
+                v2.complete_route_observation_wake_admission(
+                    reservation_id, first_inbox_message_id, ack
+                )
         return True
     except cohort_journal.SessionEffectRefused:
         if recovery_operation_key:
@@ -1498,8 +1720,95 @@ def deliver_inbox_via_bridge(
             )
         return False
     except Exception as exc:  # noqa: BLE001 - preserve or terminalize by exact outcome
+        if first_inbox_admission and not first_inbox_claimed:
+            logger.warning(
+                "managed first-inbox admission refused before provider I/O for %s/%s",
+                terminal_id,
+                first_inbox_message_id,
+                exc_info=True,
+            )
+            return False
+        if first_inbox_claimed and first_inbox_reservation_id is not None:
+            from cli_agent_orchestrator.services import managed_launch_v2 as v2
+
+            try:
+                ack = companion_receipts.get_strict_message_ack(
+                    terminal_id,
+                    expected_generation,
+                    first_inbox_message_id,
+                )
+                if ack is not None:
+                    v2.complete_route_observation_wake_admission(
+                        first_inbox_reservation_id,
+                        first_inbox_message_id,
+                        ack,
+                    )
+                    return True
+            except Exception:  # noqa: BLE001 - the original boundary failure remains primary
+                logger.warning(
+                    "managed first-inbox acknowledgement reconciliation failed for %s/%s",
+                    terminal_id,
+                    first_inbox_message_id,
+                    exc_info=True,
+                )
         detail = str(exc).lower()
-        if recovery_operation_key and "w13-fenced-before-provider-io:" in detail:
+        if first_inbox_claimed and first_inbox_reservation_id is not None:
+            try:
+                if "bridge was unavailable:" in detail:
+                    v2.refuse_route_observation_wake_admission(
+                        first_inbox_reservation_id,
+                        first_inbox_message_id,
+                        "bridge-unavailable-before-provider-io",
+                        str(exc),
+                        retryable=True,
+                    )
+                elif "route-observation-wake-unavailable-before-provider-io" in detail:
+                    v2.refuse_route_observation_wake_admission(
+                        first_inbox_reservation_id,
+                        first_inbox_message_id,
+                        "route-observation-wake-unavailable-before-provider-io",
+                        str(exc),
+                        retryable=True,
+                    )
+                elif (
+                    "w13-fenced-before-provider-io:" in detail
+                    or "successor-fenced-before-provider-io:" in detail
+                    or "route-observation-wake-fenced-before-provider-io" in detail
+                ):
+                    v2.refuse_route_observation_wake_admission(
+                        first_inbox_reservation_id,
+                        first_inbox_message_id,
+                        "generation-fenced-before-provider-io",
+                        str(exc),
+                        retryable=False,
+                    )
+                else:
+                    v2.mark_admission_ambiguous(
+                        first_inbox_reservation_id,
+                        first_inbox_message_id,
+                        str(exc),
+                    )
+            except ManagedLaunchError:
+                logger.warning(
+                    "managed first-inbox reservation outcome could not be persisted for %s/%s",
+                    terminal_id,
+                    first_inbox_message_id,
+                    exc_info=True,
+                )
+        if (
+            recovery_operation_key
+            and isinstance(exc, BridgeRequestRefused)
+            and exc.code == "recovery-lifecycle-fenced-before-provider-io"
+            and exc.provider_io_started is False
+        ):
+            from cli_agent_orchestrator.services import callback_recovery
+
+            callback_recovery.mark_delivery_refused(
+                recovery_operation_key,
+                reason_code=exc.code,
+                proven_before_provider_io=True,
+            )
+        elif recovery_operation_key and "w13-fenced-before-provider-io:" in detail:
             from cli_agent_orchestrator.services import callback_recovery
 
             callback_recovery.mark_delivery_refused(

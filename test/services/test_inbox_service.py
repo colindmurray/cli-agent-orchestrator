@@ -2,10 +2,13 @@
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import os
+import subprocess
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -15,8 +18,22 @@ from cli_agent_orchestrator.backends.base import TerminalNotFoundError
 from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.constants import INBOX_RECONCILE_GRACE_SECONDS
 from cli_agent_orchestrator.models.inbox import InboxMessage, MessageStatus
+from cli_agent_orchestrator.models.managed_launch_v2 import (
+    PROTOCOL_VERSION_V2,
+    ManagedLaunchV2BindRequest,
+    ManagedLaunchV2ReserveRequest,
+)
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.services import inbox_service
+from cli_agent_orchestrator.services import (
+    companion_receipts,
+    inbox_service,
+)
+from cli_agent_orchestrator.services import managed_launch_v2 as managed_v2
+from cli_agent_orchestrator.services import (
+    managed_provider_bridge,
+    model_turn_receipt_contract,
+    route_observation,
+)
 from cli_agent_orchestrator.services.control_input_contract import (
     ACCEPTED,
     AMBIGUOUS,
@@ -751,13 +768,24 @@ class TestManagedBridgeDelivery:
     inferred from paste."""
 
     @patch("cli_agent_orchestrator.services.inbox_service.is_message_pending", return_value=True)
+    @patch(
+        "cli_agent_orchestrator.services.inbox_service.route_observation.resolve_pending_wake",
+        side_effect=route_observation.RouteObservationUnavailable("route table unreadable"),
+    )
     @patch("cli_agent_orchestrator.services.inbox_service.update_message_status")
     @patch("cli_agent_orchestrator.services.inbox_service.terminal_service")
     @patch("cli_agent_orchestrator.services.inbox_service.status_monitor")
     @patch("cli_agent_orchestrator.services.inbox_service.get_pending_messages")
     @patch("cli_agent_orchestrator.services.inbox_service.managed_launch")
     def test_managed_receiver_delivers_via_bridge_never_paste(
-        self, mock_managed, mock_get, mock_monitor, mock_term_svc, mock_update, mock_pending
+        self,
+        mock_managed,
+        mock_get,
+        mock_monitor,
+        mock_term_svc,
+        mock_update,
+        mock_route_wake,
+        mock_pending,
     ):
         mock_get.return_value = [_make_message()]
         mock_monitor.get_status.return_value = TerminalStatus.IDLE
@@ -771,6 +799,7 @@ class TestManagedBridgeDelivery:
             "term-1", message_id=1, message="hello", sender_id="sender-1"
         )
         mock_term_svc.send_input.assert_not_called()
+        mock_route_wake.assert_not_called()
         mock_update.assert_called_once_with(1, MessageStatus.DELIVERED)
 
     @patch("cli_agent_orchestrator.services.inbox_service.update_message_status")
@@ -1023,6 +1052,268 @@ class TestManagedBridgeDelivery:
         assert database.get_inbox_messages("term-managed-busy", limit=1)[0].status == (
             MessageStatus.DELIVERED
         )
+
+    @pytest.mark.parametrize("recover_ack_after_park", [False, True])
+    def test_m10_wake_admits_bound_v2_requester_and_terminalizes_exact_inbox_once(
+        self, isolated_memory_db, tmp_path, monkeypatch, recover_ack_after_park
+    ):
+        """The deterministic M10 wake is a zero-task requester's only paid turn."""
+        from cli_agent_orchestrator import constants
+
+        companion_dir = tmp_path / "companion"
+        monkeypatch.setattr(constants, "COMPANION_DIR", companion_dir)
+        monkeypatch.setattr(companion_receipts, "COMPANION_DIR", companion_dir)
+        monkeypatch.setattr(managed_v2, "COMPANION_DIR", companion_dir)
+
+        worktree = tmp_path / "requester-worktree"
+        worktree.mkdir()
+        executable = worktree / "fake-provider"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "m10@example.test"], cwd=worktree, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "m10-test"], cwd=worktree, check=True)
+        subprocess.run(["git", "add", "fake-provider"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixture"], cwd=worktree, check=True)
+
+        supervisor_id = "cafebabe"
+        supervisor_generation = str(uuid.uuid4())
+        reserve_request = ManagedLaunchV2ReserveRequest(
+            protocol_version=PROTOCOL_VERSION_V2,
+            reservation_id=str(uuid.uuid4()),
+            session_name="cao-m10",
+            provider="codex",
+            agent_profile="m10-requester",
+            caller_id=supervisor_id,
+            working_directory=str(worktree),
+            trusted_project_root=str(worktree),
+            expected_model="gpt-5.6-luna",
+            expected_effort="high",
+            provider_executable=str(executable),
+            provider_executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+            obligation_generation="m10-obligation-generation",
+            project="test-project",
+            task_id="test-task",
+            run_id="test-run",
+            delivery_id=str(uuid.uuid4()),
+            launch_nonce="n" * 40,
+            execution_mode="acp",
+        )
+        reserved, created = managed_v2.reserve(reserve_request)
+        assert created is True
+        managed_v2.claim_launch(reserve_request.reservation_id)
+        provider_session_id = f"thr_{uuid.uuid4().hex[:16]}"
+        readiness = {
+            "bridge_version": managed_provider_bridge.BRIDGE_VERSION,
+            "receipt_id": provider_session_id,
+            "provider_session_id": provider_session_id,
+            "provider_receipt_kind": "codex-thread-start",
+            "provider_transcript_sha256": "a" * 64,
+            "provider_version": "0.147.0",
+            "model_input_ready": True,
+            "reservation_id": reserved["reservation_id"],
+            "terminal_id": reserved["terminal_id"],
+            "generation": reserved["generation"],
+            "provider": "codex",
+            "agent_profile": "m10-requester",
+            "model": "gpt-5.6-luna",
+            "effort": "high",
+            "working_directory": str(worktree),
+        }
+        monkeypatch.setattr(
+            managed_provider_bridge,
+            "read_state",
+            lambda reservation_id: {"state": "ready", "readiness": readiness},
+        )
+        bound = managed_v2.bind_native(
+            reserved["reservation_id"],
+            ManagedLaunchV2BindRequest(
+                protocol_version=PROTOCOL_VERSION_V2,
+                terminal_id=reserved["terminal_id"],
+                generation=reserved["generation"],
+                attempt_id=str(uuid.uuid4()),
+            ),
+        )
+        assert bound["state"] == "bound"
+        assert bound["admission"] is None
+
+        database.create_terminal_v2(
+            bound["terminal_id"],
+            bound["session_name"],
+            "requester",
+            bound["provider"],
+            agent_profile=bound["agent_profile"],
+            caller_id=supervisor_id,
+            generation=bound["generation"],
+        )
+        assert (
+            database.register_v2_terminal_incarnation_outcome(
+                bound["terminal_id"],
+                generation=bound["generation"],
+                server_socket_path=str(tmp_path / "m10-tmux.sock"),
+                session_id="m10-tmux-session",
+                window_id="@1",
+                pane_id="%1",
+                pane_pid=4242,
+                native_session_id=provider_session_id,
+            )
+            == database.REGISTRATION_OK
+        )
+        database.create_terminal(
+            supervisor_id,
+            bound["session_name"],
+            "supervisor",
+            "codex",
+            callback_target_generation=supervisor_generation,
+            pane_id="%7",
+        )
+
+        observation_request = route_observation.RouteObservationRequest(
+            operation_id=str(uuid.uuid4()),
+            target_terminal_id="target01",
+            target_generation="target-generation-1",
+            native_session_id="target-native-session-1",
+            provider="codex",
+            provider_version="0.147.0",
+            provider_artifact_sha256="b" * 64,
+            requester_terminal_id=bound["terminal_id"],
+            requester_generation=bound["generation"],
+        )
+        route_observation.claim(observation_request)
+        route_observation.pre_probe(
+            observation_request,
+            intent={"kind": "pre-probe-intent", "surface": "status-v1"},
+        )
+        route_observation.record_observation(
+            observation_request,
+            observation={"kind": "provider-surface", "route": "observed"},
+        )
+        route_observation.pre_close(
+            observation_request,
+            intent={"kind": "pre-close-intent", "close": "escape"},
+        )
+        route_observation.record_close_proof(
+            observation_request,
+            proof={"kind": "owned-close", "outcome": "closed"},
+        )
+        completed_route = route_observation.complete(
+            observation_request,
+            result=route_observation.RESULT_OBSERVED_CLOSED,
+            final_event={"kind": "route-observation-final", "result": "observed-closed"},
+        )
+        message_id = completed_route["inbox_message_id"]
+        wake = database.get_pending_message(bound["terminal_id"], message_id)
+        assert wake is not None
+        wake_payload = json.loads(wake.message)
+        assert wake_payload["wake_version"] == route_observation.WAKE_SCHEMA_VERSION
+        assert wake_payload["operation_id"] == observation_request.operation_id
+        assert wake.message_sha256 == hashlib.sha256(wake.message.encode("utf-8")).hexdigest()
+        assert wake.expected_receiver_generation == bound["generation"]
+
+        provider_calls = []
+        created_at = wake.created_at.replace(tzinfo=timezone.utc)
+        submitted_at = max(
+            datetime.now(timezone.utc),
+            created_at + timedelta(microseconds=1),
+        )
+        strict_receipt = model_turn_receipt_contract.build_receipt(
+            message_id=message_id,
+            message_sha256=wake.message_sha256,
+            message_created_at=created_at,
+            sender_id=wake.sender_id,
+            sender_generation=wake.sender_generation,
+            receiver_id=bound["terminal_id"],
+            receiver_generation=bound["generation"],
+            provider=bound["provider"],
+            provider_session_id=provider_session_id,
+            provider_turn_id="turn-m10-wake",
+            submitted_at=submitted_at,
+        )
+
+        def provider_bridge(reservation_id, command, *, timeout):
+            # Inbox status is provider-evidence driven: even after the durable
+            # reservation claim, the row stays pending until this exact strict
+            # acknowledgement exists.
+            provider_calls.append(command)
+            assert reservation_id == bound["reservation_id"]
+            claimed = managed_v2.get(reservation_id)
+            assert claimed["state"] == "admitting"
+            assert claimed["admission"]["admission_kind"] == "route-observation-wake-v1"
+            assert database.get_pending_message(bound["terminal_id"], message_id) is not None
+            assert command["message_id"] == str(message_id)
+            assert command["message_sha256"] == wake.message_sha256
+            companion_receipts.record_message_ack(
+                bound["terminal_id"],
+                bound["generation"],
+                message_id=message_id,
+                ack=strict_receipt,
+            )
+            return {"ok": True, "receipt": strict_receipt}
+
+        if recover_ack_after_park:
+            claimed, should_send = managed_v2.claim_route_observation_wake_admission(
+                bound["reservation_id"],
+                message_id=message_id,
+                message=wake.message,
+                message_sha256=wake.message_sha256,
+                sender_id=wake.sender_id,
+                sender_generation=wake.sender_generation,
+                message_created_at=strict_receipt["message_created_at"],
+                route_observation_operation_id=observation_request.operation_id,
+                route_observation_request_digest=completed_route["request_digest"],
+                route_observation_result_kind=completed_route["state"],
+                expected_generation=bound["generation"],
+                expected_provider=bound["provider"],
+                expected_provider_session_id=provider_session_id,
+                expected_execution_mode="acp",
+            )
+            assert should_send is True
+            assert claimed["admission"]["status"] == "io-attempted"
+            companion_receipts.record_message_ack(
+                bound["terminal_id"],
+                bound["generation"],
+                message_id=message_id,
+                ack=strict_receipt,
+            )
+            from cli_agent_orchestrator.services import generation_fence
+
+            monkeypatch.setattr(
+                generation_fence,
+                "installed_receipt",
+                lambda *_args, **_kwargs: {"intent_id": "park-after-ack"},
+            )
+            monkeypatch.setattr(
+                managed_provider_bridge,
+                "request_bridge",
+                lambda *_args, **_kwargs: pytest.fail(
+                    "parked acknowledgement recovery must not enter provider I/O"
+                ),
+            )
+        else:
+            monkeypatch.setattr(managed_provider_bridge, "request_bridge", provider_bridge)
+
+        service = InboxService()
+        service.deliver_pending(
+            bound["terminal_id"],
+            required_message_id=message_id,
+        )
+
+        stored = database.get_inbox_messages(bound["terminal_id"], limit=1)[0]
+        assert stored.status == MessageStatus.DELIVERED
+        admitted = managed_v2.get(bound["reservation_id"])
+        assert admitted["state"] == "admitted"
+        assert admitted["admission"]["admission_kind"] == "route-observation-wake-v1"
+        assert admitted["admission"]["message_id"] == str(message_id)
+        assert admitted["admission"]["provider_submission_receipt"] == strict_receipt
+        assert len(provider_calls) == (0 if recover_ack_after_park else 1)
+
+        service.deliver_pending(
+            bound["terminal_id"],
+            required_message_id=message_id,
+        )
+        assert len(provider_calls) == (0 if recover_ack_after_park else 1)
 
 
 class TestManagedV2InboxDelivery:
