@@ -208,7 +208,6 @@ def _launch_bound(
         f"state={record.get('state')} preflight={record.get('preflight_failure')}"
     )
     assert record.get("terminal_id") and record.get("generation")
-    assert record.get("native_session_id"), record
     bind = requests.post(
         f"{server_url}{V2_ROOT}/{reservation_id}/bind",
         json={
@@ -226,8 +225,62 @@ def _launch_bound(
     )
     bound = bind.json()
     assert bound["state"] == "bound", bound
-    assert bound["binding"]["native_session_id"] == record["native_session_id"]
+    assert bound["binding"]["native_session_id"], bound
     return {"reserve": payload, "launch": launched.json(), "record": bound}
+
+
+def test_launch_bound_reads_native_identity_from_the_bind_boundary(monkeypatch) -> None:
+    """V2 launch may still read ``launching`` before bind publishes identity."""
+
+    class Response:
+        def __init__(self, status_code: int, body: dict[str, Any]) -> None:
+            self.status_code = status_code
+            self._body = body
+            self.text = json.dumps(body)
+
+        def json(self) -> dict[str, Any]:
+            return self._body
+
+    calls: list[str] = []
+
+    def post(url: str, **kwargs: Any) -> Response:
+        calls.append(url)
+        if url.endswith(V2_ROOT):
+            return Response(201, {"state": "reserved"})
+        if url.endswith("/launch"):
+            return Response(200, {"state": "launching"})
+        if url.endswith("/bind"):
+            return Response(
+                200,
+                {
+                    "state": "bound",
+                    "binding": {"native_session_id": "provider-session-1"},
+                },
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(
+        __name__ + "._request_json",
+        lambda *_args, **_kwargs: {
+            "state": "launching",
+            "terminal_id": "terminal-1",
+            "generation": "generation-1",
+            "native_session_id": None,
+        },
+    )
+
+    result = _launch_bound(
+        server_url="http://127.0.0.1:1",
+        session_name="cao-t3-readiness-race",
+        workdir="/tmp/m17-t3-readiness-race",
+        installed={"path": "/opt/codex", "sha256": "a" * 64},
+        mode="acp",
+        case_key="positive-path",
+    )
+
+    assert calls[-1].endswith("/bind")
+    assert result["record"]["binding"]["native_session_id"] == "provider-session-1"
 
 
 def _run_module(
