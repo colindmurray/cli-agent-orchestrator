@@ -11,6 +11,7 @@ second, blind Enter.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -40,6 +41,18 @@ def _fast_barrier(**overrides) -> SubmissionBarrier:
     }
     fields.update(overrides)
     return SubmissionBarrier(**fields)
+
+
+def _fast_codex_barrier(**overrides) -> SubmissionBarrier:
+    barrier = submission_barrier_for("codex")
+    assert barrier is not None
+    fields = {
+        "compose_settle_seconds": 0.02,
+        "post_enter_seconds": 0.02,
+        "poll_interval_seconds": 0.005,
+    }
+    fields.update(overrides)
+    return replace(barrier, **fields)
 
 
 class TestBarrierPinning:
@@ -109,6 +122,122 @@ class TestAwaitComposeVisible:
     def test_text_visible_on_the_first_poll_settles_immediately(self):
         rows = _screen("│ > /compact │")
         assert await_compose_visible("%1", "/compact", barrier=_fast_barrier(), screen=lambda: rows)
+
+    def test_codex_slash_suggestions_do_not_hide_the_live_composer(self):
+        rows = [
+            "transcript row",
+            "",
+            "› /status",
+            "",
+            "  /status      show current session configuration and token usage",
+            "  /statusline  configure which items appear in the status line",
+            *([""] * 12),
+        ]
+        barrier = submission_barrier_for("codex")
+        assert barrier is not None
+        barrier = replace(
+            barrier,
+            compose_settle_seconds=0.02,
+            poll_interval_seconds=0.005,
+        )
+
+        assert await_compose_visible("%1", "/status", barrier=barrier, screen=lambda: rows)
+
+    def test_codex_suggestion_match_does_not_prove_partial_composer_text(self):
+        rows = [
+            "› /st",
+            "",
+            "  /status      show current session configuration and token usage",
+            "  /statusline  configure which items appear in the status line",
+        ]
+        barrier = submission_barrier_for("codex")
+        assert barrier is not None
+        barrier = replace(
+            barrier,
+            compose_settle_seconds=0.02,
+            poll_interval_seconds=0.005,
+        )
+
+        assert not await_compose_visible("%1", "/status", barrier=barrier, screen=lambda: rows)
+
+    def test_codex_longer_command_does_not_prove_exact_status_text(self):
+        rows = [
+            "› /statusline",
+            "",
+            "  /status      show current session configuration and token usage",
+            "  /statusline  configure which items appear in the status line",
+        ]
+
+        assert not await_compose_visible(
+            "%1",
+            "/status",
+            barrier=_fast_codex_barrier(),
+            screen=lambda: rows,
+        )
+
+    def test_codex_transcript_prompt_without_live_footer_is_not_compose_visible(self):
+        rows = ["assistant output", "› /status", ""]
+
+        assert not await_compose_visible(
+            "%1",
+            "/status",
+            barrier=_fast_codex_barrier(),
+            screen=lambda: rows,
+        )
+
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "assistant answer mentions context left",
+            "assistant repeats ? for shortcuts in prose",
+            "assistant describes a footer · ~/project",
+            "  /status  assistant prose about the command",
+        ],
+    )
+    def test_codex_transcript_prose_cannot_masquerade_as_live_chrome(self, prose):
+        rows = ["› /status", "", prose]
+
+        assert not await_compose_visible(
+            "%1",
+            "/status",
+            barrier=_fast_codex_barrier(),
+            screen=lambda: rows,
+        )
+
+    def test_codex_transcript_echo_above_empty_live_composer_is_not_visible(self):
+        rows = [
+            "› /status",
+            "assistant output",
+            "› ",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+
+        assert not await_compose_visible(
+            "%1",
+            "/status",
+            barrier=_fast_codex_barrier(),
+            screen=lambda: rows,
+        )
+
+    def test_codex_wrapped_text_is_matched_inside_the_live_composer_only(self):
+        text = "please summarize the campaign state"
+        rows = [
+            "› please summarize the",
+            "  campaign state",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+            *([""] * 8),
+        ]
+        barrier = submission_barrier_for("codex")
+        assert barrier is not None
+        barrier = replace(
+            barrier,
+            compose_settle_seconds=0.02,
+            poll_interval_seconds=0.005,
+        )
+
+        assert await_compose_visible("%1", text, barrier=barrier, screen=lambda: rows)
 
     def test_text_that_never_appears_fails_the_settle(self):
         rows = _screen("│ > │")
@@ -201,3 +330,59 @@ class TestObserveSubmission:
         assert observed == "submitted"
         digest = hashlib.sha256("\n".join(cleared).encode("utf-8")).hexdigest()[:16]
         assert evidence is not None and evidence.endswith(f"sha256:{digest}")
+
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            ["assistant output", "› /status", ""],
+            ["  /status      show current session configuration and token usage", ""],
+            ["garbage frame", ""],
+            ["› /status", "  /status suggestion without separator"],
+            [
+                "› /statusline",
+                "",
+                "  /status      show current session configuration and token usage",
+                "  /statusline  configure which items appear in the status line",
+            ],
+        ],
+    )
+    def test_codex_unparseable_or_different_post_enter_frame_is_unknown(self, rows):
+        observed, evidence = observe_submission(
+            "%1",
+            "/status",
+            barrier=_fast_codex_barrier(),
+            screen=lambda: rows,
+        )
+
+        assert observed == "unknown"
+        assert evidence is None
+
+    def test_codex_proven_empty_live_composer_is_submitted(self):
+        rows = ["› ", "", "  gpt-5.6-luna high · ~/project"]
+
+        observed, evidence = observe_submission(
+            "%1",
+            "/status",
+            barrier=_fast_codex_barrier(),
+            screen=lambda: rows,
+        )
+
+        assert observed == "submitted"
+        assert evidence is not None and evidence.startswith("capture-pane:%1:")
+
+    def test_codex_dim_placeholder_is_a_proven_empty_live_composer(self):
+        rows = [
+            "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+
+        observed, evidence = observe_submission(
+            "%1",
+            "/status",
+            barrier=_fast_codex_barrier(),
+            screen=lambda: rows,
+        )
+
+        assert observed == "submitted"
+        assert evidence is not None and evidence.startswith("capture-pane:%1:")
