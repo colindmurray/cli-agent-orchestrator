@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -414,7 +415,7 @@ def _write_bounded_server_log(
     sanitizer.write_text(destination, content + "\n")
 
 
-def _deliver(
+def _read_delivery(
     *,
     receiver_id: str,
     message_id: int,
@@ -437,6 +438,34 @@ def _deliver(
     return json.loads(output.read_text(encoding="utf-8"))
 
 
+def _await_server_delivery(
+    server_url: str,
+    receiver_id: str,
+    message_id: int,
+    *,
+    timeout: float = 180,
+) -> dict[str, Any]:
+    url = f"{server_url}/terminals/{receiver_id}/inbox/messages"
+    deadline = time.monotonic() + timeout
+    last_status = "absent"
+    while time.monotonic() < deadline:
+        rows = _request_list("GET", url, params={"limit": 100}, timeout=10)
+        matching = [row for row in rows if row.get("id") == message_id]
+        assert len(matching) <= 1, f"duplicate inbox rows for message {message_id}: {matching}"
+        if matching:
+            row = matching[0]
+            last_status = str(row.get("status"))
+            if last_status == "delivered":
+                return row
+            assert (
+                last_status == "pending"
+            ), f"server delivery terminalized unexpectedly for message {message_id}: {row}"
+        time.sleep(0.5)
+    raise AssertionError(
+        f"server-owned inbox delivery stayed {last_status} for message {message_id}"
+    )
+
+
 def _turn_receipt(
     server_url: str,
     terminal_id: str,
@@ -457,6 +486,177 @@ def _turn_receipt(
         last = response.status_code
         time.sleep(0.5)
     raise AssertionError(f"provider-native turn receipt stayed absent (last={last})")
+
+
+def _observe_server_delivery(
+    *,
+    server_url: str,
+    receiver_id: str,
+    message_id: int,
+    output: Path,
+    env: Mapping[str, str],
+    timeout: float = 180,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    _await_server_delivery(server_url, receiver_id, message_id, timeout=timeout)
+    turn_receipt = _turn_receipt(
+        server_url,
+        receiver_id,
+        message_id,
+        timeout=timeout,
+    )
+    delivery = _read_delivery(
+        receiver_id=receiver_id,
+        message_id=message_id,
+        output=output,
+        env=env,
+    )
+    assert delivery["status"] == "delivered", delivery
+    return delivery, turn_receipt
+
+
+def test_delivery_evidence_reader_cannot_initiate_provider_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from test.e2e.route_observation_canary import delivery as delivery_driver
+
+    from cli_agent_orchestrator.clients import database
+    from cli_agent_orchestrator.services.inbox_service import InboxService
+
+    calls: list[str] = []
+
+    class Row:
+        sender_id = "target-terminal"
+        receiver_id = "requester-terminal"
+        expected_receiver_generation = "requester-generation"
+        message_sha256 = "a" * 64
+        status = "pending"
+
+    class Query:
+        def filter(self, *_args: Any) -> "Query":
+            return self
+
+        def one_or_none(self) -> Row:
+            return Row()
+
+    class Session:
+        def __enter__(self) -> "Session":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def query(self, _model: Any) -> Query:
+            return Query()
+
+    monkeypatch.setattr(database, "SessionLocal", Session)
+    monkeypatch.setattr(database, "init_db", lambda: calls.append("init-db"))
+
+    def forbidden_delivery(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("provider-delivery")
+        raise AssertionError("the evidence reader attempted provider delivery")
+
+    monkeypatch.setattr(InboxService, "deliver_pending", forbidden_delivery)
+    output = tmp_path / "delivery.json"
+
+    delivery_driver.read_delivery("requester-terminal", 7, output)
+
+    assert calls == []
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "pending"
+
+
+def test_server_delivery_is_observed_before_read_only_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    target_message_id = 7
+
+    class Response:
+        def __init__(self, status_code: int, value: Any) -> None:
+            self.status_code = status_code
+            self._value = value
+            self.text = json.dumps(value)
+
+        def json(self) -> Any:
+            return self._value
+
+    inbox_reads = iter(
+        [
+            [
+                {"id": 3, "status": "delivered"},
+                {"id": target_message_id, "status": "pending"},
+            ],
+            [{"id": target_message_id, "status": "delivered"}],
+        ]
+    )
+
+    def request(method: str, url: str, **_kwargs: Any) -> Response:
+        assert method == "GET"
+        assert url.endswith("/terminals/requester-terminal/inbox/messages")
+        value = next(inbox_reads)
+        target = next(item for item in value if item["id"] == target_message_id)
+        events.append(f"inbox:{target['status']}")
+        return Response(200, value)
+
+    receipt = {"schema": "cao-model-turn-receipt-v1"}
+
+    def get(url: str, **_kwargs: Any) -> Response:
+        assert url.endswith("/terminals/requester-terminal/inbox/messages/7/turn-receipt")
+        assert events == ["inbox:pending", "inbox:delivered"]
+        events.append("receipt")
+        return Response(200, receipt)
+
+    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert events[-1] == "receipt"
+        assert command[2] == "test.e2e.route_observation_canary.delivery"
+        assert command[command.index("--receiver-id") + 1] == "requester-terminal"
+        assert command[command.index("--message-id") + 1] == str(target_message_id)
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "schema": "cao-m17-route-observation-delivery-evidence-v1",
+                    "message_id": target_message_id,
+                    "sender_id": "target-terminal",
+                    "receiver_id": "requester-terminal",
+                    "expected_receiver_generation": "requester-generation",
+                    "message_sha256": "a" * 64,
+                    "status": "delivered",
+                }
+            ),
+            encoding="utf-8",
+        )
+        events.append("evidence-read")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(requests, "request", request)
+    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    delivery, observed_receipt = _observe_server_delivery(
+        server_url="http://127.0.0.1:1",
+        receiver_id="requester-terminal",
+        message_id=target_message_id,
+        output=tmp_path / "delivery.json",
+        env={},
+        timeout=5,
+    )
+
+    assert delivery["status"] == "delivered"
+    assert observed_receipt == receipt
+    assert events == ["inbox:pending", "inbox:delivered", "receipt", "evidence-read"]
+
+
+def test_live_ladder_wires_server_observation_before_read_only_replay() -> None:
+    source = inspect.getsource(_run_case)
+
+    assert re.search(
+        r"delivery\s*,\s*turn_receipt\s*=\s*_observe_server_delivery\s*\(",
+        source,
+    )
+    assert re.search(r"delivery_replay\s*=\s*_read_delivery\s*\(", source)
 
 
 def _companion_store_path(state_root: Path, terminal_id: str, generation: str) -> Path:
@@ -1224,17 +1424,12 @@ def _run_case(
                     )
                     assert len(pending) == 1, pending
                     assert pending[0]["id"] == int(outcome["inbox_message_id"]), pending
-                    delivery = _deliver(
+                    delivery, turn_receipt = _observe_server_delivery(
+                        server_url=server.url,
                         receiver_id=requester_record["terminal_id"],
                         message_id=int(outcome["inbox_message_id"]),
                         output=case_dir / "delivery.json",
                         env=child_env,
-                    )
-                    assert delivery["status"] == "delivered", delivery
-                    turn_receipt = _turn_receipt(
-                        server.url,
-                        requester_record["terminal_id"],
-                        int(outcome["inbox_message_id"]),
                     )
                     requester_admitted = _request_json(
                         "GET",
@@ -1259,7 +1454,7 @@ def _run_case(
                         turn_receipt=turn_receipt,
                         artifacts=requester_artifacts_after,
                     )
-                    delivery_replay = _deliver(
+                    delivery_replay = _read_delivery(
                         receiver_id=requester_record["terminal_id"],
                         message_id=int(outcome["inbox_message_id"]),
                         output=case_dir / "delivery-replay.json",
