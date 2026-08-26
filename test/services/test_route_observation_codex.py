@@ -24,6 +24,7 @@ import pytest
 
 from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.models.inbox import MessageStatus
+from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.services import route_observation as ro
 from cli_agent_orchestrator.services import route_observation_codex as roc
 
@@ -92,11 +93,18 @@ class FakeCodexPaneSurface:
         pane_width: int | None = 100,
         submission_proven: bool = True,
         composer_restored: bool | None = True,
+        prewrite_readiness: roc.PrewriteReadiness | None = None,
+        readiness_hook=None,
     ) -> None:
         self._rows = list(rows)
         self._pane_width = pane_width
         self._submission_proven = submission_proven
         self._composer_restored = composer_restored
+        self._prewrite_readiness = prewrite_readiness or roc.PrewriteReadiness(
+            roc.PREWRITE_READY, TerminalStatus.IDLE.value
+        )
+        self._readiness_hook = readiness_hook
+        self.readiness_checks = 0
         self.status_commands_sent = 0
         self.key_events: list[str] = []
 
@@ -109,6 +117,12 @@ class FakeCodexPaneSurface:
 
     def pane_width(self) -> int | None:
         return self._pane_width
+
+    def await_input_ready(self) -> roc.PrewriteReadiness:
+        self.readiness_checks += 1
+        if self._readiness_hook is not None:
+            self._readiness_hook()
+        return self._prewrite_readiness
 
     def send_status_command(self) -> bool:
         self.status_commands_sent += 1
@@ -267,6 +281,178 @@ class TestZeroEffectAndResponseLossReplay:
         # deterministic zero-effect wake.
         assert surface.status_commands_sent == 0
         assert first["wake"]["result_kind"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+
+
+class TestPrewriteReadiness:
+    def test_real_surface_waits_on_the_exact_pane_until_idle(self, monkeypatch):
+        statuses = iter([TerminalStatus.PROCESSING, TerminalStatus.IDLE])
+        calls = []
+
+        def observe(pane_id, **kwargs):
+            calls.append((pane_id, kwargs))
+            return next(statuses)
+
+        monkeypatch.setattr(roc.npi, "observe_codex_turn_state", observe)
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        readiness = surface.await_input_ready()
+
+        assert readiness == roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
+        assert [call[0] for call in calls] == ["%7", "%7"]
+        assert all(call[1]["terminal_id"] == "term-target" for call in calls)
+        assert all(call[1]["session_name"] == "cao-target" for call in calls)
+        assert all(call[1]["window_name"] == "managed-target" for call in calls)
+
+    def test_real_surface_busy_timeout_is_not_an_unreadable_pane(self, monkeypatch):
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_codex_turn_state",
+            lambda *args, **kwargs: TerminalStatus.PROCESSING,
+        )
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=0.0,
+        )
+
+        assert surface.await_input_ready() == roc.PrewriteReadiness(
+            roc.PREWRITE_PROVIDER_NOT_READY,
+            TerminalStatus.PROCESSING.value,
+        )
+
+    def test_real_surface_unreadable_timeout_is_not_observed_busy(self, monkeypatch):
+        def unreadable(*args, **kwargs):
+            raise roc.npi.NativePaneInputUnavailable("tmux capture failed")
+
+        monkeypatch.setattr(roc.npi, "observe_codex_turn_state", unreadable)
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=0.0,
+        )
+
+        assert surface.await_input_ready() == roc.PrewriteReadiness(
+            roc.PREWRITE_PANE_UNREADABLE,
+            None,
+            "tmux capture failed",
+        )
+
+    @pytest.mark.parametrize(
+        ("readiness", "disposition"),
+        [
+            (
+                roc.PrewriteReadiness(
+                    roc.PREWRITE_PROVIDER_NOT_READY,
+                    TerminalStatus.PROCESSING.value,
+                ),
+                roc.DISPOSITION_PROVIDER_NOT_READY,
+            ),
+            (
+                roc.PrewriteReadiness(
+                    roc.PREWRITE_PANE_UNREADABLE,
+                    None,
+                    "tmux capture failed",
+                ),
+                roc.DISPOSITION_PANE_UNREADABLE,
+            ),
+        ],
+    )
+    def test_prewrite_refusal_is_typed_and_has_no_effect_fact(self, _db, readiness, disposition):
+        request = _request()
+
+        def assert_pre_probe_absent():
+            record = ro.get(request.operation_id)
+            assert record is not None
+            assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(),
+            prewrite_readiness=readiness,
+            readiness_hook=assert_pre_probe_absent,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == disposition
+        assert outcome["prewrite_readiness"] == readiness.fact()
+        assert surface.status_commands_sent == 0
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+        event = json.loads(record["final_event_json"])
+        assert event["prewrite_readiness"] == readiness.fact()
+        assert event["disposition"] == disposition
+
+    def test_requester_is_revalidated_after_the_readiness_wait(self, _db):
+        request = _request()
+        generations = iter([request.requester_generation, "gen-drifted"])
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows())
+        observer = roc.CodexRouteObserver(
+            surface=surface,
+            requester_generation_probe=lambda _terminal_id: next(generations),
+        )
+
+        outcome = observer.observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_REQUESTER_STALE
+        assert surface.readiness_checks == 1
+        assert surface.status_commands_sent == 0
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+    def test_prewrite_refusal_replays_without_rechecking_or_writing(self, _db):
+        request = _request()
+        readiness = roc.PrewriteReadiness(
+            roc.PREWRITE_PROVIDER_NOT_READY,
+            TerminalStatus.PROCESSING.value,
+        )
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), prewrite_readiness=readiness)
+        observer = roc.CodexRouteObserver(surface=surface)
+
+        first = observer.observe(request)
+        second = observer.observe(request)
+        reread = observer.read_result(request.operation_id)
+
+        assert first["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert second["replayed"] is True
+        assert second["prewrite_readiness"] == readiness.fact()
+        assert reread["prewrite_readiness"] == readiness.fact()
+        assert surface.readiness_checks == 1
+        assert surface.status_commands_sent == 0
+        assert second["inbox_message_id"] == first["inbox_message_id"]
+        with database.SessionLocal() as session:
+            assert session.query(database.InboxModel).count() == 1
+
+    def test_a_post_authorization_compose_race_stays_ambiguous_and_is_not_retried(self, _db):
+        request = _request()
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(),
+            submission_proven=False,
+        )
+        observer = roc.CodexRouteObserver(surface=surface)
+
+        first = observer.observe(request)
+        second = observer.observe(request)
+
+        assert first["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert first["observation"]["reason"] == "submission-unproven"
+        assert surface.readiness_checks == 1
+        assert surface.status_commands_sent == 1
+        assert second["replayed"] is True
+        record = ro.get(request.operation_id)
+        assert record["pre_probe_intent_json"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +882,68 @@ class TestTargetCorrelation:
 
 
 class TestCrashRetryRecovery:
+    @pytest.mark.parametrize(
+        "readiness",
+        [
+            roc.PrewriteReadiness(
+                roc.PREWRITE_PROVIDER_NOT_READY,
+                TerminalStatus.PROCESSING.value,
+            ),
+            roc.PrewriteReadiness(
+                roc.PREWRITE_PANE_UNREADABLE,
+                None,
+                "tmux capture failed",
+            ),
+        ],
+    )
+    def test_retry_after_pre_probe_skips_the_zero_effect_readiness_gate(self, _db, readiness):
+        request = _request()
+        ro.claim(request)
+        ro.pre_probe(request, intent=roc._pre_probe_intent(request, pane_id="%7"))
+        surface = FakeCodexPaneSurface(
+            rows=["Codex is still starting"],
+            prewrite_readiness=readiness,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert surface.readiness_checks == 0
+        assert surface.status_commands_sent == 0
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["observation"]["reason"] == "panel-unparsed"
+        record = ro.get(request.operation_id)
+        assert record["pre_probe_intent_json"] is not None
+        assert record["observation_json"] is not None
+
+    def test_retry_with_a_stored_observation_skips_readiness_and_reuses_it(self, _db):
+        request = _request()
+        ro.claim(request)
+        ro.pre_probe(request, intent=roc._pre_probe_intent(request, pane_id="%7"))
+        stored_observation = roc._observation_from_parse(
+            request,
+            roc.parse_codex_route_panel(
+                codex_panel_rows(),
+                pinned_version=request.provider_version,
+                pane_width=100,
+            ),
+        )
+        ro.record_observation(request, observation=stored_observation)
+        surface = FakeCodexPaneSurface(
+            rows=["not the stored panel"],
+            prewrite_readiness=roc.PrewriteReadiness(
+                roc.PREWRITE_PANE_UNREADABLE,
+                None,
+                "tmux capture failed",
+            ),
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert surface.readiness_checks == 0
+        assert surface.status_commands_sent == 0
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["observation"] == stored_observation
+
     def test_crash_after_observation_commit_recovers_on_exact_retry(self, _db, monkeypatch):
         """P1: a crash after the observation committed must not strand the
         operation nonterminal.  The retry reconciles with the durable
@@ -728,6 +976,7 @@ class TestCrashRetryRecovery:
         # re-deriving fresh bytes and conflicting on the changed-fact CAS.
         outcome = observer.observe(request)
         assert surface.status_commands_sent == 1
+        assert surface.readiness_checks == 1
         assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
         assert outcome["terminal"] is True
         assert outcome["replayed"] is False
@@ -763,6 +1012,7 @@ class TestCrashRetryRecovery:
 
         outcome = observer.observe(request)
         assert surface.status_commands_sent == 1
+        assert surface.readiness_checks == 1
         assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
         assert outcome["terminal"] is True
         assert outcome["receipt_digest"]

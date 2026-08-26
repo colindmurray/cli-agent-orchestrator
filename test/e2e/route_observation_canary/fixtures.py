@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
+from cli_agent_orchestrator.services import route_observation_codex as roc
+
 CODEX_PINNED_VERSION = "0.147.0"
 
 #: One concrete canonical session UUID substituting the ``<UUID>`` redaction
@@ -177,6 +179,9 @@ class FakeCodexPaneSurface:
 
     def pane_width(self) -> Optional[int]:
         return self._pane_width
+
+    def await_input_ready(self) -> roc.PrewriteReadiness:
+        return roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
 
     def send_status_command(self) -> bool:
         self.status_commands_sent += 1

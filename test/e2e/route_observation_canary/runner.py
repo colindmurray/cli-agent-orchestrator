@@ -149,6 +149,19 @@ class _TracedRealSurface:
             return self._captured_width
         return self._inner.pane_width()
 
+    def await_input_ready(self) -> roc.PrewriteReadiness:
+        readiness = self._inner.await_input_ready()
+        _append_event(
+            self._event_log,
+            {
+                "kind": "prewrite-readiness",
+                "at": _now(),
+                "reason": readiness.reason,
+                "provider_status": readiness.provider_status,
+            },
+        )
+        return readiness
+
     def send_status_command(self) -> bool:
         _append_event(self._event_log, {"kind": "status-authorized", "at": _now()})
         submitted = self._inner.send_status_command()
@@ -244,6 +257,18 @@ def _restart_interrupt(
     current_requester_generation = requester_generation_probe(request.requester_terminal_id)
     if current_requester_generation != request.requester_generation:
         raise LiveCanaryInvalid("restart interrupt found a stale requester generation")
+    readiness = surface.await_input_ready()
+    if not readiness.ready:
+        observer._prewrite_refusal_outcome(request, readiness=readiness)
+        raise LiveCanaryInvalid(
+            f"restart interrupt refused before provider input: {readiness.reason}"
+        )
+    current_requester_generation = requester_generation_probe(request.requester_terminal_id)
+    if current_requester_generation != request.requester_generation:
+        observer._stale_requester_outcome(request)
+        raise LiveCanaryInvalid(
+            "restart interrupt found a stale requester generation after readiness"
+        )
     probe = ro.pre_probe(
         request,
         intent=roc._pre_probe_intent(request, pane_id=surface.pane_id),

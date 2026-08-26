@@ -709,6 +709,9 @@ class TestRunnerEntryPoints:
             def capture_screen(self):
                 return fixtures.codex_route_panel_rows()
 
+            def await_input_ready(self):
+                return roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
+
             def send_status_command(self):
                 return True
 
@@ -752,6 +755,9 @@ class TestRunnerEntryPoints:
 
             def capture_screen(self):
                 return fixtures.codex_route_panel_rows()
+
+            def await_input_ready(self):
+                return roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
 
             def send_status_command(self):
                 return True
@@ -814,6 +820,9 @@ class TestRunnerEntryPoints:
 
             def capture_screen(self):
                 return ["not a Codex status panel"]
+
+            def await_input_ready(self):
+                return roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
 
             def send_status_command(self):
                 return True

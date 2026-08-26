@@ -44,6 +44,8 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Protocol, Sequence
 
@@ -77,6 +79,13 @@ SESSION_RENDER_FLOOR_COLUMNS = 76
 DISPOSITION_DELIVERED = "delivered"
 DISPOSITION_REQUESTER_STALE = "requester-stale"
 DISPOSITION_REPLAYED = "replayed"
+DISPOSITION_PROVIDER_NOT_READY = "provider-not-ready"
+DISPOSITION_PANE_UNREADABLE = "pane-unreadable"
+
+PREWRITE_READY = "ready"
+PREWRITE_PROVIDER_NOT_READY = "provider-not-ready"
+PREWRITE_PANE_UNREADABLE = "pane-unreadable"
+_PREWRITE_READINESS_POLL_SECONDS = 0.1
 
 #: Close-proof outcome vocabulary for the non-modal surface.  A proven
 #: composer return is the only positive close; everything else is unproven
@@ -101,6 +110,26 @@ _EMPTY_REASONING_SUFFIX = re.compile(r"^(.*?)\s+\(reasoning\s*\)$")
 _CODEX_COMPOSER_PROMPT = re.compile(r"^\s*(?:›|❯|codex>)(?:\s|$)")
 
 
+@dataclass(frozen=True)
+class PrewriteReadiness:
+    """The exact-pane observation made before the probe intent exists."""
+
+    reason: str
+    provider_status: Optional[str]
+    detail: Optional[str] = None
+
+    @property
+    def ready(self) -> bool:
+        return self.reason == PREWRITE_READY
+
+    def fact(self) -> dict[str, Any]:
+        return {
+            "reason": self.reason,
+            "provider_status": self.provider_status,
+            "detail": self.detail,
+        }
+
+
 class CodexPaneSurface(Protocol):
     """The pane transport the orchestrator needs (fake in tests, real via npi).
 
@@ -116,6 +145,7 @@ class CodexPaneSurface(Protocol):
 
     def capture_screen(self) -> list[str]: ...
     def pane_width(self) -> Optional[int]: ...
+    def await_input_ready(self) -> PrewriteReadiness: ...
     def send_status_command(self) -> bool: ...
     def composer_restored(self) -> Optional[bool]: ...
 
@@ -200,6 +230,48 @@ class RealCodexPaneSurface:
 
     def pane_width(self) -> Optional[int]:
         return _pane_width(self.pane_id, timeout=self._timeout)
+
+    def await_input_ready(self) -> PrewriteReadiness:
+        """Wait boundedly for this exact Codex pane to read idle.
+
+        This is a read-only last-safe-point gate.  The caller invokes it before
+        committing the pre-probe intent, so a timeout can truthfully close as a
+        zero-effect refusal.  Observed busy and unreadable remain distinct.
+        """
+        if self._terminal_id is None or self._session_name is None or self._window_name is None:
+            return PrewriteReadiness(
+                PREWRITE_PANE_UNREADABLE,
+                None,
+                "the exact terminal, session, and window identity is required",
+            )
+        deadline = time.monotonic() + self._timeout
+        latest = PrewriteReadiness(
+            PREWRITE_PANE_UNREADABLE,
+            None,
+            "the bound Codex pane has not been read",
+        )
+        while True:
+            try:
+                status = npi.observe_codex_turn_state(
+                    self.pane_id,
+                    terminal_id=self._terminal_id,
+                    session_name=self._session_name,
+                    window_name=self._window_name,
+                    timeout=min(self._timeout, max(0.2, deadline - time.monotonic())),
+                )
+            except Exception as exc:  # noqa: BLE001 - typed unreadable, not observed busy
+                latest = PrewriteReadiness(PREWRITE_PANE_UNREADABLE, None, str(exc))
+            else:
+                # Both states render the writable composer.  COMPLETED is the
+                # ordinary settled state of a resumed thread with prior turns;
+                # requiring only IDLE would refuse that healthy session forever.
+                if status in {TerminalStatus.IDLE, TerminalStatus.COMPLETED}:
+                    return PrewriteReadiness(PREWRITE_READY, status.value)
+                latest = PrewriteReadiness(PREWRITE_PROVIDER_NOT_READY, status.value)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return latest
+            time.sleep(min(_PREWRITE_READINESS_POLL_SECONDS, remaining))
 
     def send_status_command(self) -> bool:
         """Type literal ``/status`` and at most one Enter; return whether the
@@ -507,8 +579,9 @@ def _final_event(
     disposition: str,
     observation: Optional[dict[str, Any]],
     close_proof: Optional[dict[str, Any]],
+    prewrite_readiness: Optional[PrewriteReadiness] = None,
 ) -> dict[str, Any]:
-    return {
+    event = {
         "schema_version": ro.SCHEMA_VERSION,
         "result": result,
         "disposition": disposition,
@@ -518,6 +591,9 @@ def _final_event(
         "close_outcome": close_proof["outcome"] if close_proof else None,
         "committed_at": _now(),
     }
+    if prewrite_readiness is not None:
+        event["prewrite_readiness"] = prewrite_readiness.fact()
+    return event
 
 
 def _read_wake(inbox_message_id: Optional[int], *, db: Any = None) -> Optional[dict[str, Any]]:
@@ -584,6 +660,16 @@ class CodexRouteObserver:
         if not self._requester_is_current(request):
             return self._stale_requester_outcome(request, db=db)
 
+        if claimed["pre_probe_intent_json"] is None:
+            readiness = self._surface.await_input_ready()
+            if not readiness.ready:
+                return self._prewrite_refusal_outcome(request, readiness=readiness, db=db)
+            # Readiness is a bounded wait.  Revalidate after it so a requester that
+            # was superseded during that window still gets the normative zero-input
+            # disposition immediately before provider input is authorized.
+            if not self._requester_is_current(request):
+                return self._stale_requester_outcome(request, db=db)
+
         probe = ro.pre_probe(
             request,
             intent=_pre_probe_intent(request, pane_id=self._surface.pane_id),
@@ -618,6 +704,44 @@ class CodexRouteObserver:
             db=db,
             observation=observation,
             close_proof=close_proof,
+        )
+
+    def _prewrite_refusal_outcome(
+        self,
+        request: ro.RouteObservationRequest,
+        *,
+        readiness: PrewriteReadiness,
+        db: Any = None,
+    ) -> dict[str, Any]:
+        """Seal a bounded readiness refusal while every effect fact is null."""
+        if readiness.reason == PREWRITE_PROVIDER_NOT_READY:
+            disposition = DISPOSITION_PROVIDER_NOT_READY
+        elif readiness.reason == PREWRITE_PANE_UNREADABLE:
+            disposition = DISPOSITION_PANE_UNREADABLE
+        else:
+            raise ro.RouteObservationInvalid(
+                f"prewrite refusal requires a non-ready reason; got {readiness.reason!r}"
+            )
+        final_event = _final_event(
+            request,
+            result=ro.RESULT_ZERO_EFFECT_REFUSAL,
+            disposition=disposition,
+            observation=None,
+            close_proof=None,
+            prewrite_readiness=readiness,
+        )
+        terminal = ro.complete(
+            request,
+            result=ro.RESULT_ZERO_EFFECT_REFUSAL,
+            final_event=final_event,
+            db=db,
+        )
+        return self._build_outcome(
+            request,
+            terminal,
+            disposition=disposition,
+            db=db,
+            prewrite_readiness=readiness.fact(),
         )
 
     def _stale_requester_outcome(
@@ -778,8 +902,13 @@ class CodexRouteObserver:
             "inbox_message_id": record["inbox_message_id"],
             "observation": None,
             "close_proof": None,
+            "prewrite_readiness": None,
             "record": record,
         }
+        if record.get("final_event_json"):
+            outcome["prewrite_readiness"] = json.loads(record["final_event_json"]).get(
+                "prewrite_readiness"
+            )
         if record.get("receipt_json"):
             outcome["receipt"] = json.loads(record["receipt_json"])
         wake = _read_wake(record["inbox_message_id"], db=db)
@@ -814,8 +943,11 @@ class CodexRouteObserver:
         db: Any = None,
         observation: Optional[dict[str, Any]] = None,
         close_proof: Optional[dict[str, Any]] = None,
+        prewrite_readiness: Optional[dict[str, Any]] = None,
         replayed: Optional[bool] = None,
     ) -> dict[str, Any]:
+        if prewrite_readiness is None and record.get("final_event_json"):
+            prewrite_readiness = json.loads(record["final_event_json"]).get("prewrite_readiness")
         outcome: dict[str, Any] = {
             "schema": OBSERVER_SCHEMA,
             "operation_id": request.operation_id,
@@ -828,6 +960,7 @@ class CodexRouteObserver:
             "inbox_message_id": record["inbox_message_id"],
             "observation": observation,
             "close_proof": close_proof,
+            "prewrite_readiness": prewrite_readiness,
             "record": record,
         }
         if record.get("receipt_json"):

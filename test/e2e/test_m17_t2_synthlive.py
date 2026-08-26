@@ -142,7 +142,25 @@ def _request(*, operation_id: Optional[str] = None) -> ro.RouteObservationReques
 
 def _observe(h: th.T2Harness, pane_id: str, request: ro.RouteObservationRequest) -> dict:
     """Drive the real adapter against one REAL pane; returns the outcome."""
-    surface = roc.RealCodexPaneSurface(pane_id, timeout=10.0)
+    identity = h._run(
+        [
+            "tmux",
+            "display-message",
+            "-p",
+            "-t",
+            pane_id,
+            "#{session_name}\t#{window_name}",
+        ]
+    )
+    assert identity.returncode == 0, identity.stderr
+    session_name, window_name = identity.stdout.strip().split("\t", 1)
+    surface = roc.RealCodexPaneSurface(
+        pane_id,
+        terminal_id=request.target_terminal_id,
+        session_name=session_name,
+        window_name=window_name,
+        timeout=10.0,
+    )
     return roc.CodexRouteObserver(surface=surface).observe(request)
 
 
