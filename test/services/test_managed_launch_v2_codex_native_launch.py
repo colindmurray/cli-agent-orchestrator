@@ -20,7 +20,7 @@ from cli_agent_orchestrator.models.managed_launch_v2 import (
 )
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.services import codex_native_bootstrap as bootstrap
-from cli_agent_orchestrator.services import codex_native_control
+from cli_agent_orchestrator.services import codex_native_control, codex_native_launch
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
 from cli_agent_orchestrator.services import managed_provider_bridge as bridge
 from cli_agent_orchestrator.services import native_attachment, native_pane_input, native_tui_launch
@@ -159,6 +159,7 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
     assert bootstrap_calls[0]["effort"] == EFFORT
     argv = launched[0]["managed_native_command"]
     assert argv[-2:] == ["resume", SESSION]
+    assert argv[-4:-2] == ["-c", codex_native_launch.UPDATE_CHECK_OVERRIDE]
     assert "--no-alt-screen" in argv
     assert "app-server" not in argv
 

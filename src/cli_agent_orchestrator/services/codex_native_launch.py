@@ -14,6 +14,7 @@ from typing import Iterable, Optional, Sequence
 from cli_agent_orchestrator.services import provider_contracts
 
 RESUME_COMMAND = "resume"
+UPDATE_CHECK_OVERRIDE = "check_for_update_on_startup=false"
 FORBIDDEN_OPTIONS = (
     "--last",
     "--all",
@@ -86,11 +87,12 @@ def build_resume_argv(
     codex_binary: str = "codex",
     extra_args: Optional[Iterable[str]] = None,
 ) -> list[str]:
-    """Return ``codex [profile args] resume <exact-id>``.
+    """Return a noninteractive managed ``codex ... resume <exact-id>`` argv.
 
-    Codex's global/profile options are deliberately placed before the
-    subcommand.  The identity pair remains the final two argv elements, so
-    no optional positional prompt can be confused with the session id.
+    Codex's global/profile options and the fixed update-check override are
+    deliberately placed before the subcommand.  The identity pair remains
+    the final two argv elements, so no optional positional prompt can be
+    confused with the session id.
     """
     native_id = validate_session_id(session_id)
     if not isinstance(codex_binary, str) or not codex_binary:
@@ -99,7 +101,20 @@ def build_resume_argv(
     provider_contracts.validate_resume_argv(
         provider_contracts.PROVIDER_CODEX, [RESUME_COMMAND, native_id]
     )
-    return [codex_binary, *extra, RESUME_COMMAND, native_id]
+    # A managed TUI must remain on its admitted composer surface. Codex can
+    # otherwise publish a newer-build choice after the resume has already
+    # been declared ready, turning the next control command into input for an
+    # unrelated modal. Updates remain an operator action outside this process.
+    # Place the fixed override after profile args so a profile cannot re-enable
+    # the interactive startup check for this managed generation.
+    return [
+        codex_binary,
+        *extra,
+        "-c",
+        UPDATE_CHECK_OVERRIDE,
+        RESUME_COMMAND,
+        native_id,
+    ]
 
 
 def resumes_exactly(argv: Sequence[str], session_id: str) -> bool:

@@ -35,7 +35,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from test.e2e.exact_canary.evidence import EvidenceSanitizer
 from test.e2e.route_observation_canary import cases
-from test.e2e.test_exact_executor_canary import _build_codex_home
 from test.fixtures.cao_server import _pick_free_port, _start_cao_server
 from test.fixtures.tmux_server import (
     assert_shared_server_untouched,
@@ -144,6 +143,22 @@ def _installed_codex() -> dict[str, str]:
         "banner": banner,
         "version": version,
     }
+
+
+def _build_codex_home(real_home: Path, scratch: Path) -> str:
+    """Expose only Codex auth plus a minimal noninteractive canary config."""
+    source = real_home / ".codex"
+    auth = source / "auth.json"
+    if not auth.is_file():
+        pytest.skip("Codex auth carrier is absent")
+    destination = scratch / "codex-home"
+    destination.mkdir(parents=True)
+    (destination / "auth.json").symlink_to(auth)
+    (destination / "config.toml").write_text(
+        "check_for_update_on_startup = false\n",
+        encoding="utf-8",
+    )
+    return os.path.realpath(destination)
 
 
 def _git_worktree(path: Path) -> str:
@@ -904,6 +919,30 @@ def test_installed_codex_rollup_hashes_the_local_executable_path() -> None:
     assert "path" not in shared
     assert shared["executable_basename"] == "codex"
     assert shared["executable_path_sha256"] == _sha256_text(installed["path"])
+
+
+def test_codex_home_exposes_only_auth_and_minimal_noninteractive_config(tmp_path: Path) -> None:
+    real_home = tmp_path / "operator-home"
+    source = real_home / ".codex"
+    source.mkdir(parents=True)
+    auth = source / "auth.json"
+    auth.write_text("opaque-test-auth\n", encoding="utf-8")
+    (source / "config.toml").write_text("unrelated = true\n", encoding="utf-8")
+    (source / "sessions").mkdir()
+
+    destination = Path(_build_codex_home(real_home, tmp_path / "scratch"))
+
+    assert {entry.name for entry in destination.iterdir()} == {"auth.json", "config.toml"}
+    assert (destination / "auth.json").is_symlink()
+    assert (destination / "auth.json").resolve() == auth.resolve()
+    assert (destination / "config.toml").read_text(encoding="utf-8") == (
+        "check_for_update_on_startup = false\n"
+    )
+
+
+def test_codex_home_skips_when_auth_carrier_is_absent(tmp_path: Path) -> None:
+    with pytest.raises(pytest.skip.Exception, match="Codex auth carrier is absent"):
+        _build_codex_home(tmp_path / "operator-home", tmp_path / "scratch")
 
 
 def test_bounded_server_log_is_sanitized_and_limited(tmp_path: Path) -> None:
