@@ -29,8 +29,11 @@ Modes (argv):
   line and its redraw, which the pane-death mid-observation case uses to
   open a wide, deterministic window in which the pane's shell is really
   killed after the submission barrier has genuinely passed.
-- ``codex garbage`` — render 30 rows of text that is NOT a codex status
-  panel (the negative render case), then stay alive.
+- ``codex garbage`` — first render the ordinary writable Codex surface, then
+  replace it with 30 rows that are NOT a Codex status panel only after the
+  adapter submits literal ``/status``.  This exercises an inconclusive
+  post-effect observation without making unreadable startup content stand in
+  for prewrite readiness.
 """
 
 from __future__ import annotations
@@ -104,12 +107,16 @@ def _draw(rows: list[str]) -> None:
     sys.stdout.flush()
 
 
-def _redraw_on_submit(rows: list[str], *, redraw_delay: float) -> None:
-    """Draw ``rows`` and redraw on every submitted line so a submitted
-    ``/status`` leaves the composer region (the submission-observation seam
-    the adapter's barrier relies on).  ``redraw_delay`` pauses between the
-    submitted line and the redraw, giving the pane-death case a wide window
-    to really kill the pane after the barrier has passed."""
+def _redraw_on_submit(
+    rows: list[str], *, redraw_delay: float, after_status_rows: list[str] | None = None
+) -> None:
+    """Draw ``rows`` and redraw after each submitted line.
+
+    When ``after_status_rows`` is provided, an exact submitted ``/status``
+    selects those rows; every other line redraws the initial surface.
+    ``redraw_delay`` gives the pane-death case a deterministic window after
+    the barrier passes and before the composer is cleared.
+    """
     _draw(rows)
     line = b""
     while True:
@@ -121,10 +128,14 @@ def _redraw_on_submit(rows: list[str], *, redraw_delay: float) -> None:
             break
         line += chunk
         if chunk == b"\n":
+            submitted = line.rstrip(b"\r\n")
             line = b""
             if redraw_delay > 0:
                 time.sleep(redraw_delay)
-            _draw(rows)
+            if submitted == b"/status" and after_status_rows is not None:
+                _draw(after_status_rows)
+            else:
+                _draw(rows)
 
 
 def interactive(*, redraw_delay: float) -> None:
@@ -133,10 +144,12 @@ def interactive(*, redraw_delay: float) -> None:
 
 
 def render_garbage() -> None:
-    """Render rows that cannot parse as a codex status panel; redraw on
-    submit so the adapter's submission barrier still resolves and reaches
-    the (failed) parse — the negative-render observation."""
-    _redraw_on_submit(_GARBAGE_ROWS, redraw_delay=0.0)
+    """Start writable, then redraw unparseable rows after submitted /status."""
+    _redraw_on_submit(
+        _POSITIVE_ROWS,
+        redraw_delay=0.0,
+        after_status_rows=_GARBAGE_ROWS,
+    )
 
 
 def _redraw_delay_argv(argv: list[str]) -> float:

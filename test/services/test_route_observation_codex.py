@@ -18,6 +18,7 @@ honestly, never a fabricated second ``Escape``.
 from __future__ import annotations
 
 import json
+import subprocess
 import uuid
 
 import pytest
@@ -284,13 +285,109 @@ class TestZeroEffectAndResponseLossReplay:
 
 
 class TestPrewriteReadiness:
-    def test_real_surface_waits_on_the_exact_pane_until_idle(self, monkeypatch):
-        statuses = iter([TerminalStatus.PROCESSING, TerminalStatus.IDLE])
-        calls = []
+    def test_rendered_current_mcp_frame_resets_the_real_surface_ready_streak(self, monkeypatch):
+        ready_frame = [
+            ">_ OpenAI Codex (v0.149.0)",
+            "",
+            "› Ask Codex to do anything",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        current_mcp_frame = [
+            "› Inspect the route",
+            "",
+            '• Called cao-mcp-server.read_session_output({"terminal_id":"worker"})',
+            "  └ Waiting for MCP response",
+            "• Working (9s • esc to interrupt)",
+            "",
+            "› Ask Codex to do anything",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        # The real regression showed a ready redraw before current MCP work.
+        # Put that work after three ready samples so restoring the old
+        # three-poll threshold returns before the detector can see it.
+        frames = iter([ready_frame] * 3 + [current_mcp_frame] + [ready_frame] * 11)
+        captures = []
 
-        def observe(pane_id, **kwargs):
-            calls.append((pane_id, kwargs))
-            return next(statuses)
+        def capture(pane_id, *, timeout):
+            frame = next(frames)
+            captures.append((pane_id, timeout, frame))
+            return frame
+
+        monkeypatch.setattr(roc.npi, "capture_pane_screen", capture)
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        readiness = surface.await_input_ready()
+
+        assert readiness == roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
+        assert len(captures) == 15
+        assert captures[3][2] == current_mcp_frame
+        assert all(capture[0] == "%7" for capture in captures)
+
+    def test_incomplete_ready_streak_times_out_with_zero_effect(self, _db, monkeypatch):
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_codex_turn_state",
+            lambda *args, **kwargs: TerminalStatus.IDLE,
+        )
+
+        class IncompleteReadySurface(roc.RealCodexPaneSurface):
+            def __init__(self):
+                super().__init__(
+                    "%7",
+                    terminal_id="term-target",
+                    session_name="cao-target",
+                    window_name="managed-target",
+                    timeout=0.0,
+                )
+                self.status_commands_sent = 0
+
+            def send_status_command(self):
+                self.status_commands_sent += 1
+                return True
+
+        request = _request()
+        surface = IncompleteReadySurface()
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_PROVIDER_NOT_READY
+        assert outcome["prewrite_readiness"] == {
+            "reason": roc.PREWRITE_PROVIDER_NOT_READY,
+            "provider_status": TerminalStatus.IDLE.value,
+            "detail": "the bound Codex pane did not remain ready for 11 consecutive observations",
+        }
+        assert surface.status_commands_sent == 0
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+    def test_real_surface_unreadable_sample_resets_the_ready_streak(self, monkeypatch):
+        observations = iter(
+            [
+                TerminalStatus.IDLE,
+                roc.npi.NativePaneInputUnavailable("tmux capture failed"),
+                *([TerminalStatus.IDLE, TerminalStatus.COMPLETED] * 5),
+                TerminalStatus.IDLE,
+            ]
+        )
+        calls = 0
+
+        def observe(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            result = next(observations)
+            if isinstance(result, Exception):
+                raise result
+            return result
 
         monkeypatch.setattr(roc.npi, "observe_codex_turn_state", observe)
         monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
@@ -305,10 +402,81 @@ class TestPrewriteReadiness:
         readiness = surface.await_input_ready()
 
         assert readiness == roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
-        assert [call[0] for call in calls] == ["%7", "%7"]
-        assert all(call[1]["terminal_id"] == "term-target" for call in calls)
-        assert all(call[1]["session_name"] == "cao-target" for call in calls)
-        assert all(call[1]["window_name"] == "managed-target" for call in calls)
+        assert calls == 13
+
+    def test_real_surface_observer_uses_one_literal_and_one_enter_through_the_barrier(
+        self, _db, monkeypatch
+    ):
+        ready_frame = ["› Ask Codex to do anything", "", "  gpt-5.6-luna high · ~/project"]
+        composed_frame = ["transcript", "› /status", "", "  gpt-5.6-luna high · ~/project"]
+        frames = iter(
+            [ready_frame] * 11
+            + [
+                composed_frame,
+                ready_frame,
+                codex_panel_rows(),
+                ready_frame,
+            ]
+        )
+        captures = []
+        tmux_calls = []
+
+        def capture(pane_id, *, timeout):
+            frame = next(frames)
+            captures.append((pane_id, timeout, frame))
+            return frame
+
+        def run(argv, *, timeout):
+            tmux_calls.append((list(argv), timeout))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(roc.npi, "capture_pane_screen", capture)
+        monkeypatch.setattr(roc.npi, "_tmux_binary", lambda: "tmux")
+        monkeypatch.setattr(roc.npi, "_run", run)
+        monkeypatch.setattr(roc, "_pane_width", lambda pane_id, *, timeout: 100)
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(_request())
+
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert len(captures) == 15
+        assert [call[0] for call in tmux_calls] == [
+            ["tmux", "send-keys", "-t", "%7", "-l", "--", "/status"],
+            ["tmux", "send-keys", "-t", "%7", "Enter"],
+        ]
+
+    def test_real_surface_unreadable_observer_writes_no_literal_or_enter(self, _db, monkeypatch):
+        tmux_calls = []
+
+        def unreadable(*args, **kwargs):
+            raise roc.npi.NativePaneInputUnavailable("tmux capture failed")
+
+        def run(argv, *, timeout):
+            tmux_calls.append((list(argv), timeout))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(roc.npi, "capture_pane_screen", unreadable)
+        monkeypatch.setattr(roc.npi, "_run", run)
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=0.0,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(_request())
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_PANE_UNREADABLE
+        assert tmux_calls == []
 
     def test_real_surface_busy_timeout_is_not_an_unreadable_pane(self, monkeypatch):
         monkeypatch.setattr(
