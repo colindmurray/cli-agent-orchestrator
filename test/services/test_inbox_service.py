@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -42,6 +43,22 @@ from cli_agent_orchestrator.services.control_input_contract import (
 )
 from cli_agent_orchestrator.services.inbox_service import InboxService
 from cli_agent_orchestrator.services.managed_launch import ManagedLaunchConflict
+
+
+@contextlib.contextmanager
+def _process_timezone(name):
+    """Temporarily select a real non-UTC process clock for clock-basis tests."""
+    original = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        time.tzset()
 
 
 def _make_message(id=1, receiver_id="term-1", message="hello", status=MessageStatus.PENDING):
@@ -1053,9 +1070,18 @@ class TestManagedBridgeDelivery:
             MessageStatus.DELIVERED
         )
 
-    @pytest.mark.parametrize("recover_ack_after_park", [False, True])
+    @pytest.mark.parametrize(
+        ("recover_ack_after_park", "reconcile_after_non_utc_restart"),
+        [(False, False), (True, False), (False, True)],
+        ids=["direct", "parked-ack", "non-utc-restart-reconciliation"],
+    )
     def test_m10_wake_admits_bound_v2_requester_and_terminalizes_exact_inbox_once(
-        self, isolated_memory_db, tmp_path, monkeypatch, recover_ack_after_park
+        self,
+        isolated_memory_db,
+        tmp_path,
+        monkeypatch,
+        recover_ack_after_park,
+        reconcile_after_non_utc_restart,
     ):
         """The deterministic M10 wake is a zero-task requester's only paid turn."""
         from cli_agent_orchestrator import constants
@@ -1198,11 +1224,21 @@ class TestManagedBridgeDelivery:
             observation_request,
             proof={"kind": "owned-close", "outcome": "closed"},
         )
-        completed_route = route_observation.complete(
-            observation_request,
-            result=route_observation.RESULT_OBSERVED_CLOSED,
-            final_event={"kind": "route-observation-final", "result": "observed-closed"},
-        )
+        if reconcile_after_non_utc_restart:
+            utc_writer_before = datetime.now(timezone.utc).replace(tzinfo=None)
+            with _process_timezone("America/Los_Angeles"):
+                completed_route = route_observation.complete(
+                    observation_request,
+                    result=route_observation.RESULT_OBSERVED_CLOSED,
+                    final_event={"kind": "route-observation-final", "result": "observed-closed"},
+                )
+            utc_writer_after = datetime.now(timezone.utc).replace(tzinfo=None)
+        else:
+            completed_route = route_observation.complete(
+                observation_request,
+                result=route_observation.RESULT_OBSERVED_CLOSED,
+                final_event={"kind": "route-observation-final", "result": "observed-closed"},
+            )
         message_id = completed_route["inbox_message_id"]
         wake = database.get_pending_message(bound["terminal_id"], message_id)
         assert wake is not None
@@ -1211,6 +1247,13 @@ class TestManagedBridgeDelivery:
         assert wake_payload["operation_id"] == observation_request.operation_id
         assert wake.message_sha256 == hashlib.sha256(wake.message.encode("utf-8")).hexdigest()
         assert wake.expected_receiver_generation == bound["generation"]
+
+        if reconcile_after_non_utc_restart:
+            # The production route writer runs under the host clock and its
+            # untouched SQLite value must still be UTC-naive. A restarted
+            # server then compares that exact value with the same clock basis.
+            assert wake.created_at.tzinfo is None
+            assert utc_writer_before <= wake.created_at <= utc_writer_after
 
         provider_calls = []
         created_at = wake.created_at.replace(tzinfo=timezone.utc)
@@ -1295,10 +1338,15 @@ class TestManagedBridgeDelivery:
             monkeypatch.setattr(managed_provider_bridge, "request_bridge", provider_bridge)
 
         service = InboxService()
-        service.deliver_pending(
-            bound["terminal_id"],
-            required_message_id=message_id,
-        )
+        if reconcile_after_non_utc_restart:
+            monkeypatch.setattr(inbox_service, "INBOX_RECONCILE_GRACE_SECONDS", 0)
+            with _process_timezone("America/Los_Angeles"):
+                service.reconcile_orphaned_messages()
+        else:
+            service.deliver_pending(
+                bound["terminal_id"],
+                required_message_id=message_id,
+            )
 
         stored = database.get_inbox_messages(bound["terminal_id"], limit=1)[0]
         assert stored.status == MessageStatus.DELIVERED
@@ -1309,10 +1357,14 @@ class TestManagedBridgeDelivery:
         assert admitted["admission"]["provider_submission_receipt"] == strict_receipt
         assert len(provider_calls) == (0 if recover_ack_after_park else 1)
 
-        service.deliver_pending(
-            bound["terminal_id"],
-            required_message_id=message_id,
-        )
+        if reconcile_after_non_utc_restart:
+            with _process_timezone("America/Los_Angeles"):
+                InboxService().reconcile_orphaned_messages()
+        else:
+            service.deliver_pending(
+                bound["terminal_id"],
+                required_message_id=message_id,
+            )
         assert len(provider_calls) == (0 if recover_ack_after_park else 1)
 
 

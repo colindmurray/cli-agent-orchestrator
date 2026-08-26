@@ -6,6 +6,7 @@ category: REFERENCE
 status: CURRENT
 note: "Current fork contract; callback recovery is not a general managed-message API."
 changelog:
+  - "2026-08-26: Inbox creation, reconciliation age checks, and inbox retention now share one UTC-naive SQLite timestamp basis."
   - "2026-08-26: An exact M10 route-observation wake may atomically occupy a bound zero-task ACP requester's first admission, with strict-ack recovery and no duplicate provider I/O."
   - "2026-08-09: Generic inbox rows now capture the exact live managed-v2 receiver generation; parked, stale, and pre-M3 generationless rows are terminalized rather than retargeted."
   - "2026-07-30: Replaced generic bound messages with one-shot refusal/callback recovery."
@@ -176,6 +177,19 @@ The immediate and watchdog paths can both miss a message when the receiving term
 When both miss, the message would otherwise stay `PENDING` forever (issue #131).
 
 A provider-agnostic background sweep closes this gap. Every `INBOX_RECONCILE_INTERVAL` (default 30s) it re-attempts delivery for any message left `PENDING` longer than `INBOX_RECONCILE_GRACE_SECONDS` (default 30s), routing it back through the same `check_and_send_pending_messages()` gate as the other paths. The work scales with the number of *backlogged* receivers, not the total agent count: when nothing is stuck the sweep runs one cheap query and returns.
+
+Post-cutover `inbox.created_at` values use one UTC-naive SQLite storage basis.
+The ORM default, protocol-owned writers, reconciliation cutoff, and inbox
+retention cutoff must stay on that basis; mixing local-naive ordinary rows with
+UTC-naive route or callback rows can bypass the grace period in eastern time
+zones or leave a wake apparently in the future in western time zones. Exact
+receipt paths attach UTC explicitly when they serialize the stored value.
+
+Pre-cutover ordinary rows have no durable clock-basis marker and are not
+rewritten by inference. Before activating this change against an existing
+store, inspect its `PENDING` rows: settle any row that is not already beyond
+the reconciliation grace window, and confirm no row lies near the retention
+boundary. This is a one-time activation check, not a second runtime clock.
 
 ### Grace Window
 

@@ -1,7 +1,10 @@
 """Tests for the database client."""
 
+import os
 import tempfile
-from datetime import datetime, timedelta
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -39,6 +42,22 @@ from cli_agent_orchestrator.clients.database import (
     update_terminal_shell_command,
 )
 from cli_agent_orchestrator.models.inbox import MessageStatus
+
+
+@contextmanager
+def _process_timezone(name):
+    """Temporarily select a real non-UTC process clock for clock-basis tests."""
+    original = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        time.tzset()
 
 
 @pytest.fixture
@@ -290,8 +309,9 @@ class TestTerminalOperations:
         Uses the real in-memory DB (not a mocked session) so the age cutoff,
         status filter, and terminal join are actually exercised.
         """
-        old = datetime.now() - timedelta(seconds=120)
-        fresh = datetime.now()
+        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        old = utc_now - timedelta(seconds=120)
+        fresh = utc_now
 
         with test_db() as seed:
             seed.add_all(
@@ -1423,6 +1443,66 @@ class TestListPendingReceiverIdsOlderThanCrossVintage:
 
         with patch("cli_agent_orchestrator.clients.database.SessionLocal", test_db):
             assert list_pending_receiver_ids_older_than(30) == ["v2rcv01"]
+
+    def test_live_v2_stale_utc_row_reconciles_when_local_clock_is_behind(self, test_db):
+        """A westward host offset cannot hide a stale protocol-authored row."""
+        with _process_timezone("America/Los_Angeles"):
+            utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+            with test_db() as seed:
+                _seed_v2_terminal(seed, "v2old01", generation="gen-v2-old")
+                seed.add(
+                    InboxModel(
+                        sender_id="a",
+                        receiver_id="v2old01",
+                        message="stale",
+                        status=MessageStatus.PENDING.value,
+                        created_at=utc_now - timedelta(seconds=120),
+                    )
+                )
+                seed.commit()
+
+            with patch("cli_agent_orchestrator.clients.database.SessionLocal", test_db):
+                assert list_pending_receiver_ids_older_than(30) == ["v2old01"]
+
+    def test_live_v2_fresh_utc_row_waits_when_local_clock_is_ahead(self, test_db):
+        """An eastward host offset cannot adopt a row still inside grace."""
+        with _process_timezone("Asia/Tokyo"):
+            utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+            with test_db() as seed:
+                _seed_v2_terminal(seed, "v2new01", generation="gen-v2-new")
+                seed.add(
+                    InboxModel(
+                        sender_id="a",
+                        receiver_id="v2new01",
+                        message="fresh",
+                        status=MessageStatus.PENDING.value,
+                        created_at=utc_now - timedelta(seconds=1),
+                    )
+                )
+                seed.commit()
+
+            with patch("cli_agent_orchestrator.clients.database.SessionLocal", test_db):
+                assert list_pending_receiver_ids_older_than(30) == []
+
+    def test_inbox_default_created_at_is_utc_naive_under_non_utc_process_timezone(self, test_db):
+        """Every default-written inbox row uses the protocol's UTC-naive basis."""
+        with _process_timezone("America/Los_Angeles"):
+            utc_before = datetime.now(timezone.utc).replace(tzinfo=None)
+            with test_db() as db:
+                row = InboxModel(
+                    sender_id="a",
+                    receiver_id="receiver",
+                    message="default timestamp",
+                    status=MessageStatus.PENDING.value,
+                )
+                db.add(row)
+                db.commit()
+                db.refresh(row)
+                created_at = row.created_at
+            utc_after = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        assert created_at.tzinfo is None
+        assert utc_before <= created_at <= utc_after
 
     def test_superseded_v2_receiver_excluded(self, test_db):
         with test_db() as seed:

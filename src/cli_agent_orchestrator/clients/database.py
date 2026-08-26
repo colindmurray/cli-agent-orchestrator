@@ -43,6 +43,11 @@ Base: Any = declarative_base()
 _SQLITE_DDL_DIALECT = _sqlite_dialect()
 
 
+def _utc_naive_now() -> datetime:
+    """Return the UTC-naive timestamp stored by SQLite ``DateTime`` columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 class TerminalModel(Base):
     """SQLAlchemy model for terminal metadata only."""
 
@@ -155,7 +160,7 @@ class InboxModel(Base):
     receiver_id = Column(String, nullable=False)
     message = Column(String, nullable=False)
     status = Column(String, nullable=False)  # MessageStatus enum value
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=_utc_naive_now)
     # Nullable keeps the original generic inbox protocol byte-compatible.
     # These fields are populated only by the dedicated callback-recovery path.
     message_sha256 = Column(Text, nullable=True)
@@ -6554,11 +6559,12 @@ def list_pending_receiver_ids_older_than(min_age_seconds: int) -> List[str]:
     excluded and a server bounce cannot strand a live v2 receiver's row. The
     result is the distinct union of both branches.
 
-    ``created_at`` is stored local-naive (``InboxModel.created_at`` defaults to
-    ``datetime.now``), so the cutoff uses ``datetime.now()`` to match — the same
-    convention as the retention query in ``cleanup_service.cleanup_old_data``.
+    ``created_at`` is stored UTC-naive. Protocol-owned rows already use this
+    basis because their exact timestamp is later rendered as canonical UTC in
+    durable receipts; the model default keeps ordinary and registered-wait
+    rows on the same ordering and reconciliation clock.
     """
-    cutoff = datetime.now() - timedelta(seconds=min_age_seconds)
+    cutoff = _utc_naive_now() - timedelta(seconds=min_age_seconds)
     with SessionLocal() as db:
         rows = (
             db.query(InboxModel.receiver_id)
