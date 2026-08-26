@@ -404,10 +404,36 @@ class TestPrewriteReadiness:
         assert readiness == roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
         assert calls == 13
 
+    def test_real_surface_completed_status_counts_as_composer_restored(self, monkeypatch):
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_codex_turn_state",
+            lambda *args, **kwargs: TerminalStatus.COMPLETED,
+        )
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=0.0,
+        )
+
+        assert surface.composer_restored() is True
+
     def test_real_surface_observer_uses_one_literal_and_one_enter_through_the_barrier(
         self, _db, monkeypatch
     ):
-        ready_frame = ["› Ask Codex to do anything", "", "  gpt-5.6-luna high · ~/project"]
+        ready_frame = [
+            "› Ask Codex to do anything",
+            "",
+            '• Called cao-mcp-server.read_session_output({"terminal_id":"worker"})',
+            "  └ MCP response received",
+            "• Assistant settled (2s)",
+            "",
+            "› ",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
         empty_frame = ["› ", "", "  gpt-5.6-luna high · ~/project"]
         composed_frame = [
             "transcript",
@@ -438,6 +464,15 @@ class TestPrewriteReadiness:
 
         monkeypatch.setattr(roc.npi, "capture_pane_screen", capture)
         monkeypatch.setattr(roc.npi, "capture_pane_screen_styled", capture_styled)
+        observe_turn_state = roc.npi.observe_codex_turn_state
+        observed_statuses = []
+
+        def completed_turn_state(*args, **kwargs):
+            status = observe_turn_state(*args, **kwargs)
+            observed_statuses.append(status)
+            return status
+
+        monkeypatch.setattr(roc.npi, "observe_codex_turn_state", completed_turn_state)
         monkeypatch.setattr(roc.npi, "_tmux_binary", lambda: "tmux")
         monkeypatch.setattr(roc.npi, "_run", run)
         monkeypatch.setattr(roc, "_pane_width", lambda pane_id, *, timeout: 100)
@@ -453,6 +488,7 @@ class TestPrewriteReadiness:
         outcome = roc.CodexRouteObserver(surface=surface).observe(_request())
 
         assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert observed_statuses == [TerminalStatus.COMPLETED] * 12
         assert len(captures) == 15
         assert [capture[0] for capture in captures] == [
             *(["plain"] * 11),
