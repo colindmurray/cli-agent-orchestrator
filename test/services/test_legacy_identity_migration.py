@@ -133,6 +133,18 @@ class _MigrationHarness:
     _COMPOSER_ROWS = 5
 
     def _composer_rows(self) -> list[str]:
+        if self.screens and any("OpenAI Codex" in row for row in self.screens[-1]):
+            rows = [f"› {self._composer}", ""]
+            if self._composer.startswith("/"):
+                rows.extend(
+                    [
+                        "  /status      show current session configuration and token usage",
+                        "  /statusline  configure which items appear in the status line",
+                    ]
+                )
+            else:
+                rows.append("  gpt-5.6-luna high · ~/project")
+            return rows + ["" for _ in range(self._COMPOSER_ROWS - len(rows))]
         return ["" for _ in range(self._COMPOSER_ROWS - 1)] + [f"> {self._composer}"]
 
     def turn_state(self, pane_id: str, **_kwargs: Any) -> TerminalStatus:
@@ -148,6 +160,8 @@ class _MigrationHarness:
 
     def capture_screen_styled(self, pane_id: str, **_kwargs: Any) -> list[str]:
         self.calls.append("capture-styled")
+        if self.screens and any("OpenAI Codex" in row for row in self.screens[-1]):
+            return list(self.screens[-1]) + self._composer_rows()
         assert self.styled_screens, "no scripted post-Escape rows"
         return list(self.styled_screens[-1])
 
