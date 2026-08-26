@@ -18,9 +18,10 @@ Each test maps to one T2 sub-acceptance in
    pane bytes, width provable via ``tmux display -p "#{pane_width}"``.
 2. ``test_positive_loop_end_to_end`` — fire-marshal launch -> /status via the
    real pane-input seam -> observation of REAL pane bytes -> consumer wakes.
-3. ``test_garbage_render_is_ambiguous_with_proven_bytes`` — garbage render is
-   ambiguous, never observed-closed, with the bytes that reached the observer
-   proven by tmux capture.
+3. ``test_garbage_render_is_ambiguous_with_proven_bytes`` — a stable writable
+   surface accepts ``/status`` and only then redraws garbage; the post-effect
+   observation is ambiguous, never observed-closed, with the bytes that
+   reached the observer proven by tmux capture.
 4. ``test_pane_death_mid_observation_recovers_on_restart`` — restart recovery
    on REAL pane death (``tmux kill-pane``), never a monkeypatched kill.
 5. ``test_second_launcher_is_single_root_held`` — two launchers on one
@@ -396,7 +397,7 @@ class TestPositiveLoop:
 
 
 # ---------------------------------------------------------------------------
-# acceptance 3 — garbage render is ambiguous, with the bytes proven
+# acceptance 3 — writable first, then post-/status garbage is ambiguous
 # ---------------------------------------------------------------------------
 
 
@@ -408,8 +409,9 @@ class TestGarbageRenderAmbiguous:
         try:
             _wait_capture(h, pane)
             before = "\n".join(h.capture(pane))
-            assert "garbage-line" in before
-            assert "OpenAI Codex" not in before
+            assert "OpenAI Codex" in before
+            assert "› " in before
+            assert "garbage-line" not in before
 
             request = _request()
             outcome = _observe(h, pane, request)
@@ -419,6 +421,7 @@ class TestGarbageRenderAmbiguous:
             assert outcome["receipt_digest"] is None
             assert outcome["observation"]["observed_state"] == "inconclusive"
             assert outcome["observation"]["reason"] == "panel-unparsed"
+            assert ro.get(request.operation_id)["pre_probe_intent_json"] is not None
 
             after = h.capture(pane)
             after_joined = "\n".join(after)

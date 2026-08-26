@@ -86,6 +86,11 @@ PREWRITE_READY = "ready"
 PREWRITE_PROVIDER_NOT_READY = "provider-not-ready"
 PREWRITE_PANE_UNREADABLE = "pane-unreadable"
 _PREWRITE_READINESS_POLL_SECONDS = 0.1
+# Codex can briefly redraw an idle composer between asynchronous MCP-startup
+# updates.  Restart-5 observed MCP work about 0.4 seconds after the first ready
+# frame, so ten full poll gaps hold readiness for at least one second before
+# authorizing input rather than merely sampling the same transient redraw.
+_PREWRITE_READY_STABLE_POLLS = 11
 
 #: Close-proof outcome vocabulary for the non-modal surface.  A proven
 #: composer return is the only positive close; everything else is unproven
@@ -232,11 +237,12 @@ class RealCodexPaneSurface:
         return _pane_width(self.pane_id, timeout=self._timeout)
 
     def await_input_ready(self) -> PrewriteReadiness:
-        """Wait boundedly for this exact Codex pane to read idle.
+        """Wait boundedly for this exact Codex pane to remain ready.
 
         This is a read-only last-safe-point gate.  The caller invokes it before
         committing the pre-probe intent, so a timeout can truthfully close as a
-        zero-effect refusal.  Observed busy and unreadable remain distinct.
+        zero-effect refusal.  Observed busy and unreadable remain distinct, and
+        either resets the ready streak.
         """
         if self._terminal_id is None or self._session_name is None or self._window_name is None:
             return PrewriteReadiness(
@@ -250,6 +256,7 @@ class RealCodexPaneSurface:
             None,
             "the bound Codex pane has not been read",
         )
+        consecutive_ready = 0
         while True:
             try:
                 status = npi.observe_codex_turn_state(
@@ -260,14 +267,25 @@ class RealCodexPaneSurface:
                     timeout=min(self._timeout, max(0.2, deadline - time.monotonic())),
                 )
             except Exception as exc:  # noqa: BLE001 - typed unreadable, not observed busy
+                consecutive_ready = 0
                 latest = PrewriteReadiness(PREWRITE_PANE_UNREADABLE, None, str(exc))
             else:
                 # Both states render the writable composer.  COMPLETED is the
                 # ordinary settled state of a resumed thread with prior turns;
                 # requiring only IDLE would refuse that healthy session forever.
                 if status in {TerminalStatus.IDLE, TerminalStatus.COMPLETED}:
-                    return PrewriteReadiness(PREWRITE_READY, status.value)
-                latest = PrewriteReadiness(PREWRITE_PROVIDER_NOT_READY, status.value)
+                    consecutive_ready += 1
+                    if consecutive_ready >= _PREWRITE_READY_STABLE_POLLS:
+                        return PrewriteReadiness(PREWRITE_READY, status.value)
+                    latest = PrewriteReadiness(
+                        PREWRITE_PROVIDER_NOT_READY,
+                        status.value,
+                        "the bound Codex pane did not remain ready for "
+                        f"{_PREWRITE_READY_STABLE_POLLS} consecutive observations",
+                    )
+                else:
+                    consecutive_ready = 0
+                    latest = PrewriteReadiness(PREWRITE_PROVIDER_NOT_READY, status.value)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return latest
