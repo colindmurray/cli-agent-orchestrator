@@ -322,7 +322,7 @@ class RealCodexPaneSurface:
             )
         except Exception:  # noqa: BLE001 - an unreadable pane is an unproven close
             return None
-        return status == TerminalStatus.IDLE
+        return status in {TerminalStatus.IDLE, TerminalStatus.COMPLETED}
 
 
 # ---------------------------------------------------------------------------
