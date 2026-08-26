@@ -86,6 +86,19 @@ TUI_FOOTER_PATTERN = r"(?:\?\s+for shortcuts|context left|\d+%\s+left|·\s+[~/])
 # progress bullet can resemble an assistant row and the TUI footer › matches
 # the idle prompt).
 TUI_PROGRESS_PATTERN = r"[•◦].*\(\d+s\s*•\s*esc to interrupt\)"
+# Codex renders a composer before a resumed session is ready to accept input.
+# Keep these startup markers spatially scoped to the live composer region in
+# ``get_status_from_screen``: older inline redraws remain in scrollback and
+# must not keep a settled session busy forever.
+TUI_STARTUP_PATTERN = (
+    r"^(?:"
+    r"[ \t]*Resuming session(?:…|\.\.\.)[ \t]*"
+    r"|[ \t]*[│┃|][ \t]*(?:"
+    r"model:[ \t]+loading(?:[ \t]+/model to change)?"
+    r"|directory:[ \t]+loading"
+    r")[ \t]*[│┃|][ \t]*"
+    r")$"
+)
 
 # Workspace trust/approval prompt shown when Codex opens a new directory.
 # Two known variants:
@@ -806,7 +819,11 @@ class CodexProvider(BaseProvider):
         if prompt_index is None:
             return self.get_status("\n".join(rows))
         current_region = "\n".join(rows[max(0, prompt_index - 6) : prompt_index])
-        if re.search(TUI_PROGRESS_PATTERN, current_region, re.MULTILINE):
+        if re.search(TUI_PROGRESS_PATTERN, current_region, re.MULTILINE) or re.search(
+            TUI_STARTUP_PATTERN,
+            current_region,
+            re.IGNORECASE | re.MULTILINE,
+        ):
             return TerminalStatus.PROCESSING
         status = self.get_status("\n".join(rows))
         return TerminalStatus.IDLE if status is TerminalStatus.PROCESSING else status

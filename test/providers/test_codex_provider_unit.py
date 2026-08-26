@@ -1170,6 +1170,66 @@ class TestCodexBulletFormatStatusDetection:
         provider = CodexProvider("test1234", "test-session", "window-0")
         assert provider.get_status_from_screen(screen) == TerminalStatus.IDLE
 
+    @pytest.mark.parametrize(
+        "startup_row",
+        [
+            "  Resuming session…",
+            "│ model:       loading   /model to change │",
+            "│ directory:   loading                    │",
+        ],
+    )
+    def test_rendered_screen_rejects_a_composer_during_current_startup(self, startup_row):
+        screen = [
+            ">_ OpenAI Codex (v0.149.0)",
+            "",
+            startup_row,
+            "",
+            "› Ask Codex to do anything",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        assert provider.get_status_from_screen(screen) == TerminalStatus.PROCESSING
+
+    def test_rendered_screen_ignores_stale_resume_and_loading_rows(self):
+        screen = [
+            "  Resuming session…",
+            "│ model: loading │",
+            "│ directory: loading │",
+            "",
+            "• Earlier response",
+            "",
+            "settled row 1",
+            "settled row 2",
+            "settled row 3",
+            "settled row 4",
+            "settled row 5",
+            "settled row 6",
+            "",
+            "› Ask Codex to do anything",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        # The earlier response makes the settled screen COMPLETED rather than
+        # fresh-IDLE; the important fact is that stale startup history does not
+        # keep the current composer PROCESSING.
+        assert provider.get_status_from_screen(screen) == TerminalStatus.COMPLETED
+
+    def test_rendered_screen_does_not_read_assistant_loading_prose_as_startup(self):
+        screen = [
+            "› Inspect the worker state",
+            "",
+            "• The worker reports model: loading while hydration runs.",
+            "",
+            "› Ask Codex to do anything",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        provider = CodexProvider("test1234", "test-session", "window-0")
+
+        assert provider.get_status_from_screen(screen) == TerminalStatus.COMPLETED
+
     def test_rendered_screen_requires_the_current_spinner_next_to_the_composer(self):
         screen = [
             "• Earlier response",
