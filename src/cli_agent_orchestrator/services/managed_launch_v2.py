@@ -2214,10 +2214,9 @@ def _validate_readiness_for_bind(row: Any, receipt: dict[str, Any]) -> None:
     would accept it.
     """
     request = _parse_json(row.request_json, {})
+    mode = em.mode_of_record(_mode_record(row))
     kinds = (
-        _NATIVE_TUI_READINESS_RECEIPT_KINDS
-        if em.mode_of_record(_mode_record(row)) == em.NATIVE_TUI
-        else _READINESS_RECEIPT_KINDS
+        _NATIVE_TUI_READINESS_RECEIPT_KINDS if mode == em.NATIVE_TUI else _READINESS_RECEIPT_KINDS
     )
     expected_kind = kinds.get(row.provider)
     if expected_kind is None or receipt.get("provider_receipt_kind") != expected_kind:
@@ -2349,9 +2348,13 @@ def _validate_readiness_for_bind(row: Any, receipt: dict[str, Any]) -> None:
             "readiness receipt is not bound to the exact v2 reservation: "
             + _canonical_json(mismatches)
         )
-    # A Codex runtime proof is checked below before the legacy version
-    # fallback. If either proof is absent, relaunch after a fresh bootstrap;
-    # do not add a version to a capability table as a recovery action.
+    # ACP readiness is the live provider-protocol exchange validated above.
+    # It neither starts nor resumes a TUI, so no TUI capability proof applies.
+    if mode != em.NATIVE_TUI:
+        return
+    # A native-TUI Codex runtime proof is checked below before the legacy
+    # version fallback. If either proof is absent, relaunch after a fresh
+    # bootstrap; do not add a version to a capability table as a recovery action.
     codex_proof = receipt.get("capability_proof") if row.provider == "codex" else None
     codex_proof_valid = False
     if isinstance(codex_proof, dict):

@@ -226,9 +226,12 @@ record something untrue rather than merely act on less knowledge:
 - An unparseable version banner raises `ProviderVersionDrift`. Unparseable is not
   the same as unlisted: the first means the observation failed, the second means
   nothing was written down.
-- A build outside `NATIVE_BIND_CAPABLE_VERSIONS` cannot become a managed
-  generation's bound native identity, whatever the launch mode admitted.
-  Membership grants bind only.
+- In `native_tui` mode, a build outside `NATIVE_BIND_CAPABLE_VERSIONS` cannot
+  become a managed generation's bound native identity unless the fresh process
+  supplies the digest-scoped runtime proof for TUI resume adoption. Membership
+  grants bind only. ACP neither starts nor resumes a TUI, so its exact live
+  provider-protocol receipt is the bind authority and this TUI capability table
+  does not apply.
 - An unrecognised screen or response is `unknown`, never `complete`.
 
 ---

@@ -326,14 +326,88 @@ def test_bind_refused_before_ready(isolated_memory_db, worktree, tmp_path, monke
     assert not isinstance(raised.value, ManagedLaunchConflict)
 
 
-def test_bind_receipt_unproven_version_refused(isolated_memory_db, worktree, tmp_path, monkeypatch):
-    request = _reserve_request(worktree, tmp_path)
+def test_native_bind_receipt_unproven_version_refused(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    request = _reserve_request(worktree, tmp_path, execution_mode="native_tui")
     record, _ = v2.reserve(request)
     v2.claim_launch(record["reservation_id"])
-    receipt = _ready_bridge_state(record, monkeypatch)
+    receipt = _ready_bridge_state(
+        record,
+        monkeypatch,
+        provider_receipt_kind="codex-native-thread-start",
+    )
     receipt["provider_version"] = "0.144.6"
     with pytest.raises(ManagedLaunchConflict, match="native readiness proof is unavailable"):
         v2.bind_native(record["reservation_id"], _bind_request(record))
+
+
+def test_acp_bind_accepts_unlisted_build_with_exact_live_receipt(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    request = _reserve_request(worktree, tmp_path, execution_mode="acp")
+    record, _ = v2.reserve(request)
+    v2.claim_launch(record["reservation_id"])
+    receipt = _ready_bridge_state(record, monkeypatch, provider_version="0.149.0")
+
+    bound = v2.bind_native(record["reservation_id"], _bind_request(record))
+
+    assert "capability_proof" not in receipt
+    assert bound["state"] == "bound"
+    assert bound["execution_mode"] == "acp"
+    assert bound["binding"]["native_session_id"] == receipt["provider_session_id"]
+
+
+@pytest.mark.parametrize(
+    "inconsistent",
+    [
+        {"model_input_ready": False},
+        {"receipt_id": "thr_someone_elses"},
+    ],
+)
+def test_acp_bind_still_refuses_inconsistent_exact_receipt(
+    isolated_memory_db, worktree, tmp_path, monkeypatch, inconsistent
+):
+    request = _reserve_request(worktree, tmp_path, execution_mode="acp")
+    record, _ = v2.reserve(request)
+    v2.claim_launch(record["reservation_id"])
+    _ready_bridge_state(record, monkeypatch, provider_version="0.149.0", **inconsistent)
+
+    with pytest.raises(ManagedLaunchConflict, match="exact v2 reservation"):
+        v2.bind_native(record["reservation_id"], _bind_request(record))
+
+    assert v2.get(record["reservation_id"])["state"] == "launching"
+
+
+@pytest.mark.parametrize(
+    ("execution_mode", "provider_receipt_kind"),
+    [
+        ("acp", "codex-native-thread-start"),
+        ("native_tui", "codex-thread-start"),
+    ],
+)
+def test_bind_refuses_receipt_kind_from_other_execution_mode(
+    isolated_memory_db,
+    worktree,
+    tmp_path,
+    monkeypatch,
+    execution_mode,
+    provider_receipt_kind,
+):
+    request = _reserve_request(worktree, tmp_path, execution_mode=execution_mode)
+    record, _ = v2.reserve(request)
+    v2.claim_launch(record["reservation_id"])
+    _ready_bridge_state(
+        record,
+        monkeypatch,
+        provider_version="0.149.0",
+        provider_receipt_kind=provider_receipt_kind,
+    )
+
+    with pytest.raises(ManagedLaunchConflict, match="receipt kind"):
+        v2.bind_native(record["reservation_id"], _bind_request(record))
+
+    assert v2.get(record["reservation_id"])["state"] == "launching"
 
 
 def test_bind_accepts_a_stage_proven_0147_native_readiness_receipt(
