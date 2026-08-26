@@ -27,6 +27,7 @@ import re
 import threading
 import time
 import uuid
+from dataclasses import replace
 from typing import Any, Optional
 
 import pytest
@@ -238,6 +239,18 @@ class _RepairHarness:
     _COMPOSER_ROWS = 5
 
     def _composer_rows(self) -> list[str]:
+        if self.screens and any("OpenAI Codex" in row for row in self.screens[-1]):
+            rows = [f"› {self._composer}", ""]
+            if self._composer.startswith("/"):
+                rows.extend(
+                    [
+                        "  /status      show current session configuration and token usage",
+                        "  /statusline  configure which items appear in the status line",
+                    ]
+                )
+            else:
+                rows.append("  gpt-5.6-luna high · ~/project")
+            return rows + ["" for _ in range(self._COMPOSER_ROWS - len(rows))]
         return ["" for _ in range(self._COMPOSER_ROWS - 1)] + [f"> {self._composer}"]
 
     def turn_state(self, pane_id: str, **_kwargs: Any) -> TerminalStatus:
@@ -262,6 +275,8 @@ class _RepairHarness:
         self.calls.append("capture-styled")
         if self.composer_proof_rows is not None:
             return list(self.composer_proof_rows)
+        if self.screens and any("OpenAI Codex" in row for row in self.screens[-1]):
+            return list(self.screens[-1]) + self._composer_rows()
         assert self.styled_screens, "no scripted post-Escape rows"
         return list(self.styled_screens[-1])
 
@@ -3953,16 +3968,24 @@ def fast_barrier(monkeypatch):
     and the classification under test is the real one.
     """
     monkeypatch.setattr(v2, "NATIVE_PANE_READY_TIMEOUT_SECONDS", 5.0)
+    barrier = npi.submission_barrier_for("codex")
+    assert barrier is not None
     monkeypatch.setitem(
         npi._SUBMISSION_BARRIERS,
         "codex",
-        npi.SubmissionBarrier(
+        replace(
+            barrier,
             compose_settle_seconds=0.2,
             post_enter_seconds=0.2,
             poll_interval_seconds=0.02,
-            composer_tail_rows=4,
         ),
     )
+
+
+def test_fast_barrier_preserves_the_production_codex_region_rule(fast_barrier):
+    barrier = npi.submission_barrier_for("codex")
+    assert barrier is not None
+    assert barrier.composer_region_rule == "codex-prompt-region"
 
 
 def test_composer_keeping_status_refuses_submission_unproven(

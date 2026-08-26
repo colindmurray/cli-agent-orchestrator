@@ -453,15 +453,19 @@ class SubmissionBarrier:
     composer to give the text up after the single Enter.  Both are bounded
     polls, not fixed sleeps: a healthy composer answers in one or two
     polls, and the full bound is only ever paid by a composer that is not
-    answering.  ``composer_tail_rows`` is the region, counted up from the
-    bottom of the screen, that holds the composer box and its status line
-    for this provider's pinned builds.
+    answering.  ``composer_region_rule`` selects the provider-pinned region
+    classifier.  ``composer_tail_rows`` bounds the generic tail classifier
+    used by providers whose composer stays attached to the screen bottom.
+    ``capture_styled`` preserves SGR styling for a provider whose empty
+    composer is distinguishable from prefill only by rendered attributes.
     """
 
     compose_settle_seconds: float
     post_enter_seconds: float
     poll_interval_seconds: float
     composer_tail_rows: int
+    composer_region_rule: str = "tail"
+    capture_styled: bool = False
 
 
 # The observation matches on the *tail* of the control text, not the whole
@@ -485,25 +489,19 @@ _OBSERVATION_CAPTURE_TIMEOUT_SECONDS = 2.0
 #: A provider absent from the table gets that legacy behavior with no
 #: submission observation claimed.
 _SUBMISSION_BARRIERS = {
-    # Codex (ratatui composer, pinned 0.145.x): the observed region is
-    # the bottom four rows — the status line, the composer box's bottom
-    # border, and its (possibly wrapped) input rows.  Four is the
-    # boundary that keeps the composer's own contents in and everything
-    # else out: a submitted control's transcript echo lands directly
-    # above the box, outside the region, while the match on the text's
-    # own ending keeps a wrapped long control visible through its last
-    # input row.  Both failure directions of a misread region land on
-    # ``ambiguous`` rather than on a wrong verdict: a region too small
-    # fails the settle, a region too large reads the echo as the
-    # composer, and neither sends a second Enter.  The settle bound is far
-    # beyond the measured paste-burst windows (~120 ms class) and well
-    # inside the 20 s control write deadline; the post-Enter bound covers
-    # a slow first repaint without ever approaching that deadline.
+    # Codex: slash suggestions can render below the composer and push it above
+    # any fixed bottom-row slice.  The structural rule selects the last live
+    # prompt through its following blank separator, excluding transcript
+    # echoes above and suggestions below.  The settle bound remains far beyond
+    # measured paste-burst windows (~120 ms class); the post-Enter bound covers
+    # a slow first repaint without sending a second Enter.
     "codex": SubmissionBarrier(
         compose_settle_seconds=3.0,
         post_enter_seconds=5.0,
         poll_interval_seconds=0.1,
         composer_tail_rows=4,
+        composer_region_rule="codex-prompt-region",
+        capture_styled=True,
     ),
     # Kimi Code (pinned 0.29-0.30): the bottom five rows contain the three-row
     # prompt box followed by its model and context status rows.  A submitted
@@ -681,6 +679,115 @@ def composed_text_visible(
     return needle in haystack
 
 
+_COMPOSER_EXPECTED = "expected"
+_COMPOSER_EMPTY = "empty"
+_COMPOSER_UNPARSEABLE = "unparseable"
+
+_CODEX_BARRIER_PROMPT = re.compile(r"^\s*(?:›|❯|codex>)(?:\s|$)")
+# Input authorization needs a stricter anchor than the provider's permissive
+# status detector.  These are the complete footer/suggestion shapes captured
+# from Codex 0.149.0; ordinary transcript prose that merely mentions one token
+# must not turn a historical ``›`` row into a live composer.  Wording drift
+# refuses this one control as unparseable instead of guessing.
+_CODEX_BARRIER_FOOTER = re.compile(
+    r"^\s*(?:"
+    r"\?\s+for shortcuts"
+    r"|(?:gpt-[A-Za-z0-9._-]+|o[0-9][A-Za-z0-9._-]*|codex-[A-Za-z0-9._-]+)"
+    r"(?:\s+(?:none|minimal|low|medium|high|xhigh|ultra|default))?"
+    r"\s+·\s+(?:\d+%\s+left\s+·\s+)?[~/].*"
+    r")\s*$"
+)
+_CODEX_BARRIER_STATUS_SUGGESTIONS = (
+    re.compile(r"^\s*/status\s{2,}show current session configuration and token usage\s*$"),
+    re.compile(r"^\s*/statusline\s{2,}configure which items appear in the status line\s*$"),
+)
+
+
+def _codex_composer_text_state(rows: Sequence[str], text: str) -> str:
+    """Classify ``text`` against Codex's structurally live composer.
+
+    Codex slash controls open a suggestion list below the composer.  That list
+    and the terminal padding beneath it can push the composer above any fixed
+    bottom-row slice.  The live composer is therefore anchored from the final
+    recognized footer or contiguous slash-suggestion block: its immediately
+    preceding blank separator and nearest prompt row delimit the payload.
+
+    Three answers are load-bearing.  ``expected`` means the complete payload
+    is exactly the requested text after whitespace reflow.  ``empty`` means
+    the valid live composer contains only bare or dim/inverse placeholder
+    cells.  Missing chrome, transcript-only prompts, malformed styling, and a
+    different non-empty payload are ``unparseable`` -- never evidence that an
+    Enter submitted this control.
+    """
+    parsed = _parse_styled_rows(rows)
+    if parsed is None:
+        return _COMPOSER_UNPARSEABLE
+    plain = ["".join(char for char, _, _ in row) for row in parsed]
+    last_nonblank = next(
+        (index for index in range(len(plain) - 1, -1, -1) if plain[index].strip()),
+        None,
+    )
+    if last_nonblank is None:
+        return _COMPOSER_UNPARSEABLE
+
+    if _CODEX_BARRIER_FOOTER.match(plain[last_nonblank]):
+        chrome_start = last_nonblank
+    elif (
+        last_nonblank >= 1
+        and _CODEX_BARRIER_STATUS_SUGGESTIONS[0].match(plain[last_nonblank - 1])
+        and _CODEX_BARRIER_STATUS_SUGGESTIONS[1].match(plain[last_nonblank])
+    ):
+        chrome_start = last_nonblank - 1
+    else:
+        return _COMPOSER_UNPARSEABLE
+
+    separator = chrome_start - 1
+    if separator < 0 or plain[separator].strip():
+        return _COMPOSER_UNPARSEABLE
+    prompt_row = next(
+        (
+            index
+            for index in range(separator - 1, -1, -1)
+            if _CODEX_BARRIER_PROMPT.match(plain[index])
+        ),
+        None,
+    )
+    if prompt_row is None or any(not row.strip() for row in plain[prompt_row:separator]):
+        return _COMPOSER_UNPARSEABLE
+    prompt = _CODEX_BARRIER_PROMPT.match(plain[prompt_row])
+    if prompt is None:
+        return _COMPOSER_UNPARSEABLE
+
+    payload_rows = [plain[prompt_row][prompt.end() :], *plain[prompt_row + 1 : separator]]
+    payload = "".join("".join(row.split()) for row in payload_rows)
+    expected = "".join(text.split())
+    if expected and payload == expected:
+        return _COMPOSER_EXPECTED
+
+    cells = parsed[prompt_row][prompt.end() :] + [
+        cell for row in parsed[prompt_row + 1 : separator] for cell in row
+    ]
+    if all(char.isspace() or dim or inverse for char, dim, inverse in cells):
+        return _COMPOSER_EMPTY
+    return _COMPOSER_UNPARSEABLE
+
+
+def _barrier_text_state(rows: Sequence[str], text: str, *, barrier: SubmissionBarrier) -> str:
+    if barrier.composer_region_rule == "codex-prompt-region":
+        return _codex_composer_text_state(rows, text)
+    if barrier.composer_region_rule == "tail":
+        return (
+            _COMPOSER_EXPECTED
+            if composed_text_visible(
+                rows,
+                text,
+                composer_tail_rows=barrier.composer_tail_rows,
+            )
+            else _COMPOSER_EMPTY
+        )
+    return _COMPOSER_UNPARSEABLE
+
+
 def submission_evidence_ref(pane_id: str, rows: Sequence[str]) -> str:
     """A durable pointer to the capture a submission verdict rests on.
 
@@ -700,9 +807,12 @@ def _capture_rows(
     screen: Optional[Callable[[], Sequence[str]]],
     *,
     timeout: float,
+    styled: bool,
 ) -> Sequence[str]:
     if screen is not None:
         return screen()
+    if styled:
+        return capture_pane_screen_styled(pane_id, timeout=timeout)
     return capture_pane_screen(pane_id, timeout=timeout)
 
 
@@ -736,10 +846,11 @@ def await_compose_visible(
                     _OBSERVATION_CAPTURE_TIMEOUT_SECONDS,
                     max(0.2, settle_end - time.monotonic()),
                 ),
+                styled=barrier.capture_styled,
             )
         except NativePaneInputUnavailable:
             rows = ()
-        if composed_text_visible(rows, text, composer_tail_rows=barrier.composer_tail_rows):
+        if _barrier_text_state(rows, text, barrier=barrier) == _COMPOSER_EXPECTED:
             return True
         remaining = settle_end - time.monotonic()
         if remaining <= 0:
@@ -774,6 +885,7 @@ def observe_submission(
     if deadline_monotonic is not None:
         observe_end = min(observe_end, deadline_monotonic)
     last_rows: Optional[Sequence[str]] = None
+    last_state = _COMPOSER_UNPARSEABLE
     while True:
         try:
             rows = _capture_rows(
@@ -783,13 +895,18 @@ def observe_submission(
                     _OBSERVATION_CAPTURE_TIMEOUT_SECONDS,
                     max(0.2, observe_end - time.monotonic()),
                 ),
+                styled=barrier.capture_styled,
             )
         except NativePaneInputUnavailable:
             rows = None
         if rows is not None:
             last_rows = rows
-            if not composed_text_visible(rows, text, composer_tail_rows=barrier.composer_tail_rows):
+            last_state = _barrier_text_state(rows, text, barrier=barrier)
+            if last_state == _COMPOSER_EMPTY:
                 return (SUBMISSION_SUBMITTED, submission_evidence_ref(pane_id, rows))
+        else:
+            last_rows = None
+            last_state = _COMPOSER_UNPARSEABLE
         remaining = observe_end - time.monotonic()
         if remaining <= 0:
             break
@@ -800,7 +917,7 @@ def observe_submission(
     # ran its full bound rather than being cut by the write deadline — a
     # shortened window proves nothing about what the composer did next.
     deadline_cut = deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
-    if last_rows is not None and not deadline_cut:
+    if last_rows is not None and last_state == _COMPOSER_EXPECTED and not deadline_cut:
         return (SUBMISSION_UNSUBMITTED, submission_evidence_ref(pane_id, last_rows))
     return (SUBMISSION_UNKNOWN, None)
 

@@ -408,22 +408,28 @@ class TestPrewriteReadiness:
         self, _db, monkeypatch
     ):
         ready_frame = ["› Ask Codex to do anything", "", "  gpt-5.6-luna high · ~/project"]
-        composed_frame = ["transcript", "› /status", "", "  gpt-5.6-luna high · ~/project"]
-        frames = iter(
-            [ready_frame] * 11
-            + [
-                composed_frame,
-                ready_frame,
-                codex_panel_rows(),
-                ready_frame,
-            ]
-        )
+        empty_frame = ["› ", "", "  gpt-5.6-luna high · ~/project"]
+        composed_frame = [
+            "transcript",
+            "› /status",
+            "",
+            "  /status      show current session configuration and token usage",
+            "  /statusline  configure which items appear in the status line",
+            *([""] * 12),
+        ]
+        plain_frames = iter([ready_frame] * 11 + [codex_panel_rows(), ready_frame])
+        styled_frames = iter([composed_frame, empty_frame])
         captures = []
         tmux_calls = []
 
         def capture(pane_id, *, timeout):
-            frame = next(frames)
-            captures.append((pane_id, timeout, frame))
+            frame = next(plain_frames)
+            captures.append(("plain", pane_id, timeout, frame))
+            return frame
+
+        def capture_styled(pane_id, *, timeout):
+            frame = next(styled_frames)
+            captures.append(("styled", pane_id, timeout, frame))
             return frame
 
         def run(argv, *, timeout):
@@ -431,6 +437,7 @@ class TestPrewriteReadiness:
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         monkeypatch.setattr(roc.npi, "capture_pane_screen", capture)
+        monkeypatch.setattr(roc.npi, "capture_pane_screen_styled", capture_styled)
         monkeypatch.setattr(roc.npi, "_tmux_binary", lambda: "tmux")
         monkeypatch.setattr(roc.npi, "_run", run)
         monkeypatch.setattr(roc, "_pane_width", lambda pane_id, *, timeout: 100)
@@ -447,6 +454,13 @@ class TestPrewriteReadiness:
 
         assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
         assert len(captures) == 15
+        assert [capture[0] for capture in captures] == [
+            *(["plain"] * 11),
+            "styled",
+            "styled",
+            "plain",
+            "plain",
+        ]
         assert [call[0] for call in tmux_calls] == [
             ["tmux", "send-keys", "-t", "%7", "-l", "--", "/status"],
             ["tmux", "send-keys", "-t", "%7", "Enter"],

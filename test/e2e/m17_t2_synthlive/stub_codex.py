@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import termios
 import time
 
 # Replaced by the test with ``repr(...)`` of the real fixture content.  The
@@ -107,6 +108,30 @@ def _draw(rows: list[str]) -> None:
     sys.stdout.flush()
 
 
+def _draw_composer(rows: list[str], text: str) -> None:
+    composer = ["", f"› {text}", ""]
+    if text.startswith("/"):
+        composer.extend(
+            [
+                "  /status      show current session configuration and token usage",
+                "  /statusline  configure which items appear in the status line",
+            ]
+        )
+    else:
+        composer.append("  gpt-5.6-luna high · ~/project")
+    _draw([*rows, *composer])
+
+
+def _interactive_terminal_settings(prior_terminal: list[object]) -> list[object]:
+    """Return raw-input settings without mutating the restore snapshot."""
+    interactive_terminal = list(prior_terminal)
+    interactive_terminal[6] = list(prior_terminal[6])  # type: ignore[arg-type]
+    interactive_terminal[3] = int(interactive_terminal[3]) & ~(termios.ECHO | termios.ICANON)
+    interactive_terminal[6][termios.VMIN] = 1  # type: ignore[index]
+    interactive_terminal[6][termios.VTIME] = 0  # type: ignore[index]
+    return interactive_terminal
+
+
 def _redraw_on_submit(
     rows: list[str], *, redraw_delay: float, after_status_rows: list[str] | None = None
 ) -> None:
@@ -119,23 +144,36 @@ def _redraw_on_submit(
     """
     _draw(rows)
     line = b""
-    while True:
-        try:
-            chunk = sys.stdin.buffer.read(1)
-        except Exception:
-            break
-        if not chunk:
-            break
-        line += chunk
-        if chunk == b"\n":
-            submitted = line.rstrip(b"\r\n")
-            line = b""
-            if redraw_delay > 0:
-                time.sleep(redraw_delay)
-            if submitted == b"/status" and after_status_rows is not None:
-                _draw(after_status_rows)
-            else:
-                _draw(rows)
+    stdin_fd = sys.stdin.fileno()
+    prior_terminal = termios.tcgetattr(stdin_fd)
+    interactive_terminal = _interactive_terminal_settings(prior_terminal)
+    termios.tcsetattr(stdin_fd, termios.TCSANOW, interactive_terminal)
+    try:
+        while True:
+            try:
+                chunk = sys.stdin.buffer.read(1)
+            except Exception:
+                break
+            if not chunk:
+                break
+            if chunk in {b"\r", b"\n"}:
+                submitted = line
+                line = b""
+                if redraw_delay > 0:
+                    time.sleep(redraw_delay)
+                if submitted == b"/status" and after_status_rows is not None:
+                    _draw_composer(after_status_rows, "")
+                else:
+                    _draw_composer(rows, "")
+                continue
+            line += chunk
+            try:
+                composed = line.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            _draw_composer(rows, composed)
+    finally:
+        termios.tcsetattr(stdin_fd, termios.TCSANOW, prior_terminal)
 
 
 def interactive(*, redraw_delay: float) -> None:

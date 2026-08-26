@@ -38,8 +38,10 @@ tests still run.
 from __future__ import annotations
 
 import os
+import runpy
 import shutil
 import sys
+import termios
 import threading
 import time
 import uuid
@@ -555,6 +557,21 @@ class TestHarnessStubInstallLifecycle:
         h.attested = tmp_path / f"{name}-attested"
         h.attested.mkdir(parents=True, exist_ok=True)
         return h
+
+    def test_interactive_terminal_settings_preserve_the_restore_snapshot(
+        self, installed_stub: Path
+    ) -> None:
+        stub = runpy.run_path(str(installed_stub), run_name="t2_stub_module")
+        raw_settings = stub["_interactive_terminal_settings"]
+        prior = [0, 0, 0, termios.ECHO | termios.ICANON, 0, 0, [9] * termios.NCCS]
+        original_cc = list(prior[6])
+
+        interactive = raw_settings(prior)
+
+        assert interactive[6] is not prior[6]
+        assert prior[6] == original_cc
+        assert interactive[6][termios.VMIN] == 1
+        assert interactive[6][termios.VTIME] == 0
 
     def test_real_pre_existing_binary_is_backed_up_and_restored(self, tmp_path: Path) -> None:
         h = self._scratch(tmp_path, "real")
