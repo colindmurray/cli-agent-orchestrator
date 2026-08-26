@@ -18,6 +18,23 @@ def test_resume_argv_keeps_the_exact_id_as_the_final_selector():
         "--yolo",
         "--model",
         "gpt-5.6-sol",
+        "-c",
+        "check_for_update_on_startup=false",
+        "resume",
+        SESSION,
+    ]
+    assert cnl.resumes_exactly(argv, SESSION) is True
+
+
+def test_managed_update_check_override_wins_over_profile_args():
+    argv = cnl.build_resume_argv(
+        session_id=SESSION,
+        extra_args=["-c", "check_for_update_on_startup=true"],
+    )
+
+    assert argv[-4:] == [
+        "-c",
+        "check_for_update_on_startup=false",
         "resume",
         SESSION,
     ]
