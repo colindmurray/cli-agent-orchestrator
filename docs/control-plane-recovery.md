@@ -54,9 +54,17 @@ v1 query and deleter has zero visibility into them.
   the canonical receipt schemas), publishes the fork-owned binding
   record, and issues the producer fencing token. A crash anywhere
   before bind yields zero task bytes by construction.
-- **Admit** (`POST .../admit`): requires the journaled `native_bound`
-  digest and an open W13 fence; ambiguous submission is preserved,
-  never replayed.
+- **Ordinary admit** (`POST .../admit`): requires the journaled
+  `native_bound` digest and an open W13 fence; ambiguous submission is
+  preserved, never replayed.
+- **M10 first-inbox admission**: the exact terminal route-observation wake may
+  atomically occupy the one admission slot of a bound, zero-task ACP requester.
+  Its record uses `admission_kind: route-observation-wake-v1` and binds the
+  inbox message, both generations, route-observation operation/request/result,
+  native binding, provider session, and ACP mode. The claim runs under the
+  generation lock before bridge I/O. Once it owns the reservation, ordinary
+  `/admit` is excluded; a requester already admitted through ordinary `/admit`
+  retains ordinary managed inbox delivery and its task admission is unchanged.
 - **Resume** (`POST .../resume`): refused (45,
   prior-generation-unproven) while the containment composition is
   unproven; the refusal fact is journaled.
@@ -74,6 +82,14 @@ v1 query and deleter has zero visibility into them.
   receipt even after a successor exists. All provider-byte lanes (native and
   ACP admission, follow-up, native control/operator input, and native inbox)
   hold that same lock through their final check and actual submission.
+
+For the M10 first-inbox path, a retryable pre-provider refusal reopens only the
+exact special admission. A bridge-observed W13 or successor fence records a
+permanent zero-I/O refusal, while uncertainty after the provider boundary is
+`ambiguous_preserved` and cannot be replayed. Because the bridge durably writes
+the strict message acknowledgement before returning, reconciliation can adopt
+it after response loss or park and finish delivery without duplicate provider
+I/O.
 
 Provider contracts are pinned: Codex resume is exactly
 `codex resume <id>` / `codex exec resume <id>`; Kimi is

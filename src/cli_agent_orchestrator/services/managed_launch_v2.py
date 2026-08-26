@@ -3022,6 +3022,393 @@ def _is_retryable_refusal(admission: Optional[dict[str, Any]], delivery_id: str)
     )
 
 
+ROUTE_OBSERVATION_WAKE_ADMISSION_KIND = "route-observation-wake-v1"
+
+
+def _inbox_admission_identity(
+    *,
+    message_id: Any,
+    message_sha256: str,
+    sender_id: str,
+    sender_generation: str,
+    message_created_at: str,
+    route_observation_operation_id: str,
+    route_observation_request_digest: str,
+    route_observation_result_kind: str,
+    native_binding_digest_value: str,
+    receiver_id: str,
+    receiver_generation: str,
+    expected_provider: str,
+    expected_provider_session_id: str,
+    expected_execution_mode: str,
+) -> dict[str, Any]:
+    return {
+        "admission_kind": ROUTE_OBSERVATION_WAKE_ADMISSION_KIND,
+        "delivery_id": str(message_id),
+        "message_id": str(message_id),
+        "message_sha256": message_sha256,
+        "sender_id": sender_id,
+        "sender_generation": sender_generation,
+        "message_created_at": message_created_at,
+        "route_observation_operation_id": route_observation_operation_id,
+        "route_observation_request_digest": route_observation_request_digest,
+        "route_observation_result_kind": route_observation_result_kind,
+        "native_binding_digest": native_binding_digest_value,
+        "receiver_id": receiver_id,
+        "receiver_generation": receiver_generation,
+        "expected_provider": expected_provider,
+        "expected_provider_session_id": expected_provider_session_id,
+        "expected_execution_mode": expected_execution_mode,
+    }
+
+
+def _assert_same_inbox_admission_identity(
+    existing: dict[str, Any], identity: dict[str, Any]
+) -> None:
+    mismatches = [key for key, value in identity.items() if existing.get(key) != value]
+    if mismatches:
+        raise ManagedLaunchConflict(
+            "inbox message is already bound to a different first admission identity: "
+            f"{sorted(mismatches)}"
+        )
+
+
+def claim_route_observation_wake_admission(
+    reservation_id: str,
+    *,
+    message_id: Any,
+    message: str,
+    message_sha256: str,
+    sender_id: str,
+    sender_generation: str,
+    message_created_at: str,
+    route_observation_operation_id: str,
+    route_observation_request_digest: str,
+    route_observation_result_kind: str,
+    expected_generation: str,
+    expected_provider: str,
+    expected_provider_session_id: str,
+    expected_execution_mode: str,
+) -> tuple[dict[str, Any], bool]:
+    """Claim a bound ACP generation's one admission for its exact inbox wake.
+
+    Route-completion requesters intentionally launch without a task so this
+    exact-generation inbox message can be their first provider turn.  The
+    reservation CAS is still the single admission authority: claiming it
+    before bridge I/O excludes the ordinary ``/admit`` path, while the bridge's
+    existing message journal owns provider-bound replay and ambiguity.
+    """
+
+    if not isinstance(message, str) or not message:
+        raise ManagedLaunchConflict("inbox first admission requires a non-empty message")
+    if hashlib.sha256(message.encode("utf-8")).hexdigest() != message_sha256:
+        raise ManagedLaunchConflict("message_sha256 does not match inbox message bytes")
+    required = {
+        "message_id": str(message_id),
+        "sender_id": sender_id,
+        "sender_generation": sender_generation,
+        "message_created_at": message_created_at,
+        "route_observation_operation_id": route_observation_operation_id,
+        "route_observation_request_digest": route_observation_request_digest,
+        "route_observation_result_kind": route_observation_result_kind,
+        "expected_generation": expected_generation,
+        "expected_provider": expected_provider,
+        "expected_provider_session_id": expected_provider_session_id,
+        "expected_execution_mode": expected_execution_mode,
+    }
+    missing = [key for key, value in required.items() if not isinstance(value, str) or not value]
+    if missing:
+        raise ManagedLaunchConflict(
+            f"inbox first admission lacks exact identity field(s): {sorted(missing)}"
+        )
+    if expected_execution_mode != em.ACP:
+        raise ManagedLaunchConflict("inbox first admission requires expected_execution_mode 'acp'")
+    try:
+        with database.SessionLocal() as db:
+            row = _query(db, reservation_id)
+            if row is None:
+                raise ManagedLaunchNotFound(f"v2 reservation not found: {reservation_id}")
+            if em.mode_of_record(_mode_record(row)) != em.ACP:
+                raise ManagedLaunchConflict("inbox first admission is available only to ACP rows")
+            if row.generation != expected_generation or row.provider != expected_provider:
+                raise ManagedLaunchConflict(
+                    "inbox first admission does not match the exact receiver generation/provider"
+                )
+            binding = _parse_json(row.binding_json, {}) or {}
+            if binding.get("native_session_id") != expected_provider_session_id:
+                raise ManagedLaunchConflict(
+                    "inbox first admission does not match the bound provider session"
+                )
+            digest = native_binding_digest(_row_dict(row))
+            if digest is None:
+                raise ManagedLaunchConflict(
+                    "inbox first admission requires the journaled native_bound reference"
+                )
+            try:
+                stable_agent_roster.assert_admission_ready(
+                    terminal_id=row.terminal_id, generation=row.generation, db=db
+                )
+            except stable_agent_roster.StableAgentAdmissionRefused as exc:
+                raise ManagedLaunchConflict(
+                    f"inbox first admission refused before the stable-agent binding is durable: {exc}"
+                ) from exc
+            except stable_agent_roster.StableAgentError as exc:
+                raise ManagedLaunchUnavailable(
+                    f"stable-agent roster refused the inbox admission gate: {exc}"
+                ) from exc
+
+            identity = _inbox_admission_identity(
+                message_id=message_id,
+                message_sha256=message_sha256,
+                sender_id=sender_id,
+                sender_generation=sender_generation,
+                message_created_at=message_created_at,
+                route_observation_operation_id=route_observation_operation_id,
+                route_observation_request_digest=route_observation_request_digest,
+                route_observation_result_kind=route_observation_result_kind,
+                native_binding_digest_value=digest,
+                receiver_id=row.terminal_id,
+                receiver_generation=row.generation,
+                expected_provider=expected_provider,
+                expected_provider_session_id=expected_provider_session_id,
+                expected_execution_mode=expected_execution_mode,
+            )
+            prior_admission_json = row.admission_json
+            existing = _parse_json(prior_admission_json, None)
+            retrying_refusal = bool(
+                isinstance(existing, dict)
+                and existing.get("admission_kind") == ROUTE_OBSERVATION_WAKE_ADMISSION_KIND
+                and existing.get("status") == "refused"
+                and existing.get("retryable") is True
+            )
+            if existing is not None:
+                _assert_same_inbox_admission_identity(existing, identity)
+            admission = {**identity, "status": "io-attempted", "attempted_at": _now()}
+            updated = (
+                db.query(database.ManagedLaunchV2ReservationModel)
+                .filter(
+                    database.ManagedLaunchV2ReservationModel.reservation_id == reservation_id,
+                    database.ManagedLaunchV2ReservationModel.state == "bound",
+                    database.ManagedLaunchV2ReservationModel.binding_json.is_not(None),
+                    (
+                        database.ManagedLaunchV2ReservationModel.admission_json
+                        == prior_admission_json
+                        if retrying_refusal
+                        else database.ManagedLaunchV2ReservationModel.admission_json.is_(None)
+                    ),
+                )
+                .update(
+                    {
+                        "admission_json": _canonical_json(admission),
+                        "state": "admitting",
+                        "updated_at": _now(),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            db.commit()
+            row = _query(db, reservation_id)
+            if updated == 1:
+                return _row_dict(row), True
+            contender = _parse_json(row.admission_json, None)
+            if contender is not None:
+                _assert_same_inbox_admission_identity(contender, identity)
+                return _row_dict(row), False
+            raise ManagedLaunchConflict(
+                f"inbox first admission requires state 'bound', not {row.state!r}"
+            )
+    except ManagedLaunchError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ManagedLaunchUnavailable(f"inbox admission claim failed: {exc}") from exc
+
+
+def complete_route_observation_wake_admission(
+    reservation_id: str,
+    message_id: Any,
+    provider_receipt: dict[str, Any],
+) -> dict[str, Any]:
+    """Complete the claimed first inbox turn from its strict provider ack."""
+
+    from cli_agent_orchestrator.services import model_turn_receipt_contract
+
+    try:
+        with database.SessionLocal() as db:
+            row = _query(db, reservation_id)
+            if row is None:
+                raise ManagedLaunchNotFound(f"v2 reservation not found: {reservation_id}")
+            admission = _parse_json(row.admission_json, None)
+            if (
+                not isinstance(admission, dict)
+                or admission.get("admission_kind") != ROUTE_OBSERVATION_WAKE_ADMISSION_KIND
+                or admission.get("message_id") != str(message_id)
+            ):
+                raise ManagedLaunchConflict(
+                    "message_id does not match the claimed inbox first admission"
+                )
+            expected = {
+                "message_id": admission["message_id"],
+                "message_sha256": admission["message_sha256"],
+                "message_created_at": admission["message_created_at"],
+                "sender_id": admission["sender_id"],
+                "sender_generation": admission["sender_generation"],
+                "receiver_id": row.terminal_id,
+                "receiver_generation": row.generation,
+                "provider": row.provider,
+                "provider_session_id": admission["expected_provider_session_id"],
+            }
+            try:
+                strict = model_turn_receipt_contract.validate_receipt(
+                    provider_receipt, expected=expected
+                )
+            except model_turn_receipt_contract.ReceiptValidationError as exc:
+                raise ManagedLaunchConflict(
+                    f"inbox first admission receipt is not the exact provider ack: {exc}"
+                ) from exc
+            if admission.get("status") == "admitted":
+                if admission.get("provider_submission_receipt") != strict:
+                    raise ManagedLaunchConflict(
+                        "provider acknowledgement changed after inbox admission"
+                    )
+                _roster_mark_admitted_best_effort(row, db)
+                db.commit()
+                return _row_dict(row)
+            if row.state != "admitting" or admission.get("status") not in {
+                "io-attempted",
+                "ambiguous_preserved",
+            }:
+                raise ManagedLaunchConflict(
+                    f"inbox admission cannot complete from state {row.state!r}/"
+                    f"{admission.get('status')!r}"
+                )
+            admission["provider_submission_receipt"] = strict
+            admission["status"] = "admitted"
+            admission["admitted_at"] = _now()
+            row.admission_json = _canonical_json(admission)
+            row.state = "admitted"
+            row.updated_at = _now()
+            _roster_mark_admitted_best_effort(row, db)
+            db.commit()
+            db.refresh(row)
+            return _row_dict(row)
+    except ManagedLaunchError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ManagedLaunchUnavailable(f"inbox admission completion failed: {exc}") from exc
+
+
+def refuse_route_observation_wake_admission(
+    reservation_id: str,
+    message_id: Any,
+    reason: str,
+    detail: str,
+    *,
+    retryable: bool,
+) -> dict[str, Any]:
+    """Record a proven pre-provider refusal without reopening ordinary admit."""
+
+    try:
+        with database.SessionLocal() as db:
+            row = _query(db, reservation_id)
+            if row is None:
+                raise ManagedLaunchNotFound(f"v2 reservation not found: {reservation_id}")
+            admission = _parse_json(row.admission_json, None)
+            if (
+                not isinstance(admission, dict)
+                or admission.get("admission_kind") != ROUTE_OBSERVATION_WAKE_ADMISSION_KIND
+                or admission.get("message_id") != str(message_id)
+            ):
+                raise ManagedLaunchConflict(
+                    "message_id does not match the claimed inbox first admission"
+                )
+            if admission.get("status") in {"admitted", "ambiguous_preserved"}:
+                return _row_dict(row)
+            admission.update(
+                {
+                    "status": "refused",
+                    "refusal_reason": reason,
+                    "retryable": retryable,
+                    "detail": detail,
+                    "updated_at": _now(),
+                }
+            )
+            row.admission_json = _canonical_json(admission)
+            row.state = "bound" if retryable else "admitting"
+            row.updated_at = _now()
+            db.commit()
+            db.refresh(row)
+            return _row_dict(row)
+    except ManagedLaunchError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ManagedLaunchUnavailable(
+            f"inbox admission refusal persistence failed: {exc}"
+        ) from exc
+
+
+def assert_route_observation_wake_admission_current(
+    reservation_id: str,
+    *,
+    message_id: Any,
+    route_observation_operation_id: str,
+    route_observation_request_digest: str,
+    route_observation_result_kind: str,
+    expected_generation: str,
+    expected_provider: str,
+    expected_provider_session_id: str,
+    expected_execution_mode: str,
+) -> dict[str, Any]:
+    """Recheck the exact special admission immediately before provider I/O."""
+
+    try:
+        with database.SessionLocal() as db:
+            row = _query(db, reservation_id)
+            if row is None:
+                raise ManagedLaunchNotFound(f"v2 reservation not found: {reservation_id}")
+            admission = _parse_json(row.admission_json, None)
+            expected = {
+                "message_id": str(message_id),
+                "route_observation_operation_id": route_observation_operation_id,
+                "route_observation_request_digest": route_observation_request_digest,
+                "route_observation_result_kind": route_observation_result_kind,
+                "receiver_generation": expected_generation,
+                "expected_provider": expected_provider,
+                "expected_provider_session_id": expected_provider_session_id,
+                "expected_execution_mode": expected_execution_mode,
+            }
+            if (
+                row.state != "admitting"
+                or not isinstance(admission, dict)
+                or admission.get("admission_kind") != ROUTE_OBSERVATION_WAKE_ADMISSION_KIND
+                or admission.get("status") != "io-attempted"
+            ):
+                raise ManagedLaunchConflict(
+                    "route-observation wake is not the current provider-I/O admission"
+                )
+            mismatches = [key for key, value in expected.items() if admission.get(key) != value]
+            binding = _parse_json(row.binding_json, {}) or {}
+            if row.generation != expected_generation:
+                mismatches.append("reservation_generation")
+            if row.provider != expected_provider:
+                mismatches.append("reservation_provider")
+            if binding.get("native_session_id") != expected_provider_session_id:
+                mismatches.append("bound_provider_session")
+            if em.mode_of_record(_mode_record(row)) != expected_execution_mode:
+                mismatches.append("reservation_execution_mode")
+            if mismatches:
+                raise ManagedLaunchConflict(
+                    "route-observation wake provider admission changed: "
+                    f"{sorted(set(mismatches))}"
+                )
+            return _row_dict(row)
+    except ManagedLaunchError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ManagedLaunchUnavailable(
+            f"route-observation wake provider admission check failed: {exc}"
+        ) from exc
+
+
 def claim_admission(
     reservation_id: str, request: ManagedLaunchV2AdmitRequest
 ) -> tuple[dict[str, Any], bool]:

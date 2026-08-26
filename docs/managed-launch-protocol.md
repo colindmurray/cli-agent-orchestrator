@@ -54,6 +54,30 @@ All launch and admission claims use conditional database updates, so concurrent
 server requests have exactly one I/O owner. Observations use compare-and-swap
 appends so concurrent evidence is not lost.
 
+## Managed-launch v2 route-wake admission
+
+Managed-launch v2 retains one admission slot per reservation but has two
+distinct admission shapes. Ordinary task admission continues through
+`POST .../admit`. A bound, zero-task ACP requester may instead use the exact
+terminal M10 route-observation wake as its first admission. That record is
+marked `admission_kind: route-observation-wake-v1` and binds the inbox message,
+both terminal generations, the route-observation operation/request/result, the
+native binding digest, and the exact provider session and execution mode.
+
+The special claim moves `bound → admitting` by reservation CAS inside the
+generation-fence critical section before provider I/O. Once it owns the slot,
+ordinary `/admit` cannot replace it; only the same special identity may retry a
+retryable pre-provider refusal. A proven W13 or successor fence is a permanent
+zero-I/O refusal. Any uncertain failure after the boundary is
+`ambiguous_preserved` and is not replayed.
+
+The bridge writes the strict message acknowledgement before replying. An exact
+durable acknowledgement can therefore complete the special admission after a
+lost response, including during parked/stale inbox reconciliation, without new
+provider I/O. A requester that was already admitted through ordinary `/admit`
+keeps its ordinary admission record and receives later inbox messages,
+including an M10 wake, through ordinary managed inbox delivery.
+
 ## Codex trust and route proof
 
 Managed Codex launches require `trusted_project_root` to equal the existing,

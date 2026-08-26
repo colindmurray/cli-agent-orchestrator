@@ -5,10 +5,12 @@ Consumer: terminal.{id}.status
 
 import asyncio
 import contextlib
+import json
 import logging
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from itertools import groupby
 from typing import Any, Optional
 
@@ -34,6 +36,7 @@ from cli_agent_orchestrator.services import (
     callback_recovery,
     control_input_service,
     managed_launch,
+    route_observation,
     terminal_service,
     wake_receipts,
 )
@@ -222,6 +225,110 @@ class InboxService:
     def _managed_delivery_lock(message_id: int) -> threading.Lock:
         """One bounded process-local serialization stripe for one inbox id."""
         return _MANAGED_DELIVERY_LOCKS[message_id % len(_MANAGED_DELIVERY_LOCKS)]
+
+    @staticmethod
+    def _is_route_wake_candidate(message: InboxMessage) -> bool:
+        """Whether the inbox bytes claim the closed M10 wake schema."""
+        try:
+            payload = json.loads(message.message)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(payload, dict)
+            and set(payload) == set(route_observation.WAKE_FIELDS)
+            and payload.get("wake_version") == route_observation.WAKE_SCHEMA_VERSION
+        )
+
+    @staticmethod
+    def _reconcile_acknowledged_route_wake(
+        message: InboxMessage, managed_identity: dict[str, Any]
+    ) -> bool:
+        """Terminalize an exact M10 wake from its already-durable provider ack.
+
+        Stop/replacement may win immediately after the bridge publishes its
+        strict acknowledgement but before the delivering inbox sweep changes
+        PENDING to DELIVERED.  The fence proves no *new* provider I/O is legal;
+        it does not erase an effect that already has exact durable evidence.
+        """
+        from cli_agent_orchestrator.services import (
+            companion_receipts,
+            managed_launch_v2,
+            model_turn_receipt_contract,
+        )
+
+        if not InboxService._is_route_wake_candidate(message):
+            return False
+        route_wake = route_observation.resolve_pending_wake(message.id)
+        if route_wake is None:
+            return False
+        wake = route_wake["wake"]
+        receiver_generation = wake["receiver_generation"]
+        receipt = companion_receipts.get_strict_message_ack(
+            wake["receiver_id"], receiver_generation, message.id
+        )
+        if receipt is None:
+            return False
+        created_at = wake["created_at"]
+        if not isinstance(created_at, datetime):
+            raise route_observation.RouteObservationConflict(
+                f"route observation {route_wake['operation_id']} wake has no datetime creation fact"
+            )
+        if created_at.utcoffset() is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        canonical_created_at = created_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        strict = model_turn_receipt_contract.validate_receipt(
+            receipt,
+            expected={
+                "message_id": str(message.id),
+                "message_sha256": wake["message_sha256"],
+                "message_created_at": canonical_created_at,
+                "sender_id": wake["sender_id"],
+                "sender_generation": wake["sender_generation"],
+                "receiver_id": wake["receiver_id"],
+                "receiver_generation": receiver_generation,
+            },
+        )
+
+        # When the exact old generation is still addressable, converge its
+        # reservation too.  A stale-generation sweep may only retain the
+        # inbox/receipt evidence after succession; the strict receipt remains
+        # sufficient delivery truth and must not be rewritten as failure.
+        if (
+            managed_identity.get("vintage") == "v2"
+            and managed_identity.get("generation") == receiver_generation
+        ):
+            reservation_id = managed_identity.get("reservation_id")
+            if not isinstance(reservation_id, str) or not reservation_id:
+                raise managed_launch.ManagedLaunchConflict(
+                    "acknowledged route wake has no exact v2 reservation identity"
+                )
+            admission = managed_launch_v2.get(reservation_id).get("admission") or {}
+            expected_admission = {
+                "admission_kind": managed_launch_v2.ROUTE_OBSERVATION_WAKE_ADMISSION_KIND,
+                "message_id": str(message.id),
+                "route_observation_operation_id": route_wake["operation_id"],
+                "route_observation_request_digest": route_wake["request_digest"],
+                "route_observation_result_kind": route_wake["state"],
+            }
+            if {key: admission.get(key) for key in expected_admission} != expected_admission:
+                raise managed_launch.ManagedLaunchConflict(
+                    "strict route-wake acknowledgement contradicts the v2 admission claim"
+                )
+            managed_launch_v2.complete_route_observation_wake_admission(
+                reservation_id, message.id, strict
+            )
+
+        # A concurrent evidence-aware sweep may have won this CAS already.
+        # Either way, this caller has exact provider evidence and must never
+        # follow it with the unconditional FAILED transition below.
+        update_message_status(message.id, MessageStatus.DELIVERED)
+        logger.info(
+            "Reconciled acknowledged route-observation wake %s for %s/%s",
+            message.id,
+            wake["receiver_id"],
+            receiver_generation,
+        )
+        return True
 
     async def run(self, registry: PluginRegistry | None = None) -> None:
         self._loop = asyncio.get_running_loop()
@@ -721,6 +828,8 @@ class InboxService:
                 is not None
             ):
                 for message in messages:
+                    if self._reconcile_acknowledged_route_wake(message, managed_identity):
+                        continue
                     update_message_status(message.id, MessageStatus.FAILED)
                 logger.info(
                     "Terminalized %d queued inbox row(s) for parked generation %s/%s",
@@ -747,6 +856,8 @@ class InboxService:
                             generation,
                         )
                     elif expected is not None and expected != generation:
+                        if self._reconcile_acknowledged_route_wake(message, managed_identity):
+                            continue
                         update_message_status(message.id, MessageStatus.FAILED)
                         logger.info(
                             "Terminalized old-generation inbox row %s for %s: expected %s, live %s",
@@ -811,6 +922,9 @@ class InboxService:
                     # the provider's durable message-id journal.
                     if not is_message_pending(message.id):
                         continue
+                    route_wake = None
+                    if self._is_route_wake_candidate(message):
+                        route_wake = route_observation.resolve_pending_wake(message.id)
                     if (
                         message.is_identity_bound is True
                         and not callback_recovery.current_delivery_binding_matches(message)
@@ -867,8 +981,18 @@ class InboxService:
                             expected_execution_mode=message.expected_execution_mode,
                             recovery_operation_key=message.callback_recovery_key,
                         )
+                    elif route_wake is not None:
+                        bridged = managed_launch.deliver_inbox_via_bridge(
+                            terminal_id,
+                            message_id=message.id,
+                            message=message.message,
+                            sender_id=message.sender_id,
+                            sender_generation=message.sender_generation,
+                            message_created_at=message.created_at,
+                            route_observation_operation_id=route_wake["operation_id"],
+                        )
                     else:
-                        bridge_kwargs = {}
+                        bridge_kwargs: dict[str, Any] = {}
                         if message.callback_completion_key is not None:
                             bridge_kwargs["expected_generation"] = (
                                 message.expected_receiver_generation

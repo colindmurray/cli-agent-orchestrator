@@ -494,6 +494,16 @@ class BridgeError(RuntimeError):
     pass
 
 
+class BridgeRequestRefused(BridgeError):
+    """A structured bridge refusal that proves provider I/O never began."""
+
+    def __init__(self, code: str, detail: str, *, provider_io_started: bool):
+        super().__init__(f"{code}: {detail}")
+        self.code = code
+        self.detail = detail
+        self.provider_io_started = provider_io_started
+
+
 class SubmitUncertain(BridgeError):
     """The provider-boundary outcome is unknowable.
 
@@ -1487,7 +1497,17 @@ def request_bridge(
     if not isinstance(response, dict):
         raise BridgeError("managed provider bridge returned a non-object")
     if response.get("ok") is not True:
-        raise BridgeError(str(response.get("error") or "managed provider bridge rejected request"))
+        error = str(response.get("error") or "managed provider bridge rejected request")
+        error_code = response.get("error_code")
+        error_detail = response.get("error_detail")
+        provider_io_started = response.get("provider_io_started")
+        if isinstance(error_code, str) and error_code and isinstance(provider_io_started, bool):
+            raise BridgeRequestRefused(
+                error_code,
+                error_detail if isinstance(error_detail, str) and error_detail else error,
+                provider_io_started=provider_io_started,
+            )
+        raise BridgeError(error)
     return response
 
 
@@ -2781,12 +2801,56 @@ class _ProviderSession:
                 if isinstance(recovery_operation_key, str) and recovery_operation_key:
                     from cli_agent_orchestrator.services import callback_recovery
 
-                    callback_recovery.assert_provider_delivery_admissible(
-                        recovery_operation_key,
-                        terminal_id=self.request["terminal_id"],
-                        generation=self.request["generation"],
-                        message_id=message_id,
-                    )
+                    try:
+                        callback_recovery.assert_provider_delivery_admissible(
+                            recovery_operation_key,
+                            terminal_id=self.request["terminal_id"],
+                            generation=self.request["generation"],
+                            message_id=message_id,
+                        )
+                    except callback_recovery.CallbackRecoveryError as exc:
+                        raise SessionOperationRefused(
+                            "recovery-lifecycle-fenced-before-provider-io",
+                            str(exc),
+                        ) from exc
+                route_operation_id = command.get("route_observation_operation_id")
+                if isinstance(route_operation_id, str) and route_operation_id:
+                    from cli_agent_orchestrator.services import managed_launch_v2
+
+                    route_request_digest = command.get("route_observation_request_digest")
+                    route_result_kind = command.get("route_observation_result_kind")
+                    if (
+                        not isinstance(route_request_digest, str)
+                        or not route_request_digest
+                        or not isinstance(route_result_kind, str)
+                        or not route_result_kind
+                    ):
+                        raise SessionOperationRefused(
+                            "route-observation-wake-fenced-before-provider-io",
+                            "route-observation wake command omitted its exact operation facts",
+                        )
+                    try:
+                        managed_launch_v2.assert_route_observation_wake_admission_current(
+                            self.request["reservation_id"],
+                            message_id=message_id,
+                            route_observation_operation_id=route_operation_id,
+                            route_observation_request_digest=route_request_digest,
+                            route_observation_result_kind=route_result_kind,
+                            expected_generation=self.request["generation"],
+                            expected_provider=self.provider,
+                            expected_provider_session_id=self.provider_session_id,
+                            expected_execution_mode=(self.request.get("execution_mode") or "acp"),
+                        )
+                    except managed_launch_v2.ManagedLaunchUnavailable as exc:
+                        raise SessionOperationRefused(
+                            "route-observation-wake-unavailable-before-provider-io",
+                            str(exc),
+                        ) from exc
+                    except managed_launch_v2.ManagedLaunchError as exc:
+                        raise SessionOperationRefused(
+                            "route-observation-wake-fenced-before-provider-io",
+                            str(exc),
+                        ) from exc
                 expected_live = {
                     "expected_provider": self.provider,
                     "expected_provider_session_id": self.provider_session_id,
@@ -4692,7 +4756,7 @@ def _serve(
                                         }
                                     ),
                                 )
-                            raise BridgeError(f"{exc.code}: {exc.detail}") from exc
+                            raise
                         except SubmitUncertain as exc:
                             # Response loss after the provider boundary:
                             # record submit-ambiguous durably before
@@ -4821,7 +4885,16 @@ def _serve(
                     else:
                         raise BridgeError("unsupported managed bridge operation")
                 except Exception as exc:  # noqa: BLE001 - structured socket failure
-                    response = {"ok": False, "error": str(exc)}
+                    if isinstance(exc, SessionOperationRefused):
+                        response = {
+                            "ok": False,
+                            "error": f"{exc.code}: {exc.detail}",
+                            "error_code": exc.code,
+                            "error_detail": exc.detail,
+                            "provider_io_started": False,
+                        }
+                    else:
+                        response = {"ok": False, "error": str(exc)}
                 _send_socket_response(connection, response)
     except Exception as exc:  # noqa: BLE001 - persist fail-closed state
         failure = _launch_failure(

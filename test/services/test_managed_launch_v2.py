@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import subprocess
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from datetime import datetime, timezone
 
 import pytest
 
@@ -19,13 +21,22 @@ from cli_agent_orchestrator.models.managed_launch_v2 import (
     ManagedLaunchV2ReserveRequest,
 )
 from cli_agent_orchestrator.services import codex_native_bootstrap as cnb
+from cli_agent_orchestrator.services import (
+    companion_receipts,
+    managed_launch,
+)
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
 from cli_agent_orchestrator.services import managed_provider_bridge as bridge
-from cli_agent_orchestrator.services import terminal_projection
+from cli_agent_orchestrator.services import (
+    model_turn_receipt_contract,
+    route_observation,
+    terminal_projection,
+)
 from cli_agent_orchestrator.services.managed_launch import (
     ManagedLaunchConflict,
     ManagedLaunchNotFound,
     ManagedLaunchNotReady,
+    ManagedLaunchUnavailable,
 )
 from cli_agent_orchestrator.services.managed_provider_bridge import BRIDGE_VERSION
 
@@ -685,6 +696,78 @@ def _admit_request(record, digest, **changes):
     return ManagedLaunchV2AdmitRequest(**payload)
 
 
+def _bound_acp_requester(worktree, tmp_path, monkeypatch):
+    request = _reserve_request(worktree, tmp_path, execution_mode="acp")
+    record, _ = v2.reserve(request)
+    v2.claim_launch(record["reservation_id"])
+    _ready_bridge_state(record, monkeypatch)
+    bound = v2.bind_native(record["reservation_id"], _bind_request(record))
+    assert bound["state"] == "bound"
+    assert bound["execution_mode"] == "acp"
+    assert bound["admission"] is None
+    return request, bound
+
+
+def _strict_inbox_turn_receipt(
+    bound,
+    *,
+    message_id,
+    message,
+    message_created_at,
+    sender_id,
+    sender_generation,
+):
+    return model_turn_receipt_contract.build_receipt(
+        message_id=message_id,
+        message_sha256=hashlib.sha256(message.encode("utf-8")).hexdigest(),
+        message_created_at=message_created_at,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        receiver_id=bound["terminal_id"],
+        receiver_generation=bound["generation"],
+        provider=bound["provider"],
+        provider_session_id=bound["binding"]["native_session_id"],
+        provider_turn_id="turn-inbox-first-and-only",
+        submitted_at=datetime(2026, 8, 25, 12, 35, tzinfo=timezone.utc),
+    )
+
+
+def _expect_exact_route_wake(
+    monkeypatch,
+    *,
+    operation_id,
+    bound,
+    message_id,
+    message,
+    sender_id,
+    sender_generation,
+    created_at,
+):
+    calls = []
+
+    def resolve(observed_message_id):
+        assert observed_message_id == message_id
+        calls.append(observed_message_id)
+        return {
+            "operation_id": operation_id,
+            "request_digest": "7" * 64,
+            "state": route_observation.RESULT_OBSERVED_CLOSED,
+            "wake": {
+                "message_id": message_id,
+                "message": message,
+                "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+                "sender_id": sender_id,
+                "sender_generation": sender_generation,
+                "receiver_id": bound["terminal_id"],
+                "receiver_generation": bound["generation"],
+                "created_at": created_at,
+            },
+        }
+
+    monkeypatch.setattr(route_observation, "resolve_pending_wake", resolve)
+    return calls
+
+
 def test_admit_without_native_bound_sends_zero_task_bytes(isolated_memory_db, worktree, tmp_path):
     request = _reserve_request(worktree, tmp_path)
     record, _ = v2.reserve(request)
@@ -748,6 +831,571 @@ def test_admission_lifecycle_and_ambiguity(isolated_memory_db, worktree, tmp_pat
         record2["reservation_id"], admit2.delivery_id, "bridge died after accept"
     )
     assert ambiguous["admission"]["status"] == "ambiguous_preserved"
+
+
+def test_bound_acp_inbox_wake_is_the_generation_first_and_only_provider_turn(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    """The zero-task requester pays only when its exact recovery wake arrives."""
+    request, bound = _bound_acp_requester(worktree, tmp_path, monkeypatch)
+    monkeypatch.setattr(companion_receipts, "COMPANION_DIR", tmp_path / "companion")
+    message_id = 71
+    message = '{"kind":"route-observation","case":"positive-path"}'
+    created_at = datetime(2026, 8, 25, 12, 34, 56, tzinfo=timezone.utc)
+    sender_id = "cafebabe"
+    sender_generation = str(uuid.uuid4())
+    route_operation_id = str(uuid.uuid4())
+    receipt = _strict_inbox_turn_receipt(
+        bound,
+        message_id=message_id,
+        message=message,
+        message_created_at=created_at,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+    )
+    binding_digest = v2.native_binding_digest(bound)
+    assert binding_digest is not None
+    bridge_calls = []
+    route_checks = _expect_exact_route_wake(
+        monkeypatch,
+        operation_id=route_operation_id,
+        bound=bound,
+        message_id=message_id,
+        message=message,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        created_at=created_at,
+    )
+
+    def accept_exact_wake(reservation_id, command, *, timeout):
+        # The admission CAS is durable before provider I/O. A process death
+        # here must leave enough identity to adopt only this exact wake.
+        durable = v2.get(reservation_id)
+        assert durable["state"] == "admitting"
+        admission = durable["admission"]
+        assert admission["status"] == "io-attempted"
+        expected_identity = {
+            "admission_kind": "route-observation-wake-v1",
+            "message_id": str(message_id),
+            "message_sha256": receipt["message_sha256"],
+            "message_created_at": receipt["message_created_at"],
+            "sender_id": sender_id,
+            "sender_generation": sender_generation,
+            "route_observation_operation_id": route_operation_id,
+            "route_observation_request_digest": "7" * 64,
+            "route_observation_result_kind": (route_observation.RESULT_OBSERVED_CLOSED),
+            "native_binding_digest": binding_digest,
+            "expected_provider": bound["provider"],
+            "expected_provider_session_id": bound["binding"]["native_session_id"],
+            "expected_execution_mode": "acp",
+            "receiver_id": bound["terminal_id"],
+            "receiver_generation": bound["generation"],
+        }
+        assert {key: admission.get(key) for key in expected_identity} == expected_identity
+        assert command["message_id"] == str(message_id)
+        assert command["message_sha256"] == receipt["message_sha256"]
+        bridge_calls.append(command)
+        # This is the real bridge durability order: strict companion ack
+        # first, socket response second.
+        companion_receipts.record_message_ack(
+            bound["terminal_id"],
+            bound["generation"],
+            message_id=message_id,
+            ack=receipt,
+        )
+        return {"ok": True, "receipt": receipt}
+
+    monkeypatch.setattr(bridge, "request_bridge", accept_exact_wake)
+    delivered = managed_launch.deliver_inbox_via_bridge(
+        bound["terminal_id"],
+        message_id=message_id,
+        message=message,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        message_created_at=created_at,
+        expected_generation=bound["generation"],
+        expected_provider=bound["provider"],
+        expected_provider_session_id=bound["binding"]["native_session_id"],
+        expected_execution_mode="acp",
+        route_observation_operation_id=route_operation_id,
+    )
+
+    assert delivered is True
+    assert len(bridge_calls) == 1
+    assert len(route_checks) == 1
+    admitted = v2.get(request.reservation_id)
+    assert admitted["state"] == "admitted"
+    assert admitted["admission"]["admission_kind"] == "route-observation-wake-v1"
+    assert admitted["admission"]["message_id"] == str(message_id)
+    assert admitted["admission"]["provider_submission_receipt"] == receipt
+    assert (
+        companion_receipts.get_strict_message_ack(
+            bound["terminal_id"], bound["generation"], message_id
+        )
+        == receipt
+    )
+
+    # The reservation's immutable ordinary delivery id cannot open a second
+    # paid turn after the inbox wake occupied the one admission slot.
+    monkeypatch.setattr(
+        bridge,
+        "request_bridge",
+        lambda *_args, **_kwargs: pytest.fail("ordinary admission must conflict before I/O"),
+    )
+    with pytest.raises(ManagedLaunchConflict):
+        asyncio.run(
+            v2.admit_reserved(
+                request.reservation_id,
+                _admit_request(bound, binding_digest),
+            )
+        )
+    assert v2.get(request.reservation_id)["admission"]["message_id"] == str(message_id)
+
+
+def test_admitted_acp_route_wake_uses_ordinary_bridge_delivery_without_readmission(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    """An ordinary admission stays authoritative for later M10 inbox delivery."""
+    request, bound = _bound_acp_requester(worktree, tmp_path, monkeypatch)
+    binding_digest = v2.native_binding_digest(bound)
+    assert binding_digest is not None
+    ordinary_receipt = {
+        "receipt_id": "turn-ordinary-admission",
+        "provider_session_id": bound["binding"]["native_session_id"],
+        "provider_turn_id": "turn-ordinary-admission",
+        "provider_receipt_kind": "codex-turn-start",
+    }
+
+    def accept_ordinary_admission(reservation_id, command, *, timeout):
+        assert reservation_id == request.reservation_id
+        assert command["op"] == "admit"
+        assert timeout == 120.0
+        return {"ok": True, "receipt": ordinary_receipt}
+
+    monkeypatch.setattr(bridge, "request_bridge", accept_ordinary_admission)
+    admitted = asyncio.run(
+        v2.admit_reserved(
+            request.reservation_id,
+            _admit_request(bound, binding_digest),
+        )
+    )
+    assert admitted["state"] == "admitted"
+    ordinary_admission = deepcopy(admitted["admission"])
+
+    message_id = 76
+    message = '{"kind":"route-observation","case":"already-admitted-requester"}'
+    created_at = datetime(2026, 8, 25, 12, 40, tzinfo=timezone.utc)
+    sender_id = "cafebabe"
+    sender_generation = str(uuid.uuid4())
+    route_operation_id = str(uuid.uuid4())
+    _expect_exact_route_wake(
+        monkeypatch,
+        operation_id=route_operation_id,
+        bound=bound,
+        message_id=message_id,
+        message=message,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        created_at=created_at,
+    )
+
+    special_claims = []
+    claim_route_wake = v2.claim_route_observation_wake_admission
+
+    def record_special_claim(*args, **kwargs):
+        special_claims.append((args, kwargs))
+        return claim_route_wake(*args, **kwargs)
+
+    bridge_deliveries = []
+
+    def accept_ordinary_delivery(reservation_id, command, *, timeout):
+        assert reservation_id == request.reservation_id
+        assert command["op"] == "deliver"
+        assert command["message_id"] == str(message_id)
+        assert timeout == 30.0
+        bridge_deliveries.append(command)
+        return {"ok": True}
+
+    monkeypatch.setattr(v2, "claim_route_observation_wake_admission", record_special_claim)
+    monkeypatch.setattr(bridge, "request_bridge", accept_ordinary_delivery)
+
+    delivered = managed_launch.deliver_inbox_via_bridge(
+        bound["terminal_id"],
+        message_id=message_id,
+        message=message,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        message_created_at=created_at,
+        expected_generation=bound["generation"],
+        expected_provider=bound["provider"],
+        expected_provider_session_id=bound["binding"]["native_session_id"],
+        expected_execution_mode="acp",
+        route_observation_operation_id=route_operation_id,
+    )
+
+    assert delivered is True
+    assert special_claims == []
+    assert len(bridge_deliveries) == 1
+    preserved = v2.get(request.reservation_id)
+    assert preserved["state"] == "admitted"
+    assert preserved["admission"] == ordinary_admission
+
+
+@pytest.mark.parametrize("admission_already_completed", [False, True])
+def test_bound_acp_inbox_retry_adopts_durable_strict_ack_without_provider_io(
+    isolated_memory_db,
+    worktree,
+    tmp_path,
+    monkeypatch,
+    admission_already_completed,
+):
+    """Lost bridge response converges from provider evidence, never a resend."""
+    request, bound = _bound_acp_requester(worktree, tmp_path, monkeypatch)
+    monkeypatch.setattr(companion_receipts, "COMPANION_DIR", tmp_path / "companion")
+    message_id = 72
+    message = '{"kind":"route-observation","case":"response-loss"}'
+    created_at = datetime(2026, 8, 25, 12, 34, 56, tzinfo=timezone.utc)
+    sender_id = "cafebabe"
+    sender_generation = str(uuid.uuid4())
+    route_operation_id = str(uuid.uuid4())
+    receipt = _strict_inbox_turn_receipt(
+        bound,
+        message_id=message_id,
+        message=message,
+        message_created_at=created_at,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+    )
+    claimed, should_send = v2.claim_route_observation_wake_admission(
+        request.reservation_id,
+        message_id=message_id,
+        message=message,
+        message_sha256=receipt["message_sha256"],
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        message_created_at=receipt["message_created_at"],
+        route_observation_operation_id=route_operation_id,
+        route_observation_request_digest="7" * 64,
+        route_observation_result_kind=route_observation.RESULT_OBSERVED_CLOSED,
+        expected_generation=bound["generation"],
+        expected_provider=bound["provider"],
+        expected_provider_session_id=bound["binding"]["native_session_id"],
+        expected_execution_mode="acp",
+    )
+    assert should_send is True
+    assert claimed["state"] == "admitting"
+    assert claimed["admission"]["status"] == "io-attempted"
+    companion_receipts.record_message_ack(
+        bound["terminal_id"],
+        bound["generation"],
+        message_id=message_id,
+        ack=receipt,
+    )
+    if admission_already_completed:
+        completed = v2.complete_route_observation_wake_admission(
+            request.reservation_id,
+            message_id,
+            receipt,
+        )
+        assert completed["state"] == "admitted"
+    route_checks = _expect_exact_route_wake(
+        monkeypatch,
+        operation_id=route_operation_id,
+        bound=bound,
+        message_id=message_id,
+        message=message,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        created_at=created_at,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "request_bridge",
+        lambda *_args, **_kwargs: pytest.fail("durable strict ack must be adopted, not resent"),
+    )
+
+    assert managed_launch.deliver_inbox_via_bridge(
+        bound["terminal_id"],
+        message_id=message_id,
+        message=message,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        message_created_at=created_at,
+        expected_generation=bound["generation"],
+        expected_provider=bound["provider"],
+        expected_provider_session_id=bound["binding"]["native_session_id"],
+        expected_execution_mode="acp",
+        route_observation_operation_id=route_operation_id,
+    )
+    # The strict provider ack is already durable, so reconciliation performs
+    # no new provider effect and must not depend on a now-terminal callback
+    # lifecycle still granting fresh admission.
+    assert route_checks == [message_id]
+    adopted = v2.get(request.reservation_id)
+    assert adopted["state"] == "admitted"
+    assert adopted["admission"]["admission_kind"] == "route-observation-wake-v1"
+    assert adopted["admission"]["provider_submission_receipt"] == receipt
+
+
+def test_bound_acp_inbox_adopts_ack_published_before_lost_bridge_response(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    """The response-loss handler adopts the ack written by the failed call."""
+    request, bound = _bound_acp_requester(worktree, tmp_path, monkeypatch)
+    monkeypatch.setattr(companion_receipts, "COMPANION_DIR", tmp_path / "companion")
+    message_id = 74
+    message = '{"kind":"route-observation","case":"ack-then-response-loss"}'
+    created_at = datetime(2026, 8, 25, 12, 34, 56, tzinfo=timezone.utc)
+    sender_id = "cafebabe"
+    sender_generation = str(uuid.uuid4())
+    route_operation_id = str(uuid.uuid4())
+    receipt = _strict_inbox_turn_receipt(
+        bound,
+        message_id=message_id,
+        message=message,
+        message_created_at=created_at,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+    )
+    route_checks = _expect_exact_route_wake(
+        monkeypatch,
+        operation_id=route_operation_id,
+        bound=bound,
+        message_id=message_id,
+        message=message,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        created_at=created_at,
+    )
+    bridge_calls = []
+
+    def publish_ack_then_lose_response(reservation_id, command, *, timeout):
+        bridge_calls.append((reservation_id, command, timeout))
+        claimed = v2.get(reservation_id)
+        assert claimed["state"] == "admitting"
+        assert claimed["admission"]["status"] == "io-attempted"
+        companion_receipts.record_message_ack(
+            bound["terminal_id"],
+            bound["generation"],
+            message_id=message_id,
+            ack=receipt,
+        )
+        raise RuntimeError("socket response lost after strict ack publication")
+
+    monkeypatch.setattr(bridge, "request_bridge", publish_ack_then_lose_response)
+    delivery = {
+        "terminal_id": bound["terminal_id"],
+        "message_id": message_id,
+        "message": message,
+        "sender_id": sender_id,
+        "sender_generation": sender_generation,
+        "message_created_at": created_at,
+        "expected_generation": bound["generation"],
+        "expected_provider": bound["provider"],
+        "expected_provider_session_id": bound["binding"]["native_session_id"],
+        "expected_execution_mode": "acp",
+        "route_observation_operation_id": route_operation_id,
+    }
+
+    assert managed_launch.deliver_inbox_via_bridge(**delivery)
+    assert len(bridge_calls) == 1
+    admitted = v2.get(request.reservation_id)
+    assert admitted["state"] == "admitted"
+    assert admitted["admission"]["status"] == "admitted"
+    assert admitted["admission"]["provider_submission_receipt"] == receipt
+
+    monkeypatch.setattr(
+        bridge,
+        "request_bridge",
+        lambda *_args, **_kwargs: pytest.fail("ack recovery retry must not enter provider I/O"),
+    )
+    assert managed_launch.deliver_inbox_via_bridge(**delivery)
+    assert len(bridge_calls) == 1
+    assert route_checks == [message_id, message_id]
+
+
+@pytest.mark.parametrize(
+    ("failed_prerequisite", "error_type", "error_match"),
+    (
+        ("declared-mode", ManagedLaunchConflict, "requires expected_execution_mode 'acp'"),
+        ("row-mode", ManagedLaunchConflict, "available only to ACP rows"),
+        ("generation", ManagedLaunchConflict, "exact receiver generation/provider"),
+        ("provider", ManagedLaunchConflict, "exact receiver generation/provider"),
+        ("provider-session", ManagedLaunchConflict, "bound provider session"),
+        ("native-bound-reference", ManagedLaunchConflict, "journaled native_bound reference"),
+        ("roster-refused", ManagedLaunchConflict, "stable-agent binding is durable"),
+        ("roster-unreadable", ManagedLaunchUnavailable, "roster refused the inbox admission gate"),
+    ),
+)
+def test_route_wake_claim_refuses_each_prerequisite_without_claiming_or_provider_io(
+    isolated_memory_db,
+    worktree,
+    tmp_path,
+    monkeypatch,
+    failed_prerequisite,
+    error_type,
+    error_match,
+):
+    request, bound = _bound_acp_requester(worktree, tmp_path, monkeypatch)
+    created_at = datetime(2026, 8, 25, 12, 34, 56, tzinfo=timezone.utc)
+    message = '{"kind":"route-observation","case":"prerequisite"}'
+    sender_id = "cafebabe"
+    sender_generation = str(uuid.uuid4())
+    route_operation_id = str(uuid.uuid4())
+    _expect_exact_route_wake(
+        monkeypatch,
+        operation_id=route_operation_id,
+        bound=bound,
+        message_id=75,
+        message=message,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        created_at=created_at,
+    )
+    provider_calls = []
+    monkeypatch.setattr(
+        bridge,
+        "request_bridge",
+        lambda *args, **kwargs: provider_calls.append((args, kwargs)),
+    )
+    claim = {
+        "message_id": 75,
+        "message": message,
+        "sender_id": sender_id,
+        "sender_generation": sender_generation,
+        "message_created_at": created_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "route_observation_operation_id": route_operation_id,
+        "route_observation_request_digest": "7" * 64,
+        "route_observation_result_kind": route_observation.RESULT_OBSERVED_CLOSED,
+        "expected_generation": bound["generation"],
+        "expected_provider": bound["provider"],
+        "expected_provider_session_id": bound["binding"]["native_session_id"],
+        "expected_execution_mode": "acp",
+    }
+    claim["message_sha256"] = hashlib.sha256(claim["message"].encode("utf-8")).hexdigest()
+
+    if failed_prerequisite == "declared-mode":
+        claim["expected_execution_mode"] = "native_tui"
+    elif failed_prerequisite == "row-mode":
+        with database.SessionLocal() as db:
+            row = db.get(database.ManagedLaunchV2ReservationModel, request.reservation_id)
+            assert row is not None
+            row.execution_mode = "native_tui"
+            db.commit()
+    elif failed_prerequisite == "generation":
+        claim["expected_generation"] = "different-generation"
+    elif failed_prerequisite == "provider":
+        claim["expected_provider"] = "claude_code"
+    elif failed_prerequisite == "provider-session":
+        claim["expected_provider_session_id"] = "different-provider-session"
+    elif failed_prerequisite == "native-bound-reference":
+        monkeypatch.setattr(v2, "native_binding_digest", lambda _record: None)
+    elif failed_prerequisite == "roster-refused":
+
+        def refuse_roster(**_kwargs):
+            raise v2.stable_agent_roster.StableAgentAdmissionRefused("binding is not durable")
+
+        monkeypatch.setattr(v2.stable_agent_roster, "assert_admission_ready", refuse_roster)
+    elif failed_prerequisite == "roster-unreadable":
+
+        def fail_roster_read(**_kwargs):
+            raise v2.stable_agent_roster.StableAgentUnavailable("roster database is locked")
+
+        monkeypatch.setattr(v2.stable_agent_roster, "assert_admission_ready", fail_roster_read)
+    else:  # pragma: no cover - the parameter table is closed above
+        raise AssertionError(f"unknown prerequisite {failed_prerequisite}")
+
+    with pytest.raises(error_type, match=error_match):
+        v2.claim_route_observation_wake_admission(request.reservation_id, **claim)
+
+    unchanged = v2.get(request.reservation_id)
+    assert unchanged["state"] == "bound"
+    assert unchanged["admission"] is None
+
+    assert not managed_launch.deliver_inbox_via_bridge(
+        bound["terminal_id"],
+        message_id=claim["message_id"],
+        message=claim["message"],
+        sender_id=claim["sender_id"],
+        sender_generation=claim["sender_generation"],
+        message_created_at=created_at,
+        expected_generation=claim["expected_generation"],
+        expected_provider=claim["expected_provider"],
+        expected_provider_session_id=claim["expected_provider_session_id"],
+        expected_execution_mode=claim["expected_execution_mode"],
+        route_observation_operation_id=route_operation_id,
+    )
+    assert provider_calls == []
+
+
+def test_bound_acp_inbox_possible_effect_without_ack_stays_ambiguous_and_is_not_replayed(
+    isolated_memory_db, worktree, tmp_path, monkeypatch
+):
+    request, bound = _bound_acp_requester(worktree, tmp_path, monkeypatch)
+    monkeypatch.setattr(companion_receipts, "COMPANION_DIR", tmp_path / "companion")
+    message_id = 73
+    message = '{"kind":"route-observation","case":"no-ack"}'
+    created_at = datetime(2026, 8, 25, 12, 34, 56, tzinfo=timezone.utc)
+    sender_id = "cafebabe"
+    sender_generation = str(uuid.uuid4())
+    route_operation_id = str(uuid.uuid4())
+    calls = []
+    route_checks = _expect_exact_route_wake(
+        monkeypatch,
+        operation_id=route_operation_id,
+        bound=bound,
+        message_id=message_id,
+        message=message,
+        sender_id=sender_id,
+        sender_generation=sender_generation,
+        created_at=created_at,
+    )
+
+    def lose_response_after_possible_effect(reservation_id, command, *, timeout):
+        calls.append(command)
+        if len(calls) > 1:
+            raise AssertionError("ambiguous inbox admission re-entered provider I/O")
+        durable = v2.get(reservation_id)
+        assert durable["state"] == "admitting"
+        assert durable["admission"]["status"] == "io-attempted"
+        raise RuntimeError("socket response lost after possible provider effect")
+
+    monkeypatch.setattr(bridge, "request_bridge", lose_response_after_possible_effect)
+    delivery = {
+        "terminal_id": bound["terminal_id"],
+        "message_id": message_id,
+        "message": message,
+        "sender_id": sender_id,
+        "sender_generation": sender_generation,
+        "message_created_at": created_at,
+        "expected_generation": bound["generation"],
+        "expected_provider": bound["provider"],
+        "expected_provider_session_id": bound["binding"]["native_session_id"],
+        "expected_execution_mode": "acp",
+        "route_observation_operation_id": route_operation_id,
+    }
+
+    assert not managed_launch.deliver_inbox_via_bridge(**delivery)
+    ambiguous = v2.get(request.reservation_id)
+    assert ambiguous["state"] == "admitting"
+    assert ambiguous["admission"]["status"] == "ambiguous_preserved"
+    assert ambiguous["admission"]["admission_kind"] == "route-observation-wake-v1"
+    assert ambiguous["admission"]["message_id"] == str(message_id)
+    assert (
+        companion_receipts.get_strict_message_ack(
+            bound["terminal_id"], bound["generation"], message_id
+        )
+        is None
+    )
+
+    # An exact retry may reconcile later evidence, but without an ack it
+    # cannot cross the provider boundary a second time.
+    assert not managed_launch.deliver_inbox_via_bridge(**delivery)
+    assert len(calls) == 1
+    assert route_checks == [message_id, message_id]
+    still_ambiguous = v2.get(request.reservation_id)
+    assert still_ambiguous["state"] == "admitting"
+    assert still_ambiguous["admission"]["status"] == "ambiguous_preserved"
 
 
 def test_fenced_generation_refuses_acp_admission_before_claim_or_provider_io(

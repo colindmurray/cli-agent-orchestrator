@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cli_agent_orchestrator.services import terminal_service
+from cli_agent_orchestrator.services import managed_provider_bridge, terminal_service
 from cli_agent_orchestrator.services.managed_provider_bridge import (
     BridgeError,
     _assert_bridge_environment,
@@ -338,6 +338,9 @@ def test_tmux_client_rejects_relative_executable(tmp_path):
 
 
 def test_provider_env_is_minimal_and_rejects_ambient_control_state(monkeypatch):
+    # This test exercises the unbound fallback.  Real bridge-server tests can
+    # leave an intentionally live daemon holding its immutable provider env.
+    monkeypatch.setattr(managed_provider_bridge, "_BOUND_PROVIDER_ENV", None)
     monkeypatch.setenv("HOME", "/home/test")
     monkeypatch.setenv("PATH", "/sneaky/bin:/usr/bin:/bin")
     monkeypatch.setenv("CAO_TERMINAL_ID", "worker1")

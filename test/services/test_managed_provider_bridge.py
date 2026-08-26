@@ -4,7 +4,11 @@ import hashlib
 import json
 import os
 import pathlib
+import socket
 import subprocess
+import tempfile
+import threading
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -938,6 +942,616 @@ def _bound_generation(companion, request):
         route_payload_sha256="c" * 64,
     )
     return token
+
+
+@pytest.fixture
+def callback_gate_bridge_root(monkeypatch):
+    """Short, real-git bridge root for the final callback-gate server seam."""
+    from cli_agent_orchestrator.services import resource_registry
+
+    # AF_UNIX paths are length-capped on macOS, so the real bridge socket
+    # cannot live under pytest's comparatively deep ``tmp_path``.
+    with tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as root:
+        root_path = pathlib.Path(root)
+        subprocess.run(["git", "init", "-q"], cwd=root_path, check=True)
+        (root_path / "identity.txt").write_text("callback gate\n", encoding="utf-8")
+        subprocess.run(["git", "add", "identity.txt"], cwd=root_path, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=callback-gate-test",
+                "-c",
+                "user.email=callback-gate@example.test",
+                "commit",
+                "-qm",
+                "identity",
+            ],
+            cwd=root_path,
+            check=True,
+        )
+        monkeypatch.setattr(bridge, "RENDEZVOUS_ROOT", root_path / "runtime")
+        resource_registry.reset_resource_registry()
+        resource_registry.get_resource_registry(root_path / "registry.sqlite")
+        try:
+            yield root_path
+        finally:
+            resource_registry.reset_resource_registry()
+
+
+def _callback_gate_server_request(root):
+    request = {
+        "reservation_id": str(uuid.uuid4()),
+        "delivery_id": str(uuid.uuid4()),
+        "provider": "codex",
+        "terminal_id": "a1b2c3d4",
+        "generation": "generation-callback-gate",
+        "obligation_generation": "obligation-callback-gate",
+    }
+    request["rendezvous_identity"] = bridge.launch_binding_identity(
+        project="test-project",
+        task_id=request["reservation_id"],
+        terminal_id=request["terminal_id"],
+        terminal_generation=request["generation"],
+        working_directory=str(root.resolve()),
+        actor="cafebabe",
+    )
+    return request
+
+
+def _callback_gate_server_target(root, request):
+    bridge_root = root / "bridge" / request["reservation_id"]
+    target = {"root": bridge_root, "state": bridge_root / "state.json"}
+    target.update(bridge.rendezvous_paths(request["rendezvous_identity"]))
+    target["root"].mkdir(parents=True)
+    return target
+
+
+def _start_callback_gate_server(request, target, monkeypatch):
+    # The daemon remains live through the assertions. Suppress only its
+    # eventual interpreter-teardown deregistration, not the registry claim.
+    monkeypatch.setattr(bridge, "_deregister_bridge_resources", lambda *a, **k: None)
+    server = threading.Thread(target=bridge._serve, args=(request, target), daemon=True)
+    server.start()
+    for _ in range(200):
+        try:
+            state = json.loads(target["state"].read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            state = None
+        if state is not None and state.get("state") == "ready":
+            return
+        if not server.is_alive():
+            raise AssertionError("bridge exited before publishing ready state")
+        time.sleep(0.01)
+    raise AssertionError("bridge never published ready state")
+
+
+def _call_callback_gate_server(target, request, command):
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(str(target["socket"]))
+        client.sendall(
+            json.dumps(
+                {
+                    "rendezvous_identity": request["rendezvous_identity"],
+                    "request": command,
+                }
+            ).encode()
+            + b"\n"
+        )
+        raw = bytearray()
+        while b"\n" not in raw:
+            block = client.recv(65536)
+            if not block:
+                break
+            raw.extend(block)
+        return json.loads(bytes(raw).split(b"\n", 1)[0])
+    finally:
+        client.close()
+
+
+def _route_observation_wake_command(request, *, message_id):
+    message = '{"kind":"route-observation","result":"observed-closed"}'
+    return {
+        "op": "deliver",
+        "reservation_id": request["reservation_id"],
+        "terminal_id": request["terminal_id"],
+        "generation": request["generation"],
+        "message_id": message_id,
+        "message": message,
+        "message_sha256": hashlib.sha256(message.encode()).hexdigest(),
+        "sender_id": "supervisor",
+        "route_observation_operation_id": "44444444-4444-4444-8444-444444444444",
+        "route_observation_request_digest": "7" * 64,
+        "route_observation_result_kind": "observed-closed",
+    }
+
+
+@pytest.mark.parametrize("callback_failure", ["refused", "error"])
+def test_callback_recovery_final_gate_is_a_certain_pre_provider_refusal(
+    callback_gate_bridge_root, monkeypatch, callback_failure
+):
+    """A lifecycle-gate failure is retryable refusal, never submission ambiguity."""
+    import contextlib
+
+    from cli_agent_orchestrator.services import callback_recovery
+    from cli_agent_orchestrator.services.delivery_journal import DeliveryJournal
+
+    root = callback_gate_bridge_root
+    request = _callback_gate_server_request(root)
+    target = _callback_gate_server_target(root, request)
+    provider_submissions = []
+    provider_session_class = bridge._ProviderSession
+
+    def session_factory(server_request):
+        session = provider_session_class.__new__(provider_session_class)
+        session.request = server_request
+        session.provider = server_request["provider"]
+        session.rpc = SimpleNamespace(proc=None)
+        session.provider_session_id = "thread-provider-opaque"
+        session.readiness = {"provider_version": "test"}
+        session.current_model = "test-model"
+        session.current_effort = "test-effort"
+        session._current_turn_id = None
+        session._heartbeat_producer = None
+        session.kimi_wire_path = None
+        session._companion_scan_index = 0
+        session.initialize = lambda: {"provider_session_id": session.provider_session_id}
+        session._scan_companion_events = lambda: None
+        session.close = lambda: None
+        session._admission_critical_section = contextlib.nullcontext
+        session._submit_provider_turn = lambda *args, **kwargs: provider_submissions.append(
+            (args, kwargs)
+        )
+        return session
+
+    monkeypatch.setattr(bridge, "_ProviderSession", session_factory)
+    if callback_failure == "refused":
+        failure = callback_recovery.CallbackRecoveryRefused(
+            "callback lifecycle is already closed",
+            reason_code="recovery-lifecycle-fenced-before-provider-io",
+        )
+    else:
+        failure = callback_recovery.CallbackRecoveryError("callback lifecycle could not be read")
+
+    def refuse_delivery(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(
+        callback_recovery,
+        "assert_provider_delivery_admissible",
+        refuse_delivery,
+    )
+    _start_callback_gate_server(request, target, monkeypatch)
+    message = "do not cross the provider boundary"
+    message_id = f"callback-{callback_failure}"
+    response = _call_callback_gate_server(
+        target,
+        request,
+        {
+            "op": "deliver",
+            "reservation_id": request["reservation_id"],
+            "terminal_id": request["terminal_id"],
+            "generation": request["generation"],
+            "message_id": message_id,
+            "message": message,
+            "message_sha256": hashlib.sha256(message.encode()).hexdigest(),
+            "sender_id": "supervisor",
+            "recovery_operation_key": "recovery-operation",
+        },
+    )
+
+    assert response["ok"] is False
+    assert response == {
+        "ok": False,
+        "error": f"recovery-lifecycle-fenced-before-provider-io: {failure}",
+        "error_code": "recovery-lifecycle-fenced-before-provider-io",
+        "error_detail": str(failure),
+        "provider_io_started": False,
+    }
+    assert provider_submissions == []
+    journal = DeliveryJournal(target["root"] / "delivery-journal.db")
+    record = journal.get(request["obligation_generation"], message_id)
+    assert record["state"] == "submit-refused"
+    assert [event["to_state"] for event in record["events"]] == [
+        "accepted",
+        "terminal_queued",
+        "submit-refused",
+    ]
+
+
+def test_request_bridge_preserves_structured_pre_provider_refusal(tmp_path, monkeypatch):
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps({"rendezvous_identity": {}}), encoding="utf-8")
+    response = {
+        "ok": False,
+        "error": (
+            "recovery-lifecycle-fenced-before-provider-io: " "callback lifecycle could not be read"
+        ),
+        "error_code": "recovery-lifecycle-fenced-before-provider-io",
+        "error_detail": "callback lifecycle could not be read",
+        "provider_io_started": False,
+    }
+
+    class FakeSocket:
+        def __init__(self):
+            self.response = json.dumps(response).encode() + b"\n"
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _path):
+            pass
+
+        def sendall(self, _payload):
+            pass
+
+        def recv(self, _size):
+            data, self.response = self.response, b""
+            return data
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        bridge,
+        "paths",
+        lambda _reservation_id: {"request": request_path, "socket": tmp_path / "bridge.sock"},
+    )
+    monkeypatch.setattr(bridge, "binding_identity", lambda _request: {})
+    monkeypatch.setattr(bridge, "verify_rendezvous_binding", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(bridge.socket, "socket", lambda *_args, **_kwargs: FakeSocket())
+
+    with pytest.raises(bridge.BridgeRequestRefused) as excinfo:
+        bridge.request_bridge("reservation", {"op": "deliver"})
+    assert excinfo.value.code == "recovery-lifecycle-fenced-before-provider-io"
+    assert excinfo.value.detail == "callback lifecycle could not be read"
+    assert excinfo.value.provider_io_started is False
+
+
+def test_route_observation_wake_gate_precedes_its_only_provider_turn(tmp_path, monkeypatch):
+    from cli_agent_orchestrator.services import companion_receipts, managed_launch_v2
+
+    session, companion, request = _v2_session(tmp_path, monkeypatch)
+    _bound_generation(companion, request)
+    monkeypatch.setattr(companion_receipts, "COMPANION_DIR", companion)
+    command = _route_observation_wake_command(request, message_id="route-wake-1")
+    events = []
+    gate_calls = []
+    provider_calls = []
+
+    def assert_current(reservation_id, **facts):
+        events.append("route-gate")
+        gate_calls.append((reservation_id, facts))
+
+    def submit_provider_turn(message, **facts):
+        events.append("provider-turn")
+        provider_calls.append((message, facts))
+        return "turn-route-wake", "codex-turn-start", {"source": "test-provider"}
+
+    monkeypatch.setattr(
+        managed_launch_v2,
+        "assert_route_observation_wake_admission_current",
+        assert_current,
+    )
+    session._submit_provider_turn = submit_provider_turn
+    session._scan_companion_events = lambda: None
+    session._emit_beat = lambda *_args: None
+
+    receipt = session.deliver_inbox(command)
+
+    assert events == ["route-gate", "provider-turn"]
+    assert gate_calls == [
+        (
+            request["reservation_id"],
+            {
+                "message_id": "route-wake-1",
+                "route_observation_operation_id": ("44444444-4444-4444-8444-444444444444"),
+                "route_observation_request_digest": "7" * 64,
+                "route_observation_result_kind": "observed-closed",
+                "expected_generation": request["generation"],
+                "expected_provider": request["provider"],
+                "expected_provider_session_id": "thread_provider_opaque",
+                "expected_execution_mode": "acp",
+            },
+        )
+    ]
+    assert len(provider_calls) == 1
+    assert provider_calls[0][0] == command["message"]
+    assert provider_calls[0][1]["client_message_id"] == "route-wake-1"
+    assert receipt["provider_turn_id"] == "turn-route-wake"
+
+
+def test_route_observation_wake_gate_failure_is_submit_refused(
+    callback_gate_bridge_root, monkeypatch
+):
+    import contextlib
+
+    from cli_agent_orchestrator.services import companion_receipts, managed_launch_v2
+    from cli_agent_orchestrator.services.delivery_journal import DeliveryJournal
+
+    root = callback_gate_bridge_root
+    request = _callback_gate_server_request(root)
+    target = _callback_gate_server_target(root, request)
+    monkeypatch.setattr(companion_receipts, "COMPANION_DIR", root / "companion")
+    provider_submissions = []
+    provider_session_class = bridge._ProviderSession
+
+    def session_factory(server_request):
+        session = provider_session_class.__new__(provider_session_class)
+        session.request = server_request
+        session.provider = server_request["provider"]
+        session.rpc = SimpleNamespace(proc=None)
+        session.provider_session_id = "thread-provider-opaque"
+        session.readiness = {"provider_version": "test"}
+        session.current_model = "test-model"
+        session.current_effort = "test-effort"
+        session._current_turn_id = None
+        session._heartbeat_producer = None
+        session.kimi_wire_path = None
+        session._companion_scan_index = 0
+        session.initialize = lambda: {"provider_session_id": session.provider_session_id}
+        session._scan_companion_events = lambda: None
+        session._emit_beat = lambda *_args: None
+        session.close = lambda: None
+        session._admission_critical_section = contextlib.nullcontext
+        session._submit_provider_turn = lambda *args, **kwargs: (
+            provider_submissions.append((args, kwargs))
+            or ("unexpected-turn", "codex-turn-start", {"source": "test-provider"})
+        )
+        return session
+
+    def refuse_route_wake(*_args, **_kwargs):
+        raise managed_launch_v2.ManagedLaunchConflict(
+            "route-observation wake admission changed before provider I/O"
+        )
+
+    monkeypatch.setattr(bridge, "_ProviderSession", session_factory)
+    monkeypatch.setattr(
+        managed_launch_v2,
+        "assert_route_observation_wake_admission_current",
+        refuse_route_wake,
+    )
+    _start_callback_gate_server(request, target, monkeypatch)
+    command = _route_observation_wake_command(request, message_id="route-wake-refused")
+
+    response = _call_callback_gate_server(target, request, command)
+
+    assert response["ok"] is False
+    assert "route-observation-wake-fenced-before-provider-io" in response["error"]
+    assert provider_submissions == []
+    journal = DeliveryJournal(target["root"] / "delivery-journal.db")
+    record = journal.get(request["obligation_generation"], command["message_id"])
+    states = [event["to_state"] for event in record["events"]]
+    assert record["state"] == "submit-refused"
+    assert states == ["accepted", "terminal_queued", "submit-refused"]
+    assert "submit-acked" not in states
+
+
+def test_route_observation_wake_gate_unavailable_is_retryable_before_provider_io(
+    callback_gate_bridge_root, monkeypatch
+):
+    import contextlib
+
+    from cli_agent_orchestrator.services import companion_receipts, managed_launch_v2
+    from cli_agent_orchestrator.services.delivery_journal import DeliveryJournal
+
+    root = callback_gate_bridge_root
+    request = _callback_gate_server_request(root)
+    request.update(
+        {
+            "agent_profile": "reviewer",
+            "working_directory": str(root),
+        }
+    )
+    target = _callback_gate_server_target(root, request)
+    monkeypatch.setattr(companion_receipts, "COMPANION_DIR", root / "companion")
+    provider_submissions = []
+    provider_session_class = bridge._ProviderSession
+
+    def session_factory(server_request):
+        session = provider_session_class.__new__(provider_session_class)
+        session.request = server_request
+        session.provider = server_request["provider"]
+        session.rpc = SimpleNamespace(proc=None)
+        session.provider_session_id = "thread-provider-opaque"
+        session.readiness = {"provider_version": "test"}
+        session.current_model = "test-model"
+        session.current_effort = "test-effort"
+        session._current_turn_id = None
+        session._heartbeat_producer = None
+        session.kimi_wire_path = None
+        session._companion_scan_index = 0
+        session.initialize = lambda: {"provider_session_id": session.provider_session_id}
+        session._scan_companion_events = lambda: None
+        session._emit_beat = lambda *_args: None
+        session.close = lambda: None
+        session._admission_critical_section = contextlib.nullcontext
+        session._submit_provider_turn = lambda *args, **kwargs: (
+            provider_submissions.append((args, kwargs))
+            or ("turn-after-retry", "codex-turn-start", {"source": "test-provider"})
+        )
+        return session
+
+    gate_attempts = []
+
+    def transiently_unavailable(*_args, **_kwargs):
+        gate_attempts.append(None)
+        if len(gate_attempts) == 1:
+            raise managed_launch_v2.ManagedLaunchUnavailable("reservation database is locked")
+
+    monkeypatch.setattr(bridge, "_ProviderSession", session_factory)
+    monkeypatch.setattr(
+        managed_launch_v2,
+        "assert_route_observation_wake_admission_current",
+        transiently_unavailable,
+    )
+    _start_callback_gate_server(request, target, monkeypatch)
+    command = _route_observation_wake_command(request, message_id="route-wake-retry")
+
+    first = _call_callback_gate_server(target, request, command)
+
+    assert first["ok"] is False
+    assert "route-observation-wake-unavailable-before-provider-io" in first["error"]
+    assert provider_submissions == []
+    journal = DeliveryJournal(target["root"] / "delivery-journal.db")
+    refused = journal.get(request["obligation_generation"], command["message_id"])
+    assert refused["state"] == "submit-refused"
+
+    second = _call_callback_gate_server(target, request, command)
+
+    assert second["ok"] is True
+    assert len(gate_attempts) == 2
+    assert len(provider_submissions) == 1
+    admitted = journal.get(request["obligation_generation"], command["message_id"])
+    assert admitted["state"] == "submit-acked"
+    assert [event["to_state"] for event in admitted["events"]] == [
+        "accepted",
+        "terminal_queued",
+        "submit-refused",
+        "terminal_queued",
+        "submitted",
+        "submit-acked",
+    ]
+
+
+def test_route_observation_wake_unavailable_reopens_outer_admission_for_exact_retry(
+    monkeypatch,
+):
+    import contextlib
+    from datetime import datetime, timezone
+
+    from cli_agent_orchestrator.services import (
+        cohort_journal,
+        companion_receipts,
+        generation_fence,
+        managed_launch,
+        managed_launch_v2,
+        route_observation,
+    )
+
+    reservation_id = "11111111-1111-4111-8111-111111111111"
+    terminal_id = "deadbeef"
+    generation = "22222222-2222-4222-8222-222222222222"
+    message_id = "route-wake-outer-retry"
+    message = '{"kind":"route-observation","result":"observed-closed"}'
+    sender_id = "supervisor"
+    sender_generation = "33333333-3333-4333-8333-333333333333"
+    created_at = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+    operation_id = "44444444-4444-4444-8444-444444444444"
+    identity = {
+        "vintage": "v2",
+        "execution_mode": "acp",
+        "state": "bound",
+        "terminal_id": terminal_id,
+        "generation": generation,
+        "provider": "codex",
+        "reservation_id": reservation_id,
+        "session_name": "test-session",
+    }
+    record = {
+        "provider": "codex",
+        "execution_mode": "acp",
+        "binding": {
+            "native_session_id": "thread-provider-opaque",
+            "attempt_id": "attempt-1",
+            "fencing_token_id": "token-1",
+        },
+        "admission": {
+            "admission_kind": "route-observation-wake-v1",
+            "message_id": message_id,
+            "route_observation_operation_id": operation_id,
+            "status": "io-attempted",
+        },
+    }
+    wake_claim = {
+        "operation_id": operation_id,
+        "request_digest": "7" * 64,
+        "state": "observed-closed",
+        "wake": {
+            "receiver_id": terminal_id,
+            "receiver_generation": generation,
+            "message": message,
+            "sender_id": sender_id,
+            "sender_generation": sender_generation,
+            "created_at": created_at,
+        },
+    }
+    bridge_calls = []
+    refusals = []
+    completions = []
+    strict_ack = {"kind": "strict-test-ack"}
+
+    monkeypatch.setattr(managed_launch, "managed_control_identity", lambda _terminal_id: identity)
+    monkeypatch.setattr(managed_launch_v2, "get", lambda _reservation_id: record)
+    monkeypatch.setattr(route_observation, "resolve_pending_wake", lambda _message_id: wake_claim)
+    monkeypatch.setattr(
+        cohort_journal, "session_effect_admission", lambda _name: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(
+        generation_fence,
+        "managed_admission_critical_section",
+        lambda *_args, **_kwargs: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        managed_launch_v2,
+        "claim_route_observation_wake_admission",
+        lambda *_args, **_kwargs: (record, True),
+    )
+    monkeypatch.setattr(
+        managed_launch_v2,
+        "refuse_route_observation_wake_admission",
+        lambda *args, **kwargs: refusals.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        managed_launch_v2,
+        "complete_route_observation_wake_admission",
+        lambda *args, **kwargs: completions.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        companion_receipts,
+        "get_strict_message_ack",
+        lambda *_args: strict_ack if len(bridge_calls) == 2 else None,
+    )
+
+    def request_bridge(_reservation_id, _command, *, timeout):
+        bridge_calls.append(timeout)
+        if len(bridge_calls) == 1:
+            raise bridge.BridgeError(
+                "route-observation-wake-unavailable-before-provider-io: "
+                "reservation database is locked"
+            )
+        return {"ok": True}
+
+    monkeypatch.setattr(bridge, "request_bridge", request_bridge)
+    delivery = {
+        "terminal_id": terminal_id,
+        "message_id": message_id,
+        "message": message,
+        "sender_id": sender_id,
+        "sender_generation": sender_generation,
+        "message_created_at": created_at,
+        "expected_generation": generation,
+        "expected_provider": "codex",
+        "expected_provider_session_id": "thread-provider-opaque",
+        "expected_execution_mode": "acp",
+        "route_observation_operation_id": operation_id,
+    }
+
+    assert managed_launch.deliver_inbox_via_bridge(**delivery) is False
+    assert len(refusals) == 1
+    refusal_args, refusal_kwargs = refusals[0]
+    assert refusal_args[:3] == (
+        reservation_id,
+        message_id,
+        "route-observation-wake-unavailable-before-provider-io",
+    )
+    assert "reservation database is locked" in refusal_args[3]
+    assert refusal_kwargs == {"retryable": True}
+
+    assert managed_launch.deliver_inbox_via_bridge(**delivery) is True
+    assert bridge_calls == [30.0, 30.0]
+    assert completions == [((reservation_id, message_id, strict_ack), {})]
 
 
 def test_emit_beat_retains_producer_and_rehydrates_across_sessions(tmp_path, monkeypatch):

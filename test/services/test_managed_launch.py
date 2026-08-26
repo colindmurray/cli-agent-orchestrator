@@ -1684,6 +1684,55 @@ def test_stop_barrier_refuses_managed_inbox_before_bridge(isolated_effect_admiss
     ]
 
 
+def test_callback_gate_refusal_remains_certain_before_provider_io(
+    isolated_effect_admission, monkeypatch
+):
+    identity = {
+        "reservation_id": "reservation-1",
+        "terminal_id": "deadbeef",
+        "generation": "generation-1",
+        "session_name": "cao-test",
+        "provider": "codex",
+        "state": "admitted",
+    }
+    monkeypatch.setattr(managed_launch, "managed_control_identity", lambda _tid: identity)
+
+    def refused(*_args, **_kwargs):
+        raise bridge.BridgeRequestRefused(
+            "recovery-lifecycle-fenced-before-provider-io",
+            "callback lifecycle could not be read",
+            provider_io_started=False,
+        )
+
+    monkeypatch.setattr(bridge, "request_bridge", refused)
+    refusals = []
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.callback_recovery.mark_delivery_refused",
+        lambda operation_key, **kwargs: refusals.append((operation_key, kwargs)),
+    )
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.callback_recovery.mark_delivery_ambiguous",
+        lambda *_args, **_kwargs: pytest.fail("a proven zero-I/O refusal is not ambiguous"),
+    )
+
+    assert not managed_launch.deliver_inbox_via_bridge(
+        "deadbeef",
+        message_id=7,
+        message="ping",
+        sender_id="supervisor",
+        recovery_operation_key="recovery-1",
+    )
+    assert refusals == [
+        (
+            "recovery-1",
+            {
+                "reason_code": "recovery-lifecycle-fenced-before-provider-io",
+                "proven_before_provider_io": True,
+            },
+        )
+    ]
+
+
 def test_managed_control_identity_does_not_hide_missing_columns(isolated_memory_db):
     """Schema drift must fail closed: a missing column in the v2
     reservations table is never silently converted into "unmanaged"."""

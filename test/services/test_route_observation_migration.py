@@ -268,8 +268,9 @@ def test_the_index_rejects_a_second_active_owner_at_the_storage_layer(tmp_path, 
 def test_no_speculative_indexes_are_added(tmp_path, monkeypatch):
     """Only the indexes a read/ownership path actually uses exist.
 
-    ``inbox_message_id`` is deliberately not unique — no query reads by it and
-    each operation mints its own inbox row.
+    ``inbox_message_id`` is deliberately not unique — each operation mints its
+    own inbox row, and the delivery resolver refuses if multiple operations
+    ever contradict that writer invariant by claiming one row.
     """
     path = _migrated_db(tmp_path, monkeypatch)
     for store in (path, _orm_schema(tmp_path / "orm.db")):

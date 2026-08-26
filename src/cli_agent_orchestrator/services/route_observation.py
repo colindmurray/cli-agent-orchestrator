@@ -493,6 +493,126 @@ def list_operations(db: Any = None) -> list[dict[str, Any]]:
     return _read(_list, db, "route-observation list failed")
 
 
+def resolve_pending_wake(message_id: Any, db: Any = None) -> Optional[dict[str, Any]]:
+    """Resolve one pending inbox row to its terminal M10 operation.
+
+    The durable operation-to-inbox foreign key is the authority.  The inbox
+    payload is then re-derived from that operation and compared byte-for-byte,
+    along with both generations and the stored digest.  A row with no M10
+    owner is ordinary inbox traffic and returns ``None``; a claimed M10 row
+    that no longer matches its terminal operation is corrupt and conflicts.
+    """
+
+    try:
+        exact_message_id = int(message_id)
+    except (TypeError, ValueError) as exc:
+        raise RouteObservationInvalid(
+            f"wake message_id must be an integer; got {message_id!r}"
+        ) from exc
+    if (
+        isinstance(message_id, bool)
+        or exact_message_id <= 0
+        or str(exact_message_id) != str(message_id)
+    ):
+        raise RouteObservationInvalid(
+            f"wake message_id must be a positive canonical integer; got {message_id!r}"
+        )
+
+    def _resolve(session: Any) -> Optional[dict[str, Any]]:
+        model = database.RouteObservationOperationModel
+        owners = (
+            session.query(model).filter(model.inbox_message_id == exact_message_id).limit(2).all()
+        )
+        inbox = session.get(database.InboxModel, exact_message_id)
+        if not owners:
+            if inbox is not None:
+                try:
+                    alleged = json.loads(inbox.message)
+                except (TypeError, json.JSONDecodeError):
+                    alleged = None
+                if isinstance(alleged, dict) and alleged.get("wake_version") == WAKE_SCHEMA_VERSION:
+                    raise RouteObservationConflict(
+                        f"inbox message {exact_message_id} claims the M10 wake schema "
+                        "without a route-observation owner"
+                    )
+            return None
+        if len(owners) != 1:
+            raise RouteObservationConflict(
+                f"inbox message {exact_message_id} is claimed by multiple route observations"
+            )
+        row = owners[0]
+        if not _is_terminal(row.state) or not isinstance(row.final_event_digest, str):
+            raise RouteObservationConflict(
+                f"inbox message {exact_message_id} is not owned by a terminal route observation"
+            )
+        try:
+            _require_sha256(row.final_event_digest, field="stored final_event_digest")
+        except RouteObservationInvalid as exc:
+            raise RouteObservationConflict(str(exc)) from exc
+        request = RouteObservationRequest(
+            operation_id=row.operation_id,
+            target_terminal_id=row.target_terminal_id,
+            target_generation=row.target_generation,
+            native_session_id=row.native_session_id,
+            provider=row.provider,
+            provider_version=row.provider_version,
+            provider_artifact_sha256=row.provider_artifact_sha256,
+            requester_terminal_id=row.requester_terminal_id,
+            requester_generation=row.requester_generation,
+        )
+        if request.request_digest() != row.request_digest:
+            raise RouteObservationConflict(
+                f"route observation {row.operation_id} has a divergent stored request digest"
+            )
+        expected_bytes = encode_canonical(
+            _wake_message(request, result=row.state, event_digest=row.final_event_digest)
+        )
+        expected_message = expected_bytes.decode("utf-8")
+        expected_sha256 = hashlib.sha256(expected_bytes).hexdigest()
+        if inbox is None:
+            raise RouteObservationConflict(
+                f"route observation {row.operation_id} names a missing inbox wake"
+            )
+        expected = {
+            "sender_id": row.target_terminal_id,
+            "receiver_id": row.requester_terminal_id,
+            "message": expected_message,
+            "status": MessageStatus.PENDING.value,
+            "message_sha256": expected_sha256,
+            "sender_generation": row.target_generation,
+            "expected_receiver_generation": row.requester_generation,
+            "expected_provider_session_id": None,
+            "expected_execution_mode": None,
+            "expected_provider": None,
+            "callback_recovery_key": None,
+            "callback_completion_key": None,
+        }
+        observed = {key: getattr(inbox, key) for key in expected}
+        if observed != expected:
+            mismatches = sorted(
+                key for key, value in expected.items() if observed.get(key) != value
+            )
+            raise RouteObservationConflict(
+                f"route observation {row.operation_id} wake contradicts its inbox row: "
+                f"{mismatches}"
+            )
+        return {
+            **_row_dict(row),
+            "wake": {
+                "message_id": exact_message_id,
+                "message": expected_message,
+                "message_sha256": expected_sha256,
+                "sender_id": row.target_terminal_id,
+                "sender_generation": row.target_generation,
+                "receiver_id": row.requester_terminal_id,
+                "receiver_generation": row.requester_generation,
+                "created_at": inbox.created_at,
+            },
+        }
+
+    return _read(_resolve, db, "route-observation wake resolution failed")
+
+
 # ---------------------------------------------------------------------------
 # the durable write
 # ---------------------------------------------------------------------------

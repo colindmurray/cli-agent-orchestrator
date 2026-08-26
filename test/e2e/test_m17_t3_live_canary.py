@@ -5,9 +5,11 @@ fresh state root, private tmux server, zero-turn native Codex target, and
 zero-task ACP Codex/Luna requester.  The fork-side runner drives ``/status``
 while the production capability remains dark.  Deliverable wakes traverse the
 real inbox bridge, produce the provider-native model-turn receipt, and enter
-the real conductor consumer.  The stale-requester case deliberately retires
-its requester first and proves zero provider input; by definition it cannot
-honestly produce a model-turn receipt.
+the real conductor consumer.  Each deliverable case additionally proves that
+the wake was provider sequence 1 and the generation's sole acknowledged and
+journaled input.  The stale-requester case deliberately retires its requester
+first and proves zero provider input; by definition it cannot honestly produce
+a model-turn receipt.
 
 The file is excluded by the repository's default ``not e2e`` selection and
 also requires ``CAO_M17_T3_LIVE=1``.  Run only after CP1 and exact installed
@@ -22,11 +24,13 @@ source attestation::
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -46,7 +50,11 @@ from typing import Any, Mapping
 import pytest
 import requests
 
-from cli_agent_orchestrator.services import provider_contracts
+from cli_agent_orchestrator.services import (
+    model_turn_receipt_contract,
+    provider_contracts,
+    route_receipts,
+)
 
 pytestmark = [pytest.mark.e2e, pytest.mark.requires_tmux]
 
@@ -180,6 +188,15 @@ def _request_json(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
     return value
 
 
+def _request_list(method: str, url: str, **kwargs: Any) -> list[dict[str, Any]]:
+    response = requests.request(method, url, **kwargs)
+    assert response.status_code < 400, f"{method} {url}: {response.status_code} {response.text}"
+    value = response.json()
+    assert isinstance(value, list), f"{method} {url} returned a non-list"
+    assert all(isinstance(item, dict) for item in value), f"{method} {url} returned bad rows"
+    return value
+
+
 def _launch_bound(
     *,
     server_url: str,
@@ -240,6 +257,8 @@ def _launch_bound(
     )
     bound = bind.json()
     assert bound["state"] == "bound", bound
+    assert bound["durable_state"] == "bound", bound
+    assert bound["admission"] is None, bound
     assert bound["binding"]["native_session_id"], bound
     return {"reserve": payload, "launch": launched.json(), "record": bound}
 
@@ -269,6 +288,8 @@ def test_launch_bound_reads_native_identity_from_the_bind_boundary(monkeypatch) 
                 200,
                 {
                     "state": "bound",
+                    "durable_state": "bound",
+                    "admission": None,
                     "binding": {"native_session_id": "provider-session-1"},
                 },
             )
@@ -436,6 +457,446 @@ def _turn_receipt(
         last = response.status_code
         time.sleep(0.5)
     raise AssertionError(f"provider-native turn receipt stayed absent (last={last})")
+
+
+def _companion_store_path(state_root: Path, terminal_id: str, generation: str) -> Path:
+    safe_terminal = "".join(
+        character if character.isalnum() or character in "-_" else "-" for character in terminal_id
+    )
+    safe_generation = "".join(
+        character if character.isalnum() or character in "-_" else "-" for character in generation
+    )
+    return state_root / "companion" / f"{safe_terminal}-{safe_generation}.json"
+
+
+def _requester_turn_artifacts(
+    state_root: Path,
+    requester: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read all durable provider-turn evidence for one requester generation."""
+
+    record = requester["record"]
+    reservation_id = requester["reserve"]["reservation_id"]
+    obligation_generation = requester["reserve"]["obligation_generation"]
+    terminal_id = record["terminal_id"]
+    generation = record["generation"]
+
+    companion_path = _companion_store_path(state_root, terminal_id, generation)
+    companion: dict[str, Any] = {}
+    if companion_path.is_file():
+        loaded = json.loads(companion_path.read_text(encoding="utf-8"))
+        assert isinstance(loaded, dict), f"malformed companion store: {companion_path}"
+        companion = loaded
+
+    reservation_root = state_root / "managed-provider-sessions" / reservation_id
+    journal_path = reservation_root / "delivery-journal.db"
+    deliveries: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+    if journal_path.is_file():
+        connection = sqlite3.connect(f"file:{journal_path}?mode=ro", uri=True, timeout=5)
+        try:
+            deliveries = [
+                {
+                    "logical_callback_id": row[0],
+                    "state": row[1],
+                    "request_sha256": row[2],
+                    "opened_at": row[3],
+                    "updated_at": row[4],
+                }
+                for row in connection.execute(
+                    "SELECT logical_callback_id, state, request_sha256, opened_at, updated_at "
+                    "FROM delivery WHERE obligation_generation=? ORDER BY logical_callback_id",
+                    (obligation_generation,),
+                )
+            ]
+            events = [
+                {
+                    "event_seq": row[0],
+                    "logical_callback_id": row[1],
+                    "from_state": row[2],
+                    "to_state": row[3],
+                    "evidence_digest": row[4],
+                    "at": row[5],
+                }
+                for row in connection.execute(
+                    "SELECT event_seq, logical_callback_id, from_state, to_state, "
+                    "evidence_digest, at FROM delivery_event "
+                    "WHERE obligation_generation=? ORDER BY event_seq",
+                    (obligation_generation,),
+                )
+            ]
+        finally:
+            connection.close()
+
+    matching_route_receipts: list[dict[str, Any]] = []
+    recovery_root = state_root / "recovery"
+    if recovery_root.is_dir():
+        for candidate in sorted(recovery_root.glob("route-receipt.*.json")):
+            raw = candidate.read_bytes()
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                continue
+            if value.get("terminal_id") != terminal_id or value.get("generation") != generation:
+                continue
+            matching_route_receipts.append(
+                {
+                    "filename": candidate.name,
+                    "content_sha256": hashlib.sha256(raw).hexdigest(),
+                    "receipt": value,
+                }
+            )
+
+    return {
+        "terminal_id": terminal_id,
+        "generation": generation,
+        "reservation_id": reservation_id,
+        "obligation_generation": obligation_generation,
+        "companion_route": companion.get("route"),
+        "message_acks": companion.get("message_acks") or {},
+        "deliveries": deliveries,
+        "delivery_events": events,
+        "route_receipts": matching_route_receipts,
+    }
+
+
+def _assert_zero_requester_turns(artifacts: Mapping[str, Any]) -> None:
+    assert artifacts["message_acks"] == {}, artifacts
+    assert artifacts["deliveries"] == [], artifacts
+    assert artifacts["delivery_events"] == [], artifacts
+    assert artifacts["route_receipts"] == [], artifacts
+    assert artifacts["companion_route"] is None, artifacts
+
+
+def _assert_first_only_wake_turn(
+    *,
+    state_root: Path,
+    requester: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+    message_id: int,
+    delivery: Mapping[str, Any],
+    turn_receipt: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prove the wake was this unchanged requester's first and only turn."""
+
+    record = requester["record"]
+    admission = reservation.get("admission")
+    assert reservation["reservation_id"] == requester["reserve"]["reservation_id"], reservation
+    assert reservation["terminal_id"] == record["terminal_id"], reservation
+    assert reservation["generation"] == record["generation"], reservation
+    assert reservation["provider"] == record["provider"], reservation
+    assert reservation["execution_mode"] == "acp", reservation
+    assert reservation["binding"] == record["binding"], reservation
+    assert reservation["state"] == "admitted", reservation
+    assert reservation["durable_state"] == "admitted", reservation
+    assert isinstance(admission, dict), reservation
+    assert admission["admission_kind"] == "route-observation-wake-v1", admission
+    assert admission["status"] == "admitted", admission
+    assert admission["message_id"] == str(message_id), admission
+    assert admission["receiver_id"] == record["terminal_id"], admission
+    assert admission["receiver_generation"] == record["generation"], admission
+    assert admission["expected_provider"] == record["provider"], admission
+    assert admission["expected_provider_session_id"] == record["binding"]["native_session_id"]
+    assert admission["expected_execution_mode"] == "acp", admission
+
+    expected_receipt = {
+        "message_id": str(message_id),
+        "message_sha256": delivery["message_sha256"],
+        "message_created_at": admission["message_created_at"],
+        "sender_id": delivery["sender_id"],
+        "sender_generation": admission["sender_generation"],
+        "receiver_id": record["terminal_id"],
+        "receiver_generation": record["generation"],
+        "provider": record["provider"],
+        "provider_session_id": record["binding"]["native_session_id"],
+    }
+    strict = model_turn_receipt_contract.validate_receipt(
+        dict(turn_receipt), expected=expected_receipt
+    )
+    assert admission["provider_submission_receipt"] == strict, admission
+
+    acknowledgements = artifacts["message_acks"]
+    assert list(acknowledgements) == [str(message_id)], acknowledgements
+    envelope = acknowledgements[str(message_id)]
+    assert envelope["schema"] == "cao-model-turn-receipt-envelope-v1", envelope
+    assert envelope["receipt"] == strict, envelope
+
+    deliveries = artifacts["deliveries"]
+    assert len(deliveries) == 1, deliveries
+    journaled = deliveries[0]
+    assert journaled["logical_callback_id"] == str(message_id), journaled
+    assert journaled["state"] == "submit-acked", journaled
+    assert [event["to_state"] for event in artifacts["delivery_events"]] == [
+        "accepted",
+        "terminal_queued",
+        "submitted",
+        "submit-acked",
+    ], artifacts["delivery_events"]
+    assert all(
+        event["logical_callback_id"] == str(message_id) for event in artifacts["delivery_events"]
+    )
+
+    # The route sequence is session-local corroboration.  The durable
+    # delivery journal above is the restart-stable authority that excludes a
+    # prior accepted turn even if its best-effort route receipt was lost.
+    matching_route_receipts = artifacts["route_receipts"]
+    assert len(matching_route_receipts) == 1, matching_route_receipts
+    route_receipt = matching_route_receipts[0]["receipt"]
+    assert route_receipt["schema"] == "cao-route-receipt-v1", route_receipt
+    assert route_receipt["event_sequence"] == 1, route_receipt
+    assert route_receipt["terminal_id"] == record["terminal_id"], route_receipt
+    assert route_receipt["generation"] == record["generation"], route_receipt
+    assert route_receipt["native_session_id"] == strict["provider_session_id"], route_receipt
+    assert route_receipt["native_turn_id"] == strict["provider_turn_id"], route_receipt
+    assert route_receipt["delivery_id"] == str(message_id), route_receipt
+    assert route_receipt["model_input_digest"] == journaled["request_sha256"], route_receipt
+    assert artifacts["companion_route"]["turn_id"] == strict["provider_turn_id"]
+
+    reservation_root = (
+        state_root / "managed-provider-sessions" / requester["reserve"]["reservation_id"]
+    )
+    journaled_digests = route_receipts.journaled_request_digests(
+        reservation_root, requester["reserve"]["obligation_generation"]
+    )
+    assert journaled_digests == frozenset({journaled["request_sha256"]})
+    proofs = route_receipts.load_valid_route_proofs(
+        state_dir=state_root / "recovery",
+        expected_routes={
+            "codex": {
+                "generation": record["generation"],
+                "model": MODEL,
+                "effort": EFFORT,
+            }
+        },
+        expected_input_digests={"codex": journaled_digests},
+    )
+    assert proofs == {"codex": route_receipt}, proofs
+    return {
+        "accepted_provider_turn_count": 1,
+        "provider_event_sequence": route_receipt["event_sequence"],
+        "provider_turn_id": strict["provider_turn_id"],
+        "provider_session_id": strict["provider_session_id"],
+        "message_id": str(message_id),
+        "route_receipt_content_sha256": matching_route_receipts[0]["content_sha256"],
+    }
+
+
+def test_first_only_wake_proof_requires_provider_sequence_one(tmp_path: Path) -> None:
+    from cli_agent_orchestrator.services.delivery_journal import DeliveryJournal
+
+    state_root = tmp_path / "state"
+    message_id = 7
+    message = '{"wake_version":"cao-m10-route-observation-wake-v1"}'
+    message_sha256 = _sha256_text(message)
+    terminal_id = "requester-terminal"
+    generation = "requester-generation"
+    provider_session_id = "provider-session"
+    provider_turn_id = "provider-turn"
+    reservation_id = "requester-reservation"
+    obligation_generation = "requester-obligation"
+    submitted_at = datetime(2026, 8, 26, 12, 0, 1, tzinfo=timezone.utc)
+    created_at = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+    strict = model_turn_receipt_contract.build_receipt(
+        message_id=message_id,
+        message_sha256=message_sha256,
+        message_created_at=created_at,
+        sender_id="target-terminal",
+        sender_generation="target-generation",
+        receiver_id=terminal_id,
+        receiver_generation=generation,
+        provider="codex",
+        provider_session_id=provider_session_id,
+        provider_turn_id=provider_turn_id,
+        submitted_at=submitted_at,
+    )
+    companion_path = _companion_store_path(state_root, terminal_id, generation)
+    companion_path.parent.mkdir(parents=True)
+    companion_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "terminal_id": terminal_id,
+                "generation": generation,
+                "route": {"turn_id": provider_turn_id},
+                "prompt": None,
+                "refusal": None,
+                "message_acks": {
+                    str(message_id): {
+                        "schema": "cao-model-turn-receipt-envelope-v1",
+                        "receipt": strict,
+                        "recorded_at": "2026-08-26T12:00:02.000000Z",
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    request_sha256 = "a" * 64
+    reservation_root = state_root / "managed-provider-sessions" / reservation_id
+    journal = DeliveryJournal(reservation_root / "delivery-journal.db")
+    journal.open_intent(obligation_generation, str(message_id), request_sha256)
+    journal.mark_terminal_queued(obligation_generation, str(message_id))
+    journal.mark_submitted(obligation_generation, str(message_id))
+    journal.mark_submit_acked(obligation_generation, str(message_id))
+    route_receipts.write_route_receipt(
+        state_dir=state_root / "recovery",
+        provider="codex",
+        native_session_id=provider_session_id,
+        native_turn_id=provider_turn_id,
+        generation=generation,
+        terminal_id=terminal_id,
+        delivery_id=str(message_id),
+        expected_model=MODEL,
+        expected_effort=EFFORT,
+        observed_model=MODEL,
+        observed_effort=EFFORT,
+        protocol="app-server/1",
+        event_sequence=1,
+        model_input_digest=request_sha256,
+        provider_version="0.149.0",
+    )
+    requester = {
+        "reserve": {
+            "reservation_id": reservation_id,
+            "obligation_generation": obligation_generation,
+        },
+        "record": {
+            "terminal_id": terminal_id,
+            "generation": generation,
+            "provider": "codex",
+            "binding": {"native_session_id": provider_session_id},
+        },
+    }
+    reservation = {
+        "reservation_id": reservation_id,
+        "terminal_id": terminal_id,
+        "generation": generation,
+        "provider": "codex",
+        "execution_mode": "acp",
+        "binding": {"native_session_id": provider_session_id},
+        "state": "admitted",
+        "durable_state": "admitted",
+        "admission": {
+            "admission_kind": "route-observation-wake-v1",
+            "status": "admitted",
+            "message_id": str(message_id),
+            "message_created_at": strict["message_created_at"],
+            "sender_generation": strict["sender_generation"],
+            "receiver_id": terminal_id,
+            "receiver_generation": generation,
+            "expected_provider": "codex",
+            "expected_provider_session_id": provider_session_id,
+            "expected_execution_mode": "acp",
+            "provider_submission_receipt": strict,
+        },
+    }
+    delivery = {
+        "message_id": message_id,
+        "message_sha256": message_sha256,
+        "sender_id": strict["sender_id"],
+        "status": "delivered",
+    }
+    artifacts = _requester_turn_artifacts(state_root, requester)
+
+    proof = _assert_first_only_wake_turn(
+        state_root=state_root,
+        requester=requester,
+        reservation=reservation,
+        message_id=message_id,
+        delivery=delivery,
+        turn_receipt=strict,
+        artifacts=artifacts,
+    )
+    assert proof["accepted_provider_turn_count"] == 1
+
+    mutations = {
+        "extra acknowledgement": lambda item, _reservation: item["message_acks"].update(
+            {"8": copy.deepcopy(item["message_acks"][str(message_id)])}
+        ),
+        "acknowledgement receipt drift": lambda item, _reservation: item["message_acks"][
+            str(message_id)
+        ]["receipt"].update({"provider_turn_id": "other-turn"}),
+        "extra delivery": lambda item, _reservation: item["deliveries"].append(
+            {**item["deliveries"][0], "logical_callback_id": "8"}
+        ),
+        "journal state drift": lambda item, _reservation: item["deliveries"][0].update(
+            {"state": "submitted"}
+        ),
+        "extra delivery event": lambda item, _reservation: item["delivery_events"].append(
+            {**item["delivery_events"][-1], "logical_callback_id": "8"}
+        ),
+        "delivery transition drift": lambda item, _reservation: item["delivery_events"][0].update(
+            {"to_state": "terminal_queued"}
+        ),
+        "second route receipt": lambda item, _reservation: item["route_receipts"].append(
+            copy.deepcopy(item["route_receipts"][0])
+        ),
+        "route sequence reset": lambda item, _reservation: item["route_receipts"][0][
+            "receipt"
+        ].update({"event_sequence": 2}),
+        "wrong provider session": lambda item, _reservation: item["route_receipts"][0][
+            "receipt"
+        ].update({"native_session_id": "other-session"}),
+        "wrong provider turn": lambda item, _reservation: item["route_receipts"][0][
+            "receipt"
+        ].update({"native_turn_id": "other-turn"}),
+        "wrong journal digest": lambda item, _reservation: item["route_receipts"][0][
+            "receipt"
+        ].update({"model_input_digest": "b" * 64}),
+        "wrong route terminal": lambda item, _reservation: item["route_receipts"][0][
+            "receipt"
+        ].update({"terminal_id": "other-terminal"}),
+        "wrong route delivery": lambda item, _reservation: item["route_receipts"][0][
+            "receipt"
+        ].update({"delivery_id": "8"}),
+        "companion route drift": lambda item, _reservation: item["companion_route"].update(
+            {"turn_id": "other-turn"}
+        ),
+        "current generation drift": lambda _item, current: current.update(
+            {"generation": "other-generation"}
+        ),
+        "current provider session drift": lambda _item, current: current["binding"].update(
+            {"native_session_id": "other-session"}
+        ),
+    }
+    for _label, mutate in mutations.items():
+        mutated_artifacts = copy.deepcopy(artifacts)
+        mutated_reservation = copy.deepcopy(reservation)
+        mutate(mutated_artifacts, mutated_reservation)
+        with pytest.raises(AssertionError):
+            _assert_first_only_wake_turn(
+                state_root=state_root,
+                requester=requester,
+                reservation=mutated_reservation,
+                message_id=message_id,
+                delivery=delivery,
+                turn_receipt=strict,
+                artifacts=mutated_artifacts,
+            )
+
+
+@pytest.mark.parametrize(
+    "surface,value",
+    [
+        ("message_acks", {"7": {"receipt": "unexpected"}}),
+        ("deliveries", [{"logical_callback_id": "7"}]),
+        ("delivery_events", [{"logical_callback_id": "7"}]),
+        ("route_receipts", [{"receipt": {"event_sequence": 1}}]),
+        ("companion_route", {"turn_id": "unexpected"}),
+    ],
+)
+def test_zero_requester_turn_proof_rejects_every_nonempty_surface(surface: str, value: Any) -> None:
+    artifacts = {
+        "message_acks": {},
+        "deliveries": [],
+        "delivery_events": [],
+        "route_receipts": [],
+        "companion_route": None,
+    }
+    artifacts[surface] = value
+    with pytest.raises(AssertionError):
+        _assert_zero_requester_turns(artifacts)
 
 
 def _write_posted_control(conductor: Path, psd: str, wake: Mapping[str, str]) -> str:
@@ -619,6 +1080,27 @@ def _run_case(
                 progress("Luna requester bound without task input")
                 target_record = target["record"]
                 requester_record = requester["record"]
+                requester_bound = _request_json(
+                    "GET",
+                    f"{server.url}{V2_ROOT}/{requester['reserve']['reservation_id']}",
+                    timeout=10,
+                )
+                assert requester_bound["state"] == "bound", requester_bound
+                assert requester_bound["durable_state"] == "bound", requester_bound
+                assert requester_bound["admission"] is None, requester_bound
+                assert requester_bound["terminal_id"] == requester_record["terminal_id"]
+                assert requester_bound["generation"] == requester_record["generation"]
+                assert requester_bound["binding"] == requester_record["binding"]
+                requester_artifacts_before = _requester_turn_artifacts(state_root, requester)
+                provider_evidence_path = case_dir / "provider-turn-evidence.json"
+                sanitizer.write_json(
+                    provider_evidence_path,
+                    {
+                        "before": _shareable_json(sanitizer, requester_artifacts_before),
+                        "proof_status": "checking-zero-turn-launch",
+                    },
+                )
+                _assert_zero_requester_turns(requester_artifacts_before)
                 pane_id = target_record["pane_id"]
                 assert pane_id
                 window_name = tmux.out("display-message", "-p", "-t", pane_id, "#{window_name}")
@@ -726,11 +1208,22 @@ def _run_case(
                 progress("route observation terminalized")
 
                 delivery = None
+                delivery_replay = None
                 turn_receipt = None
+                provider_turn_evidence: dict[str, Any]
                 consumer_response = None
                 consumer_wakes: list[Any] = []
                 consumer_replay = None
                 if case is not cases.STALE_REQUESTER:
+                    pending = _request_list(
+                        "GET",
+                        f"{server.url}/terminals/{requester_record['terminal_id']}"
+                        "/inbox/messages",
+                        params={"status": "pending", "limit": 100},
+                        timeout=10,
+                    )
+                    assert len(pending) == 1, pending
+                    assert pending[0]["id"] == int(outcome["inbox_message_id"]), pending
                     delivery = _deliver(
                         receiver_id=requester_record["terminal_id"],
                         message_id=int(outcome["inbox_message_id"]),
@@ -742,6 +1235,79 @@ def _run_case(
                         server.url,
                         requester_record["terminal_id"],
                         int(outcome["inbox_message_id"]),
+                    )
+                    requester_admitted = _request_json(
+                        "GET",
+                        f"{server.url}{V2_ROOT}/{requester['reserve']['reservation_id']}",
+                        timeout=10,
+                    )
+                    requester_artifacts_after = _requester_turn_artifacts(state_root, requester)
+                    sanitizer.write_json(
+                        provider_evidence_path,
+                        {
+                            "before": _shareable_json(sanitizer, requester_artifacts_before),
+                            "after_delivery": _shareable_json(sanitizer, requester_artifacts_after),
+                            "proof_status": "checking-first-only-wake",
+                        },
+                    )
+                    provider_turn_evidence = _assert_first_only_wake_turn(
+                        state_root=state_root,
+                        requester=requester,
+                        reservation=requester_admitted,
+                        message_id=int(outcome["inbox_message_id"]),
+                        delivery=delivery,
+                        turn_receipt=turn_receipt,
+                        artifacts=requester_artifacts_after,
+                    )
+                    delivery_replay = _deliver(
+                        receiver_id=requester_record["terminal_id"],
+                        message_id=int(outcome["inbox_message_id"]),
+                        output=case_dir / "delivery-replay.json",
+                        env=child_env,
+                    )
+                    assert delivery_replay == delivery
+                    requester_replayed = _request_json(
+                        "GET",
+                        f"{server.url}{V2_ROOT}/{requester['reserve']['reservation_id']}",
+                        timeout=10,
+                    )
+                    requester_artifacts_replayed = _requester_turn_artifacts(state_root, requester)
+                    sanitizer.write_json(
+                        provider_evidence_path,
+                        {
+                            "before": _shareable_json(sanitizer, requester_artifacts_before),
+                            "after_delivery": _shareable_json(sanitizer, requester_artifacts_after),
+                            "after_replay": _shareable_json(
+                                sanitizer, requester_artifacts_replayed
+                            ),
+                            "proof_status": "checking-replay-stability",
+                        },
+                    )
+                    assert requester_replayed["admission"] == requester_admitted["admission"]
+                    assert requester_artifacts_replayed == requester_artifacts_after
+                    assert (
+                        _assert_first_only_wake_turn(
+                            state_root=state_root,
+                            requester=requester,
+                            reservation=requester_replayed,
+                            message_id=int(outcome["inbox_message_id"]),
+                            delivery=delivery_replay,
+                            turn_receipt=turn_receipt,
+                            artifacts=requester_artifacts_replayed,
+                        )
+                        == provider_turn_evidence
+                    )
+                    sanitizer.write_json(
+                        provider_evidence_path,
+                        _shareable_json(
+                            sanitizer,
+                            {
+                                "before": requester_artifacts_before,
+                                "after": requester_artifacts_after,
+                                "after_replay": requester_artifacts_replayed,
+                                "proof": provider_turn_evidence,
+                            },
+                        ),
                     )
                     progress("wake delivered and provider turn receipted")
                     route_receipt = outcome.get("receipt")
@@ -783,6 +1349,33 @@ def _run_case(
                     assert outcome["disposition"] == "requester-stale"
                     assert evidence["inbox_message_status"] == "pending"
                     assert retirement is not None
+                    requester_artifacts_after = _requester_turn_artifacts(state_root, requester)
+                    sanitizer.write_json(
+                        provider_evidence_path,
+                        {
+                            "before": _shareable_json(sanitizer, requester_artifacts_before),
+                            "after_retirement": _shareable_json(
+                                sanitizer, requester_artifacts_after
+                            ),
+                            "proof_status": "checking-zero-turn-retirement",
+                        },
+                    )
+                    _assert_zero_requester_turns(requester_artifacts_after)
+                    provider_turn_evidence = {
+                        "accepted_provider_turn_count": 0,
+                        "provider_event_sequence": None,
+                        "message_id": str(outcome["inbox_message_id"]),
+                    }
+                    sanitizer.write_json(
+                        provider_evidence_path,
+                        {
+                            "before": _shareable_json(sanitizer, requester_artifacts_before),
+                            "after_retirement": _shareable_json(
+                                sanitizer, requester_artifacts_after
+                            ),
+                            "proof": provider_turn_evidence,
+                        },
+                    )
                     progress("stale generation fenced with zero provider input")
 
                 assert_shared_server_untouched(shared, shared_session, shared_identity)
@@ -811,7 +1404,9 @@ def _run_case(
                     "wake_message_status": evidence["inbox_message_status"],
                     "status_command_count": evidence["status_command_count"],
                     "delivery": delivery,
+                    "delivery_replay": delivery_replay,
                     "turn_receipt": turn_receipt,
+                    "provider_turn_evidence": provider_turn_evidence,
                     "consumer": consumer_response,
                     "consumer_wake_count": len(consumer_wakes),
                     "consumer_replay": consumer_replay,
@@ -846,6 +1441,8 @@ def _preserve_case(
         "fork-events.jsonl",
         "pane-before.txt",
         "delivery.json",
+        "delivery-replay.json",
+        "provider-turn-evidence.json",
         "restart-interrupt.json",
         "replay-initial.json",
         "consumer.sqlite3",
@@ -873,6 +1470,9 @@ def test_partial_case_evidence_is_preserved_without_an_outcome(tmp_path: Path) -
     run_dir.mkdir()
     (run_dir / "fork-events.jsonl").write_text('{"kind":"status-authorized"}\n', encoding="utf-8")
     (run_dir / "server.log").write_text("bounded server evidence\n", encoding="utf-8")
+    (run_dir / "provider-turn-evidence.json").write_text(
+        '{"proof_status":"checking-first-only-wake"}\n', encoding="utf-8"
+    )
     project_state = run_dir / "project-state"
     project_state.mkdir()
     (project_state / "control.json").write_text("{}\n", encoding="utf-8")
@@ -885,6 +1485,9 @@ def test_partial_case_evidence_is_preserved_without_an_outcome(tmp_path: Path) -
     )
     assert (preserved / "project-state" / "control.json").read_text(encoding="utf-8") == "{}\n"
     assert (preserved / "server.log").read_text(encoding="utf-8") == "bounded server evidence\n"
+    assert json.loads((preserved / "provider-turn-evidence.json").read_text(encoding="utf-8")) == {
+        "proof_status": "checking-first-only-wake"
+    }
     assert not (preserved / "summary.json").exists()
 
 
@@ -1135,8 +1738,18 @@ def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
     assert [item["case"] for item in results] == [case.runner_key for case in cases.CANARY_CASES]
     assert sum(item["status_command_count"] for item in results) == 4
     assert sum(item["turn_receipt"] is not None for item in results) == 4
+    accepted_provider_turn_count = sum(
+        item["provider_turn_evidence"]["accepted_provider_turn_count"] for item in results
+    )
+    assert accepted_provider_turn_count == 4
+    deliverable_results = [item for item in results if item["case"] != "stale-requester"]
+    assert all(
+        item["provider_turn_evidence"]["provider_event_sequence"] == 1
+        for item in deliverable_results
+    )
     stale_result = next(item for item in results if item["case"] == "stale-requester")
     assert stale_result["wake_message_status"] == "pending"
+    assert stale_result["provider_turn_evidence"]["accepted_provider_turn_count"] == 0
     manifest = {
         "schema": "cao-m17-t3-installed-canary-report-v1",
         "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1152,8 +1765,11 @@ def test_installed_five_case_route_observation_ladder(tmp_path: Path) -> None:
         "conductor_source_head": _git_head(conductor),
         "installed_codex": _shareable_installed_codex(installed),
         "case_order": [case.runner_key for case in cases.CANARY_CASES],
-        "paid_turn_count": 4,
-        "stale_requester_turn_count": 0,
+        # This is provider-native acceptance evidence, not a claim about an
+        # external billing meter.  It is also the exact Luna turn-budget count
+        # for this isolated canary because every requester starts at sequence 0.
+        "accepted_provider_turn_count": accepted_provider_turn_count,
+        "stale_requester_accepted_turn_count": 0,
         "results": results,
     }
     manifest_path = evidence_root / "m17-t3-installed-canary-report.json"

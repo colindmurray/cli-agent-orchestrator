@@ -1,11 +1,12 @@
 ---
 created: 2026-05-30
-lastUpdated: 2026-08-09
-summary: "Reference for ordinary inbox delivery, managed generation binding, and the dedicated refusal-bound callback recovery protocol."
+lastUpdated: 2026-08-26
+summary: "Reference for ordinary inbox delivery, managed generation binding, M10 first admission, and refusal-bound callback recovery."
 category: REFERENCE
 status: CURRENT
 note: "Current fork contract; callback recovery is not a general managed-message API."
 changelog:
+  - "2026-08-26: An exact M10 route-observation wake may atomically occupy a bound zero-task ACP requester's first admission, with strict-ack recovery and no duplicate provider I/O."
   - "2026-08-09: Generic inbox rows now capture the exact live managed-v2 receiver generation; parked, stale, and pre-M3 generationless rows are terminalized rather than retargeted."
   - "2026-07-30: Replaced generic bound messages with one-shot refusal/callback recovery."
   - "2026-07-30: Added exact-generation managed message binding."
@@ -51,6 +52,33 @@ as visible failed history. They are never retargeted to a successor, never
 fall back to raw pane paste, and never remain pending solely because a parked
 head row preceded valid current-generation work. The park path eagerly applies
 the same cleanup; delivery repeats it as crash-recovery backstop.
+
+## M10 wake as a bound ACP first admission
+
+An exact terminal M10 route-observation wake is the sole special case for a
+bound, zero-task managed-v2 ACP requester. Delivery re-derives the canonical
+wake from its terminal route-observation operation and verifies the inbox row,
+message digest and timestamp, sender and receiver generations, bound native
+session, provider, and ACP mode. Under the generation lock, a reservation CAS
+then claims the requester's one admission slot before any provider I/O. The
+durable record is marked `admission_kind: route-observation-wake-v1`; ordinary
+task admission has its existing ordinary record shape.
+
+Once the special record owns the slot, ordinary `/admit` cannot supersede it.
+A retryable refusal proven before provider I/O returns the reservation to
+`bound`, but only the exact wake identity can reclaim it. An observed W13 or
+successor fence is a permanent zero-I/O refusal. An uncertain outcome after the
+provider boundary remains `ambiguous_preserved` and is never blindly replayed.
+
+The provider bridge persists a strict, generation- and message-bound
+acknowledgement before its response. Response-loss recovery adopts that receipt
+without another provider turn. Parked or stale-generation cleanup checks for
+the same receipt before marking the inbox row failed, so a durable
+acknowledgement can still terminalize the row as delivered and, while the exact
+reservation is addressable, converge it to `admitted`. A requester already
+admitted by ordinary `/admit` does not re-enter this special claim; its M10 wake
+and other messages continue through ordinary managed inbox delivery without
+rewriting its task admission.
 
 ## Overview
 
