@@ -855,36 +855,82 @@ class TestRunnerEntryPoints:
         with pytest.raises(canary_runner.LiveCanaryInvalid, match="absent inbox row"):
             canary_runner._inbox_status(999_999)
 
-    def test_delivery_driver_selects_the_existing_exact_wake_row(self, _db, tmp_path, monkeypatch):
+    def test_delivery_driver_reads_only_the_existing_exact_wake_row(
+        self, _db, tmp_path, monkeypatch
+    ):
+        from cli_agent_orchestrator.services.inbox_service import InboxService
+
         request = _request()
         outcome = roc.CodexRouteObserver(
             surface=fixtures.FakeCodexPaneSurface(rows=fixtures.codex_route_panel_rows())
         ).observe(request)
-        calls = []
-        monkeypatch.setattr(
-            canary_delivery.inbox_service,
-            "deliver_pending",
-            lambda receiver_id, **kwargs: calls.append((receiver_id, kwargs)),
-        )
-        output = tmp_path / "delivery.json"
+        message_id = int(outcome["inbox_message_id"])
 
-        canary_delivery.deliver(
+        def forbidden_init_db():
+            raise AssertionError("the evidence reader attempted schema initialization")
+
+        def forbidden_provider_delivery(*_args, **_kwargs):
+            raise AssertionError("the evidence reader attempted provider delivery")
+
+        monkeypatch.setattr(database, "init_db", forbidden_init_db)
+        monkeypatch.setattr(InboxService, "deliver_pending", forbidden_provider_delivery)
+
+        with database.SessionLocal() as session:
+            schema_before = list(
+                session.connection().exec_driver_sql(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                    "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+                )
+            )
+            inbox_rows_before = session.query(database.InboxModel).count()
+            expected_message_sha256 = (
+                session.query(database.InboxModel.message_sha256)
+                .filter(database.InboxModel.id == message_id)
+                .scalar()
+            )
+
+        wrong_output = tmp_path / "wrong-delivery.json"
+        with pytest.raises(RuntimeError, match=rf"wake inbox row {message_id} .* is absent"):
+            canary_delivery.read_delivery("different-requester", message_id, wrong_output)
+        assert not wrong_output.exists()
+
+        output = tmp_path / "delivery.json"
+        canary_delivery.read_delivery(
             request.requester_terminal_id,
-            int(outcome["inbox_message_id"]),
+            message_id,
             output,
         )
 
-        assert calls == [
-            (
-                request.requester_terminal_id,
-                {"num_messages": 1, "required_message_id": outcome["inbox_message_id"]},
-            )
-        ]
         evidence = json.loads(output.read_text(encoding="utf-8"))
-        assert evidence["message_id"] == outcome["inbox_message_id"]
-        assert evidence["receiver_id"] == request.requester_terminal_id
-        assert evidence["expected_receiver_generation"] == request.requester_generation
-        assert evidence["status"] == MessageStatus.PENDING.value
+        assert evidence == {
+            "schema": "cao-m17-route-observation-delivery-evidence-v1",
+            "message_id": message_id,
+            "sender_id": request.target_terminal_id,
+            "receiver_id": request.requester_terminal_id,
+            "expected_receiver_generation": request.requester_generation,
+            "message_sha256": expected_message_sha256,
+            "status": MessageStatus.PENDING.value,
+        }
+        assert len(expected_message_sha256) == 64
+
+        with database.SessionLocal() as session:
+            schema_after = list(
+                session.connection().exec_driver_sql(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                    "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+                )
+            )
+            assert session.query(database.InboxModel).count() == inbox_rows_before
+            row = (
+                session.query(database.InboxModel)
+                .filter(
+                    database.InboxModel.id == message_id,
+                    database.InboxModel.receiver_id == request.requester_terminal_id,
+                )
+                .one()
+            )
+        assert schema_after == schema_before
+        assert row.status == MessageStatus.PENDING.value
 
     def test_execute_refuses_a_prepared_record_for_a_different_case(self, tmp_path):
         case = cases.POSITIVE_PATH
