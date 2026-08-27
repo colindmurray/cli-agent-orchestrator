@@ -726,6 +726,32 @@ def _get_terminal_metadata_any(terminal_id: str) -> Optional[Dict[str, Any]]:
     return v2_metadata
 
 
+def get_terminal_generation_any(terminal_id: str) -> Optional[str]:
+    """Return the exact generation when only one terminal store resolves it.
+
+    This read-only identity lookup probes both isolated stores so a terminal
+    ID collision across vintages is treated as ambiguous rather than silently
+    selecting the v1 generation. It performs no pane or lifecycle observation.
+    """
+    metadata = get_terminal_metadata(terminal_id, warn_if_missing=False)
+    try:
+        v2_metadata = get_terminal_metadata_v2(terminal_id)
+    except OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        v2_metadata = None
+    if metadata is not None and v2_metadata is not None:
+        return None
+    if metadata is None:
+        metadata = v2_metadata
+    if metadata is None:
+        report_terminal_missing_from_every_store(terminal_id)
+    if not isinstance(metadata, dict):
+        return None
+    generation = metadata.get("generation")
+    return generation if isinstance(generation, str) else None
+
+
 def _verify_managed_pane_process(session_name: str, window_name: str) -> None:
     """Prove the managed window is NOT running a shell (fail-closed check).
 
