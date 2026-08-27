@@ -32,6 +32,7 @@ import hashlib
 import subprocess
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Any, Mapping, Optional
 
 import pytest
@@ -177,10 +178,7 @@ class _Pane:
         self._state.observed_deadlines.append(deadline_monotonic)
         if self._state.pane_timeout:
             assert deadline_monotonic is not None
-            remaining = max(0.0, deadline_monotonic - time.monotonic())
-            if remaining:
-                time.sleep(remaining)
-            raise subprocess.TimeoutExpired(["tmux", "list-panes"], remaining)
+            raise subprocess.TimeoutExpired(["tmux", "list-panes"], timeout=0)
         if self._state.pane_gone:
             return None
         if self._state.pane_unreadable:
@@ -825,24 +823,31 @@ class TestTheGatesRunBeforeTheWriteClaim:
         _, bound = await _bound_native(worktree, tmp_path)
         native.pane_timeout = True
         monkeypatch.setattr(cis, "WRITE_DEADLINE_SECONDS", 0.05)
+        real_time = cis.time
+        deadline_origin = real_time.monotonic()
+        monkeypatch.setattr(
+            cis,
+            "time",
+            SimpleNamespace(monotonic=lambda: deadline_origin),
+        )
+        observations_before_delivery = len(native.observed_deadlines)
 
-        started = time.monotonic()
         result = _deliver(
             bound["terminal_id"],
             tmux,
             journal,
             control_id="c-native-timeout",
         )
-        elapsed = time.monotonic() - started
 
         assert result.outcome == cis.REFUSED
         assert result.reason_code == cis.REASON_WRITE_DEADLINE
         assert result.as_response()["reattemptable"] is True
-        assert elapsed < 0.15
+        assert native.observed_deadlines[observations_before_delivery:] == [deadline_origin + 0.05]
         assert tmux.events == []
         assert journal.get("c-native-timeout").state == STATE_REFUSED
 
         native.pane_timeout = False
+        monkeypatch.setattr(cis, "time", real_time)
         monkeypatch.setattr(cis, "WRITE_DEADLINE_SECONDS", 5.0)
         healthy = _deliver(
             bound["terminal_id"],
