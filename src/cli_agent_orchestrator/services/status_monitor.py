@@ -134,7 +134,10 @@ class StatusMonitor:
           resumed) and at quiescence (output stopped) — see
           _schedule_screen_detection.
         """
-        provider = provider_manager.get_provider(terminal_id)
+        # FIFO/ACP v2 rows live only in the managed-v2 metadata surface.  This
+        # is the one ingestion path that opts into cross-vintage provider
+        # reconstruction; ordinary status/projection reads remain v1-only.
+        provider = provider_manager.get_provider(terminal_id, include_managed_v2=True)
         use_screen = (
             CAO_PYTE_STATUS
             and provider is not None
@@ -490,7 +493,7 @@ class StatusMonitor:
 
     def _detect_status(self, terminal_id: str, buffer: str) -> TerminalStatus:
         """Detect status: provider-specific patterns or UNKNOWN if no provider."""
-        provider = provider_manager.get_provider(terminal_id)
+        provider = provider_manager.get_provider(terminal_id, include_managed_v2=True)
         if provider is None:
             return TerminalStatus.UNKNOWN
 

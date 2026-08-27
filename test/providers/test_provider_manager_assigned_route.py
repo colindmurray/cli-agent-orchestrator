@@ -12,6 +12,7 @@ from cli_agent_orchestrator.models.provider import ProviderType
 from cli_agent_orchestrator.providers.manager import (
     ProviderManager,
     TerminalAssignedRouteIncompleteError,
+    TerminalMetadataCollisionError,
 )
 
 
@@ -23,7 +24,7 @@ def terminal_database(tmp_path, monkeypatch):
     )
     database.Base.metadata.create_all(bind=engine)
     monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
-    yield
+    yield engine
     engine.dispose()
 
 
@@ -195,3 +196,288 @@ def test_unreadable_metadata_is_not_treated_as_absent_or_legacy():
     ):
         with pytest.raises(OperationalError, match="database is locked"):
             ProviderManager().get_provider("unread01")
+
+
+def test_v2_only_terminal_reconstructs_from_its_native_session(terminal_database):
+    """A fresh manager must recover a terminal that exists only in the v2 store."""
+    database.create_terminal_v2(
+        "v2-only",
+        "cao-v2",
+        "w-v2",
+        ProviderType.CODEX.value,
+        generation="gen-v2-only",
+        session_id="v2-session",
+        native_session_id="native-v2-only",
+    )
+    manager = ProviderManager()
+    manager.create_provider = MagicMock(return_value=MagicMock(shell_baseline=None))
+
+    with patch(
+        "cli_agent_orchestrator.providers.manager.get_terminal_metadata",
+        wraps=database.get_terminal_metadata,
+    ) as v1_lookup:
+        provider = manager.get_provider("v2-only", include_managed_v2=True)
+
+    assert provider is manager.create_provider.return_value
+    v1_lookup.assert_called_once_with("v2-only", warn_if_missing=False)
+    manager.create_provider.assert_called_once_with(
+        ProviderType.CODEX.value,
+        "v2-only",
+        "cao-v2",
+        "w-v2",
+        None,
+        native_session_id="native-v2-only",
+    )
+
+
+def test_opt_in_v1_terminal_reconstructs_when_v2_table_is_absent(terminal_database):
+    """Opt-in probing keeps existing v1 rows usable on pre-migration DBs."""
+    database.create_terminal(
+        "v1-without-v2-table",
+        "cao-v1",
+        "w-v1",
+        ProviderType.CODEX.value,
+        generation="gen-v1",
+        native_session_id="native-v1",
+        assigned_model="gpt-5.6-sol",
+        assigned_effort="high",
+    )
+    database.ManagedLaunchV2TerminalModel.__table__.drop(bind=terminal_database)
+    manager = ProviderManager()
+    manager.create_provider = MagicMock(return_value=MagicMock(shell_baseline=None))
+
+    provider = manager.get_provider("v1-without-v2-table", include_managed_v2=True)
+
+    assert provider is manager.create_provider.return_value
+    manager.create_provider.assert_called_once_with(
+        ProviderType.CODEX.value,
+        "v1-without-v2-table",
+        "cao-v1",
+        "w-v1",
+        None,
+        native_session_id="native-v1",
+        expected_model="gpt-5.6-sol",
+        expected_effort="high",
+    )
+
+
+def test_same_id_in_both_vintages_refuses_without_creating_provider(terminal_database):
+    """A cross-vintage ID collision must never silently choose one row."""
+    database.create_terminal(
+        "same-id",
+        "cao-v1",
+        "w-v1",
+        ProviderType.CODEX.value,
+        generation="gen-v1",
+        assigned_model="gpt-5.6-sol",
+        assigned_effort="high",
+    )
+    database.create_terminal_v2(
+        "same-id",
+        "cao-v2",
+        "w-v2",
+        ProviderType.CODEX.value,
+        generation="gen-v2",
+        native_session_id="native-v2",
+    )
+    manager = ProviderManager()
+    manager.create_provider = MagicMock()
+    manager._providers["same-id"] = MagicMock(name="stale-cached-provider")
+
+    with pytest.raises(TerminalMetadataCollisionError, match="both v1 and v2"):
+        manager.get_provider("same-id", include_managed_v2=True)
+
+    manager.create_provider.assert_not_called()
+
+
+def test_untagged_cached_provider_does_not_hide_v2_only_row(terminal_database):
+    database.create_terminal_v2(
+        "v2-untagged-cache",
+        "cao-v2",
+        "w-v2",
+        ProviderType.CODEX.value,
+        generation="gen-v2-cache",
+        native_session_id="native-v2-cache",
+    )
+    manager = ProviderManager()
+    stale = MagicMock(name="stale-provider")
+    rebuilt = MagicMock(name="rebuilt-provider", shell_baseline=None)
+    manager._providers["v2-untagged-cache"] = stale
+    manager.create_provider = MagicMock(return_value=rebuilt)
+
+    provider = manager.get_provider("v2-untagged-cache", include_managed_v2=True)
+
+    assert provider is rebuilt
+    assert provider is not stale
+    manager.create_provider.assert_called_once_with(
+        ProviderType.CODEX.value,
+        "v2-untagged-cache",
+        "cao-v2",
+        "w-v2",
+        None,
+        native_session_id="native-v2-cache",
+    )
+
+
+def test_exact_v2_cache_identity_reuses_provider_without_recreating(terminal_database):
+    database.create_terminal_v2(
+        "v2-tagged-cache",
+        "cao-v2",
+        "w-v2",
+        ProviderType.CODEX.value,
+        generation="gen-v2-tagged",
+        native_session_id="native-v2-tagged",
+    )
+    manager = ProviderManager()
+    created = MagicMock(name="created-provider", shell_baseline=None)
+
+    def create_and_cache(*_args, **_kwargs):
+        manager._providers["v2-tagged-cache"] = created
+        return created
+
+    manager.create_provider = MagicMock(side_effect=create_and_cache)
+
+    first = manager.get_provider("v2-tagged-cache", include_managed_v2=True)
+    second = manager.get_provider("v2-tagged-cache", include_managed_v2=True)
+
+    assert first is created
+    assert second is created
+    manager.create_provider.assert_called_once()
+
+
+def test_stale_v2_cache_rebuilds_for_new_durable_incarnation(terminal_database):
+    terminal_id = "v2-reincarnated-cache"
+    database.create_terminal_v2(
+        terminal_id,
+        "cao-v2-a",
+        "w-v2-a",
+        ProviderType.CODEX.value,
+        generation="gen-v2-a",
+        native_session_id="native-v2-a",
+    )
+    manager = ProviderManager()
+    provider_a = MagicMock(name="provider-a", shell_baseline=None)
+    provider_b = MagicMock(name="provider-b", shell_baseline=None)
+    created = iter((provider_a, provider_b))
+
+    def create_and_cache(*_args, **_kwargs):
+        provider = next(created)
+        manager._providers[terminal_id] = provider
+        return provider
+
+    manager.create_provider = MagicMock(side_effect=create_and_cache)
+
+    assert manager.get_provider(terminal_id, include_managed_v2=True) is provider_a
+    assert database.delete_terminal_v2(terminal_id) is True
+    database.create_terminal_v2(
+        terminal_id,
+        "cao-v2-b",
+        "w-v2-b",
+        ProviderType.CODEX.value,
+        generation="gen-v2-b",
+        native_session_id="native-v2-b",
+    )
+
+    assert manager.get_provider(terminal_id, include_managed_v2=True) is provider_b
+    assert manager.get_provider(terminal_id, include_managed_v2=True) is provider_b
+    assert manager.create_provider.call_count == 2
+    assert manager.create_provider.call_args_list[1] == (
+        (
+            ProviderType.CODEX.value,
+            terminal_id,
+            "cao-v2-b",
+            "w-v2-b",
+            None,
+        ),
+        {"native_session_id": "native-v2-b"},
+    )
+    assert manager._provider_identities[terminal_id] == (
+        "v2",
+        "gen-v2-b",
+        "native-v2-b",
+        ProviderType.CODEX.value,
+    )
+
+
+def test_missing_v2_table_is_treated_as_absence(monkeypatch):
+    """An un-migrated installation has no v2 table, which is still no row."""
+    missing_table = OperationalError(
+        "SELECT managed_launch_v2_terminals",
+        {},
+        Exception("no such table: managed_launch_v2_terminals"),
+    )
+    with (
+        patch(
+            "cli_agent_orchestrator.providers.manager.get_terminal_metadata",
+            return_value=None,
+        ),
+        patch(
+            "cli_agent_orchestrator.providers.manager.get_terminal_metadata_v2",
+            side_effect=missing_table,
+        ),
+    ):
+        with pytest.raises(ValueError, match="not found"):
+            ProviderManager().get_provider("pre-migration", include_managed_v2=True)
+
+
+def test_unreadable_v2_metadata_is_not_treated_as_absent():
+    unreadable = OperationalError(
+        "SELECT managed_launch_v2_terminals",
+        {},
+        Exception("database is locked"),
+    )
+    with (
+        patch(
+            "cli_agent_orchestrator.providers.manager.get_terminal_metadata",
+            return_value=None,
+        ),
+        patch(
+            "cli_agent_orchestrator.providers.manager.get_terminal_metadata_v2",
+            side_effect=unreadable,
+        ),
+    ):
+        with pytest.raises(OperationalError, match="database is locked"):
+            ProviderManager().get_provider("v2-unreadable", include_managed_v2=True)
+
+
+def test_unrelated_missing_table_is_not_treated_as_missing_v2_surface():
+    unreadable = OperationalError(
+        "SELECT managed_launch_v2_terminals",
+        {},
+        Exception("no such table: unrelated_table"),
+    )
+    with (
+        patch(
+            "cli_agent_orchestrator.providers.manager.get_terminal_metadata",
+            return_value=None,
+        ),
+        patch(
+            "cli_agent_orchestrator.providers.manager.get_terminal_metadata_v2",
+            side_effect=unreadable,
+        ),
+    ):
+        with pytest.raises(OperationalError, match="unrelated_table"):
+            ProviderManager().get_provider("v2-unreadable", include_managed_v2=True)
+
+
+def test_v2_only_default_lookup_remains_legacy_invisible_after_opt_in(terminal_database):
+    database.create_terminal_v2(
+        "v2-default-hidden",
+        "cao-v2",
+        "w-v2",
+        ProviderType.CODEX.value,
+        generation="gen-v2-hidden",
+        native_session_id="native-v2-hidden",
+    )
+    manager = ProviderManager()
+    provider = MagicMock(name="v2-provider", shell_baseline=None)
+    manager.create_provider = MagicMock(
+        side_effect=lambda *_args, **_kwargs: manager._providers.setdefault(
+            "v2-default-hidden", provider
+        )
+    )
+
+    assert manager.get_provider("v2-default-hidden", include_managed_v2=True) is provider
+
+    with pytest.raises(ValueError, match="not found"):
+        manager.get_provider("v2-default-hidden")

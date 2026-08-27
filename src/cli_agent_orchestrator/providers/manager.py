@@ -3,7 +3,9 @@
 import logging
 from typing import Dict, List, Optional
 
-from cli_agent_orchestrator.clients.database import get_terminal_metadata
+from sqlalchemy.exc import OperationalError
+
+from cli_agent_orchestrator.clients.database import get_terminal_metadata, get_terminal_metadata_v2
 from cli_agent_orchestrator.models.provider import ProviderType
 from cli_agent_orchestrator.providers.antigravity_cli import AntigravityCliProvider
 from cli_agent_orchestrator.providers.base import BaseProvider
@@ -25,11 +27,35 @@ class TerminalAssignedRouteIncompleteError(Exception):
     """A generation-bound terminal lacks a complete assigned route pin."""
 
 
+class TerminalMetadataCollisionError(ValueError):
+    """One terminal ID is present in both isolated metadata vintages."""
+
+
+def _is_missing_v2_table(error: OperationalError) -> bool:
+    """Return whether an OperationalError is only an uncreated v2 table.
+
+    A pre-v2 database legitimately has no ``managed_launch_v2_terminals``
+    table.  Every other database/read failure must remain visible to callers;
+    treating a locked or corrupt v2 surface as an absent terminal could cause
+    restart code to reconstruct the wrong provider or overwrite state.
+    """
+    # SQLAlchemy keeps the database's actual missing relation in ``orig``;
+    # the statement text may name the v2 relation even when SQLite reports a
+    # different missing table, so classify from the driver error only.
+    origin = str(getattr(error, "orig", "")).lower()
+    return "no such table" in origin and "managed_launch_v2_terminals" in origin
+
+
 class ProviderManager:
     """Simplified provider manager with direct mapping."""
 
     def __init__(self) -> None:
         self._providers: Dict[str, BaseProvider] = {}
+        # Identity for providers reconstructed from durable metadata.  Providers
+        # created directly by callers predate this opt-in cache contract and are
+        # intentionally left untagged; the managed-v2 path revalidates those
+        # entries against the durable row before returning them.
+        self._provider_identities: Dict[str, tuple] = {}
 
     def create_provider(
         self,
@@ -169,6 +195,7 @@ class ProviderManager:
                 raise ValueError(f"Unknown provider type: {provider_type}")
 
             # Store in direct mapping
+            self._provider_identities.pop(terminal_id, None)
             self._providers[terminal_id] = provider
             logger.info(f"Created {provider_type} provider for terminal: {terminal_id}")
             return provider
@@ -179,7 +206,9 @@ class ProviderManager:
             )
             raise
 
-    def get_provider(self, terminal_id: str) -> Optional[BaseProvider]:
+    def get_provider(
+        self, terminal_id: str, *, include_managed_v2: bool = False
+    ) -> Optional[BaseProvider]:
         """Get provider instance, creating on-demand if not found.
 
         Args:
@@ -191,25 +220,84 @@ class ProviderManager:
         Raises:
             ValueError: If terminal not found in database or provider creation fails
             RuntimeError/OperationalError: If metadata cannot be read (distinct from absence)
-        """
-        # Check if already exists
-        provider = self._providers.get(terminal_id)
-        if provider:
-            return provider
 
-        # Try to create on-demand from database metadata
-        # Do not catch exceptions: an unreadable projection must propagate distinctly
-        # from an actually absent terminal, otherwise callers cannot distinguish
-        # "no row" from "could not read row" and may treat an unreadable
-        # managed terminal as a legacy row.
-        metadata = get_terminal_metadata(terminal_id)
+        ``include_managed_v2`` is intentionally opt-in.  Most callers operate
+        on the legacy projection and must not make v2 native-TUI terminals
+        visible to old status/projection behavior.  The FIFO/ACP status path
+        opts in because it is a cross-vintage consumer that must recover the
+        provider for a v2 managed row after restart.
+        """
+        if not include_managed_v2:
+            # Keep the default path's direct in-memory behavior unchanged.
+            provider = self._providers.get(terminal_id)
+            cached_identity = self._provider_identities.get(terminal_id)
+            if provider and (cached_identity is None or cached_identity[0] != "v2"):
+                return provider
+            metadata = get_terminal_metadata(terminal_id)
+        else:
+            # Probe both isolated metadata vintages.  The v1 row remains the
+            # authoritative shape for old terminals, while a v2-only row must
+            # be recoverable after a server restart.  Always perform the second
+            # probe so an accidental cross-vintage ID collision cannot silently
+            # select a provider from whichever table happened to be queried
+            # first.
+            # Do not catch exceptions: an unreadable projection must propagate
+            # distinctly from an actually absent terminal, otherwise callers
+            # cannot distinguish "no row" from "could not read row" and may
+            # treat an unreadable managed terminal as a legacy row.
+            # This is the first tier of a deliberate v1-then-v2 probe.  A v1
+            # miss is expected for every healthy v2-only terminal, so suppress
+            # the legacy lookup's recurring missing-row warning; only a caller
+            # that needs to report both tiers empty should emit a not-found
+            # diagnostic.
+            v1_metadata = get_terminal_metadata(terminal_id, warn_if_missing=False)
+            try:
+                v2_metadata = get_terminal_metadata_v2(terminal_id)
+            except OperationalError as error:
+                if not _is_missing_v2_table(error):
+                    raise
+                v2_metadata = None
+
+            if v1_metadata is not None and v2_metadata is not None:
+                raise TerminalMetadataCollisionError(
+                    f"Terminal {terminal_id} exists in both v1 and v2 metadata stores"
+                )
+
+            metadata = v1_metadata
+            if metadata is None and v2_metadata is not None:
+                # The v2 schema prefixes fields whose names would otherwise
+                # collide with v1 columns.  Provider constructors intentionally
+                # consume the common ``native_session_id`` name, so normalize
+                # only that input at this manager boundary; assigned route pins
+                # remain absent/nullable for v2 and must not trigger v1's
+                # completeness guard.
+                metadata = dict(v2_metadata)
+                metadata["native_session_id"] = metadata.get("v2_native_session_id")
+
         if not metadata:
             raise ValueError(f"Terminal {terminal_id} not found in database")
+
+        provider = self._providers.get(terminal_id)
+        if include_managed_v2 and provider is not None:
+            cached_identity = self._provider_identities.get(terminal_id)
+            durable_identity = self._provider_identity(metadata)
+            if cached_identity == durable_identity:
+                return provider
+            if metadata.get("protocol_vintage") != "v2" and cached_identity is None:
+                # A provider created directly by a legacy caller has no
+                # durable identity tag, but the v1 lookup is still the exact
+                # legacy row that this opt-in call resolved.
+                return provider
+            # The opt-in path must not let an untagged or stale provider hide a
+            # v2-only row (or a changed v2 incarnation).  Drop the mapping so
+            # create_provider's normal assignment installs the reconstruction.
+            self._providers.pop(terminal_id, None)
+            self._provider_identities.pop(terminal_id, None)
 
         # Managed v1 rows are classified by non-null ``generation`` alone.
         # A row with generation and missing assigned fields must not reconstruct
         # on ambient defaults even when native_session_id is still None.
-        if metadata.get("generation") is not None:
+        if metadata.get("protocol_vintage") != "v2" and metadata.get("generation") is not None:
             missing: list[str] = []
             if metadata.get("assigned_model") is None:
                 missing.append("assigned_model")
@@ -223,15 +311,21 @@ class ProviderManager:
                 )
 
         # Create provider on-demand from persisted assigned route pin.
+        create_kwargs = {"native_session_id": metadata.get("native_session_id")}
+        if metadata.get("protocol_vintage") != "v2":
+            # Assigned route pins are a v1 managed-terminal contract.  Do not
+            # invent or enforce them for the isolated v2 observation row.
+            create_kwargs.update(
+                expected_model=metadata.get("assigned_model"),
+                expected_effort=metadata.get("assigned_effort"),
+            )
         provider = self.create_provider(
             metadata["provider"],
             terminal_id,
             metadata["tmux_session"],
             metadata["tmux_window"],
             metadata["agent_profile"],
-            native_session_id=metadata.get("native_session_id"),
-            expected_model=metadata.get("assigned_model"),
-            expected_effort=metadata.get("assigned_effort"),
+            **create_kwargs,
         )
         # Restore shell_command baseline from DB so get_status() can detect kiro exit.
         # The terminal already exists in the DB, so its CLI has long since
@@ -243,13 +337,26 @@ class ProviderManager:
             provider.shell_baseline = metadata["shell_command"]
             if hasattr(provider, "_initialized"):
                 provider._initialized = True
+        if include_managed_v2:
+            self._provider_identities[terminal_id] = self._provider_identity(metadata)
         logger.info(f"Created provider on-demand for terminal {terminal_id}")
         return provider
+
+    @staticmethod
+    def _provider_identity(metadata: dict) -> tuple:
+        """Return the durable identity used to validate opt-in cache hits."""
+        return (
+            metadata.get("protocol_vintage", "v1"),
+            metadata.get("generation"),
+            metadata.get("native_session_id"),
+            metadata.get("provider"),
+        )
 
     def cleanup_provider(self, terminal_id: str) -> None:
         """Cleanup provider and remove from map (used when terminal is deleted)."""
         try:
             provider = self._providers.pop(terminal_id, None)
+            self._provider_identities.pop(terminal_id, None)
             if provider:
                 provider.cleanup()
                 logger.info(f"Cleaned up provider for terminal: {terminal_id}")
