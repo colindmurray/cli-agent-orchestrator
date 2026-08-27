@@ -926,10 +926,10 @@ _TS_MONITOR = f"{_TS}:948"  # registry.monitor in _register_v2_terminal_resource
 _TS_REUSE_DELETE = f"{_TS}:1077"  # registry.delete in _retire_reused_tmux_observation
 _TS_DELETE = f"{_TS}:1317"  # registry.delete in _deregister_v2_terminal_resources
 _CS_RESOLVE = f"{_CS}:170"  # registry.resolve_fs_path in _legacy_file_delete_blocked
-_BR_DECLARE = f"{_BR}:3768"  # registry.declare in _declare_bridge_resources
-_BR_MARK = f"{_BR}:3812"  # registry.register_created in _mark_bridge_resource_created
-_BR_JOURNAL_MARK = f"{_BR}:3836"  # registry.register_created in _mark_bridge_journal_created
-_BR_DELETE = f"{_BR}:3989"  # registry.delete in _deregister_bridge_resources
+_BR_DECLARE = f"{_BR}:3787"  # registry.declare in _declare_bridge_resources
+_BR_MARK = f"{_BR}:3831"  # registry.register_created in _mark_bridge_resource_created
+_BR_JOURNAL_MARK = f"{_BR}:3855"  # registry.register_created in _mark_bridge_journal_created
+_BR_DELETE = f"{_BR}:4008"  # registry.delete in _deregister_bridge_resources
 
 _MANIFEST_SPEC: tuple[tuple[str, str, str, str], ...] = (
     # --- terminal log artifacts (constructor + generation deleter + retention)

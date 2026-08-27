@@ -3420,6 +3420,8 @@ class _ProviderSession:
                 # with an ambiguous compact submission.
                 from cli_agent_orchestrator.services import generation_fence
 
+                if isinstance(exc, SessionOperationRefused):
+                    return self._refuse_control(journal, operation_id, exc.code, exc.detail)
                 if isinstance(exc, generation_fence.FencedError):
                     return self._refuse_control(
                         journal,
@@ -3538,20 +3540,37 @@ class _ProviderSession:
                         "provider admission cannot revalidate generation binding"
                     ) from exc
                 expected_binding = {
+                    "reservation_id": self.request["reservation_id"],
                     "terminal_id": terminal_id,
                     "generation": generation,
-                    "attempt_id": self.request.get("attempt_id"),
+                    "provider": self.provider,
                     "native_session_id": self.provider_session_id,
                 }
                 if {key: binding.get(key) for key in expected_binding} != expected_binding:
-                    raise BridgeError("provider admission generation/session binding changed")
+                    raise SessionOperationRefused(
+                        "successor-fenced-before-provider-io",
+                        "provider admission durable generation/session binding changed",
+                    )
+                attempt_id = binding.get("attempt_id")
+                fencing_token_id = binding.get("fencing_token_id")
+                if (
+                    not isinstance(attempt_id, str)
+                    or not attempt_id.strip()
+                    or not isinstance(fencing_token_id, str)
+                    or not fencing_token_id.strip()
+                ):
+                    raise SessionOperationRefused(
+                        "successor-fenced-before-provider-io",
+                        "provider admission durable generation binding omitted "
+                        "attempt or fencing identity",
+                    )
                 try:
                     heartbeat_store.assert_current_fencing_binding(
                         COMPANION_DIR,
                         terminal_id=terminal_id,
                         generation=generation,
-                        attempt_id=str(self.request.get("attempt_id") or ""),
-                        fencing_token_id=str(binding.get("fencing_token_id") or ""),
+                        attempt_id=attempt_id,
+                        fencing_token_id=fencing_token_id,
                     )
                 except heartbeat_store.FencingRefused as exc:
                     raise generation_fence.FencedError(
