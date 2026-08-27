@@ -944,6 +944,86 @@ def _bound_generation(companion, request):
     return token
 
 
+def test_admission_reads_attempt_and_fencing_identity_from_durable_binding(tmp_path, monkeypatch):
+    """The real v2 bridge request is pre-bind and has no attempt id.
+
+    The companion binding is published later, so admission must use its
+    immutable attempt/fencing values without mutating the launch request.
+    """
+    from cli_agent_orchestrator.services import heartbeat_store as hb
+
+    session, companion, request = _v2_session(tmp_path, monkeypatch)
+    request.pop("attempt_id")
+    token = _bound_generation(companion, request)
+    observed = []
+
+    def assert_current(*args, **kwargs):
+        observed.append((args, kwargs))
+
+    monkeypatch.setattr(hb, "assert_current_fencing_binding", assert_current)
+
+    with session._admission_critical_section():
+        pass
+
+    assert observed == [
+        (
+            (companion,),
+            {
+                "terminal_id": request["terminal_id"],
+                "generation": request["generation"],
+                "attempt_id": "attempt-1",
+                "fencing_token_id": token.id,
+            },
+        )
+    ]
+    assert "attempt_id" not in request
+
+
+@pytest.mark.parametrize("missing_field", ["attempt_id", "fencing_token_id"])
+def test_missing_durable_binding_identity_refuses_before_provider_io(
+    tmp_path, monkeypatch, missing_field
+):
+    from cli_agent_orchestrator.services.destructive_endpoint import binding_record_path
+
+    session, companion, request = _v2_session(tmp_path, monkeypatch)
+    request.pop("attempt_id")
+    _bound_generation(companion, request)
+    binding_path = binding_record_path(companion, request["terminal_id"], request["generation"])
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    binding.pop(missing_field)
+    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+    provider_calls = []
+    session._submit_provider_turn = lambda *args, **kwargs: provider_calls.append((args, kwargs))
+
+    with pytest.raises(bridge.SessionOperationRefused) as exc_info:
+        session.admit(_admission(request))
+
+    assert exc_info.value.code == "successor-fenced-before-provider-io"
+    assert "durable generation binding omitted" in exc_info.value.detail
+    assert provider_calls == []
+
+
+def test_stale_durable_binding_session_refuses_before_provider_io(tmp_path, monkeypatch):
+    from cli_agent_orchestrator.services.destructive_endpoint import binding_record_path
+
+    session, companion, request = _v2_session(tmp_path, monkeypatch)
+    request.pop("attempt_id")
+    _bound_generation(companion, request)
+    binding_path = binding_record_path(companion, request["terminal_id"], request["generation"])
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    binding["native_session_id"] = "stale-provider-session"
+    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+    provider_calls = []
+    session._submit_provider_turn = lambda *args, **kwargs: provider_calls.append((args, kwargs))
+
+    with pytest.raises(bridge.SessionOperationRefused) as exc_info:
+        session.admit(_admission(request))
+
+    assert exc_info.value.code == "successor-fenced-before-provider-io"
+    assert "generation/session binding changed" in exc_info.value.detail
+    assert provider_calls == []
+
+
 @pytest.fixture
 def callback_gate_bridge_root(monkeypatch):
     """Short, real-git bridge root for the final callback-gate server seam."""
@@ -1065,6 +1145,91 @@ def _route_observation_wake_command(request, *, message_id):
         "route_observation_request_digest": "7" * 64,
         "route_observation_result_kind": "observed-closed",
     }
+
+
+def test_route_wake_socket_records_durable_binding_mismatch_as_refused(
+    callback_gate_bridge_root, monkeypatch
+):
+    """A binding mismatch is structured pre-I/O refusal, never ambiguity."""
+    from cli_agent_orchestrator import constants
+    from cli_agent_orchestrator.services import heartbeat_store as hb
+    from cli_agent_orchestrator.services import managed_launch_v2
+    from cli_agent_orchestrator.services.delivery_journal import DeliveryJournal
+    from cli_agent_orchestrator.services.destructive_endpoint import write_binding_record
+
+    root = callback_gate_bridge_root
+    request = _callback_gate_server_request(root)
+    target = _callback_gate_server_target(root, request)
+    companion = root / "companion"
+    monkeypatch.setattr(constants, "COMPANION_DIR", companion)
+    token = hb.issue_fencing_token(
+        companion, request["terminal_id"], request["generation"], "attempt-1"
+    )
+    write_binding_record(
+        companion,
+        terminal_id=request["terminal_id"],
+        generation=request["generation"],
+        reservation_id=request["reservation_id"],
+        attempt_id="attempt-1",
+        launch_nonce_digest="a" * 64,
+        fencing_token_id=token.id,
+        provider=request["provider"],
+        native_session_id="stale-provider-session",
+    )
+    provider_submissions = []
+    provider_session_class = bridge._ProviderSession
+
+    def session_factory(server_request):
+        session = provider_session_class.__new__(provider_session_class)
+        session.request = server_request
+        session.provider = server_request["provider"]
+        session.rpc = SimpleNamespace(proc=None)
+        session.provider_session_id = "thread-provider-opaque"
+        session.readiness = {"provider_version": "test"}
+        session.current_model = "test-model"
+        session.current_effort = "test-effort"
+        session._current_turn_id = None
+        session._heartbeat_producer = None
+        session.kimi_wire_path = None
+        session._companion_scan_index = 0
+        session.initialize = lambda: {"provider_session_id": session.provider_session_id}
+        session._scan_companion_events = lambda: None
+        session._emit_beat = lambda *_args: None
+        session.close = lambda: None
+        session._submit_provider_turn = lambda *args, **kwargs: provider_submissions.append(
+            (args, kwargs)
+        )
+        return session
+
+    monkeypatch.setattr(bridge, "_ProviderSession", session_factory)
+    monkeypatch.setattr(bridge, "_build_actor_broker", lambda *_args: None)
+    monkeypatch.setattr(
+        managed_launch_v2, "assert_route_observation_wake_admission_current", lambda *_a, **_k: None
+    )
+    _start_callback_gate_server(request, target, monkeypatch)
+    command = _route_observation_wake_command(request, message_id="route-wake-binding-mismatch")
+
+    response = _call_callback_gate_server(target, request, command)
+
+    assert response == {
+        "ok": False,
+        "error": (
+            "successor-fenced-before-provider-io: "
+            "provider admission durable generation/session binding changed"
+        ),
+        "error_code": "successor-fenced-before-provider-io",
+        "error_detail": "provider admission durable generation/session binding changed",
+        "provider_io_started": False,
+    }
+    assert provider_submissions == []
+    journal = DeliveryJournal(target["root"] / "delivery-journal.db")
+    record = journal.get(request["obligation_generation"], command["message_id"])
+    assert record["state"] == "submit-refused"
+    assert [event["to_state"] for event in record["events"]] == [
+        "accepted",
+        "terminal_queued",
+        "submit-refused",
+    ]
 
 
 @pytest.mark.parametrize("callback_failure", ["refused", "error"])
@@ -1213,6 +1378,7 @@ def test_route_observation_wake_gate_precedes_its_only_provider_turn(tmp_path, m
     from cli_agent_orchestrator.services import companion_receipts, managed_launch_v2
 
     session, companion, request = _v2_session(tmp_path, monkeypatch)
+    request.pop("attempt_id")
     _bound_generation(companion, request)
     monkeypatch.setattr(companion_receipts, "COMPANION_DIR", companion)
     command = _route_observation_wake_command(request, message_id="route-wake-1")
@@ -1904,6 +2070,82 @@ def test_parked_compact_is_typed_generation_fenced_before_start_request(tmp_path
 
     assert receipt["state"] == "refused"
     assert receipt["reason_code"] == "generation_fenced"
+    assert rpc.calls == []
+
+
+def test_compact_durable_binding_mismatch_is_refused_before_rpc_call(tmp_path, monkeypatch):
+    """A compact binding mismatch is typed, not compact-outcome ambiguity."""
+    import threading
+
+    from cli_agent_orchestrator.services.destructive_endpoint import binding_record_path
+
+    session, companion, request = _v2_session(tmp_path, monkeypatch)
+    request["provider"] = "kimi_cli"
+    request.pop("attempt_id")
+    session.provider = "kimi_cli"
+    _bound_generation(companion, request)
+    binding_path = binding_record_path(companion, request["terminal_id"], request["generation"])
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    binding["native_session_id"] = "stale-provider-session"
+    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+
+    class Rpc:
+        def __init__(self):
+            self.calls = []
+
+        def notifications_since(self, _index):
+            return (
+                [
+                    {
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "available_commands_update",
+                                "availableCommands": [{"name": "compact"}],
+                            }
+                        },
+                    }
+                ],
+                1,
+            )
+
+        def notification_count(self):
+            return 1
+
+        def start_request(self, method, params):
+            self.calls.append((method, params))
+            return "must-not-start"
+
+    rpc = Rpc()
+    session.rpc = rpc
+    session._active_prompt_lock = threading.Lock()
+    session._active_prompt_request_id = None
+    journal = bridge.SessionControlJournal(tmp_path / "compact-binding-mismatch.sqlite")
+    operation_id = "88888888-8888-4888-8888-888888888888"
+    command = {
+        "operation_id": operation_id,
+        "action": "compact",
+        "reservation_id": request["reservation_id"],
+        "terminal_id": request["terminal_id"],
+        "generation": request["generation"],
+    }
+    journal.begin(
+        operation_id=operation_id,
+        terminal_id=request["terminal_id"],
+        generation=request["generation"],
+        action="compact",
+        request_sha256="g" * 64,
+        provider=request["provider"],
+        provider_session_id=session.provider_session_id,
+    )
+
+    receipt = session.session_operation(command, journal)
+
+    assert receipt["state"] == "refused"
+    assert receipt["reason_code"] == "successor-fenced-before-provider-io"
+    assert receipt["reason_detail"] == (
+        "provider admission durable generation/session binding changed"
+    )
     assert rpc.calls == []
 
 
