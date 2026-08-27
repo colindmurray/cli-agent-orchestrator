@@ -488,6 +488,9 @@ def cleanup_old_data():
     """Clean up terminals, inbox messages, and log files older than RETENTION_DAYS."""
     try:
         cutoff_date = datetime.now() - timedelta(days=RETENTION_DAYS)
+        inbox_cutoff_date = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            days=RETENTION_DAYS
+        )
         logger.info(
             f"Starting cleanup of data older than {RETENTION_DAYS} days (before {cutoff_date})"
         )
@@ -568,7 +571,7 @@ def cleanup_old_data():
             with SessionLocal() as db:
                 held_ids = {row[0] for row in db.query(InboxModel.id).all()}
         with SessionLocal() as db:
-            query = db.query(InboxModel).filter(InboxModel.created_at < cutoff_date)
+            query = db.query(InboxModel).filter(InboxModel.created_at < inbox_cutoff_date)
             if held_ids:
                 query = query.filter(InboxModel.id.not_in(held_ids))
             deleted_messages = query.delete(synchronize_session=False)

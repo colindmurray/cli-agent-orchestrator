@@ -1,13 +1,32 @@
 """Tests for cleanup service."""
 
+import os
 import tempfile
-from datetime import datetime, timedelta
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cli_agent_orchestrator.services.cleanup_service import cleanup_old_data
+
+
+@contextmanager
+def _process_timezone(name):
+    """Temporarily select a real non-UTC process clock for clock-basis tests."""
+    original = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        time.tzset()
 
 
 class TestCleanupOldData:
@@ -227,6 +246,82 @@ class TestCleanupOldData:
 
         # Verify filter was called (terminals: .all() + .delete(), inbox: .delete())
         assert len(filter_calls) >= 2
+
+    def test_inbox_retention_uses_utc_without_changing_terminal_local_clock_behavior(
+        self, isolated_memory_db, monkeypatch, tmp_path
+    ):
+        """Each legacy-naive column is retained against its established clock basis."""
+        from cli_agent_orchestrator.clients import database
+        from cli_agent_orchestrator.services import cleanup_service
+
+        retention = timedelta(days=7)
+        boundary_margin = timedelta(hours=1)
+        with _process_timezone("America/Los_Angeles"):
+            utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+            local_now = datetime.now()
+            with database.SessionLocal() as db:
+                db.add_all(
+                    [
+                        database.TerminalModel(
+                            id="localold",
+                            tmux_session="cao-local",
+                            tmux_window="old",
+                            provider="codex",
+                            last_active=local_now - retention - boundary_margin,
+                        ),
+                        database.TerminalModel(
+                            id="localnew",
+                            tmux_session="cao-local",
+                            tmux_window="new",
+                            provider="codex",
+                            last_active=local_now - retention + boundary_margin,
+                        ),
+                        database.InboxModel(
+                            sender_id="sender",
+                            receiver_id="receiver",
+                            message="stale UTC",
+                            status="delivered",
+                            created_at=utc_now - retention - boundary_margin,
+                        ),
+                        database.InboxModel(
+                            sender_id="sender",
+                            receiver_id="receiver",
+                            message="fresh UTC",
+                            status="delivered",
+                            created_at=utc_now - retention + boundary_margin,
+                        ),
+                    ]
+                )
+                db.commit()
+
+            monkeypatch.setattr(cleanup_service, "SessionLocal", database.SessionLocal)
+            monkeypatch.setattr(cleanup_service, "RETENTION_DAYS", 7)
+            monkeypatch.setattr(
+                cleanup_service,
+                "fifo_manager",
+                type("NoopFifo", (), {"stop_reader": staticmethod(lambda _id: None)})(),
+            )
+            monkeypatch.setattr(
+                cleanup_service,
+                "status_monitor",
+                type("NoopMonitor", (), {"clear_terminal": staticmethod(lambda _id: None)})(),
+            )
+            for attribute in (
+                "TERMINAL_LOG_DIR",
+                "LOG_DIR",
+                "WAKE_RECEIPT_DIR",
+                "COMPANION_DIR",
+            ):
+                monkeypatch.setattr(cleanup_service, attribute, tmp_path / attribute.lower())
+
+            cleanup_service.cleanup_old_data()
+
+            with database.SessionLocal() as db:
+                terminal_ids = {row.id for row in db.query(database.TerminalModel).all()}
+                inbox_messages = {row.message for row in db.query(database.InboxModel).all()}
+
+        assert terminal_ids == {"localnew"}
+        assert inbox_messages == {"fresh UTC"}
 
 
 # ------------------------------------------- v2 vintage invisibility (MIG)
