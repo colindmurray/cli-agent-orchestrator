@@ -9,7 +9,14 @@ provider's native status. These tests pin both paths.
 import threading
 from unittest.mock import MagicMock, patch
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from cli_agent_orchestrator.clients import database
+from cli_agent_orchestrator.models.provider import ProviderType
 from cli_agent_orchestrator.models.terminal import TerminalStatus
+from cli_agent_orchestrator.providers.manager import ProviderManager
 from cli_agent_orchestrator.services.status_monitor import StatusMonitor
 
 
@@ -17,6 +24,19 @@ def _backend(event_inbox):
     backend = MagicMock()
     backend.supports_event_inbox.return_value = event_inbox
     return backend
+
+
+@pytest.fixture
+def v2_terminal_database(tmp_path, monkeypatch):
+    """A real isolated database containing the v2-only terminal surface."""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'status-monitor-v2.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    database.Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
+    yield
+    engine.dispose()
 
 
 class TestGetStatusTmux:
@@ -397,3 +417,52 @@ class TestRawDebounceArmedDetection:
         sm._process_chunk("t1", "● Working on task...")
 
         assert sm._last_status["t1"] == TerminalStatus.PROCESSING
+
+
+def test_process_chunk_v2_only_provider_publishes_fifo_status(v2_terminal_database):
+    """The FIFO/status pipeline must resolve a v2-only row after restart."""
+    terminal_id = "v2-status-terminal"
+    database.create_terminal_v2(
+        terminal_id,
+        "cao-v2",
+        "w-v2",
+        ProviderType.CODEX.value,
+        generation="gen-v2-status",
+        native_session_id="native-v2-status",
+    )
+    manager = ProviderManager()
+    provider = MagicMock()
+    provider.supports_screen_detection = False
+    provider.get_status.return_value = TerminalStatus.IDLE
+    manager.create_provider = MagicMock(
+        side_effect=lambda *_args, **_kwargs: manager._providers.setdefault(terminal_id, provider)
+    )
+    manager_lookup = MagicMock(wraps=manager.get_provider)
+    manager.get_provider = manager_lookup
+
+    sm = StatusMonitor()
+    published = []
+    bus = MagicMock()
+    bus.publish.side_effect = lambda topic, data: published.append((topic, data["status"]))
+    with (
+        patch("cli_agent_orchestrator.services.status_monitor.provider_manager", manager),
+        patch("cli_agent_orchestrator.services.status_monitor.bus", bus),
+    ):
+        sm._process_chunk(terminal_id, "idle output from the v2 terminal")
+
+    assert sm.get_buffer(terminal_id) == "idle output from the v2 terminal"
+    assert sm._last_status[terminal_id] is TerminalStatus.IDLE
+    assert published == [(f"terminal.{terminal_id}.status", "idle")]
+    assert manager_lookup.call_count == 2
+    assert all(
+        call.args == (terminal_id,) and call.kwargs == {"include_managed_v2": True}
+        for call in manager_lookup.call_args_list
+    )
+    manager.create_provider.assert_called_once_with(
+        ProviderType.CODEX.value,
+        terminal_id,
+        "cao-v2",
+        "w-v2",
+        None,
+        native_session_id="native-v2-status",
+    )
