@@ -3129,10 +3129,7 @@ async def get_terminal(terminal_id: TerminalId) -> Terminal:
 
 
 def _live_terminal_generation(terminal_id: str) -> Optional[str]:
-    metadata = terminal_service.get_terminal_metadata(terminal_id)
-    if not isinstance(metadata, dict):
-        return None
-    return metadata.get("generation")
+    return terminal_service.get_terminal_generation_any(terminal_id)
 
 
 @app.get("/terminals/{terminal_id}/user-prompt")
