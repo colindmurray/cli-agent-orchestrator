@@ -92,6 +92,16 @@ _PREWRITE_READINESS_POLL_SECONDS = 0.1
 # authorizing input rather than merely sampling the same transient redraw.
 _PREWRITE_READY_STABLE_POLLS = 11
 
+# Codex renders the non-modal status panel asynchronously after the submission
+# barrier proves Enter.  Poll the exact pane through at most twenty 50 ms gaps
+# instead of treating the first pre-render frame as a permanent ambiguous
+# observation.  Each capture remains independently bounded by the pane surface.
+_POST_SUBMIT_RENDER_POLL_SECONDS = 0.05
+_POST_SUBMIT_RENDER_CAPTURE_LIMIT = 21
+_POST_SUBMIT_RETRYABLE_PARSE_REASONS = frozenset(
+    {"panel-unparsed", "model-row-unparsed", "model-row-absent"}
+)
+
 #: Close-proof outcome vocabulary for the non-modal surface.  A proven
 #: composer return is the only positive close; everything else is unproven
 #: and terminates ambiguous-after-possible-effect.
@@ -842,8 +852,9 @@ class CodexRouteObserver:
     def _derive_observation(
         self, request: ro.RouteObservationRequest, *, newly_authorized: bool
     ) -> dict[str, Any]:
-        """Capture the pane and build the observation fact (or a possible-effect
-        inconclusive when the one authorized probe did not produce a panel)."""
+        """Capture the pane boundedly and build the observation fact (or a
+        possible-effect inconclusive when the authorized probe did not render a
+        parseable panel within the bounded capture window)."""
         send_failed = False
         submission_proven = True
         if newly_authorized:
@@ -855,15 +866,23 @@ class CodexRouteObserver:
             return _inconclusive_observation(request, reason="send-failed")
         if not submission_proven:
             return _inconclusive_observation(request, reason="submission-unproven")
-        try:
-            rows = self._surface.capture_screen()
-        except Exception:  # noqa: BLE001 - an unreadable pane is not a panel
-            rows = []
-        parsed = parse_codex_route_panel(
-            rows,
-            pinned_version=request.provider_version,
-            pane_width=self._surface.pane_width(),
-        )
+        for capture_number in range(_POST_SUBMIT_RENDER_CAPTURE_LIMIT):
+            try:
+                rows = self._surface.capture_screen()
+            except Exception:  # noqa: BLE001 - an unreadable pane is not a panel
+                rows = []
+            parsed = parse_codex_route_panel(
+                rows,
+                pinned_version=request.provider_version,
+                pane_width=self._surface.pane_width(),
+            )
+            if (
+                parsed["kind"] == "observed"
+                or parsed.get("reason") not in _POST_SUBMIT_RETRYABLE_PARSE_REASONS
+                or capture_number + 1 == _POST_SUBMIT_RENDER_CAPTURE_LIMIT
+            ):
+                break
+            time.sleep(_POST_SUBMIT_RENDER_POLL_SECONDS)
         return _observation_from_parse(request, parsed)
 
     def _reconcile_close_proof(

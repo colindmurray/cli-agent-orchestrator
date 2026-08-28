@@ -106,6 +106,7 @@ class FakeCodexPaneSurface:
         )
         self._readiness_hook = readiness_hook
         self.readiness_checks = 0
+        self.capture_count = 0
         self.status_commands_sent = 0
         self.key_events: list[str] = []
 
@@ -114,6 +115,7 @@ class FakeCodexPaneSurface:
         return "%7"
 
     def capture_screen(self) -> list[str]:
+        self.capture_count += 1
         return list(self._rows)
 
     def pane_width(self) -> int | None:
@@ -225,6 +227,50 @@ class TestPositivePath:
         assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
         assert outcome["observation"]["model"] == "gpt-5.4-codex"
         assert outcome["observation"]["effort"] is None
+
+    def test_observer_waits_boundedly_for_the_submitted_status_panel_to_render(
+        self, _db, monkeypatch
+    ):
+        request = _request(
+            provider_version="0.149.0",
+            native_session_id=SESSION_ID,
+        )
+        pre_render = [
+            "• M17_T5_RETAINED_READY",
+            "",
+            "› Ask Codex to do anything",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        rendered = codex_panel_rows(
+            session_id=SESSION_ID,
+            model="gpt-5.6-luna",
+            effort="high",
+            version="0.149.0",
+        )
+
+        class DelayedPanelSurface(FakeCodexPaneSurface):
+            def __init__(self):
+                super().__init__(rows=pre_render)
+                self.frames = [pre_render, pre_render, rendered]
+                self.capture_count = 0
+
+            def capture_screen(self) -> list[str]:
+                index = min(self.capture_count, len(self.frames) - 1)
+                self.capture_count += 1
+                return list(self.frames[index])
+
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        surface = DelayedPanelSurface()
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["observation"]["session_id"] == SESSION_ID
+        assert outcome["observation"]["model"] == "gpt-5.6-luna"
+        assert outcome["observation"]["effort"] == "high"
+        assert surface.status_commands_sent == 1
+        assert surface.capture_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -828,6 +874,7 @@ class TestAmbiguousAfterPossibleEffect:
         assert outcome["terminal"] is True
         assert outcome["receipt_digest"] is None
         assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert surface.capture_count == roc._POST_SUBMIT_RENDER_CAPTURE_LIMIT
         # the composer did return; the panel itself was unparseable, which is
         # what makes the observation inconclusive and the result ambiguous.
         assert outcome["close_proof"]["outcome"] == "composer-restored"
