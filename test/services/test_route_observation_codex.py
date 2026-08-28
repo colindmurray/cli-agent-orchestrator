@@ -34,6 +34,17 @@ SESSION_ID = "4f5f46c7-b660-4f6f-a144-d2c6dceccf95"
 CODEX_PINNED_VERSION = "0.147.0"
 
 
+def _install_advancing_clock(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(roc.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        roc.time,
+        "sleep",
+        lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+    return now
+
+
 def _request(
     operation_id=None,
     *,
@@ -271,6 +282,51 @@ class TestPositivePath:
         assert outcome["observation"]["effort"] == "high"
         assert surface.status_commands_sent == 1
         assert surface.capture_count == 3
+
+    def test_observer_outlasts_the_old_capture_ceiling_for_a_slow_status_panel(
+        self, _db, monkeypatch
+    ):
+        request = _request(
+            provider_version="0.149.0",
+            native_session_id=SESSION_ID,
+        )
+        pre_render = [
+            "• M17_T5_RETAINED_READY",
+            "",
+            "› Ask Codex to do anything",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        rendered = codex_panel_rows(
+            session_id=SESSION_ID,
+            model="gpt-5.6-luna",
+            effort="high",
+            version="0.149.0",
+        )
+
+        class SlowPanelSurface(FakeCodexPaneSurface):
+            def __init__(self):
+                super().__init__(rows=pre_render)
+                self.frames = [pre_render] * 40 + [rendered]
+                self.capture_count = 0
+
+            def capture_screen(self) -> list[str]:
+                index = min(self.capture_count, len(self.frames) - 1)
+                self.capture_count += 1
+                return list(self.frames[index])
+
+        now = _install_advancing_clock(monkeypatch)
+        surface = SlowPanelSurface()
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["observation"]["session_id"] == SESSION_ID
+        assert outcome["observation"]["model"] == "gpt-5.6-luna"
+        assert outcome["observation"]["effort"] == "high"
+        assert surface.status_commands_sent == 1
+        assert surface.capture_count == 41
+        assert now[0] == pytest.approx(2.0)
 
 
 # ---------------------------------------------------------------------------
@@ -862,9 +918,10 @@ class TestStaleRequester:
 
 
 class TestAmbiguousAfterPossibleEffect:
-    def test_an_unparseable_panel_terminates_ambiguous(self, _db):
+    def test_an_unparseable_panel_terminates_ambiguous(self, _db, monkeypatch):
         request = _request()
         surface = FakeCodexPaneSurface(rows=["> not a status panel", "garbage"])
+        now = _install_advancing_clock(monkeypatch)
         observer = roc.CodexRouteObserver(surface=surface)
         outcome = observer.observe(request)
 
@@ -874,7 +931,8 @@ class TestAmbiguousAfterPossibleEffect:
         assert outcome["terminal"] is True
         assert outcome["receipt_digest"] is None
         assert outcome["observation"]["observed_state"] == "inconclusive"
-        assert surface.capture_count == roc._POST_SUBMIT_RENDER_CAPTURE_LIMIT
+        assert surface.capture_count == 201
+        assert now[0] == pytest.approx(roc._POST_SUBMIT_RENDER_TIMEOUT_SECONDS)
         # the composer did return; the panel itself was unparseable, which is
         # what makes the observation inconclusive and the result ambiguous.
         assert outcome["close_proof"]["outcome"] == "composer-restored"
@@ -946,8 +1004,9 @@ class TestRenderFloor:
         assert outcome["observation"]["model"] is None
         assert outcome["observation"]["effort"] is None
 
-    def test_a_malformed_model_reasoning_suffix_is_not_positive(self, _db):
+    def test_a_malformed_model_reasoning_suffix_is_not_positive(self, _db, monkeypatch):
         request = _request()
+        _install_advancing_clock(monkeypatch)
         surface = FakeCodexPaneSurface(
             rows=codex_panel_rows(model="gpt-5.4-codex (reasoning turbo)", effort=None)
         )
@@ -958,8 +1017,9 @@ class TestRenderFloor:
         # is exposed as a parsed fact.
         assert outcome["observation"]["effort"] is None
 
-    def test_an_empty_reasoning_parenthetical_is_not_a_bare_model(self, _db):
+    def test_an_empty_reasoning_parenthetical_is_not_a_bare_model(self, _db, monkeypatch):
         request = _request()
+        _install_advancing_clock(monkeypatch)
         surface = FakeCodexPaneSurface(
             rows=codex_panel_rows(model="gpt-5.4-codex (reasoning )", effort=None)
         )
@@ -970,12 +1030,13 @@ class TestRenderFloor:
         assert outcome["observation"]["model"] is None
         assert outcome["observation"]["effort"] is None
 
-    def test_a_truncated_model_row_at_full_width_is_not_reported_observed(self, _db):
+    def test_a_truncated_model_row_at_full_width_is_not_reported_observed(self, _db, monkeypatch):
         """P2 (round 2): a known width is not enough — the Model row's own
         content must be complete.  A value cut mid-parenthetical at a width
         that should have rendered it fully is a truncated capture, and the
         closed effort parse fails closed rather than reporting a half token."""
         request = _request()
+        _install_advancing_clock(monkeypatch)
         surface = FakeCodexPaneSurface(
             rows=codex_panel_rows(model="gpt-5.4-codex (reasoning h", effort=None),
             pane_width=roc.MODEL_RENDER_FLOOR_COLUMNS,
@@ -1085,9 +1146,10 @@ class TestReasoningEffortExtraction:
         stored = json.loads(ro.get(request.operation_id)["observation_json"])
         assert stored["effort"] == effort
 
-    def test_a_truncated_parenthetical_remains_inconclusive(self, _db):
+    def test_a_truncated_parenthetical_remains_inconclusive(self, _db, monkeypatch):
         """A value cut mid-parenthetical remains inconclusive."""
         request = _request()
+        _install_advancing_clock(monkeypatch)
         surface = FakeCodexPaneSurface(
             rows=codex_panel_rows(model="gpt-5.4-codex (reasoning h", effort=None),
             pane_width=roc.MODEL_RENDER_FLOOR_COLUMNS,
@@ -1101,9 +1163,10 @@ class TestReasoningEffortExtraction:
         stored = json.loads(ro.get(request.operation_id)["observation_json"])
         assert stored["reason"] == "model-row-unparsed"
 
-    def test_two_model_rows_remain_inconclusive(self, _db):
+    def test_two_model_rows_remain_inconclusive(self, _db, monkeypatch):
         """A duplicated authoritative Model row remains inconclusive."""
         request = _request()
+        _install_advancing_clock(monkeypatch)
         rows = codex_panel_rows() + ["Model: gpt-5.4-codex (reasoning low)"]
         surface = FakeCodexPaneSurface(rows=rows)
         outcome = roc.CodexRouteObserver(surface=surface).observe(request)
@@ -1161,8 +1224,11 @@ class TestCrashRetryRecovery:
             ),
         ],
     )
-    def test_retry_after_pre_probe_skips_the_zero_effect_readiness_gate(self, _db, readiness):
+    def test_retry_after_pre_probe_skips_the_zero_effect_readiness_gate(
+        self, _db, readiness, monkeypatch
+    ):
         request = _request()
+        _install_advancing_clock(monkeypatch)
         ro.claim(request)
         ro.pre_probe(request, intent=roc._pre_probe_intent(request, pane_id="%7"))
         surface = FakeCodexPaneSurface(
