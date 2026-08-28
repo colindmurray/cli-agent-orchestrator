@@ -3,7 +3,7 @@
 import os
 import shlex
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -1792,6 +1792,31 @@ class TestCodexProviderTrustPrompt:
         await provider._handle_trust_prompt(timeout=2.0)
 
         mock_tmux.return_value.send_special_key.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("cli_agent_orchestrator.providers.codex.get_backend")
+    async def test_handle_update_prompt_skips_until_next_version(self, mock_tmux):
+        """A release notification cannot strand a fresh managed launch."""
+        mock_tmux.return_value.get_history.return_value = (
+            "  ✨\u200aUpdate available! 0.149.0 -> 0.149.1\n"
+            "\n"
+            "  Release notes: https://github.com/openai/codex/releases/latest\n"
+            "\n"
+            "› 1. Update now (runs `npm install -g @openai/codex`)\n"
+            "  2. Skip\n"
+            "  3. Skip until next version\n"
+            "\n"
+            "  Press enter to continue\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        await provider._handle_trust_prompt(timeout=2.0)
+
+        assert mock_tmux.return_value.send_special_key.call_args_list == [
+            call("test-session", "window-0", "Down"),
+            call("test-session", "window-0", "Down"),
+            call("test-session", "window-0", "Enter"),
+        ]
 
     def test_get_status_trust_prompt_is_waiting_user_answer(self):
         """Test that trust prompt reports WAITING_USER_ANSWER, not PROCESSING."""

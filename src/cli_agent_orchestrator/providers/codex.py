@@ -108,6 +108,16 @@ TUI_STARTUP_PATTERN = (
 TRUST_PROMPT_PATTERN = r"allow Codex to work in this folder"
 TRUST_PROMPT_PATTERN_V2 = r"Do you trust the contents of this directory\?"
 TRUST_PROMPT_FOOTER = r"Press enter to continue"
+# Release notification menu.  Managed launches must never upgrade the
+# operator's CLI as an incidental startup effect; select the durable
+# non-update option instead.  Require the complete menu in the bottom region
+# so historical prose containing "Update available" cannot receive keys.
+UPDATE_PROMPT_PATTERN = (
+    r"^[ \t]*(?:✨[ \t\u200a]*)?Update available![ \t]+\S+" r"[ \t]+->[ \t]+\S+[ \t]*$"
+)
+UPDATE_PROMPT_OPTION_1 = r"^[ \t]*›[ \t]*1\.[ \t]+Update now(?:[ \t]|$)"
+UPDATE_PROMPT_OPTION_2 = r"^[ \t]*2\.[ \t]+Skip[ \t]*$"
+UPDATE_PROMPT_OPTION_3 = r"^[ \t]*3\.[ \t]+Skip until next version[ \t]*$"
 # Codex welcome banner indicating normal startup (no trust prompt)
 CODEX_WELCOME_PATTERN = r"OpenAI Codex"
 
@@ -670,7 +680,7 @@ class CodexProvider(BaseProvider):
         return shlex.join(command_parts)
 
     async def _handle_trust_prompt(self, timeout: float = 20.0) -> None:
-        """Auto-accept the workspace trust prompt if it appears.
+        """Resolve non-task startup prompts if they appear.
 
         Codex shows a folder approval dialog when opening a new directory.
         This sends Enter to accept the default option (allow Codex to work).
@@ -680,6 +690,10 @@ class CodexProvider(BaseProvider):
         Two known dialog variants:
           v0.98+: "allow Codex to work in this folder"
           v0.130+ (git worktree): "Do you trust the contents of this directory?"
+
+        A release notification is also dismissed with "Skip until next
+        version".  Managed launch initialization never updates the operator's
+        installed CLI as a side effect.
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
@@ -690,6 +704,28 @@ class CodexProvider(BaseProvider):
 
             # Clean ANSI codes for reliable text matching
             clean_output = re.sub(ANSI_CODE_PATTERN, "", output)
+
+            bottom_region = "\n".join(clean_output.splitlines()[-15:])
+            update_menu = all(
+                re.search(pattern, bottom_region, re.MULTILINE)
+                for pattern in (
+                    UPDATE_PROMPT_PATTERN,
+                    UPDATE_PROMPT_OPTION_1,
+                    UPDATE_PROMPT_OPTION_2,
+                    UPDATE_PROMPT_OPTION_3,
+                    TRUST_PROMPT_FOOTER,
+                )
+            )
+            if update_menu:
+                from cli_agent_orchestrator.services.status_monitor import status_monitor
+
+                logger.info("Codex update prompt detected; skipping until the next version")
+                status_monitor.notify_input_sent(self.terminal_id)
+                backend = get_backend()
+                backend.send_special_key(self.session_name, self.window_name, "Down")
+                backend.send_special_key(self.session_name, self.window_name, "Down")
+                backend.send_special_key(self.session_name, self.window_name, "Enter")
+                return
 
             if re.search(TRUST_PROMPT_PATTERN, clean_output):
                 if self._trusted_project_root is not None:
