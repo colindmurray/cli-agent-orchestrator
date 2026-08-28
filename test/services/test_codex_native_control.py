@@ -1037,6 +1037,17 @@ class TestDefensiveGuards:
         assert plan["submit_settle_seconds"] == 0.2
         assert plan["undeliverable_reason"] is None
 
+    def test_0149_has_its_live_proven_composer_authority(self):
+        """The installed 0.149.0 build can carry an ordinary CAO task packet."""
+        _attach()
+        plan = cnc.plan_composer_keystrokes("one\ntwo", provider_version="codex-cli 0.149.0")
+        assert plan["deliverable"] is True
+        assert plan["soft_newline_keystroke"] == "C-j"
+        assert plan["submit_settle_seconds"] == 0.2
+        assert plan["submit_settle_proven"] is True
+        assert plan["composer_evidence"]["live_canary"]
+        assert plan["undeliverable_reason"] is None
+
     def test_0148_does_not_inherit_0147_composer_authority(self):
         _attach()
         plan = cnc.plan_composer_keystrokes("one\ntwo", provider_version="0.148.0")

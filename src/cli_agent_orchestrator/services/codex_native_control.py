@@ -157,6 +157,28 @@ _PROVEN_COMPOSER_NEWLINE: dict[str, dict[str, Any]] = {
         # payload, not every possible leading/trailing-whitespace input.
         "submit_normalization_proven": False,
     },
+    "0.149.0": {
+        "keystroke": "C-j",
+        "submit_settle_seconds": 0.2,
+        "evidence": {
+            "source_ref": "openai/codex rust-v0.149.0",
+            "source_commit": "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0",
+            "composer_binding": (
+                "EditorKeymap.insert_newline defaults include Ctrl-J; "
+                "composer.submit defaults to plain Enter"
+            ),
+            "settle_source": "paste_burst PASTE_ENTER_SUPPRESS_WINDOW=120ms",
+            "live_canary": (
+                "isolated Codex 0.149.0 TUI: tmux Ctrl-J rendered two literal lines "
+                "with 0 input and 0 output tokens; pane terminated without Enter, "
+                "2026-08-28"
+            ),
+        },
+        # The canary proved the editor newline. The tagged source proves the
+        # submit dispatch and burst window, but neither establishes every
+        # leading/trailing-whitespace normalization case.
+        "submit_normalization_proven": False,
+    },
 }
 
 #: The settle an unproven build waits before its Enter. A missing pin

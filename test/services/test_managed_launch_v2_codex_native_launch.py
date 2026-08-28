@@ -76,9 +76,10 @@ def _request(worktree, tmp_path):
     )
 
 
+@pytest.mark.parametrize("provider_version", ["0.147.0", "0.149.0"])
 @pytest.mark.asyncio
 async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
-    isolated_memory_db, worktree, tmp_path, monkeypatch
+    isolated_memory_db, worktree, tmp_path, monkeypatch, provider_version
 ):
     launched: list[dict[str, Any]] = []
     bootstrap_calls: list[dict[str, Any]] = []
@@ -96,7 +97,7 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
             "provider": "codex",
             "native_session_id": SESSION,
             "id_source": "app_server_thread_start",
-            "provider_version": "0.147.0",
+            "provider_version": provider_version,
             "binary_path": kwargs["codex_binary"],
             "binary_sha256": kwargs["binary_sha256"],
             "working_directory": kwargs["working_directory"],
@@ -111,6 +112,20 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
             "rollout_sha256": "a" * 64,
             "detached_before_launch": True,
             "exit_proof": {"reaped": True, "exit_status": -15},
+            "capability_proof": {
+                "binary_sha256": kwargs["binary_sha256"],
+                "schema": {
+                    "schema": bootstrap.SCHEMA_PROBE_SCHEMA,
+                    "methods": {method: {} for method in bootstrap._SCHEMA_REQUIREMENTS},
+                },
+                "resume_adoption": {
+                    "schema": bootstrap.RESUME_ADOPTION_SCHEMA,
+                    "method": bootstrap.RESUME_METHOD,
+                    "adopted_session_id": SESSION,
+                    "adopted_in_fresh_process": True,
+                    "sent_no_turn": True,
+                },
+            },
         }
 
     async def create_terminal(**kwargs):
@@ -142,7 +157,7 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
     monkeypatch.setattr(
         bridge,
         "provider_version_banner",
-        lambda *args, **kwargs: "codex-cli 0.147.0",
+        lambda *args, **kwargs: f"codex-cli {provider_version}",
     )
     monkeypatch.setattr(
         "cli_agent_orchestrator.services.terminal_service.create_terminal",
@@ -191,8 +206,9 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
 
     # Production-shaped closure of the exact campaign failure: bind the
     # readiness receipt and admit a 98-line task through the native composer.
-    # The prior bind-only repair reached this point and then refused before
-    # any task byte because 0.147.0 had no composer-newline proof.
+    # Both stage-proven builds must reach the real admission transport. The
+    # 0.149.0 parameter is the exact activation failure: bind and readiness
+    # succeeded, then the multiline task was refused before any task byte.
     bound = v2.bind_native(
         record["reservation_id"],
         ManagedLaunchV2BindRequest(
