@@ -82,6 +82,12 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
 ):
     launched: list[dict[str, Any]] = []
     bootstrap_calls: list[dict[str, Any]] = []
+    startup_statuses = [
+        TerminalStatus.IDLE,
+        TerminalStatus.PROCESSING,
+        *([TerminalStatus.IDLE] * 11),
+    ]
+    startup_reads: list[TerminalStatus] = []
 
     def mint_session(**kwargs):
         bootstrap_calls.append(kwargs)
@@ -143,11 +149,14 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
         create_terminal,
     )
     monkeypatch.setattr(v2._V2NativePane, "observe", observe)
-    monkeypatch.setattr(
-        native_pane_input,
-        "observe_codex_turn_state",
-        lambda *args, **kwargs: TerminalStatus.IDLE,
-    )
+
+    def observe_startup(*args, **kwargs):
+        status = startup_statuses.pop(0)
+        startup_reads.append(status)
+        return status
+
+    monkeypatch.setattr(native_pane_input, "observe_codex_turn_state", observe_startup)
+    monkeypatch.setattr(v2, "_NATIVE_PANE_READY_POLL_SECONDS", 0)
 
     request = _request(worktree, tmp_path)
     record, _ = v2.reserve(request)
@@ -169,6 +178,12 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
     assert receipt["provider_session_id"] == SESSION
     assert receipt["model_input_ready"] is True
     assert receipt["provider_session_start_proven"] is False
+    assert startup_reads == [
+        TerminalStatus.IDLE,
+        TerminalStatus.PROCESSING,
+        *([TerminalStatus.IDLE] * 11),
+    ]
+    assert receipt["model_input_ready_observation"]["provider_status"] == "idle"
 
     attachment = native_attachment.get("codex", SESSION)
     assert attachment["state"] == native_attachment.ATTACHED
@@ -248,6 +263,65 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
     assert admitted["state"] == "admitted"
     assert [event for event in keystrokes.events if event[0] == "key"] == [("key", "C-j")] * 97
     assert keystrokes.events[-1] == ("enter", "")
+
+
+def test_codex_ready_frame_before_stability_timeout_is_not_certified(monkeypatch):
+    reads = []
+
+    def observe(*args, **kwargs):
+        reads.append((args, kwargs))
+        return TerminalStatus.IDLE
+
+    monkeypatch.setattr(v2, "_observe_turn_state", observe)
+    monkeypatch.setattr(v2, "NATIVE_PANE_READY_TIMEOUT_SECONDS", 0)
+
+    observation = v2._await_native_pane_input_ready(
+        {
+            "provider": "codex",
+            "terminal_id": "c0de0001",
+            "generation": "11111111-1111-4111-8111-111111111111",
+            "session_name": "cao-codex-stability",
+        },
+        "%9",
+    )
+
+    assert len(reads) == 1
+    assert observation["provider_status"] == TerminalStatus.IDLE.value
+    assert observation["input_ready"] is False
+    assert "has not remained stable" in observation["detail"]
+
+
+def test_unreadable_codex_frame_resets_the_ready_streak(monkeypatch):
+    script = [
+        *([TerminalStatus.IDLE] * 10),
+        native_pane_input.NativePaneInputUnavailable("capture failed"),
+        *([TerminalStatus.IDLE] * 11),
+    ]
+    reads = []
+
+    def observe(*args, **kwargs):
+        reads.append((args, kwargs))
+        status = script.pop(0)
+        if isinstance(status, Exception):
+            raise status
+        return status
+
+    monkeypatch.setattr(v2, "_observe_turn_state", observe)
+    monkeypatch.setattr(v2, "_NATIVE_PANE_READY_POLL_SECONDS", 0)
+
+    observation = v2._await_native_pane_input_ready(
+        {
+            "provider": "codex",
+            "terminal_id": "c0de0002",
+            "generation": "22222222-2222-4222-8222-222222222222",
+            "session_name": "cao-codex-stability",
+        },
+        "%10",
+    )
+
+    assert len(reads) == 22
+    assert observation["provider_status"] == TerminalStatus.IDLE.value
+    assert observation["input_ready"] is True
 
 
 def test_codex_native_profile_preserves_mcp_env_inheritance_and_timeout(tmp_path):

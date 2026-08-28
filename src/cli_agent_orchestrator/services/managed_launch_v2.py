@@ -445,6 +445,15 @@ _PINNED_PROVIDER = {
 NATIVE_PANE_READY_TIMEOUT_SECONDS = native_tui_launch.NATIVE_COLD_START_RUNWAY_SECONDS
 _NATIVE_PANE_READY_POLL_SECONDS = 0.1
 
+#: Codex can render a writable-looking composer before its MCP startup work
+#: begins, then transition back to PROCESSING before settling at the final
+#: composer.  Eleven consecutive observations contain ten complete 100 ms
+#: poll gaps, so the launch must see one uninterrupted second of writable
+#: state before publishing the durable readiness receipt.  Other providers
+#: keep their existing first-ready contract; this sequence was observed only
+#: on Codex and widening it would add startup latency without evidence.
+_CODEX_NATIVE_READY_STABLE_POLLS = 11
+
 #: How long one ``/status`` submission may stay silent before the Muse
 #: observation resends the literal command into the pane.  Muse 0.2.1
 #: silently swallows a ``/status`` submitted during cold start: the
@@ -5912,6 +5921,7 @@ def _await_native_pane_input_ready(
     window_name = managed_window_name(record["terminal_id"], record["generation"])
     authority = TURN_OBSERVER_AUTHORITY.get(record["provider"], "observe_native_turn_state")
     deadline = time.monotonic() + NATIVE_PANE_READY_TIMEOUT_SECONDS
+    codex_ready_streak = 0
     while True:
         try:
             status = _observe_turn_state(
@@ -5922,6 +5932,7 @@ def _await_native_pane_input_ready(
                 window_name=window_name,
             )
         except Exception as exc:  # noqa: BLE001 - an unread pane, not a failed launch
+            codex_ready_streak = 0
             observation = _readiness_observation(
                 pane_id=pane_handle,
                 provider_status=None,
@@ -5930,12 +5941,26 @@ def _await_native_pane_input_ready(
                 authority=authority,
             )
         else:
-            input_ready = status in {TerminalStatus.IDLE, TerminalStatus.COMPLETED}
+            status_ready = status in {TerminalStatus.IDLE, TerminalStatus.COMPLETED}
+            if record["provider"] == "codex":
+                codex_ready_streak = codex_ready_streak + 1 if status_ready else 0
+                input_ready = codex_ready_streak >= _CODEX_NATIVE_READY_STABLE_POLLS
+                detail = (
+                    None
+                    if input_ready or not status_ready
+                    else (
+                        "the Codex pane is writable but has not remained stable across "
+                        f"{_CODEX_NATIVE_READY_STABLE_POLLS} consecutive observations"
+                    )
+                )
+            else:
+                input_ready = status_ready
+                detail = None
             observation = _readiness_observation(
                 pane_id=pane_handle,
                 provider_status=status.value,
                 input_ready=input_ready,
-                detail=None,
+                detail=detail,
                 authority=authority,
             )
             if observation["input_ready"]:
