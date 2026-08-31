@@ -1539,6 +1539,54 @@ class TestReasoningEffortExtraction:
         assert outcome["observation"]["effort"] is None
 
 
+class TestBannerVersionNormalization:
+    def test_parser_normalizes_the_durable_codex_banner_pin(self):
+        parsed = roc.parse_codex_route_panel(
+            codex_panel_rows(version="0.149.0"),
+            pinned_version="codex-cli 0.149.0",
+            pane_width=100,
+        )
+
+        assert parsed["kind"] == "observed"
+        assert parsed["provider_version"] == "0.149.0"
+
+    def test_observer_preserves_banner_request_but_records_bare_observed_version(self, _db):
+        request = _request(provider_version="codex-cli 0.149.0")
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(version="0.149.0"))
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert request.provider_version == "codex-cli 0.149.0"
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["observation"]["provider_version"] == "0.149.0"
+        assert surface.composer_proof_versions == ["codex-cli 0.149.0"]
+        assert (
+            json.loads(ro.get(request.operation_id)["pre_probe_intent_json"])["provider_version"]
+            == "codex-cli 0.149.0"
+        )
+
+    def test_banner_version_drift_still_refuses_the_panel(self):
+        parsed = roc.parse_codex_route_panel(
+            codex_panel_rows(version="0.149.0"),
+            pinned_version="codex-cli 0.149.1",
+            pane_width=100,
+        )
+
+        assert parsed["kind"] == "inconclusive"
+        assert parsed["reason"] == "panel-unparsed"
+
+    @pytest.mark.parametrize("pinned_version", ["codex-cli", "codex-cli unknown"])
+    def test_malformed_banner_pin_remains_inconclusive(self, pinned_version):
+        parsed = roc.parse_codex_route_panel(
+            codex_panel_rows(version="0.149.0"),
+            pinned_version=pinned_version,
+            pane_width=100,
+        )
+
+        assert parsed["kind"] == "inconclusive"
+        assert parsed["reason"] == "panel-unparsed"
+
+
 # ---------------------------------------------------------------------------
 # the observation is correlated to the exact target
 # ---------------------------------------------------------------------------
