@@ -799,14 +799,15 @@ def search_index_refresh(
     body: Optional[SearchIndexRefreshBody] = None,
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
-    """Embed the queued documents of every active and building generation.
+    """Embed queued documents for the prepared model's generation.
 
     The body is optional and every field defaults, so a bare ``POST`` is the
     bounded read-shaped refresh. Write-scoped maintenance per §9.2: unlike the
     query-time bounded drain a semantic search performs, ``all=true`` drains
-    completely and offers a finished building generation for activation. An
-    incomplete build is kept from going live by the coverage proof inside the
-    activation transaction, not by this route's judgement.
+    completely and offers a finished building generation for activation. The
+    old active generation stays untouched during a model migration. An
+    incomplete replacement is kept from going live by the coverage proof
+    inside the activation transaction, not by this route's judgement.
     """
     refresh_all = body.all if body is not None else False
     retry_failed = body.retry_failed if body is not None else False

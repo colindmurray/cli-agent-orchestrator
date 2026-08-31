@@ -18,6 +18,7 @@ by rewriting issues would fail, and the build-completion contract
 from __future__ import annotations
 
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List
@@ -284,6 +285,48 @@ class TestPrepare:
         assert len(_generation_rows(store)) == 1
         assert outcomes[0]["generation_id"] == outcomes[1]["generation_id"]
         assert outcomes[0]["enqueued_documents"] + outcomes[1]["enqueued_documents"] == 3
+
+    def test_concurrent_public_prepare_publishes_metadata_without_temp_collision(
+        self, store, tmp_path, monkeypatch
+    ):
+        """Both writers may reach metadata publication before either replaces it."""
+        from cli_agent_orchestrator.services import embedding_adapter as adapter
+
+        _populate(store)
+        _fake_runtime(monkeypatch)
+        models_dir = tmp_path / "models"
+        snapshot = tmp_path / "downloaded-snapshot"
+        snapshot.mkdir()
+        (snapshot / "config.json").write_bytes(b'{"model_type": "bert"}')
+        (snapshot / "model.safetensors").write_bytes(b"measured-weights")
+
+        def downloader(**_kwargs):
+            return str(snapshot)
+
+        replace_barrier = threading.Barrier(2)
+        original_replace = adapter.os.replace
+
+        def synchronized_replace(source, destination):
+            replace_barrier.wait(timeout=5)
+            original_replace(source, destination)
+
+        monkeypatch.setattr(adapter.os, "replace", synchronized_replace)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(
+                pool.map(
+                    lambda _: maintenance.prepare_index(
+                        models_dir=models_dir, snapshot_downloader=downloader
+                    ),
+                    range(2),
+                )
+            )
+
+        assert sorted(outcome["action"] for outcome in outcomes) == ["created", "reused"]
+        assert outcomes[0]["generation_id"] == outcomes[1]["generation_id"]
+        assert outcomes[0]["enqueued_documents"] + outcomes[1]["enqueued_documents"] == 3
+        assert len(_generation_rows(store)) == 1
+        assert adapter.read_metadata(models_dir)["artifact_sha256"] == _fake_digest()
+        assert list(models_dir.glob(".generation-metadata.json.*.tmp")) == []
 
     def test_repeated_prepare_still_reuses_after_the_generation_went_active(self, store):
         """The idempotency that matters operationally: prepare, build, re-prepare.

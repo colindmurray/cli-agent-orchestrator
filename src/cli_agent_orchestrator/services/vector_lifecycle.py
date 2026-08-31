@@ -366,7 +366,7 @@ def _create_generation_in_transaction(raw: Any, record: Mapping[str, Any]) -> Di
             created_at,
         ),
     )
-    enqueued = schema.enqueue_all_live_documents(raw)
+    enqueued = schema.enqueue_generation_live_documents(raw, generation_id)
     return {
         "generation_id": generation_id,
         "state": "building",
@@ -428,9 +428,9 @@ def _embedder_identity(embedder: Any) -> Optional[Dict[str, Any]]:
     """Project an embedder's bound metadata, when it exposes that contract.
 
     Test/dry-run embedders may intentionally be metadata-free; a single
-    explicitly selected generation can still use one of those.  A refresh
-    spanning generations with different persisted identities is refused below
-    unless the embedder proves which identity it carries.
+    explicitly selected generation can still use one of those. A refresh
+    spanning generations with different persisted identities needs this
+    binding so it can select only the generation the embedder can safely fill.
     """
     metadata = getattr(embedder, "metadata", None)
     if not isinstance(metadata, Mapping):
@@ -664,6 +664,7 @@ def refresh_generation(
         "failed": 0,
         "damaged_skipped": 0,
     }
+    resolved_embedder = embedder
     with open_search_connection(db_path=db_path, connection_factory=connection_factory) as sc:
         raw = sc.connection
         raw.row_factory = sqlite3.Row
@@ -672,12 +673,29 @@ def refresh_generation(
         if identities and any(
             not _same_generation_identity(identities[0], identity) for identity in identities[1:]
         ):
-            raise VectorLifecycleError(
-                "generation-identity-mismatch",
-                "one refresh pass selected multiple active/building generations "
-                "with different model/runtime/artifact identities; refresh each "
-                "generation with its matching embedder",
-            )
+            if resolved_embedder is None:
+                from cli_agent_orchestrator.services.embedding_adapter import load_embedder
+
+                resolved_embedder = load_embedder(models_dir)
+            bound_identity = _embedder_identity(resolved_embedder)
+            if bound_identity is None:
+                raise VectorLifecycleError(
+                    "generation-identity-mismatch",
+                    "one refresh pass selected multiple active/building generations with "
+                    "different identities, but the embedder exposes no persisted identity",
+                )
+            matched = [
+                (target, identity)
+                for target, identity in zip(targets, identities)
+                if _same_generation_identity(identity, bound_identity)
+            ]
+            if not matched:
+                raise VectorLifecycleError(
+                    "generation-identity-mismatch",
+                    "embedder identity matches none of the active/building generations",
+                )
+            targets = [target for target, _identity in matched]
+            identities = [identity for _target, identity in matched]
         batch = _select_eligible_batch(
             raw, targets, limit, _sqlite_moment(datetime.now(timezone.utc))
         )
@@ -707,7 +725,6 @@ def refresh_generation(
             # capability-absent runtime stays a typed refusal: it is not a
             # per-document embedding failure and must not spend dirty rows'
             # retry state on it.
-            resolved_embedder = embedder
             if resolved_embedder is None:
                 from cli_agent_orchestrator.services.embedding_adapter import load_embedder
 

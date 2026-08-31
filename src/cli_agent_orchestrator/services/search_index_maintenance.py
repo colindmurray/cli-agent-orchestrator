@@ -430,12 +430,13 @@ def refresh_index(
 
     ``all=False`` is the bounded shape a query-time caller uses: one batch,
     derived rows only, no activation attempt. ``all=True`` is the explicit
-    maintenance shape: the whole queue, then every ``building`` generation
-    whose queue reached zero is offered for activation. A refused activation
-    is reported per generation with its typed reason and leaves that
-    generation ``building`` — the refusal is the coverage proof doing its
-    job, not a failure of this command, so the remedy is to run the refresh
-    again rather than to start over.
+    maintenance shape: the whole queue for the prepared embedder's generation,
+    then every ``building`` generation whose queue reached zero is offered for
+    activation. During a model migration this leaves the old active generation
+    untouched while its replacement builds. A refused activation is reported
+    per generation with its typed reason and leaves that generation ``building``
+    — the refusal is the coverage proof doing its job, not a failure of this
+    command, so the remedy is to run the refresh again rather than to start over.
     """
     retry: Dict[str, Any] = {"reset": 0, "remaining_failed": None, "bounded": False}
     if retry_failed:

@@ -32,6 +32,7 @@ from cli_agent_orchestrator.cli.commands.search_index import (
     model_prepare,
     refresh,
 )
+from cli_agent_orchestrator.clients import tracker_search_schema as schema
 from cli_agent_orchestrator.clients.database import Base, _migrate_tracker_search_projection
 from cli_agent_orchestrator.services import embedding_adapter as adapter
 from cli_agent_orchestrator.services import issue_tracker as tracker
@@ -56,6 +57,9 @@ class JourneyEmbedder:
     """
 
     dimensions = 384
+
+    def __init__(self):
+        self.metadata = None
 
     def _vector(self, text):
         import re as _re
@@ -113,7 +117,15 @@ def journey(tmp_path, monkeypatch):
     monkeypatch.setattr(adapter, "_read_dist_version", lambda name: versions.get(name))
     monkeypatch.setattr(adapter, "MODEL_ARTIFACT_SHA256", _fake_digest())
     embedder = JourneyEmbedder()
-    monkeypatch.setattr(adapter, "load_embedder", lambda models_dir=None: embedder)
+
+    def load_journey_embedder(models_dir=None):
+        # Mirror LoadedEmbedder's production identity binding. The public
+        # refresh command resolves this metadata from the prepared model; the
+        # journey must not smuggle it into the fake through test setup.
+        embedder.metadata = adapter.read_metadata(models_dir) if models_dir is not None else None
+        return embedder
+
+    monkeypatch.setattr(adapter, "load_embedder", load_journey_embedder)
     monkeypatch.setattr(ranked, "_query_embedder", lambda models_dir=None: embedder)
     try:
         yield {"engine": engine, "embedder": embedder, "tmp_path": tmp_path}
@@ -216,6 +228,56 @@ def test_prepare_refresh_then_explicit_hybrid_search_serves_the_semantic_lane(ru
     assert human.exit_code == 0, human.output
     assert "mode hybrid" in human.output
     assert "semantic" in human.output, human.output
+
+
+def test_public_model_migration_refreshes_and_activates_only_the_new_generation(
+    runner, journey, monkeypatch
+):
+    """The public prepare/refresh path migrates A to B without mixing identities."""
+    _seed_corpus()
+    tmp_path = journey["tmp_path"]
+    models_dir, prepared_a = _prepare(runner, tmp_path)
+    generation_a = prepared_a["generation"]["generation_id"]
+
+    refreshed_a = runner.invoke(refresh, ["--all", "--models-dir", str(models_dir), "--json"])
+    assert refreshed_a.exit_code == 0, refreshed_a.output
+    assert json.loads(refreshed_a.output)["active_generation"] == generation_a
+
+    monkeypatch.setattr(adapter, "MODEL_ID", "test/model-b")
+    monkeypatch.setattr(adapter, "MODEL_REVISION", "rev-b")
+    _models_dir, prepared_b = _prepare(runner, tmp_path)
+    generation_b = prepared_b["generation"]["generation_id"]
+    assert generation_b != generation_a
+
+    raw = journey["engine"].raw_connection()
+    try:
+        dirty = dict(
+            raw.execute(
+                f"SELECT generation_id, COUNT(*) FROM {schema.VECTOR_DIRTY_TABLE} "
+                "GROUP BY generation_id"
+            ).fetchall()
+        )
+    finally:
+        raw.close()
+    assert dirty == {generation_b: 3}, "preparing B must not dirty active A"
+
+    refreshed_b = runner.invoke(refresh, ["--all", "--models-dir", str(models_dir), "--json"])
+    assert refreshed_b.exit_code == 0, refreshed_b.output
+    payload = json.loads(refreshed_b.output)
+    assert payload["refresh"]["published"] == 3
+    assert payload["activations"] == [{"generation_id": generation_b, "activated": True}]
+    assert payload["active_generation"] == generation_b
+
+    raw = journey["engine"].raw_connection()
+    try:
+        states = dict(
+            raw.execute(
+                f"SELECT generation_id, state FROM {schema.VECTOR_GENERATIONS_TABLE}"
+            ).fetchall()
+        )
+    finally:
+        raw.close()
+    assert states == {generation_a: "retired", generation_b: "active"}
 
 
 def test_the_same_journey_degrades_visibly_when_the_generation_is_never_activated(runner, journey):

@@ -208,13 +208,14 @@ def index_status(models_dir: Optional[Path], as_json: bool):
 def refresh(
     drain_all: bool, retry_failed: bool, limit: int, models_dir: Optional[Path], as_json: bool
 ):
-    """Embed queued documents for every active and building generation.
+    """Embed queued documents for the prepared model's generation.
 
     Without --all this drains one bounded batch — the same derived work a
     semantic query performs — and never activates anything. With --all it
     drains completely and offers a finished building generation for
-    activation; the activation proof inside that transaction is what keeps an
-    incomplete build from ever going live.
+    activation. During a model migration the old active generation remains the
+    serving fallback while the replacement builds; the activation proof inside
+    that transaction keeps an incomplete build from ever going live.
     """
     try:
         result = maintenance.refresh_index(

@@ -28,7 +28,8 @@ returned unchanged, a corrupt metadata file is rewritten from the verified
 artifact, and the matching generation is reused instead of minted again. The
 generation identity includes model id and revision, runtime id and version,
 artifact digest, dimensions, encoding, metric, normalization, and document
-schema. Refresh refuses to use one embedder across different identities, so a
+schema. When active and building generations have different identities,
+refresh selects only the generation matching the prepared embedder, so a
 same-width replacement cannot publish blobs under the wrong generation.
 
 Without the `[search]` extra every surface degrades with a typed answer and
@@ -46,10 +47,13 @@ activated generation 20260831T051646488428-a16747
 active generation: 20260831T051646488428-a16747
 ```
 
-`refresh` embeds the documents queued in the durable outbox. Without `--all`
-it drains one bounded batch — the same derived work a semantic query performs
-— and never activates anything. With `--all` it drains completely and offers
-every finished building generation for activation.
+`refresh` embeds the documents queued in the durable outbox for the prepared
+model's generation. Without `--all` it drains one bounded batch — the same
+derived work a semantic query performs — and never activates anything. With
+`--all` it drains that generation completely and offers every finished
+building generation for activation. During a model replacement, the previous
+active generation remains untouched and continues serving until the new
+generation passes activation.
 
 Activation is where an incomplete build is stopped. The proof inside the
 activation transaction requires that no queued work remains, that every live

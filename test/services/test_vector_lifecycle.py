@@ -382,10 +382,8 @@ class TestCreateGeneration:
 
 
 class TestConcurrencyAndFailureMatrix:
-    def test_refresh_refuses_one_embedder_for_differently_identified_generations(
-        self, store, db_file
-    ):
-        """Equal dimensions do not permit model A blobs under generation B."""
+    def test_refresh_selects_only_the_generation_matching_the_bound_embedder(self, store, db_file):
+        """A model migration builds B without redirtying or re-embedding active A."""
         _seed_issue(store, "cao-1", title="shared width")
         model_a = dict(MINIMAL_RECORD)
         model_b = dict(MINIMAL_RECORD)
@@ -393,16 +391,27 @@ class TestConcurrencyAndFailureMatrix:
             {"model_id": "test/model-b", "model_revision": "rev-b", "artifact_sha256": "b" * 64}
         )
         first = vlc.create_generation(metadata=model_a, target_engine=store)
-        second = vlc.create_generation(metadata=model_b, target_engine=store)
-        embedder_a = FakeEmbedder(metadata=model_a)
+        first_refresh = vlc.refresh_generation(
+            generation_id=first["generation_id"],
+            db_path=str(db_file),
+            embedder=FakeEmbedder(metadata=model_a),
+        )
+        assert first_refresh["published"] == 1
+        vlc.activate_generation(first["generation_id"], target_engine=store)
 
-        with pytest.raises(vlc.VectorLifecycleError) as excinfo:
-            vlc.refresh_generation(db_path=str(db_file), embedder=embedder_a)
-        assert excinfo.value.reason == "generation-identity-mismatch"
-        assert _vectors(store, first["generation_id"]) == []
-        assert _vectors(store, second["generation_id"]) == []
-        assert len(_dirty_rows(store, first["generation_id"])) == 1
+        second = vlc.create_generation(metadata=model_b, target_engine=store)
+        assert _dirty_rows(store, first["generation_id"]) == []
         assert len(_dirty_rows(store, second["generation_id"])) == 1
+
+        migrated = vlc.refresh_generation(
+            db_path=str(db_file), embedder=FakeEmbedder(metadata=model_b)
+        )
+
+        assert migrated["published"] == 1
+        assert len(_vectors(store, first["generation_id"])) == 1
+        assert len(_vectors(store, second["generation_id"])) == 1
+        assert _dirty_rows(store, first["generation_id"]) == []
+        assert _dirty_rows(store, second["generation_id"]) == []
 
     def test_mutation_during_embedding_cannot_clear_a_newer_dirty_row(self, store, db_file):
         """§19.3: mutation during embedding cannot clear a newer dirty row."""
