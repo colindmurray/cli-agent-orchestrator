@@ -561,9 +561,12 @@ class TestCommentsAndLinks:
     def test_a_duplicate_link_is_idempotent(self, cao_system):
         a = tracker.create_issue(project_id="cao-system", title="a")
         b = tracker.create_issue(project_id="cao-system", title="b")
-        tracker.add_link(a["key"], to_key=b["key"], kind="blocks")
+        first = tracker.add_link(a["key"], to_key=b["key"], kind="blocks")
         again = tracker.add_link(a["key"], to_key=b["key"], kind="blocks")
         assert again["created"] is False
+        assert again["id"] == first["id"]
+        assert again["from_updated_at"] == tracker.get_issue(a["key"])["updated_at"]
+        assert again["to_updated_at"] == tracker.get_issue(b["key"])["updated_at"]
 
     def test_a_link_to_a_missing_issue_is_refused(self, cao_system):
         a = tracker.create_issue(project_id="cao-system", title="a")
@@ -577,6 +580,161 @@ class TestCommentsAndLinks:
         tracker.add_link(a["key"], to_key=b["key"], kind="relates")
         tracker.delete_issue(a["key"])
         assert tracker.get_issue(b["key"])["links"] == []
+
+
+class TestAuditPublishFences:
+    """Fences are at the write seam: a mutation after review cannot publish a
+    comment, relation, or status effect against the stale review."""
+
+    def test_fenced_important_comment_returns_exact_effect_and_parent_clock(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        result = tracker.add_comment(
+            issue["key"],
+            body="reviewed finding",
+            important=True,
+            expected_updated_at=issue["updated_at"],
+        )
+        detail = tracker.get_issue(issue["key"])
+        assert result["id"] == detail["comments"][0]["id"]
+        assert result["important"] is True
+        assert result["updated_at"] == detail["updated_at"]
+        event = next(e for e in detail["events"] if e["id"] == result["effect_id"])
+        assert event["kind"] == "comment"
+
+    def test_comment_mutation_after_precheck_refuses_without_partial_comment_or_event(
+        self, cao_system, monkeypatch
+    ):
+        import threading
+
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        at_write, release = threading.Event(), threading.Event()
+        real_now = tracker._utcnow
+        paused = False
+
+        def pause_after_precheck():
+            nonlocal paused
+            if not paused:
+                paused = True
+                at_write.set()
+                assert release.wait(timeout=5)
+            return real_now()
+
+        monkeypatch.setattr(tracker, "_utcnow", pause_after_precheck)
+        outcomes = []
+
+        def publish_comment():
+            try:
+                tracker.add_comment(
+                    issue["key"], body="must not land", expected_updated_at=issue["updated_at"]
+                )
+            except TrackerError as exc:
+                outcomes.append(exc)
+
+        worker = threading.Thread(target=publish_comment)
+        worker.start()
+        assert at_write.wait(timeout=5)
+        tracker.update_issue(issue["key"], body="concurrent review note")
+        release.set()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+        assert [exc.code for exc in outcomes] == ["conflict"]
+        detail = tracker.get_issue(issue["key"])
+        assert detail["comments"] == []
+        assert [e["kind"] for e in detail["events"]] == ["created", "field"]
+
+    def test_unfenced_comment_path_remains_compatible(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        result = tracker.add_comment(issue["key"], body="ordinary caller")
+        assert result["id"] > 0
+        assert result["updated_at"] == tracker.get_issue(issue["key"])["updated_at"]
+
+    def test_fenced_link_returns_both_clocks_and_endpoint_effects(self, cao_system):
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        result = tracker.add_link(
+            source["key"],
+            to_key=target["key"],
+            kind="relates",
+            expected_from_updated_at=source["updated_at"],
+            expected_to_updated_at=target["updated_at"],
+        )
+        assert result["id"] > 0
+        assert len(result["effect_ids"]) == 2
+        assert result["from_updated_at"] == tracker.get_issue(source["key"])["updated_at"]
+        assert result["to_updated_at"] == tracker.get_issue(target["key"])["updated_at"]
+        assert all(
+            any(e["id"] == effect_id for e in tracker.get_issue(key)["events"])
+            for key, effect_id in zip((source["key"], target["key"]), result["effect_ids"])
+        )
+
+    @pytest.mark.parametrize("mutated_side", ["from", "to"])
+    def test_link_mutation_after_both_prechecks_refuses_without_partial_effect(
+        self, cao_system, monkeypatch, mutated_side
+    ):
+        import threading
+
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        at_write, release = threading.Event(), threading.Event()
+        real_now = tracker._utcnow
+        paused = False
+
+        def pause_after_prechecks():
+            nonlocal paused
+            if not paused:
+                paused = True
+                at_write.set()
+                assert release.wait(timeout=5)
+            return real_now()
+
+        monkeypatch.setattr(tracker, "_utcnow", pause_after_prechecks)
+        outcomes = []
+
+        def publish_link():
+            try:
+                tracker.add_link(
+                    source["key"],
+                    to_key=target["key"],
+                    kind="relates",
+                    expected_from_updated_at=source["updated_at"],
+                    expected_to_updated_at=target["updated_at"],
+                )
+            except TrackerError as exc:
+                outcomes.append(exc)
+
+        worker = threading.Thread(target=publish_link)
+        worker.start()
+        assert at_write.wait(timeout=5)
+        mutated = source if mutated_side == "from" else target
+        tracker.update_issue(mutated["key"], body=f"{mutated_side} changed")
+        release.set()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+        assert [exc.code for exc in outcomes] == ["conflict"]
+        assert tracker.get_issue(source["key"])["links"] == []
+        assert tracker.get_issue(target["key"])["links"] == []
+        assert not [
+            event
+            for key in (source["key"], target["key"])
+            for event in tracker.get_issue(key)["events"]
+            if event["kind"] == "link"
+        ]
+
+    def test_stale_second_endpoint_clock_refuses_the_link(self, cao_system):
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        tracker.update_issue(target["key"], body="target changed")
+        with pytest.raises(TrackerError) as exc:
+            tracker.add_link(
+                source["key"],
+                to_key=target["key"],
+                kind="relates",
+                expected_from_updated_at=source["updated_at"],
+                expected_to_updated_at=target["updated_at"],
+            )
+        assert exc.value.code == "conflict"
+        assert exc.value.details["endpoint"] == "to"
+        assert tracker.get_issue(source["key"])["links"] == []
 
 
 class TestProjectDeletion:
@@ -1041,6 +1199,62 @@ class TestExpectedUpdatedAt:
         with pytest.raises(TrackerError) as exc:
             tracker.update_issue(issue["key"], body="v2", expected_updated_at="yesterday")
         assert exc.value.code == "invalid"
+
+    def test_a_status_cas_returns_the_committed_clock_and_audit_effect(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        result = tracker.update_issue(
+            issue["key"], status="blocked", expected_updated_at=issue["updated_at"]
+        )
+        assert result["updated_at"] == tracker.get_issue(issue["key"])["updated_at"]
+        assert result["effect_id"] in result["effect_ids"]
+        event = next(
+            e for e in tracker.get_issue(issue["key"])["events"] if e["id"] == result["effect_id"]
+        )
+        assert (event["kind"], event["field"], event["new_value"]) == ("field", "status", "blocked")
+
+    def test_a_status_mutation_after_precheck_is_refused_without_a_second_effect(
+        self, cao_system, monkeypatch
+    ):
+        import threading
+
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        at_write, release = threading.Event(), threading.Event()
+        real_now = tracker._utcnow
+        paused = False
+
+        def pause_after_precheck():
+            nonlocal paused
+            if not paused:
+                paused = True
+                at_write.set()
+                assert release.wait(timeout=5)
+            return real_now()
+
+        monkeypatch.setattr(tracker, "_utcnow", pause_after_precheck)
+        outcomes = []
+
+        def stale_status_write():
+            try:
+                tracker.update_issue(
+                    issue["key"], status="closed", expected_updated_at=issue["updated_at"]
+                )
+            except TrackerError as exc:
+                outcomes.append(exc)
+
+        worker = threading.Thread(target=stale_status_write)
+        worker.start()
+        assert at_write.wait(timeout=5)
+        tracker.update_issue(issue["key"], status="blocked")
+        release.set()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+        assert [exc.code for exc in outcomes] == ["conflict"]
+        detail = tracker.get_issue(issue["key"])
+        assert detail["status"] == "blocked"
+        assert [(e["kind"], e["field"]) for e in detail["events"]] == [
+            ("created", None),
+            ("field", "status"),
+        ]
 
 
 class TestAtomicLabelUpdates:

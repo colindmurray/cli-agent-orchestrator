@@ -1022,6 +1022,10 @@ export interface TrackerComment {
   body: string
   important: boolean
   created_at: string | null
+  /** Parent issue clock after this durable comment effect committed. */
+  updated_at?: string | null
+  /** Audit-event identity for this creation effect. */
+  effect_id?: number
 }
 
 /** Response of the importance PATCH: the transition outcome, not a comment row.
@@ -1987,7 +1991,12 @@ export const api = {
     fetchJSON<{ key: string; deleted: boolean }>(`/tracker/issues/${encodeURIComponent(key)}`, {
       method: 'DELETE',
     }),
-  addTrackerComment: (key: string, body: { body: string; author?: string; important?: boolean }) =>
+  addTrackerComment: (key: string, body: {
+    body: string
+    author?: string
+    important?: boolean
+    expected_updated_at?: string
+  }) =>
     fetchJSON<TrackerComment>(`/tracker/issues/${encodeURIComponent(key)}/comments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2002,8 +2011,19 @@ export const api = {
         body: JSON.stringify({ important, actor: 'dashboard' }),
       },
     ),
-  addTrackerLink: (key: string, body: { to_key: string; kind: string; actor?: string }) =>
-    fetchJSON<TrackerLink & { created: boolean }>(
+  addTrackerLink: (key: string, body: {
+    to_key: string
+    kind: string
+    actor?: string
+    expected_from_updated_at?: string
+    expected_to_updated_at?: string
+  }) =>
+    fetchJSON<TrackerLink & {
+      created: boolean
+      from_updated_at?: string | null
+      to_updated_at?: string | null
+      effect_ids?: number[]
+    }>(
       `/tracker/issues/${encodeURIComponent(key)}/links`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     ),
@@ -2036,7 +2056,12 @@ export const api = {
     fetchJSON<{ key: string; deleted: boolean }>(`/tracker/features/${encodeURIComponent(key)}`, {
       method: 'DELETE',
     }),
-  addTrackerFeatureComment: (key: string, body: { body: string; author?: string; important?: boolean }) =>
+  addTrackerFeatureComment: (key: string, body: {
+    body: string
+    author?: string
+    important?: boolean
+    expected_updated_at?: string
+  }) =>
     fetchJSON<TrackerComment>(`/tracker/features/${encodeURIComponent(key)}/comments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2051,8 +2076,19 @@ export const api = {
         body: JSON.stringify({ important, actor: 'dashboard' }),
       },
     ),
-  addTrackerFeatureLink: (key: string, body: { to_key: string; kind: string; actor?: string }) =>
-    fetchJSON<TrackerLink & { created: boolean }>(
+  addTrackerFeatureLink: (key: string, body: {
+    to_key: string
+    kind: string
+    actor?: string
+    expected_from_updated_at?: string
+    expected_to_updated_at?: string
+  }) =>
+    fetchJSON<TrackerLink & {
+      created: boolean
+      from_updated_at?: string | null
+      to_updated_at?: string | null
+      effect_ids?: number[]
+    }>(
       `/tracker/features/${encodeURIComponent(key)}/links`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     ),

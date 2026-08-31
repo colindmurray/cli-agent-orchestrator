@@ -251,6 +251,8 @@ class CommentBody(StrictBody):
     author: Optional[str] = None
     # Optional at creation; defaults to ordinary/routine weight.
     important: bool = False
+    # Optional audit-publisher fence on the parent issue's reviewed clock.
+    expected_updated_at: Optional[str] = None
 
 
 class CommentImportanceBody(StrictBody):
@@ -264,6 +266,10 @@ class LinkBody(StrictBody):
     to_key: str
     kind: str
     actor: Optional[str] = None
+    # A relation changes both endpoint projections, so an audit publisher may
+    # pin each side independently.  Omitted clocks retain ordinary linking.
+    expected_from_updated_at: Optional[str] = None
+    expected_to_updated_at: Optional[str] = None
 
 
 class ClaimBody(StrictBody):
@@ -950,7 +956,11 @@ async def add_comment(
 ) -> Dict[str, Any]:
     try:
         return tracker.add_comment(
-            issue_key, body=body.body, author=body.author, important=body.important
+            issue_key,
+            body=body.body,
+            author=body.author,
+            important=body.important,
+            expected_updated_at=body.expected_updated_at,
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
@@ -995,7 +1005,14 @@ async def add_link(
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
-        return tracker.add_link(issue_key, to_key=body.to_key, kind=body.kind, actor=body.actor)
+        return tracker.add_link(
+            issue_key,
+            to_key=body.to_key,
+            kind=body.kind,
+            actor=body.actor,
+            expected_from_updated_at=body.expected_from_updated_at,
+            expected_to_updated_at=body.expected_to_updated_at,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
@@ -1272,7 +1289,11 @@ async def add_feature_comment(
         existing = tracker.get_issue(feature_key)
         _assert_feature(existing)
         return tracker.add_comment(
-            feature_key, body=body.body, author=body.author, important=body.important
+            feature_key,
+            body=body.body,
+            author=body.author,
+            important=body.important,
+            expected_updated_at=body.expected_updated_at,
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
@@ -1322,7 +1343,14 @@ async def add_feature_link(
     try:
         existing = tracker.get_issue(feature_key)
         _assert_feature(existing)
-        return tracker.add_link(feature_key, to_key=body.to_key, kind=body.kind, actor=body.actor)
+        return tracker.add_link(
+            feature_key,
+            to_key=body.to_key,
+            kind=body.kind,
+            actor=body.actor,
+            expected_from_updated_at=body.expected_from_updated_at,
+            expected_to_updated_at=body.expected_to_updated_at,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 

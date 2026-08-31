@@ -1669,6 +1669,14 @@ class _ImportanceRaceLost(Exception):
     transaction's read of it and its guarded write."""
 
 
+class _CommentRaceLost(Exception):
+    """A comment's parent changed after its expected-clock precheck."""
+
+
+class _LinkRaceLost(Exception):
+    """One endpoint changed after a link operation read its clock."""
+
+
 def update_issue(
     issue_key: str,
     *,
@@ -1965,9 +1973,18 @@ def _apply_issue_update(
         raise _UpdateRaceLost()
     for event in events:
         db.add(event)
+    db.flush()
+    effect_ids = [int(event.id) for event in events]
     db.commit()
     db.refresh(row)
-    return _issue_row(row)
+    result = _issue_row(row)
+    # A status-only write has one durable audit effect.  Keep the plural form
+    # for multi-field edits while making the ordinary status/close seam easy
+    # for an audit publisher to acknowledge exactly.
+    result["effect_ids"] = effect_ids
+    if len(effect_ids) == 1:
+        result["effect_id"] = effect_ids[0]
+    return result
 
 
 def _as_text(value: Any) -> Optional[str]:
@@ -2056,6 +2073,7 @@ def add_comment(
     body: str,
     author: Optional[str] = None,
     important: bool = False,
+    expected_updated_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Append a comment and record it in the audit trail.
 
@@ -2069,31 +2087,85 @@ def add_comment(
         raise TrackerError("invalid", "comment body must not be empty")
     if len(text) > MAX_BODY:
         raise TrackerError("invalid", f"comment too long (max {MAX_BODY} chars)")
-    with SessionLocal() as db:
-        row = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
-        if row is None:
-            raise TrackerError("not-found", f"no such issue: {key}")
-        now = _utcnow()
-        comment = TrackerCommentModel(
-            issue_key=key, author=author, body=text, important=bool(important), created_at=now
-        )
-        db.add(comment)
-        db.add(
-            TrackerEventModel(
-                issue_key=key, actor=author, kind="comment", new_value=text[:200], created_at=now
-            )
-        )
-        row.updated_at = now
-        db.commit()
-        db.refresh(comment)
-        return {
-            "id": comment.id,
-            "issue_key": key,
-            "author": comment.author,
-            "body": comment.body,
-            "important": bool(comment.important),
-            "created_at": _iso(comment.created_at),
-        }
+    for attempt in range(8):
+        try:
+            with SessionLocal() as db:
+                row = db.query(TrackerIssueModel).filter(TrackerIssueModel.key == key).first()
+                if row is None:
+                    raise TrackerError("not-found", f"no such issue: {key}")
+                if expected_updated_at is not None:
+                    expected = _parse_timestamp(expected_updated_at, field="expected_updated_at")
+                    if _stored_moment(row.updated_at) != expected:
+                        raise TrackerError(
+                            "conflict",
+                            f"{key} has changed since {expected_updated_at} "
+                            f"(current updated_at {_iso(row.updated_at)}); re-read and retry",
+                            details={"current_updated_at": _iso(row.updated_at)},
+                        )
+                now = _utcnow()
+                # The parent clock is the compare-and-swap fence.  Do this before
+                # flushing the comment/audit rows so a late conflicting mutation
+                # leaves no visible partial effect.
+                written = (
+                    db.query(TrackerIssueModel)
+                    .filter(
+                        TrackerIssueModel.key == key,
+                        TrackerIssueModel.updated_at == row.updated_at,
+                    )
+                    .update({"updated_at": now}, synchronize_session=False)
+                )
+                if written != 1:
+                    db.rollback()
+                    raise _CommentRaceLost()
+                comment = TrackerCommentModel(
+                    issue_key=key,
+                    author=author,
+                    body=text,
+                    important=bool(important),
+                    created_at=now,
+                )
+                event = TrackerEventModel(
+                    issue_key=key,
+                    actor=author,
+                    kind="comment",
+                    new_value=text[:200],
+                    created_at=now,
+                )
+                db.add_all([comment, event])
+                db.flush()
+                result = {
+                    "id": int(comment.id),
+                    "issue_key": key,
+                    "author": comment.author,
+                    "body": comment.body,
+                    "important": bool(comment.important),
+                    "created_at": _iso(comment.created_at),
+                    "updated_at": _iso(now),
+                    "effect_id": int(event.id),
+                }
+                db.commit()
+                return result
+        except _CommentRaceLost:
+            if expected_updated_at is not None:
+                current = _current_updated_at(key)
+                raise TrackerError(
+                    "conflict",
+                    f"{key} changed while creating the comment (current updated_at {current}); re-read and retry",
+                    details={"current_updated_at": current},
+                )
+            time.sleep(0.005 * (attempt + 1))
+        except OperationalError as exc:
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                raise
+            if expected_updated_at is not None:
+                current = _current_updated_at(key)
+                raise TrackerError(
+                    "conflict",
+                    f"{key} changed while creating the comment (current updated_at {current}); re-read and retry",
+                    details={"current_updated_at": current},
+                )
+            time.sleep(0.005 * (attempt + 1))
+    raise TrackerError("conflict", f"{key} could not be updated after 8 attempts; retry it")
 
 
 def set_comment_importance(
@@ -2232,48 +2304,139 @@ def delete_comment(key: str, comment_id: int, *, actor: Optional[str] = None) ->
 
 
 def add_link(
-    from_key: str, *, to_key: str, kind: str, actor: Optional[str] = None
+    from_key: str,
+    *,
+    to_key: str,
+    kind: str,
+    actor: Optional[str] = None,
+    expected_from_updated_at: Optional[str] = None,
+    expected_to_updated_at: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Relate two issues."""
+    """Relate two issues, optionally fencing both endpoint clocks.
+
+    A new relationship changes both issues' visible graph, so it advances both
+    clocks and records an audit event on each endpoint in the same transaction.
+    Callers without clocks retain the historical idempotent behavior; callers
+    that did review clocks get a typed conflict instead of publishing against a
+    stale endpoint.
+    """
     from_key = str(from_key or "").strip().lower()
     to_key = str(to_key or "").strip().lower()
     kind = _validate_choice(kind, LINK_KINDS, "link kind")
     if from_key == to_key:
         raise TrackerError("invalid", "an issue cannot link to itself")
-    with SessionLocal() as db:
-        for candidate in (from_key, to_key):
-            if (
-                db.query(TrackerIssueModel).filter(TrackerIssueModel.key == candidate).first()
-                is None
-            ):
-                raise TrackerError("not-found", f"no such issue: {candidate}")
-        existing = (
-            db.query(TrackerLinkModel)
-            .filter(
-                TrackerLinkModel.from_key == from_key,
-                TrackerLinkModel.to_key == to_key,
-                TrackerLinkModel.kind == kind,
-            )
-            .first()
-        )
-        if existing is not None:
-            return {
-                "id": existing.id,
-                "from_key": from_key,
-                "to_key": to_key,
-                "kind": kind,
-                "created": False,
-            }
-        row = TrackerLinkModel(from_key=from_key, to_key=to_key, kind=kind)
-        db.add(row)
-        db.add(
-            TrackerEventModel(
-                issue_key=from_key, actor=actor, kind="link", field=kind, new_value=to_key
-            )
-        )
-        db.commit()
-        db.refresh(row)
-        return {"id": row.id, "from_key": from_key, "to_key": to_key, "kind": kind, "created": True}
+    attempted_fence = expected_from_updated_at is not None or expected_to_updated_at is not None
+    for attempt in range(8):
+        try:
+            with SessionLocal() as db:
+                from_row = _require_issue(db, from_key)
+                to_row = _require_issue(db, to_key)
+                endpoint_specs = (
+                    ("from", from_key, from_row, expected_from_updated_at),
+                    ("to", to_key, to_row, expected_to_updated_at),
+                )
+                for label, endpoint_key, endpoint_row, expected_text in endpoint_specs:
+                    if expected_text is None:
+                        continue
+                    expected = _parse_timestamp(expected_text, field=f"expected_{label}_updated_at")
+                    if _stored_moment(endpoint_row.updated_at) != expected:
+                        raise TrackerError(
+                            "conflict",
+                            f"{endpoint_key} has changed since {expected_text} "
+                            f"(current updated_at {_iso(endpoint_row.updated_at)}); re-read and retry",
+                            details={
+                                "endpoint": label,
+                                "current_updated_at": _iso(endpoint_row.updated_at),
+                            },
+                        )
+                existing = (
+                    db.query(TrackerLinkModel)
+                    .filter(
+                        TrackerLinkModel.from_key == from_key,
+                        TrackerLinkModel.to_key == to_key,
+                        TrackerLinkModel.kind == kind,
+                    )
+                    .first()
+                )
+                if existing is not None:
+                    return {
+                        "id": int(existing.id),
+                        "from_key": from_key,
+                        "to_key": to_key,
+                        "kind": kind,
+                        "created": False,
+                        "from_updated_at": _iso(from_row.updated_at),
+                        "to_updated_at": _iso(to_row.updated_at),
+                    }
+                now = _utcnow()
+                # Pin each conditional update to the exact version observed in
+                # this transaction.  A failure rolls back the other endpoint,
+                # link, and both audit rows as one all-or-nothing effect.
+                for endpoint_key, endpoint_row in ((from_key, from_row), (to_key, to_row)):
+                    written = (
+                        db.query(TrackerIssueModel)
+                        .filter(
+                            TrackerIssueModel.key == endpoint_key,
+                            TrackerIssueModel.updated_at == endpoint_row.updated_at,
+                        )
+                        .update({"updated_at": now}, synchronize_session=False)
+                    )
+                    if written != 1:
+                        db.rollback()
+                        raise _LinkRaceLost()
+                link = TrackerLinkModel(from_key=from_key, to_key=to_key, kind=kind)
+                events = [
+                    TrackerEventModel(
+                        issue_key=from_key, actor=actor, kind="link", field=kind, new_value=to_key
+                    ),
+                    TrackerEventModel(
+                        issue_key=to_key, actor=actor, kind="link", field=kind, new_value=from_key
+                    ),
+                ]
+                db.add(link)
+                db.add_all(events)
+                db.flush()
+                result = {
+                    "id": int(link.id),
+                    "from_key": from_key,
+                    "to_key": to_key,
+                    "kind": kind,
+                    "created": True,
+                    "from_updated_at": _iso(now),
+                    "to_updated_at": _iso(now),
+                    "effect_ids": [int(event.id) for event in events],
+                }
+                db.commit()
+                return result
+        except _LinkRaceLost:
+            if attempted_fence:
+                from_current = _current_updated_at(from_key)
+                to_current = _current_updated_at(to_key)
+                raise TrackerError(
+                    "conflict",
+                    "a link endpoint changed while creating the relationship; re-read and retry",
+                    details={
+                        "from_current_updated_at": from_current,
+                        "to_current_updated_at": to_current,
+                    },
+                )
+            time.sleep(0.005 * (attempt + 1))
+        except OperationalError as exc:
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                raise
+            if attempted_fence:
+                from_current = _current_updated_at(from_key)
+                to_current = _current_updated_at(to_key)
+                raise TrackerError(
+                    "conflict",
+                    "a link endpoint changed while creating the relationship; re-read and retry",
+                    details={
+                        "from_current_updated_at": from_current,
+                        "to_current_updated_at": to_current,
+                    },
+                )
+            time.sleep(0.005 * (attempt + 1))
+    raise TrackerError("conflict", "link could not be created after 8 attempts; retry it")
 
 
 def remove_link(link_id: int, *, actor: Optional[str] = None) -> Dict[str, Any]:

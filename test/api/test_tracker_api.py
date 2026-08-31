@@ -521,6 +521,35 @@ class TestCommentsAndLinksRoutes:
         detail = client.get(f"/tracker/issues/{issue['key']}").json()
         assert detail["comments"][0]["important"] is True
 
+    def test_comment_forwards_the_parent_clock_fence_and_returns_its_effect(self, client, project):
+        issue = _issue(client)
+        created = client.post(
+            f"/tracker/issues/{issue['key']}/comments",
+            json={
+                "body": "audited",
+                "important": True,
+                "expected_updated_at": issue["updated_at"],
+            },
+        )
+        assert created.status_code == 201
+        result = created.json()
+        assert result["important"] is True
+        assert result["effect_id"] > 0
+        assert (
+            result["updated_at"]
+            == client.get(f"/tracker/issues/{issue['key']}").json()["updated_at"]
+        )
+
+    def test_stale_comment_clock_is_a_conflict_without_a_comment(self, client, project):
+        issue = _issue(client)
+        client.patch(f"/tracker/issues/{issue['key']}", json={"body": "changed"})
+        response = client.post(
+            f"/tracker/issues/{issue['key']}/comments",
+            json={"body": "stale", "expected_updated_at": issue["updated_at"]},
+        )
+        assert response.status_code == 409
+        assert client.get(f"/tracker/issues/{issue['key']}").json()["comments"] == []
+
     def test_comment_importance_set_clear_and_retry(self, client, project):
         issue = _issue(client)
         comment = client.post(
@@ -612,6 +641,44 @@ class TestCommentsAndLinksRoutes:
         link_id = created.json()["id"]
         assert client.delete(f"/tracker/issues/{a['key']}/links/{link_id}").status_code == 200
         assert client.get(f"/tracker/issues/{b['key']}").json()["links"] == []
+
+    def test_link_forwards_both_endpoint_clocks_and_returns_both_new_clocks(self, client, project):
+        a, b = _issue(client, title="a"), _issue(client, title="b")
+        created = client.post(
+            f"/tracker/issues/{a['key']}/links",
+            json={
+                "to_key": b["key"],
+                "kind": "blocks",
+                "expected_from_updated_at": a["updated_at"],
+                "expected_to_updated_at": b["updated_at"],
+            },
+        )
+        assert created.status_code == 201
+        result = created.json()
+        assert len(result["effect_ids"]) == 2
+        assert (
+            result["from_updated_at"]
+            == client.get(f"/tracker/issues/{a['key']}").json()["updated_at"]
+        )
+        assert (
+            result["to_updated_at"]
+            == client.get(f"/tracker/issues/{b['key']}").json()["updated_at"]
+        )
+
+    def test_link_forwards_the_second_endpoint_clock(self, client, project):
+        a, b = _issue(client, title="a"), _issue(client, title="b")
+        client.patch(f"/tracker/issues/{b['key']}", json={"body": "changed"})
+        response = client.post(
+            f"/tracker/issues/{a['key']}/links",
+            json={
+                "to_key": b["key"],
+                "kind": "blocks",
+                "expected_from_updated_at": a["updated_at"],
+                "expected_to_updated_at": b["updated_at"],
+            },
+        )
+        assert response.status_code == 409
+        assert client.get(f"/tracker/issues/{a['key']}").json()["links"] == []
 
     def test_an_unknown_link_kind_is_400(self, client, project):
         a, b = _issue(client, title="a"), _issue(client, title="b")

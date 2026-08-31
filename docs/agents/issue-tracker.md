@@ -51,6 +51,23 @@ conduct issue link --id <blocker> --to <dependent> --kind blocks
 conduct issue link --id <a> --to <b> --kind relates
 ```
 
+When a publisher reviewed the endpoint clocks before writing, fence the write
+at commit time instead of trusting that earlier read:
+
+```sh
+conduct issue comment --id <key> --body-file <path> --expect-updated-at <clock> --json
+conduct issue link --id <from> --to <to> \
+  --expect-from-updated-at <from-clock> --expect-to-updated-at <to-clock> --json
+conduct issue close --id <key> --as resolved --expect-updated-at <clock> --json
+```
+
+The comment response carries its `id`, new parent `updated_at`, and audit
+`effect_id`; a new link carries its `id`, both new endpoint clocks, and both
+audit `effect_ids`; a status/close response carries its committed `updated_at`
+and status `effect_id`. A stale supplied clock is a typed conflict and writes
+no partial comment, relation, audit event, or status update. Omitting clocks
+preserves ordinary unfenced work.
+
 Labels represent workflow state, initiatives, sessions, and other
 cross-cutting cohorts. Relationships represent containment and execution
 order. A cross-repository outcome may use one issue with multiple recorded
