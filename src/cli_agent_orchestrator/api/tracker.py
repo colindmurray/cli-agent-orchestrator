@@ -59,6 +59,7 @@ _STATUS_FOR_CODE = {
     "invalid": status.HTTP_400_BAD_REQUEST,
     "not-found": status.HTTP_404_NOT_FOUND,
     "conflict": status.HTTP_409_CONFLICT,
+    "busy": status.HTTP_503_SERVICE_UNAVAILABLE,
     "unresolved": status.HTTP_422_UNPROCESSABLE_ENTITY,
 }
 
@@ -270,6 +271,8 @@ class LinkBody(StrictBody):
     # pin each side independently.  Omitted clocks retain ordinary linking.
     expected_from_updated_at: Optional[str] = None
     expected_to_updated_at: Optional[str] = None
+    # Stable caller-minted identity for an exact fenced-publish replay receipt.
+    action_key: Optional[str] = None
 
 
 class ClaimBody(StrictBody):
@@ -1012,6 +1015,7 @@ async def add_link(
             actor=body.actor,
             expected_from_updated_at=body.expected_from_updated_at,
             expected_to_updated_at=body.expected_to_updated_at,
+            action_key=body.action_key,
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
@@ -1022,10 +1026,17 @@ async def remove_link(
     issue_key: str,
     link_id: int,
     actor: Optional[str] = Query(None),
+    expected_from_updated_at: Optional[str] = Query(None),
+    expected_to_updated_at: Optional[str] = Query(None),
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
-        return tracker.remove_link(link_id, actor=actor)
+        return tracker.remove_link(
+            link_id,
+            actor=actor,
+            expected_from_updated_at=expected_from_updated_at,
+            expected_to_updated_at=expected_to_updated_at,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
@@ -1350,6 +1361,7 @@ async def add_feature_link(
             actor=body.actor,
             expected_from_updated_at=body.expected_from_updated_at,
             expected_to_updated_at=body.expected_to_updated_at,
+            action_key=body.action_key,
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
@@ -1360,6 +1372,8 @@ async def remove_feature_link(
     feature_key: str,
     link_id: int,
     actor: Optional[str] = Query(None),
+    expected_from_updated_at: Optional[str] = Query(None),
+    expected_to_updated_at: Optional[str] = Query(None),
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
@@ -1376,7 +1390,12 @@ async def remove_feature_link(
                 raise tracker.TrackerError(
                     "not-found", f"no link {link_id} on feature {feature_key}"
                 )
-        return tracker.remove_link(link_id, actor=actor)
+        return tracker.remove_link(
+            link_id,
+            actor=actor,
+            expected_from_updated_at=expected_from_updated_at,
+            expected_to_updated_at=expected_to_updated_at,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 

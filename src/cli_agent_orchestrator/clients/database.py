@@ -481,7 +481,13 @@ class TrackerEventModel(Base):
 
 
 class TrackerLinkModel(Base):
-    """A directed relationship between two issues."""
+    """A directed relationship between two issues and, when supplied, its receipt.
+
+    ``action_key`` is a caller-minted stable identity for a fenced publish.
+    The receipt fields make a response-loss retry return the exact committed
+    clocks and audit event ids instead of adopting an arbitrary same-shaped
+    relationship another worker happened to create.
+    """
 
     __tablename__ = "tracker_issue_links"
 
@@ -490,9 +496,25 @@ class TrackerLinkModel(Base):
     to_key = Column(String, nullable=False, index=True)
     # "blocks" | "relates" | "duplicates" | "caused-by"
     kind = Column(String, nullable=False)
+    action_key = Column(String, nullable=True)
+    from_updated_at = Column(DateTime(timezone=True), nullable=True)
+    to_updated_at = Column(DateTime(timezone=True), nullable=True)
+    from_effect_id = Column(Integer, nullable=True)
+    to_effect_id = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
-    __table_args__ = (UniqueConstraint("from_key", "to_key", "kind", name="uq_tracker_link"),)
+    __table_args__ = (
+        UniqueConstraint("from_key", "to_key", "kind", name="uq_tracker_link"),
+        # SQLite allows multiple NULLs in a unique index, so ordinary
+        # historical/unfenced links retain their idempotent contract while a
+        # supplied action key names exactly one durable publish receipt.
+        Index(
+            "uq_tracker_link_action_key",
+            "action_key",
+            unique=True,
+            sqlite_where=action_key.is_not(None),
+        ),
+    )
 
 
 class SessionEnvModel(Base):
@@ -2671,6 +2693,56 @@ def _migrate_tracker_observed_revision_columns(target_engine: Optional[Any] = No
         raw.close()
 
 
+def _migrate_tracker_link_receipts(target_engine: Optional[Any] = None) -> None:
+    """Add durable fenced-link replay receipts to existing tracker stores.
+
+    The columns are nullable so historical relationships retain their ordinary
+    idempotent behavior.  A caller that needs a response-loss-safe fenced
+    publish supplies an action key, and the unique partial index binds that key
+    to one link receipt without turning NULL/historical rows into conflicts.
+    """
+    target = target_engine if target_engine is not None else engine
+    raw = target.raw_connection()
+    definitions = {
+        "action_key": "TEXT NULL",
+        "from_updated_at": "DATETIME NULL",
+        "to_updated_at": "DATETIME NULL",
+        "from_effect_id": "INTEGER NULL",
+        "to_effect_id": "INTEGER NULL",
+    }
+    try:
+        raw.execute("BEGIN IMMEDIATE")
+        try:
+            links = _tracker_table_columns(raw, "tracker_issue_links")
+            if links is None:
+                raw.commit()
+                return
+            for required in ("from_key", "to_key", "kind"):
+                if required not in links:
+                    raise TrackerSchemaMigrationError(
+                        f"tracker_issue_links table is malformed: missing expected column {required}",
+                        table="tracker_issue_links",
+                    )
+            for name, definition in definitions.items():
+                if name not in links:
+                    raw.execute(f"ALTER TABLE tracker_issue_links ADD COLUMN {name} {definition}")
+            raw.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_tracker_link_action_key "
+                "ON tracker_issue_links(action_key) WHERE action_key IS NOT NULL"
+            )
+            raw.commit()
+        except TrackerSchemaMigrationError:
+            raw.rollback()
+            raise
+        except Exception as exc:
+            raw.rollback()
+            raise TrackerSchemaMigrationError(
+                f"tracker link-receipt migration failed: {exc}"
+            ) from exc
+    finally:
+        raw.close()
+
+
 def _migrate_tracker_search_projection(target_engine: Optional[Any] = None) -> None:
     """Install the derived tracker search projection, idempotently.
 
@@ -2771,6 +2843,7 @@ def ensure_tracker_schema() -> None:
     _migrate_tracker_work_context_columns()
     _migrate_tracker_planning_columns()
     _migrate_tracker_observed_revision_columns()
+    _migrate_tracker_link_receipts()
     _migrate_tracker_search_projection()
 
 
@@ -2826,6 +2899,7 @@ def init_db() -> None:
     _migrate_tracker_work_context_columns()
     _migrate_tracker_planning_columns()
     _migrate_tracker_observed_revision_columns()
+    _migrate_tracker_link_receipts()
     _migrate_tracker_search_projection()
     _migrate_terminals_schema()
     inbox_schema_ready = _migrate_callback_recovery_inbox_schema()

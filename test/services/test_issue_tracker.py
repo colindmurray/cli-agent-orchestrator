@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from cli_agent_orchestrator.clients.database import Base
@@ -657,6 +658,7 @@ class TestAuditPublishFences:
             kind="relates",
             expected_from_updated_at=source["updated_at"],
             expected_to_updated_at=target["updated_at"],
+            action_key="fenced-link-success",
         )
         assert result["id"] > 0
         assert len(result["effect_ids"]) == 2
@@ -698,6 +700,7 @@ class TestAuditPublishFences:
                     kind="relates",
                     expected_from_updated_at=source["updated_at"],
                     expected_to_updated_at=target["updated_at"],
+                    action_key=f"fenced-link-race-{mutated_side}",
                 )
             except TrackerError as exc:
                 outcomes.append(exc)
@@ -731,10 +734,230 @@ class TestAuditPublishFences:
                 kind="relates",
                 expected_from_updated_at=source["updated_at"],
                 expected_to_updated_at=target["updated_at"],
+                action_key="stale-second-endpoint",
             )
         assert exc.value.code == "conflict"
         assert exc.value.details["endpoint"] == "to"
         assert tracker.get_issue(source["key"])["links"] == []
+
+
+class TestTrackerWriteReceiptsAndAvailability:
+    def test_fenced_status_retries_an_unrelated_busy_writer_with_the_original_clock(
+        self, cao_system, monkeypatch
+    ):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        real_apply = tracker._apply_issue_update
+        attempts = 0
+
+        def locked_once(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError(
+                    "UPDATE tracker_issues", {}, RuntimeError("database is locked")
+                )
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(tracker, "_apply_issue_update", locked_once)
+        monkeypatch.setattr(tracker.time, "sleep", lambda _delay: None)
+        result = tracker.update_issue(
+            issue["key"], status="resolved", expected_updated_at=issue["updated_at"]
+        )
+        assert attempts == 2
+        assert result["status"] == "resolved"
+
+    def test_fenced_busy_exhaustion_is_distinct_from_a_stale_clock(self, cao_system, monkeypatch):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+
+        def always_locked(*_args, **_kwargs):
+            raise OperationalError("UPDATE tracker_issues", {}, RuntimeError("database is locked"))
+
+        monkeypatch.setattr(tracker, "_apply_issue_update", always_locked)
+        monkeypatch.setattr(tracker.time, "sleep", lambda _delay: None)
+        with pytest.raises(TrackerError) as exc:
+            tracker.update_issue(
+                issue["key"], status="resolved", expected_updated_at=issue["updated_at"]
+            )
+        assert exc.value.code == "busy"
+        assert exc.value.details == {
+            "retryable": True,
+            "observed_updated_at": issue["updated_at"],
+        }
+
+    def test_fenced_link_replay_returns_its_exact_committed_receipt(self, cao_system):
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        kwargs = {
+            "to_key": target["key"],
+            "kind": "relates",
+            "expected_from_updated_at": source["updated_at"],
+            "expected_to_updated_at": target["updated_at"],
+            "action_key": "audit-publish-41",
+        }
+        committed = tracker.add_link(source["key"], **kwargs)
+        # The visible clocks may move long after the first response was lost;
+        # replay is bound to the durable action receipt, not the live edge.
+        tracker.update_issue(source["key"], body="later source edit")
+        tracker.update_issue(target["key"], body="later target edit")
+        replayed = tracker.add_link(source["key"], **kwargs)
+        assert replayed["replayed"] is True
+        assert replayed["created"] is True
+        assert replayed["id"] == committed["id"]
+        assert replayed["from_updated_at"] == committed["from_updated_at"]
+        assert replayed["to_updated_at"] == committed["to_updated_at"]
+        assert replayed["effect_ids"] == committed["effect_ids"]
+        assert (
+            len(
+                [
+                    event
+                    for issue_key in (source["key"], target["key"])
+                    for event in tracker.get_issue(issue_key)["events"]
+                    if event["kind"] == "link"
+                ]
+            )
+            == 2
+        )
+
+    def test_fenced_link_requires_an_action_key_for_loss_safe_replay(self, cao_system):
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        with pytest.raises(TrackerError) as exc:
+            tracker.add_link(
+                source["key"],
+                to_key=target["key"],
+                kind="relates",
+                expected_from_updated_at=source["updated_at"],
+                expected_to_updated_at=target["updated_at"],
+            )
+        assert exc.value.code == "invalid"
+        assert "action_key" in exc.value.message
+
+    def test_action_key_never_adopts_another_workers_existing_link(self, cao_system):
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        tracker.add_link(source["key"], to_key=target["key"], kind="relates")
+        source = tracker.get_issue(source["key"])
+        target = tracker.get_issue(target["key"])
+        with pytest.raises(TrackerError) as exc:
+            tracker.add_link(
+                source["key"],
+                to_key=target["key"],
+                kind="relates",
+                expected_from_updated_at=source["updated_at"],
+                expected_to_updated_at=target["updated_at"],
+                action_key="audit-publish-42",
+            )
+        assert exc.value.code == "conflict"
+        assert "do not adopt" in exc.value.message
+
+    def test_unlink_bumps_both_endpoints_and_mirrors_the_audit_effect(self, cao_system):
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        link = tracker.add_link(source["key"], to_key=target["key"], kind="blocks")
+        source = tracker.get_issue(source["key"])
+        target = tracker.get_issue(target["key"])
+        result = tracker.remove_link(
+            link["id"],
+            expected_from_updated_at=source["updated_at"],
+            expected_to_updated_at=target["updated_at"],
+        )
+        assert len(result["effect_ids"]) == 2
+        assert result["from_updated_at"] == tracker.get_issue(source["key"])["updated_at"]
+        assert result["to_updated_at"] == tracker.get_issue(target["key"])["updated_at"]
+        for issue_key, effect_id, other_key in (
+            (source["key"], result["effect_ids"][0], target["key"]),
+            (target["key"], result["effect_ids"][1], source["key"]),
+        ):
+            event = next(
+                event
+                for event in tracker.get_issue(issue_key)["events"]
+                if event["id"] == effect_id
+            )
+            assert (event["kind"], event["old_value"]) == ("unlink", other_key)
+
+    @pytest.mark.parametrize("mutated_side", ["from", "to"])
+    def test_unlink_refuses_a_late_endpoint_mutation_without_partial_effect(
+        self, cao_system, monkeypatch, mutated_side
+    ):
+        import threading
+
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        link = tracker.add_link(source["key"], to_key=target["key"], kind="relates")
+        source = tracker.get_issue(source["key"])
+        target = tracker.get_issue(target["key"])
+        at_write, release = threading.Event(), threading.Event()
+        real_now = tracker._utcnow
+        paused = False
+
+        def pause_after_precheck():
+            nonlocal paused
+            if not paused:
+                paused = True
+                at_write.set()
+                assert release.wait(timeout=5)
+            return real_now()
+
+        monkeypatch.setattr(tracker, "_utcnow", pause_after_precheck)
+        outcomes = []
+
+        def unlink():
+            try:
+                tracker.remove_link(
+                    link["id"],
+                    expected_from_updated_at=source["updated_at"],
+                    expected_to_updated_at=target["updated_at"],
+                )
+            except TrackerError as exc:
+                outcomes.append(exc)
+
+        worker = threading.Thread(target=unlink)
+        worker.start()
+        assert at_write.wait(timeout=5)
+        changed = source if mutated_side == "from" else target
+        tracker.update_issue(changed["key"], body="late endpoint update")
+        release.set()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+        assert [exc.code for exc in outcomes] == ["conflict"]
+        assert tracker.get_issue(source["key"])["links"]
+        assert tracker.get_issue(target["key"])["links"]
+        assert not [
+            event
+            for issue_key in (source["key"], target["key"])
+            for event in tracker.get_issue(issue_key)["events"]
+            if event["kind"] == "unlink"
+        ]
+
+    def test_deleting_an_issue_bumps_and_audits_each_surviving_peer(self, cao_system):
+        removed = tracker.create_issue(project_id="cao-system", title="removed")
+        peer = tracker.create_issue(project_id="cao-system", title="peer")
+        tracker.add_link(removed["key"], to_key=peer["key"], kind="relates")
+        before = tracker.get_issue(peer["key"])
+        result = tracker.delete_issue(removed["key"])
+        after = tracker.get_issue(peer["key"])
+        assert result["peer_updated_at"] == {peer["key"]: after["updated_at"]}
+        assert after["updated_at"] >= before["updated_at"]
+        unlink = [event for event in after["events"] if event["kind"] == "unlink"]
+        assert len(unlink) == 1
+        assert unlink[0]["old_value"] == removed["key"]
+        assert result["effect_ids"] == [unlink[0]["id"]]
+
+    def test_multifield_close_returns_the_status_effect_as_effect_id(self, cao_system):
+        issue = tracker.create_issue(project_id="cao-system", title="a")
+        result = tracker.update_issue(
+            issue["key"],
+            status="closed",
+            resolution="fixed",
+            expected_updated_at=issue["updated_at"],
+        )
+        assert len(result["effect_ids"]) == 2
+        event = next(
+            event
+            for event in tracker.get_issue(issue["key"])["events"]
+            if event["id"] == result["effect_id"]
+        )
+        assert event["field"] == "status"
 
 
 class TestProjectDeletion:
@@ -749,6 +972,21 @@ class TestProjectDeletion:
         got = tracker.delete_project("cao-system", force=True)
         assert got["issues_deleted"] == 1
         assert tracker.list_projects() == []
+
+    def test_force_delete_bumps_and_audits_a_peer_outside_the_project(self, cao_system):
+        tracker.create_project(name="Peer", project_id="peer", issue_prefix="peer")
+        removed = tracker.create_issue(project_id="cao-system", title="removed")
+        peer = tracker.create_issue(project_id="peer", title="peer")
+        tracker.add_link(removed["key"], to_key=peer["key"], kind="relates")
+        before = tracker.get_issue(peer["key"])
+
+        result = tracker.delete_project("cao-system", force=True)
+
+        after = tracker.get_issue(peer["key"])
+        assert result["peer_updated_at"] == {peer["key"]: after["updated_at"]}
+        assert after["updated_at"] >= before["updated_at"]
+        event = next(event for event in after["events"] if event["kind"] == "unlink")
+        assert (event["old_value"], result["effect_ids"]) == (removed["key"], [event["id"]])
 
     def test_archiving_hides_a_project_without_touching_its_issues(self, cao_system):
         tracker.create_issue(project_id="cao-system", title="a")

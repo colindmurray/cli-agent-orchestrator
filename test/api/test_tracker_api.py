@@ -550,6 +550,31 @@ class TestCommentsAndLinksRoutes:
         assert response.status_code == 409
         assert client.get(f"/tracker/issues/{issue['key']}").json()["comments"] == []
 
+    def test_retryable_tracker_busy_is_a_typed_503_not_a_stale_conflict(
+        self, client, project, monkeypatch
+    ):
+        issue = _issue(client)
+
+        def busy(*_args, **_kwargs):
+            raise tracker.TrackerError(
+                "busy",
+                "the tracker write lock is busy",
+                details={"retryable": True, "observed_updated_at": issue["updated_at"]},
+            )
+
+        monkeypatch.setattr(tracker, "add_comment", busy)
+        response = client.post(
+            f"/tracker/issues/{issue['key']}/comments",
+            json={"body": "retry later", "expected_updated_at": issue["updated_at"]},
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"] == {
+            "message": "the tracker write lock is busy",
+            "code": "busy",
+            "retryable": True,
+            "observed_updated_at": issue["updated_at"],
+        }
+
     def test_comment_importance_set_clear_and_retry(self, client, project):
         issue = _issue(client)
         comment = client.post(
@@ -639,7 +664,9 @@ class TestCommentsAndLinksRoutes:
         )
         assert created.status_code == 201
         link_id = created.json()["id"]
-        assert client.delete(f"/tracker/issues/{a['key']}/links/{link_id}").status_code == 200
+        removed = client.delete(f"/tracker/issues/{a['key']}/links/{link_id}")
+        assert removed.status_code == 200
+        assert len(removed.json()["effect_ids"]) == 2
         assert client.get(f"/tracker/issues/{b['key']}").json()["links"] == []
 
     def test_link_forwards_both_endpoint_clocks_and_returns_both_new_clocks(self, client, project):
@@ -651,6 +678,7 @@ class TestCommentsAndLinksRoutes:
                 "kind": "blocks",
                 "expected_from_updated_at": a["updated_at"],
                 "expected_to_updated_at": b["updated_at"],
+                "action_key": "api-link-success",
             },
         )
         assert created.status_code == 201
@@ -675,10 +703,31 @@ class TestCommentsAndLinksRoutes:
                 "kind": "blocks",
                 "expected_from_updated_at": a["updated_at"],
                 "expected_to_updated_at": b["updated_at"],
+                "action_key": "api-link-stale-target",
             },
         )
         assert response.status_code == 409
         assert client.get(f"/tracker/issues/{a['key']}").json()["links"] == []
+
+    def test_link_action_key_replays_the_original_receipt_after_response_loss(
+        self, client, project
+    ):
+        a, b = _issue(client, title="a"), _issue(client, title="b")
+        body = {
+            "to_key": b["key"],
+            "kind": "blocks",
+            "expected_from_updated_at": a["updated_at"],
+            "expected_to_updated_at": b["updated_at"],
+            "action_key": "wire-replay-1",
+        }
+        committed = client.post(f"/tracker/issues/{a['key']}/links", json=body)
+        assert committed.status_code == 201
+        client.patch(f"/tracker/issues/{a['key']}", json={"body": "later"})
+        replay = client.post(f"/tracker/issues/{a['key']}/links", json=body)
+        assert replay.status_code == 201
+        assert replay.json()["replayed"] is True
+        for field in ("id", "from_updated_at", "to_updated_at", "effect_ids", "action_key"):
+            assert replay.json()[field] == committed.json()[field]
 
     def test_an_unknown_link_kind_is_400(self, client, project):
         a, b = _issue(client, title="a"), _issue(client, title="b")

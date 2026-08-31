@@ -653,10 +653,13 @@ class TestEditConcurrencyAndLabelFlags:
                 source_after_comment["updated_at"],
                 "--expect-to-updated-at",
                 target["updated_at"],
+                "--action-key",
+                "cli-audit-publish-1",
                 "--json",
             )
         )
         assert len(link["effect_ids"]) == 2
+        assert link["action_key"] == "cli-audit-publish-1"
 
     def test_add_and_remove_label_flags_merge(self, runner):
         run(

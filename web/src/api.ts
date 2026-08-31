@@ -1448,6 +1448,21 @@ function trackerQuery(filters?: TrackerIssueFilters): string {
   return parts.length ? `?${parts.join('&')}` : ''
 }
 
+function linkClockQuery(clocks?: {
+  expected_from_updated_at?: string
+  expected_to_updated_at?: string
+}): string {
+  if (!clocks) return ''
+  const parts: string[] = []
+  if (clocks.expected_from_updated_at) {
+    parts.push(`expected_from_updated_at=${encodeURIComponent(clocks.expected_from_updated_at)}`)
+  }
+  if (clocks.expected_to_updated_at) {
+    parts.push(`expected_to_updated_at=${encodeURIComponent(clocks.expected_to_updated_at)}`)
+  }
+  return parts.length ? `?${parts.join('&')}` : ''
+}
+
 /** Query string for GET /tracker/issues/search. Same repeated-param
  * conventions as trackerQuery: multi-value families repeat, scope is exactly
  * one project here (the dashboard is per-project), and `q` is mandatory — the
@@ -2017,9 +2032,12 @@ export const api = {
     actor?: string
     expected_from_updated_at?: string
     expected_to_updated_at?: string
+    action_key?: string
   }) =>
     fetchJSON<TrackerLink & {
       created: boolean
+      replayed?: boolean
+      action_key?: string
       from_updated_at?: string | null
       to_updated_at?: string | null
       effect_ids?: number[]
@@ -2027,9 +2045,12 @@ export const api = {
       `/tracker/issues/${encodeURIComponent(key)}/links`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     ),
-  removeTrackerLink: (key: string, linkId: number) =>
-    fetchJSON<{ id: number; deleted: boolean }>(
-      `/tracker/issues/${encodeURIComponent(key)}/links/${linkId}`,
+  removeTrackerLink: (key: string, linkId: number, clocks?: {
+    expected_from_updated_at?: string
+    expected_to_updated_at?: string
+  }) =>
+    fetchJSON<{ id: number; deleted: boolean; from_updated_at?: string | null; to_updated_at?: string | null; effect_ids?: number[] }>(
+      `/tracker/issues/${encodeURIComponent(key)}/links/${linkId}${linkClockQuery(clocks)}`,
       { method: 'DELETE' },
     ),
   getTrackerStats: (projectId?: string) =>
@@ -2082,9 +2103,12 @@ export const api = {
     actor?: string
     expected_from_updated_at?: string
     expected_to_updated_at?: string
+    action_key?: string
   }) =>
     fetchJSON<TrackerLink & {
       created: boolean
+      replayed?: boolean
+      action_key?: string
       from_updated_at?: string | null
       to_updated_at?: string | null
       effect_ids?: number[]
@@ -2092,9 +2116,12 @@ export const api = {
       `/tracker/features/${encodeURIComponent(key)}/links`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     ),
-  removeTrackerFeatureLink: (key: string, linkId: number) =>
-    fetchJSON<{ id: number; deleted: boolean }>(
-      `/tracker/features/${encodeURIComponent(key)}/links/${linkId}`,
+  removeTrackerFeatureLink: (key: string, linkId: number, clocks?: {
+    expected_from_updated_at?: string
+    expected_to_updated_at?: string
+  }) =>
+    fetchJSON<{ id: number; deleted: boolean; from_updated_at?: string | null; to_updated_at?: string | null; effect_ids?: number[] }>(
+      `/tracker/features/${encodeURIComponent(key)}/links/${linkId}${linkClockQuery(clocks)}`,
       { method: 'DELETE' },
     ),
   getTrackerFeatureStats: (projectId?: string) =>

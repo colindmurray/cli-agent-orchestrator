@@ -1104,6 +1104,11 @@ def issue_comment_importance(issue_key, comment_id, weight, actor, as_json):
     default=None,
     help="refuse unless the --to issue's updated_at still equals this ISO timestamp",
 )
+@click.option(
+    "--action-key",
+    default=None,
+    help="stable caller-minted key that permits an exact lost-response replay",
+)
 @click.option("--json", "as_json", is_flag=True)
 def issue_link(
     issue_key,
@@ -1112,6 +1117,7 @@ def issue_link(
     actor,
     expect_from_updated_at,
     expect_to_updated_at,
+    action_key,
     as_json,
 ):
     """Relate two issues. `part-of` runs child -> parent: CHILD part-of PARENT."""
@@ -1123,6 +1129,7 @@ def issue_link(
             actor=actor,
             expected_from_updated_at=expect_from_updated_at,
             expected_to_updated_at=expect_to_updated_at,
+            action_key=action_key,
         )
     except TrackerError as exc:
         _fail(exc)

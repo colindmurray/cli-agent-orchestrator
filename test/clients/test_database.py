@@ -1156,6 +1156,49 @@ class TestProjectAliasMigration:
         assert rows == [("a1", "p1")], "current-schema table must be left intact"
 
 
+class TestTrackerLinkReceiptMigration:
+    """Durable action receipts upgrade an existing tracker-links table."""
+
+    def test_adds_receipt_columns_and_unique_action_key_index_idempotently(self, tmp_path):
+        from cli_agent_orchestrator.clients import database as db_mod
+
+        legacy = create_engine(f"sqlite:///{tmp_path / 'legacy-tracker.db'}")
+        with legacy.begin() as conn:
+            conn.exec_driver_sql(
+                "CREATE TABLE tracker_issue_links ("
+                "id INTEGER PRIMARY KEY, from_key TEXT NOT NULL, to_key TEXT NOT NULL, kind TEXT NOT NULL)"
+            )
+            conn.exec_driver_sql(
+                "INSERT INTO tracker_issue_links (id, from_key, to_key, kind) "
+                "VALUES (1, 'cond-1', 'cond-2', 'relates')"
+            )
+
+        db_mod._migrate_tracker_link_receipts(legacy)
+        db_mod._migrate_tracker_link_receipts(legacy)
+
+        with legacy.begin() as conn:
+            columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(tracker_issue_links)")
+            }
+            indexes = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA index_list(tracker_issue_links)")
+            }
+            conn.exec_driver_sql(
+                "UPDATE tracker_issue_links SET action_key = 'publish-1', "
+                "from_updated_at = '2026-08-31T00:00:00Z', "
+                "to_updated_at = '2026-08-31T00:00:00Z', from_effect_id = 7, to_effect_id = 8 "
+                "WHERE id = 1"
+            )
+        assert {
+            "action_key",
+            "from_updated_at",
+            "to_updated_at",
+            "from_effect_id",
+            "to_effect_id",
+        } <= columns
+        assert "uq_tracker_link_action_key" in indexes
+
+
 class TestSessionEnvMigration:
     """Tests for the session_env table migration (issue #248 durability)."""
 
