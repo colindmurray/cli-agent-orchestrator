@@ -3,7 +3,7 @@ import {
   api, ApiError, errorText, conflictDetail, TrackerProject, TrackerIssue, TrackerIssuePage,
   TrackerVocabulary, TrackerScope, TrackerOptionField, TrackerIssueBrief, TrackerProjectHome,
   TrackerProjectSessions, TrackerProjectSessionDetail, TrackerProjectSessionSummary,
-  RankedSearchResponse,
+  RankedSearchResponse, SimilarIssueDraft,
 } from '../api'
 import { linkPhrase } from '../lib/issueMap'
 import { useStore } from '../store'
@@ -12,6 +12,7 @@ import { IssueGraphPanel } from './IssueGraphPanel'
 import { WayfinderPanel } from './WayfinderPanel'
 import { SearchableMultiSelect, SearchableOption, SearchableSelect } from './SearchablePicker'
 import { RankedSearchResults } from './RankedSearchResults'
+import { SimilarIssueCandidates } from './SimilarIssueCandidates'
 import {
   FolderGit2, Plus, Search, Trash2, X, Loader2, Archive, ChevronRight, MessageSquare,
   History, Link2, Save, FileDown, CircleDot, CheckCircle2, Lightbulb, Compass, List,
@@ -1156,6 +1157,7 @@ export function ProjectsPanel() {
                       vocab={vocab}
                       onChanged={refreshAfterIssueChange}
                       onDeleted={() => { setSelectedKey(null); refreshAfterIssueChange() }}
+                      onNavigate={key => { setSelectedKey(key); setCommentTarget(null) }}
                       commentTarget={commentTarget && commentTarget.issueKey === issue.key ? commentTarget.commentId : null}
                     />
                   )}
@@ -1173,6 +1175,7 @@ export function ProjectsPanel() {
                   vocab={vocab}
                   onChanged={refreshAfterIssueChange}
                   onDeleted={() => { setSelectedKey(null); refreshAfterIssueChange() }}
+                  onNavigate={key => { setSelectedKey(key); setCommentTarget(null) }}
                   commentTarget={commentTarget && commentTarget.issueKey === selectedKey ? commentTarget.commentId : null}
                 />
               </div>
@@ -1276,6 +1279,7 @@ export function ProjectsPanel() {
           kind={kind === 'all' ? 'bug' : kind}
           onClose={() => setShowNewIssue(false)}
           onCreated={async key => { setShowNewIssue(false); setSelectedKey(key); await refreshAfterIssueChange() }}
+          onIssueChanged={refreshAfterIssueChange}
         />
       )}
 
@@ -1780,9 +1784,7 @@ function ScopeEditor({
 // Item detail — factored around presentation descriptor so the two kinds share
 // one implementation and copy is not duplicated.
 
-function ItemDetail({
-  issueKey, initialKind, vocab, onChanged, onDeleted, onNavigate, commentTarget,
-}: {
+interface ItemDetailProps {
   issueKey: string
   initialKind?: string
   vocab: TrackerVocabulary
@@ -1792,9 +1794,24 @@ function ItemDetail({
   /** A ranked-search hit asked to land on this comment (§12.3 "navigate
    * directly to a matching comment"): scroll to it and ring it once loaded. */
   commentTarget?: number | null
-}) {
+}
+
+/**
+ * Identity boundary for the stateful detail editor. A key change remounts the
+ * implementation in the same render, before effects run, so no draft, delete
+ * confirmation, or mutation callback from one issue can target another.
+ */
+function ItemDetail(props: ItemDetailProps) {
+  return <ItemDetailContent key={props.issueKey} {...props} />
+}
+
+function ItemDetailContent({
+  issueKey, initialKind, vocab, onChanged, onDeleted, onNavigate, commentTarget,
+}: ItemDetailProps) {
   const { showSnackbar } = useStore()
   const [issue, setIssue] = useState<TrackerIssue | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const loadRequestRef = useRef(0)
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [labelValues, setLabelValues] = useState<string[]>([])
   const [collaboratorValues, setCollaboratorValues] = useState<string[]>([])
@@ -1822,10 +1839,17 @@ function ItemDetail({
   const isFeature = presentation.kind === 'feature'
   const isBug = presentation.kind === 'bug'
 
-  const load = useCallback(async (opts?: { preserveDraft?: boolean }) => {
+  const load = useCallback(async (opts?: { preserveDraft?: boolean; signal?: AbortSignal }) => {
+    const request = ++loadRequestRef.current
+    if (!opts?.preserveDraft) setLoadError(null)
     try {
       // Use key-universal fetch; typed wrappers would 404 on cross-kind
-      const row = await api.getTrackerIssue(issueKey)
+      const row = await api.getTrackerIssue(issueKey, opts?.signal)
+      if (opts?.signal?.aborted || request !== loadRequestRef.current) return
+      if (row.key !== issueKey) {
+        throw new Error(`tracker returned ${row.key} while loading ${issueKey}`)
+      }
+      setLoadError(null)
       setIssue(row)
       if (!opts?.preserveDraft) {
         setDraft({
@@ -1854,11 +1878,22 @@ function ItemDetail({
         setCasConflict(null)
       }
     } catch (err) {
+      if (opts?.signal?.aborted || request !== loadRequestRef.current) return
+      setLoadError(errorText(err))
       showSnackbar({ type: 'error', message: errorText(err) })
     }
   }, [issueKey, showSnackbar])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    const controller = new AbortController()
+    void load({ signal: controller.signal })
+    return () => {
+      // Invalidate before abort propagation settles; even a fetch double that
+      // ignores AbortSignal cannot commit after this identity is abandoned.
+      loadRequestRef.current += 1
+      controller.abort()
+    }
+  }, [load])
 
   // Comment navigation from a ranked-search hit: once the issue (and its
   // comments) are loaded, bring the target comment on screen and ring it
@@ -2113,6 +2148,13 @@ function ItemDetail({
   }
 
   if (!issue) {
+    if (loadError) {
+      return (
+        <div role="alert" className="px-10 py-4 text-xs text-amber-300">
+          Unable to load {issueKey}: {loadError}
+        </div>
+      )
+    }
     return <div className="px-10 py-4 text-xs text-gray-600">Loading {issueKey}…</div>
   }
 
@@ -2781,13 +2823,14 @@ function NewProjectModal({
 // do not diverge.
 
 function NewItemModal({
-  project, vocab, kind, onClose, onCreated,
+  project, vocab, kind, onClose, onCreated, onIssueChanged,
 }: {
   project: TrackerProject
   vocab: TrackerVocabulary
   kind: ItemKind
   onClose: () => void
   onCreated: (key: string) => void
+  onIssueChanged: () => Promise<void>
 }) {
   const presentation = KIND_PRESENTATION[kind]
   const { showSnackbar } = useStore()
@@ -2810,6 +2853,7 @@ function NewItemModal({
   const [actualOutcome, setActualOutcome] = useState('')
   const [favorite, setFavorite] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [inspectingIssueKey, setInspectingIssueKey] = useState<string | null>(null)
 
   // Reset body when kind switches (modal is remounted via key, but guard anyway)
   useEffect(() => {
@@ -2882,6 +2926,65 @@ function NewItemModal({
   const loadBranches = useCallback((query: string) => loadFieldOptions('branch', query), [loadFieldOptions])
   const loadWorktrees = useCallback((query: string) => loadFieldOptions('worktree', query), [loadFieldOptions])
   const loadPullRequests = useCallback((query: string) => loadFieldOptions('pull_request', query), [loadFieldOptions])
+
+  // M2.5 pre-filing probe (§11/§12.3): once the draft carries meaningful
+  // content, SimilarIssueCandidates debounces one project-scoped similar
+  // query per settled draft. The probe is advisory only — it never feeds the
+  // submit button's disabled state and never mutates tracker state.
+  const similarDraft = useMemo<SimilarIssueDraft | null>(() => {
+    const bodyIsStarter = body === presentation.bodyStarter
+    const meaningful = title.trim().length > 0 || (!bodyIsStarter && body.trim().length > 0)
+    if (!meaningful) return null
+    const draft: SimilarIssueDraft = { kind, title }
+    // An untouched feature template is scaffolding, not signal: sending it
+    // would match every other template-bearing feature.
+    if (!bodyIsStarter && body.trim()) draft.body = body
+    if (severity !== 'unset') draft.severity = severity
+    if (component.trim()) draft.component = component.trim()
+    if (requester.trim()) draft.reporter = requester.trim()
+    if (owner.trim()) draft.assignee = owner.trim()
+    if (labels.length) draft.labels = labels
+    if (evidence.trim()) draft.evidence = evidence.trim()
+    if (kind === 'bug') {
+      if (failingCommand.trim()) draft.failing_command = failingCommand.trim()
+      if (reproductionSteps.trim()) draft.reproduction_steps = reproductionSteps.trim()
+      if (expectedOutcome.trim()) draft.expected_outcome = expectedOutcome.trim()
+      if (actualOutcome.trim()) draft.actual_outcome = actualOutcome.trim()
+    }
+    return draft
+  }, [
+    kind, title, body, severity, component, requester, owner, labels, evidence,
+    failingCommand, reproductionSteps, expectedOutcome, actualOutcome,
+    presentation.bodyStarter,
+  ])
+
+  // Keep this component mounted while inspecting a candidate so every create
+  // field retains its exact local value. ItemDetail remains the single full
+  // issue-inspection surface and can navigate the candidate's relationships.
+  if (inspectingIssueKey) {
+    return (
+      <Modal title={`Inspect ${inspectingIssueKey}`} onClose={() => setInspectingIssueKey(null)}>
+        <button
+          type="button"
+          onClick={() => setInspectingIssueKey(null)}
+          aria-label={`Back to new ${presentation.kind} draft`}
+          className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300"
+        >
+          <ChevronRight size={13} className="rotate-180" /> Back to draft
+        </button>
+        <ItemDetail
+          issueKey={inspectingIssueKey}
+          vocab={vocab}
+          onChanged={onIssueChanged}
+          onDeleted={() => {
+            setInspectingIssueKey(null)
+            void onIssueChanged()
+          }}
+          onNavigate={setInspectingIssueKey}
+        />
+      </Modal>
+    )
+  }
 
   return (
     <Modal title={presentation.modalTitle(project.name)} onClose={onClose}>
@@ -2995,6 +3098,12 @@ function NewItemModal({
         <SearchableMultiSelect values={pullRequests} onChange={setPullRequests} loadOptions={loadPullRequests}
           placeholder="Search or add PR URLs / references" ariaLabel="Pull requests" allowCreate className="mt-1" />
       </label>
+      <SimilarIssueCandidates
+        projectId={project.id}
+        draft={similarDraft}
+        terminalStatuses={vocab.terminal_statuses}
+        onOpenIssue={setInspectingIssueKey}
+      />
       {activeWithoutOwner && (
         <div role="alert" className="rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
           In-progress work should have one primary {presentation.assigneeLabel.toLowerCase()}.

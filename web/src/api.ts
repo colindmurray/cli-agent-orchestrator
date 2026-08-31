@@ -1124,6 +1124,62 @@ export interface TrackerLabelFacet {
 }
 
 // ---------------------------------------------------------------------------
+// Similar issues — POST /tracker/issues/similar (M2.4a contract, consumed by
+// the M2.5 pre-filing candidates panel).
+
+/**
+ * The create/search fields a similarity draft may carry, mirroring
+ * DRAFT_FIELDS in services/issue_similar.py. Server-owned identity
+ * (key/project_id), status, and relation fields are refused by the service,
+ * so this interface simply does not declare them.
+ */
+export interface SimilarIssueDraft {
+  title?: string
+  kind?: string
+  body?: string
+  severity?: string
+  component?: string
+  reporter?: string
+  assignee?: string
+  labels?: string[]
+  failing_command?: string
+  reproduction_steps?: string
+  expected_outcome?: string
+  actual_outcome?: string
+  evidence?: string
+  observed_revision?: string
+}
+
+/** The advisory similar-issues probe: exactly one of issue_key/draft and
+ * exactly one of project_ids/all_projects — the service owns both XOR
+ * refusals. Read-only by contract: it never files, links, or mutates. */
+export interface SimilarIssuesRequest {
+  issue_key?: string
+  draft?: SimilarIssueDraft
+  project_ids?: string[]
+  all_projects?: boolean
+  limit?: number
+}
+
+/** A confirmed duplicate of a returned hit, expanded one level beside it. */
+export interface SimilarDuplicateExpansion {
+  duplicate_of: string
+  issue: TrackerIssue
+}
+
+export interface SimilarIssuesResponse {
+  query_source: { mode: 'issue_key' | 'draft'; issue_key: string | null; kind: string }
+  query: string
+  scope: RankedSearchResponse['scope']
+  include_comments: boolean
+  limit: number
+  total: number
+  /** Candidates keep the full ranked-search explanation objects. */
+  candidates: RankedSearchExplanation[]
+  duplicate_expansions: SimilarDuplicateExpansion[]
+}
+
+// ---------------------------------------------------------------------------
 // Ranked issue search — GET /tracker/issues/search (M1.4a contract)
 
 export interface RankedSearchLaneContribution {
@@ -1862,8 +1918,17 @@ export const api = {
     fetchJSON<TrackerIssuePage>(`/tracker/issues${trackerQuery(filters)}`),
   searchTrackerIssues: (filters: RankedSearchFilters, signal?: AbortSignal) =>
     fetchJSON<RankedSearchResponse>(`/tracker/issues/search${rankedSearchQuery(filters)}`, { signal }),
-  getTrackerIssue: (key: string) =>
-    fetchJSON<TrackerIssue>(`/tracker/issues/${encodeURIComponent(key)}`),
+  // Advisory pre-filing probe (M2.5): the signal lets the form cancel a
+  // superseded draft query. A failure here must never gate filing.
+  similarTrackerIssues: (body: SimilarIssuesRequest, signal?: AbortSignal) =>
+    fetchJSON<SimilarIssuesResponse>('/tracker/issues/similar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    }),
+  getTrackerIssue: (key: string, signal?: AbortSignal) =>
+    fetchJSON<TrackerIssue>(`/tracker/issues/${encodeURIComponent(key)}`, { signal }),
   createTrackerIssue: (body: Record<string, unknown>) =>
     fetchJSON<TrackerIssue>('/tracker/issues', {
       method: 'POST',
