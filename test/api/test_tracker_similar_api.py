@@ -5,9 +5,15 @@ over ``/tracker/issues/{issue_key}``; issue_key XOR draft and project_ids XOR
 all_projects are typed 400s; undeclared top-level fields are a 422 while
 undeclared draft fields are the service's 400 naming the field; an unknown
 issue key is a 404; candidates come explained with duplicate-chain
-expansions; and a read-scoped probe writes nothing.
+expansions; a read-scoped probe writes nothing; and the probe's CPU/SQLite
+work runs off the event loop so unrelated requests stay live (cond-0781).
 """
 
+import threading
+import time
+from typing import Any, Dict
+
+import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -201,3 +207,147 @@ class TestNonGating:
         monkeypatch.setattr(similar, "find_similar_issues", refuse)
         filed = _issue(client, title="deploy pipeline bounces")
         assert filed["key"].startswith("cond-")
+
+
+@pytest.fixture
+def live_server():
+    """The real tracker router served by a real uvicorn server.
+
+    TestClient drives every request through its own event loop, so it cannot
+    observe one request blocking another. A live server shares one loop
+    across concurrent requests, which is what the liveness proof below needs.
+    The lifespan is deliberately not imported: this test owns its database
+    patching and must not boot the installed server's startup work.
+    """
+    import uvicorn
+    from fastapi import FastAPI
+
+    from cli_agent_orchestrator.api.tracker import router as tracker_router
+
+    application = FastAPI()
+    application.include_router(tracker_router)
+    server = uvicorn.Server(
+        uvicorn.Config(application, host="127.0.0.1", port=0, log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not server.started:
+        server.should_exit = True
+        thread.join(timeout=5)
+        raise RuntimeError("the live API server never started")
+    port = server.servers[0].sockets[0].getsockname()[1]
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    thread.join(timeout=10)
+
+
+class TestEventLoopLiveness:
+    """cond-0781: a slow similarity probe must not park the API server.
+
+    Similarity is bounded work per probe, not bounded work per request: the
+    probe plan is CPU/SQLite work that can run for seconds on a realistic
+    draft. Like the ranked-search and index-maintenance routes, the route
+    therefore runs on Starlette's threadpool, so an unrelated request is
+    served while a probe is still executing.
+    """
+
+    @pytest.fixture
+    def slow_semantic_probe(self, monkeypatch):
+        """A semantic lane slow enough to park an event loop that runs it.
+
+        Only the first semantic probe sleeps: the liveness proof needs one
+        long in-flight probe, and a per-probe delay would multiply the wall
+        clock by the probe plan under the all-hybrid regression. The fixture
+        also reports how many semantic probes the request ran and signals the
+        moment the slow one is in flight, so the liveness read happens inside
+        the window the fix is responsible for.
+        """
+        real_ranked_search = ranked.ranked_search
+        state: Dict[str, Any] = {
+            "semantic_probes": 0,
+            "slept": False,
+            "lane_entered": threading.Event(),
+        }
+        lock = threading.Lock()
+
+        def probe(request):
+            wants_semantic = request.mode in ("semantic", "hybrid")
+            if wants_semantic:
+                with lock:
+                    state["semantic_probes"] += 1
+                    should_sleep = not state["slept"]
+                    state["slept"] = True
+                if should_sleep:
+                    state["lane_entered"].set()
+                    time.sleep(1.5)
+            return real_ranked_search(request)
+
+        monkeypatch.setattr(ranked, "ranked_search", probe)
+        return state
+
+    def test_unrelated_requests_stay_live_while_similarity_runs(
+        self, live_server, project, slow_semantic_probe
+    ):
+        base_url = live_server
+        result: Dict[str, Any] = {}
+
+        def post():
+            started = time.monotonic()
+            response = httpx.post(
+                f"{base_url}/tracker/issues/similar",
+                json={
+                    "draft": {"title": "deploy pipeline bounces on dry run"},
+                    "all_projects": True,
+                },
+                timeout=30.0,
+            )
+            result["status"] = response.status_code
+            result["body"] = response.json()
+            result["elapsed"] = time.monotonic() - started
+
+        worker = threading.Thread(target=post, daemon=True)
+        worker.start()
+        entered = slow_semantic_probe["lane_entered"]
+        assert entered.wait(timeout=10), "the similarity probe never reached the semantic lane"
+
+        started = time.monotonic()
+        liveness = httpx.get(f"{base_url}/tracker/vocabulary", timeout=5.0)
+        liveness_elapsed = time.monotonic() - started
+
+        assert liveness.status_code == 200, liveness.text
+        waited = f"an unrelated request waited {liveness_elapsed:.2f}s while similarity ran"
+        assert liveness_elapsed < 1.0, waited
+        assert worker.is_alive(), "the similarity request finished before the liveness check"
+
+        worker.join(timeout=20)
+        assert not worker.is_alive(), "the similarity request never returned"
+        assert result["status"] == 200, result.get("body")
+        assert slow_semantic_probe["semantic_probes"] == 1
+
+    def test_the_hybrid_envelope_stays_truthful_over_http(self, client, project):
+        _issue(client, title="deploy pipeline bounces on dry run")
+        response = _similar(
+            client,
+            draft={
+                "title": "deploy pipeline bounces on dry run",
+                "failing_command": "conduct deploy --dry-run",
+            },
+            all_projects=True,
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["mode_requested"] == "hybrid"
+        # This store has no active vector generation, so the one semantic
+        # probe degrades and the answer says so instead of claiming hybrid.
+        assert body["mode_effective"] == "lexical"
+        assert body["degradation"]["reasons"]
+        assert body["degradation"]["lanes"]["semantic-issue"]["available"] is False
+        audit = body["diagnostics"]["similarity_probes"]
+        assert [probe["label"] for probe in audit][0] == "draft"
+        assert [probe["mode"] for probe in audit] == ["hybrid"] + ["lexical"] * (len(audit) - 1)
+        assert body["coverage"]["probes_requested"] == len(audit)
+        assert body["coverage"]["probes_completed"] == len(audit)
+        assert body["candidates"]

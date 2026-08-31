@@ -114,6 +114,14 @@ of the tracker API (reads accept `cao:read`; writes demand `cao:write`):
 A refusal keeps the reason the orchestrator observed and its operator action
 in the detail: an unknown scope is 400, an installation refusal is 409. There
 is no model-prepare route; preparing downloads weights and stays a CLI
-decision. Ranked search and index-maintenance routes use FastAPI's synchronous
-worker execution for blocking SQLite, model-load, and CPU embedding work, so
-the Uvicorn event loop remains responsive while a build runs.
+decision. Ranked search, similar-issue, and index-maintenance routes use
+FastAPI's synchronous worker execution for blocking SQLite, model-load, and
+CPU embedding work, so the Uvicorn event loop remains responsive while a
+build runs.
+
+A pre-filing `POST /tracker/issues/similar` probe runs a bounded plan of
+literal searches over the draft. In the default hybrid mode the complete-draft
+probe is the one semantic execution; every field and drop-one probe runs
+lexical, so the probe count bounds the expensive-lane cost as well as the
+query count. Explicit `semantic` mode probes semantically throughout, and a
+probe whose semantic lane cannot serve degrades the whole answer visibly.
