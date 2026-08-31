@@ -92,13 +92,10 @@ RUNTIME_ACTION = (
 )
 
 _PREPARE_ACTION = (
-    "run `cao issue search-index model prepare` to download and verify the "
-    "pinned local model"
+    "run `cao issue search-index model prepare` to download and verify the " "pinned local model"
 )
 _REBUILD_ACTION = "re-run `cao issue search-index rebuild --vectors` for a fresh build"
-_SCHEMA_ACTION = (
-    "run any `cao issue` command once so the tracker schema migration runs"
-)
+_SCHEMA_ACTION = "run any `cao issue` command once so the tracker schema migration runs"
 
 #: The operator remedy for every lifecycle refusal this orchestrator lets
 #: reach its boundary. Translation happens HERE, once, so the CLI and the API
@@ -565,7 +562,9 @@ def _rebuild_vectors(
     except Exception as exc:
         failure = f"{type(exc).__name__}: {exc}"
         try:
-            lifecycle.mark_generation_failed(generation_id, failure=failure, target_engine=target_engine)
+            lifecycle.mark_generation_failed(
+                generation_id, failure=failure, target_engine=target_engine
+            )
         except Exception:  # noqa: BLE001 - marking must not mask the original refusal
             pass
         if isinstance(exc, SearchIndexMaintenanceError):
@@ -588,9 +587,7 @@ def _rebuild_vectors(
     activation: Dict[str, Any] = {"generation_id": generation_id, "activated": False}
     if leftover:
         activation["refused_reason"] = "activation-refused-dirty"
-        activation["detail"] = (
-            f"{leftover} document(s) remain unembedded after the refresh pass"
-        )
+        activation["detail"] = f"{leftover} document(s) remain unembedded after the refresh pass"
     else:
         try:
             lifecycle.activate_generation(generation_id, target_engine=target_engine)
@@ -709,10 +706,18 @@ def index_status(
                 "document_schema_version": int(meta[1]) if meta else None,
                 "content_clock": int(meta[2]) if meta else None,
                 "rebuilt_at": meta[3] if meta else None,
-                "issues": int(raw.execute(f"SELECT COUNT(*) FROM {schema.ISSUE_FTS_TABLE}").fetchone()[0]),
-                "comments": int(raw.execute(f"SELECT COUNT(*) FROM {schema.COMMENT_FTS_TABLE}").fetchone()[0]),
-                "vectors": int(raw.execute(f"SELECT COUNT(*) FROM {schema.SEARCH_VECTORS_TABLE}").fetchone()[0]),
-                "dirty": int(raw.execute(f"SELECT COUNT(*) FROM {schema.VECTOR_DIRTY_TABLE}").fetchone()[0]),
+                "issues": int(
+                    raw.execute(f"SELECT COUNT(*) FROM {schema.ISSUE_FTS_TABLE}").fetchone()[0]
+                ),
+                "comments": int(
+                    raw.execute(f"SELECT COUNT(*) FROM {schema.COMMENT_FTS_TABLE}").fetchone()[0]
+                ),
+                "vectors": int(
+                    raw.execute(f"SELECT COUNT(*) FROM {schema.SEARCH_VECTORS_TABLE}").fetchone()[0]
+                ),
+                "dirty": int(
+                    raw.execute(f"SELECT COUNT(*) FROM {schema.VECTOR_DIRTY_TABLE}").fetchone()[0]
+                ),
                 "dirty_failed": _count_failed(raw),
             }
     finally:

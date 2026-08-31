@@ -10,19 +10,20 @@ reason the orchestrator observed plus its operator action; and no maintenance
 or search route ever downloads model weights.
 """
 
+from pathlib import Path
+from typing import Any, Dict
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from typing import Any, Dict
-from pathlib import Path
 
 from cli_agent_orchestrator.api import tracker as tracker_api
 from cli_agent_orchestrator.api.main import app
 from cli_agent_orchestrator.clients.database import (
+    _TRACKER_ORM_TABLE_NAMES,
     Base,
     _migrate_tracker_search_projection,
-    _TRACKER_ORM_TABLE_NAMES,
 )
 from cli_agent_orchestrator.security import auth
 from cli_agent_orchestrator.services import embedding_adapter as adapter
@@ -251,9 +252,9 @@ def test_write_scope_is_admitted_on_the_write_routes(client, prepared, auth_on):
 
 def test_write_scope_is_refused_on_the_read_routes(client, auth_on):
     app.dependency_overrides[auth.get_current_scopes] = _override_scopes([auth.SCOPE_WRITE])
-    assert client.get("/tracker/issues/search-index/status").status_code == 200, (
-        "a write token holds read too"
-    )
+    assert (
+        client.get("/tracker/issues/search-index/status").status_code == 200
+    ), "a write token holds read too"
 
 
 # ---------------------------------------------------------------------------
@@ -325,14 +326,20 @@ def test_an_undrained_build_is_reported_not_failed(client, prepared, project):
 def test_maintenance_refusals_carry_reason_and_action_over_http():
     """The mapping table: an installation refusal is a 409, a malformed
     request is a 400 — a client can branch on the status code alone."""
-    assert tracker_api._maintenance_http(
-        maintenance.SearchIndexMaintenanceError(
-            "unprepared", "not prepared", action="run prepare"
-        )
-    ).status_code == 409
-    assert tracker_api._maintenance_http(
-        maintenance.SearchIndexMaintenanceError("schema-missing", "no derived schema")
-    ).status_code == 409
+    assert (
+        tracker_api._maintenance_http(
+            maintenance.SearchIndexMaintenanceError(
+                "unprepared", "not prepared", action="run prepare"
+            )
+        ).status_code
+        == 409
+    )
+    assert (
+        tracker_api._maintenance_http(
+            maintenance.SearchIndexMaintenanceError("schema-missing", "no derived schema")
+        ).status_code
+        == 409
+    )
     unknown = HTTPException(status_code=404)
     mapped = tracker_api._maintenance_http(
         maintenance.SearchIndexMaintenanceError("unknown-generation", "no such generation")

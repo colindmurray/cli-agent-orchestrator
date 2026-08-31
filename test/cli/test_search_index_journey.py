@@ -171,9 +171,7 @@ def _prepare(runner, tmp_path):
     return models_dir, json.loads(prepared.output)
 
 
-def test_prepare_refresh_then_explicit_hybrid_search_serves_the_semantic_lane(
-    runner, journey
-):
+def test_prepare_refresh_then_explicit_hybrid_search_serves_the_semantic_lane(runner, journey):
     """The acceptance journey, end to end over public commands."""
     _seed_corpus()
     tmp_path = journey["tmp_path"]
@@ -206,9 +204,7 @@ def test_prepare_refresh_then_explicit_hybrid_search_serves_the_semantic_lane(
 
     assert hits["mode_effective"] == "hybrid", hits["degradation"]
     assert hits["diagnostics"]["semantic"]["served"] is True
-    lanes = {
-        lane["lane"] for row in hits["results"] for lane in row["contributing_lanes"]
-    }
+    lanes = {lane["lane"] for row in hits["results"] for lane in row["contributing_lanes"]}
     assert any(lane.startswith("semantic") for lane in lanes), sorted(lanes)
     assert [row["issue"]["key"] for row in hits["results"]][:1] == [DEPLOY_KEY], [
         (row["issue"]["key"], row["rank_score"]) for row in hits["results"]
@@ -222,9 +218,7 @@ def test_prepare_refresh_then_explicit_hybrid_search_serves_the_semantic_lane(
     assert "semantic" in human.output, human.output
 
 
-def test_the_same_journey_degrades_visibly_when_the_generation_is_never_activated(
-    runner, journey
-):
+def test_the_same_journey_degrades_visibly_when_the_generation_is_never_activated(runner, journey):
     """The contrast case: without activation the same search reports exactly
     what an operator needs to know instead of silently serving lexical only."""
     _seed_corpus()

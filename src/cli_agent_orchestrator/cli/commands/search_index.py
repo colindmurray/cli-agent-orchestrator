@@ -194,7 +194,9 @@ def index_status(models_dir: Optional[Path], as_json: bool):
 
 
 @search_index.command(name="refresh")
-@click.option("--all", "drain_all", is_flag=True, help="drain the whole queue, not one bounded batch")
+@click.option(
+    "--all", "drain_all", is_flag=True, help="drain the whole queue, not one bounded batch"
+)
 @click.option(
     "--retry-failed",
     is_flag=True,
@@ -203,7 +205,9 @@ def index_status(models_dir: Optional[Path], as_json: bool):
 @click.option("--limit", type=int, default=None, help="bound the batch explicitly")
 @click.option("--models-dir", type=click.Path(file_okay=False, path_type=Path), default=None)
 @click.option("--json", "as_json", is_flag=True)
-def refresh(drain_all: bool, retry_failed: bool, limit: int, models_dir: Optional[Path], as_json: bool):
+def refresh(
+    drain_all: bool, retry_failed: bool, limit: int, models_dir: Optional[Path], as_json: bool
+):
     """Embed queued documents for every active and building generation.
 
     Without --all this drains one bounded batch — the same derived work a
@@ -252,11 +256,19 @@ def refresh(drain_all: bool, retry_failed: bool, limit: int, models_dir: Optiona
 
 @search_index.command(name="rebuild")
 @click.option("--lexical", "scope_lexical", is_flag=True, help="rebuild the FTS documents")
-@click.option("--vectors", "scope_vectors", is_flag=True, help="build and activate a fresh vector generation")
+@click.option(
+    "--vectors", "scope_vectors", is_flag=True, help="build and activate a fresh vector generation"
+)
 @click.option("--all", "scope_all", is_flag=True, help="rebuild both")
 @click.option("--models-dir", type=click.Path(file_okay=False, path_type=Path), default=None)
 @click.option("--json", "as_json", is_flag=True)
-def rebuild(scope_lexical: bool, scope_vectors: bool, scope_all: bool, models_dir: Optional[Path], as_json: bool):
+def rebuild(
+    scope_lexical: bool,
+    scope_vectors: bool,
+    scope_all: bool,
+    models_dir: Optional[Path],
+    as_json: bool,
+):
     """Repair the derived index. Never rewrites an issue, comment, link, or event.
 
     Exactly one of --lexical, --vectors, --all is required. Lexical repair
@@ -265,13 +277,23 @@ def rebuild(scope_lexical: bool, scope_vectors: bool, scope_all: bool, models_di
     vector can be served against rebuilt text. Vector repair builds a fresh
     generation and activates it only after the coverage proof passes.
     """
-    chosen = [flag for flag, given in (("lexical", scope_lexical), ("vectors", scope_vectors), ("all", scope_all)) if given]
+    chosen = [
+        flag
+        for flag, given in (
+            ("lexical", scope_lexical),
+            ("vectors", scope_vectors),
+            ("all", scope_all),
+        )
+        if given
+    ]
     if len(chosen) != 1:
         _fail(
             maintenance.SearchIndexMaintenanceError(
                 "invalid-scope",
                 "exactly one of --lexical, --vectors, --all is required"
-                + (f"; got {', '.join('--' + name for name in chosen)}" if chosen else "; got none"),
+                + (
+                    f"; got {', '.join('--' + name for name in chosen)}" if chosen else "; got none"
+                ),
                 action="pass exactly one scope flag",
             ),
             as_json,

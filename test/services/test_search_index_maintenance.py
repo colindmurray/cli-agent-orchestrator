@@ -404,7 +404,9 @@ class TestRefresh:
         assert result["active_generation"] == prepared["generation_id"]
         assert _active_pointer(store) == prepared["generation_id"]
 
-    def test_refresh_all_then_explicit_hybrid_search_serves_the_semantic_lane(self, store, prepared):
+    def test_refresh_all_then_explicit_hybrid_search_serves_the_semantic_lane(
+        self, store, prepared
+    ):
         """Acceptance: the production journey reaches a semantic contribution.
 
         ``mode="hybrid"`` through the real ``ranked_search`` entry point with
@@ -420,9 +422,7 @@ class TestRefresh:
 
         assert response["mode_effective"] == "hybrid"
         assert response["diagnostics"]["semantic"]["served"] is True
-        lanes = {
-            lane["lane"] for row in response["results"] for lane in row["contributing_lanes"]
-        }
+        lanes = {lane["lane"] for row in response["results"] for lane in row["contributing_lanes"]}
         assert any(lane.startswith("semantic") for lane in lanes), sorted(lanes)
         assert [row["issue"]["key"] for row in response["results"]] == [
             DEPLOY_ISSUE[0],
@@ -509,7 +509,9 @@ class TestRefresh:
         assert repaired["vectors"]["activation"]["activated"] is True
         assert _active_pointer(store) == repaired["vectors"]["activation"]["generation_id"]
 
-    def test_an_embedding_failure_records_retry_state_and_excludes_the_document(self, store, prepared):
+    def test_an_embedding_failure_records_retry_state_and_excludes_the_document(
+        self, store, prepared
+    ):
         _populate(store)
         maintenance.refresh_index(embedder=DeterministicEmbedder(fail_on=("deploy",)))
 
@@ -523,9 +525,7 @@ class TestRefresh:
         _populate(store)
         maintenance.refresh_index(embedder=DeterministicEmbedder(fail_on=("deploy",)))
 
-        result = maintenance.refresh_index(
-            retry_failed=True, embedder=DeterministicEmbedder()
-        )
+        result = maintenance.refresh_index(retry_failed=True, embedder=DeterministicEmbedder())
 
         assert result["retry_failed"]["reset"] == 3
         assert result["refresh"]["published"] == 3, "the reset rows became eligible"
@@ -675,9 +675,7 @@ class TestRebuild:
         from cli_agent_orchestrator.services.search_engine_factory import SearchEngineError
 
         def absent_runtime(*args, **kwargs):
-            raise SearchEngineError(
-                "runtime-missing", "the sqlite-vec package is not installed"
-            )
+            raise SearchEngineError("runtime-missing", "the sqlite-vec package is not installed")
 
         monkeypatch.setattr(vlc, "open_search_connection", absent_runtime)
         _populate(store)
@@ -745,7 +743,9 @@ class TestDiagnostics:
         _populate(store)
 
         models_dir = tmp_path / "models"
-        prepared = maintenance.prepare_index(models_dir=models_dir, snapshot_downloader=_fake_downloader)
+        prepared = maintenance.prepare_index(
+            models_dir=models_dir, snapshot_downloader=_fake_downloader
+        )
         maintenance.refresh_index(
             all=True,
             embedder=DeterministicEmbedder(dimensions=int(prepared["generation"]["dimensions"])),

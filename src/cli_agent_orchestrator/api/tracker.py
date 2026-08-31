@@ -796,41 +796,49 @@ async def search_index_integrity(_scopes: List[str] = _READ) -> Dict[str, Any]:
 
 @router.post("/tracker/issues/search-index/refresh")
 async def search_index_refresh(
-    body: SearchIndexRefreshBody = SearchIndexRefreshBody(),
+    body: Optional[SearchIndexRefreshBody] = None,
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     """Embed the queued documents of every active and building generation.
 
-    Write-scoped maintenance per §9.2: unlike the query-time bounded drain a
-    semantic search performs, ``all=true`` drains completely and offers a
-    finished building generation for activation. An incomplete build is kept
-    from going live by the coverage proof inside the activation transaction,
-    not by this route's judgement.
+    The body is optional and every field defaults, so a bare ``POST`` is the
+    bounded read-shaped refresh. Write-scoped maintenance per §9.2: unlike the
+    query-time bounded drain a semantic search performs, ``all=true`` drains
+    completely and offers a finished building generation for activation. An
+    incomplete build is kept from going live by the coverage proof inside the
+    activation transaction, not by this route's judgement.
     """
+    refresh_all = body.all if body is not None else False
+    retry_failed = body.retry_failed if body is not None else False
+    limit = body.limit if body is not None else None
     try:
         return maintenance.refresh_index(
-            all=body.all,
-            retry_failed=body.retry_failed,
-            limit=body.limit,
+            all=refresh_all,
+            retry_failed=retry_failed,
+            limit=limit,
         )
-    except (maintenance.SearchIndexMaintenanceError, embedding_adapter.EmbeddingCapabilityError) as exc:
+    except (
+        maintenance.SearchIndexMaintenanceError,
+        embedding_adapter.EmbeddingCapabilityError,
+    ) as exc:
         raise _maintenance_http(exc) from exc
 
 
 @router.post("/tracker/issues/search-index/rebuild")
 async def search_index_rebuild(
-    body: SearchIndexRebuildBody = SearchIndexRebuildBody(),
+    body: Optional[SearchIndexRebuildBody] = None,
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     """Repair the derived index; never rewrites authoritative tracker rows.
 
-    ``scope=lexical`` repopulates the FTS documents with fresh content
-    versions and requeues every live document; ``scope=vectors`` builds a
-    fresh generation and activates it only after the coverage proof passes;
-    ``scope=all`` does both in that order.
+    The body is optional and defaults to the full rebuild. ``scope=lexical``
+    repopulates the FTS documents with fresh content versions and requeues
+    every live document; ``scope=vectors`` builds a fresh generation and
+    activates it only after the coverage proof passes; ``scope=all`` does both
+    in that order.
     """
     try:
-        return maintenance.rebuild_index(scope=body.scope)
+        return maintenance.rebuild_index(scope=body.scope if body is not None else "all")
     except maintenance.SearchIndexMaintenanceError as exc:
         raise _maintenance_http(exc) from exc
 

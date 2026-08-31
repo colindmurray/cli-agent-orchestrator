@@ -105,9 +105,7 @@ def _prepare(runner, tmp_path):
 
     models_dir = tmp_path / "models"
     with patch.object(adapter, "_default_snapshot_downloader", fake_downloader):
-        result = runner.invoke(
-            model_prepare, ["--models-dir", str(models_dir), "--json"]
-        )
+        result = runner.invoke(model_prepare, ["--models-dir", str(models_dir), "--json"])
     assert result.exit_code == 0, result.output
     return models_dir, json.loads(result.output)
 
@@ -290,7 +288,16 @@ class StubEmbedder:
         return blobs
 
 
-_CLI_VOCAB = {"deploy": 0, "pipeline": 1, "bounce": 2, "dry": 3, "run": 4, "widget": 5, "color": 6, "tuning": 7}
+_CLI_VOCAB = {
+    "deploy": 0,
+    "pipeline": 1,
+    "bounce": 2,
+    "dry": 3,
+    "run": 4,
+    "widget": 5,
+    "color": 6,
+    "tuning": 7,
+}
 
 
 @pytest.fixture()
@@ -306,7 +313,9 @@ def test_status_after_the_journey_reports_ready_and_no_pending_action(
 ):
     _seed_corpus()
     models_dir, prepared = _prepare(runner, tmp_path)
-    assert runner.invoke(refresh, ["--all", "--models-dir", str(models_dir), "--json"]).exit_code == 0
+    assert (
+        runner.invoke(refresh, ["--all", "--models-dir", str(models_dir), "--json"]).exit_code == 0
+    )
 
     result = runner.invoke(index_status, ["--models-dir", str(models_dir), "--json"])
     assert result.exit_code == 0, result.output
@@ -417,7 +426,9 @@ def test_rebuild_lexical_then_vectors_through_the_cli(
 ):
     _seed_corpus()
     models_dir, _prepared = _prepare(runner, tmp_path)
-    assert runner.invoke(refresh, ["--all", "--models-dir", str(models_dir), "--json"]).exit_code == 0
+    assert (
+        runner.invoke(refresh, ["--all", "--models-dir", str(models_dir), "--json"]).exit_code == 0
+    )
 
     lexical = runner.invoke(rebuild, ["--lexical", "--models-dir", str(models_dir), "--json"])
     assert lexical.exit_code == 0, lexical.output
