@@ -676,8 +676,15 @@ def issue_search(
     help="search every tracker project; exactly one scope form is required",
 )
 @click.option("--limit", default=ranked.DEFAULT_LIMIT, show_default=True, type=int)
+@click.option(
+    "--mode",
+    type=click.Choice(("lexical", "semantic", "hybrid")),
+    default="hybrid",
+    show_default=True,
+    help="retrieval mode; semantic modes degrade visibly when unavailable",
+)
 @click.option("--json", "as_json", is_flag=True)
-def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, as_json):
+def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, mode, as_json):
     """Advisory similar-issue lookup: what already exists that looks like this?
 
     Exactly one of --issue-key or --draft-file, and exactly one of
@@ -701,6 +708,7 @@ def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, as_js
                 project_ids=tuple(project_ids),
                 all_projects=bool(all_projects),
                 limit=limit,
+                mode=mode,
             )
         )
     except TrackerError as exc:

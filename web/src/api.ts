@@ -1159,6 +1159,7 @@ export interface SimilarIssuesRequest {
   project_ids?: string[]
   all_projects?: boolean
   limit?: number
+  mode?: 'lexical' | 'semantic' | 'hybrid'
 }
 
 /** A confirmed duplicate of a returned hit, expanded one level beside it. */
@@ -1172,6 +1173,20 @@ export interface SimilarIssuesResponse {
   query: string
   scope: RankedSearchResponse['scope']
   include_comments: boolean
+  mode_requested?: string
+  mode_effective?: string
+  degradation?: RankedSearchDegradation
+  coverage?: {
+    status: 'complete' | 'degraded' | 'inconclusive' | string
+    complete: boolean
+    inconclusive: boolean
+    probes_requested: number
+    probes_completed: number
+    probes_failed: number
+    candidate_keys_seen: number
+  }
+  diagnostics?: Record<string, unknown>
+  generations?: Record<string, unknown>
   limit: number
   total: number
   /** Candidates keep the full ranked-search explanation objects. */

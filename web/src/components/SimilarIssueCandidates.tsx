@@ -258,6 +258,18 @@ export function SimilarIssueCandidates({
           {' '}{error} Filing is unaffected.
         </div>
       )}
+      {!error && response && response.degradation && response.degradation.reasons.length > 0 && (
+        <div
+          role="status"
+          data-testid="similar-degraded"
+          className="m-2 rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200"
+        >
+          Similarity is advisory and running with {response.mode_effective ?? 'degraded'} coverage.
+          {response.coverage?.inconclusive
+            ? ' No candidates is inconclusive while retrieval is degraded.'
+            : ' Filing is unaffected.'}
+        </div>
+      )}
       {!error && response && response.candidates.length === 0 && (
         <div role="status" className="px-3 py-3 text-xs text-gray-500">
           No similar issues found in this project.

@@ -289,6 +289,7 @@ class SimilarIssuesBody(StrictBody):
     project_ids: Optional[List[str]] = None
     all_projects: bool = False
     limit: int = Field(ranked.DEFAULT_LIMIT, ge=ranked.MIN_LIMIT, le=ranked.MAX_LIMIT)
+    mode: str = Field("hybrid", description="lexical|semantic|hybrid")
 
 
 class IssueSnapshotBody(StrictBody):
@@ -700,6 +701,7 @@ async def similar_issues(
                 project_ids=tuple(body.project_ids or ()),
                 all_projects=body.all_projects,
                 limit=body.limit,
+                mode=body.mode,
             )
         )
     except tracker.TrackerError as exc:
