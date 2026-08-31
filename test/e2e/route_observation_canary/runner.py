@@ -270,32 +270,41 @@ def _restart_interrupt(
     current_requester_generation = requester_generation_probe(request.requester_terminal_id)
     if current_requester_generation != request.requester_generation:
         raise LiveCanaryInvalid("restart interrupt found a stale requester generation")
-    readiness = surface.await_input_ready()
-    if not readiness.ready:
-        observer._prewrite_refusal_outcome(request, readiness=readiness)
-        raise LiveCanaryInvalid(
-            f"restart interrupt refused before provider input: {readiness.reason}"
-        )
-    composer = surface.prove_composer_empty(request.provider_version)
-    if not composer.ready:
-        observer._prewrite_refusal_outcome(request, readiness=composer)
-        raise LiveCanaryInvalid(
-            f"restart interrupt refused before provider input: {composer.reason}"
-        )
-    current_requester_generation = requester_generation_probe(request.requester_terminal_id)
-    if current_requester_generation != request.requester_generation:
-        observer._stale_requester_outcome(request)
-        raise LiveCanaryInvalid(
-            "restart interrupt found a stale requester generation after composer proof"
-        )
+    if claimed["pre_probe_intent_json"] is None:
+        readiness = surface.await_input_ready()
+        if not readiness.ready:
+            observer._prewrite_refusal_outcome(request, readiness=readiness)
+            raise LiveCanaryInvalid(
+                f"restart interrupt refused before provider input: {readiness.reason}"
+            )
+        composer = surface.prove_composer_empty(request.provider_version)
+        if not composer.ready:
+            observer._prewrite_refusal_outcome(request, readiness=composer)
+            raise LiveCanaryInvalid(
+                f"restart interrupt refused before provider input: {composer.reason}"
+            )
+        geometry = roc._prove_status_panel_geometry(surface)
+        if not geometry.ready:
+            observer._prewrite_refusal_outcome(request, readiness=geometry)
+            raise LiveCanaryInvalid(
+                f"restart interrupt refused before provider input: {geometry.reason}"
+            )
+        current_requester_generation = requester_generation_probe(request.requester_terminal_id)
+        if current_requester_generation != request.requester_generation:
+            observer._stale_requester_outcome(request)
+            raise LiveCanaryInvalid(
+                "restart interrupt found a stale requester generation after composer proof"
+            )
     probe = ro.pre_probe(
         request,
         intent=roc._pre_probe_intent(request, pane_id=surface.pane_id),
     )
-    observation = observer._derive_observation(
-        request, newly_authorized=probe.get("authorized") is True
+    stored = ro.get(request.operation_id)
+    observation = observer._reconcile_observation(
+        request,
+        stored=stored,
+        newly_authorized=probe.get("authorized") is True,
     )
-    ro.record_observation(request, observation=observation)
     stored = ro.get(request.operation_id)
     if (
         stored is None
