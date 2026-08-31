@@ -229,8 +229,72 @@ class TestHumanRenderingAndRefusals:
         out = similar(runner, "--draft-file", str(draft_path), "--all-tracker-projects")
         assert f"for the draft · kind bug" in out
         assert hit["key"] in out
+        assert "mode hybrid→lexical" in out
+        assert "coverage degraded" in out
+        assert "probe draft" in out
         assert "confirmed duplicates of hits:" in out
         assert f"{hit['key']} <- {confirmed['key']}" in out
+
+    def test_human_mode_surfaces_probe_audit_and_does_not_call_inconclusive_empty_zero(
+        self, runner, tmp_path, monkeypatch
+    ):
+        draft_path = tmp_path / "draft.json"
+        draft_path.write_text(json.dumps({"title": "offline similarity"}))
+        monkeypatch.setattr(
+            similar_service,
+            "find_similar_issues",
+            lambda request: {
+                "query_source": {"mode": "draft", "issue_key": None, "kind": "bug"},
+                "query": "offline similarity",
+                "scope": {
+                    "project_ids": ["cao-system"],
+                    "all_projects": False,
+                    "subtree_roots": [],
+                    "subtree_closure_size": 0,
+                },
+                "mode_requested": "hybrid",
+                "mode_effective": "lexical",
+                "degradation": {
+                    "requested_mode": "hybrid",
+                    "effective_mode": "lexical",
+                    "reasons": ["semantic unavailable"],
+                    "lanes": {},
+                },
+                "coverage": {
+                    "status": "inconclusive",
+                    "complete": False,
+                    "inconclusive": True,
+                    "partial": False,
+                    "probes_requested": 1,
+                    "probes_completed": 1,
+                    "probes_failed": 0,
+                    "candidate_keys_seen": 0,
+                },
+                "diagnostics": {
+                    "similarity_probe_failures": [],
+                    "similarity_probes": [
+                        {"label": "draft", "query": "offline similarity", "weight": 2.0}
+                    ],
+                },
+                "generations": {},
+                "include_comments": False,
+                "limit": 20,
+                "total": 0,
+                "candidates": [],
+                "duplicate_expansions": [],
+            },
+        )
+        out = similar(
+            runner,
+            "--draft-file",
+            str(draft_path),
+            "--all-tracker-projects",
+        )
+        assert "mode hybrid→lexical" in out
+        assert "coverage inconclusive" in out
+        assert "degraded: semantic unavailable" in out
+        assert "retrieval coverage is inconclusive" in out
+        assert "0 similar issue(s)" not in out
 
     def test_neither_input_is_a_typed_refusal(self, runner):
         seed_corpus()

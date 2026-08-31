@@ -717,7 +717,41 @@ def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, mode,
     def render(payload):
         source = payload["query_source"]
         origin = source["issue_key"] or "the draft"
-        click.echo(f"{payload['total']} similar issue(s) for {origin} · kind {source['kind']}")
+        degradation = payload.get("degradation") or {}
+        coverage = payload.get("coverage") or degradation.get("coverage") or {}
+        requested_mode = payload.get("mode_requested") or degradation.get(
+            "requested_mode", "unknown"
+        )
+        effective_mode = payload.get("mode_effective") or degradation.get(
+            "effective_mode", "unknown"
+        )
+        coverage_status = coverage.get("status", "unknown")
+        probe_summary = ""
+        if coverage.get("probes_requested") is not None:
+            probe_summary = (
+                f" ({coverage.get('probes_completed', 0)}/"
+                f"{coverage.get('probes_requested', 0)} probes; "
+                f"{coverage.get('probes_failed', 0)} failed)"
+            )
+        click.echo(
+            f"similarity for {origin} · kind {source['kind']} · "
+            f"mode {requested_mode}→{effective_mode} · "
+            f"coverage {coverage_status}{probe_summary}"
+        )
+        for reason in degradation.get("reasons", []):
+            click.echo(f"degraded: {reason}")
+        for failure in (payload.get("diagnostics") or {}).get("similarity_probe_failures", []):
+            click.echo(
+                f"probe failed: {failure.get('label', '-')} "
+                f"[{failure.get('code', 'unknown')}] {failure.get('message', '')}"
+            )
+        if payload["total"] == 0 and coverage.get("inconclusive"):
+            click.echo(
+                f"no similar issue candidates returned for {origin}; "
+                "retrieval coverage is inconclusive"
+            )
+        else:
+            click.echo(f"{payload['total']} similar issue(s) for {origin}")
         for position, row in enumerate(payload["candidates"], start=1):
             issue = row["issue"] or {}
             severity = issue.get("severity") or "unset"
@@ -731,6 +765,12 @@ def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, mode,
             click.echo(
                 f"      score {row['rank_score']:.4f} · lanes {lanes or '-'} · matched {matched}"
             )
+            for contribution in row.get("probe_contributions", []):
+                click.echo(
+                    f"      probe {contribution['label']} · weight {contribution['weight']:.2f} "
+                    f"· rank {contribution['original_rank']} · "
+                    f"score {contribution.get('original_score', '-')}: {contribution['query']}"
+                )
             for field_name, snippet in sorted(row["snippets"].items()):
                 click.echo(f"      {field_name}: {snippet}")
         if payload["duplicate_expansions"]:

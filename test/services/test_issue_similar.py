@@ -243,6 +243,7 @@ class TestCandidateSemantics:
                 "issue",
                 "rank_score",
                 "contributing_lanes",
+                "probe_contributions",
                 "matched_fields",
                 "snippets",
                 "winning_comment",
@@ -250,6 +251,89 @@ class TestCandidateSemantics:
                 "neighborhood",
                 "duplicate_chain",
             }
+
+    def test_long_title_reserves_high_value_probes_and_recalls_exact_command(self):
+        tracker.create_project(name="CAO System", project_id="cao-system", issue_prefix="cond")
+        exact = tracker.create_issue(
+            project_id="cao-system",
+            key="cond-0030",
+            title="unrelated title",
+            failing_command="conduct deploy --dry-run",
+            force=True,
+        )
+        long_title = " ".join(f"titleword{index}" for index in range(100))
+        payload = similar.find_similar_issues(
+            similar.SimilarIssuesRequest(
+                draft={
+                    "title": long_title,
+                    "failing_command": "conduct deploy --dry-run",
+                    "reproduction_steps": "run the command once",
+                    "actual_outcome": "the deploy bounces",
+                },
+                project_ids=("cao-system",),
+                mode="lexical",
+                limit=1,
+            )
+        )
+        assert payload["candidates"][0]["issue"]["key"] == exact["key"]
+        labels = [probe["label"] for probe in payload["diagnostics"]["similarity_probes"]]
+        assert {"failing_command", "reproduction_steps", "actual_outcome"} <= set(labels)
+        assert "failing_command" in payload["candidates"][0]["matched_fields"]
+
+    def test_failed_punctuation_probe_is_partial_and_preserves_failure_details(self, monkeypatch):
+        tracker.create_project(name="CAO System", project_id="cao-system", issue_prefix="cond")
+        calls = []
+
+        def search(request):
+            calls.append(request.query)
+            if request.query == "!!!":
+                raise ranked.TrackerRankedSearchError(
+                    "invalid-query", "ranked search requires nonempty normalized text"
+                )
+            return {
+                "query": request.query,
+                "scope": {
+                    "project_ids": ["cao-system"],
+                    "all_projects": False,
+                    "subtree_roots": [],
+                    "subtree_closure_size": 0,
+                },
+                "mode_requested": request.mode,
+                "mode_effective": "lexical",
+                "degradation": {"reasons": [], "lanes": {}},
+                "generations": {},
+                "diagnostics": {},
+                "results": [],
+            }
+
+        monkeypatch.setattr(ranked, "ranked_search", search)
+        payload = similar.find_similar_issues(
+            similar.SimilarIssuesRequest(
+                draft={"title": "valid sibling", "failing_command": "!!!"},
+                project_ids=("cao-system",),
+                mode="lexical",
+            )
+        )
+        assert calls
+        assert payload["coverage"]["probes_requested"] == len(
+            payload["diagnostics"]["similarity_probes"]
+        )
+        assert (
+            payload["coverage"]["probes_completed"] + payload["coverage"]["probes_failed"]
+            == payload["coverage"]["probes_requested"]
+        )
+        assert payload["coverage"]["probes_failed"] == 1
+        assert payload["coverage"]["partial"] is True
+        assert payload["coverage"]["status"] == "inconclusive"
+        assert payload["coverage"]["inconclusive"] is True
+        assert payload["degradation"]["reasons"]
+        assert payload["diagnostics"]["similarity_probe_failures"] == [
+            {
+                "label": "failing_command",
+                "code": "invalid-query",
+                "message": "ranked search requires nonempty normalized text",
+            }
+        ]
 
     def test_a_textless_draft_is_a_typed_invalid_query(self):
         with pytest.raises(tracker.TrackerError) as excinfo:
@@ -334,6 +418,20 @@ class TestDuplicateChainExpansion:
         assert [(row["duplicate_of"], row["issue"]["key"]) for row in expansions] == [
             (canonical["key"], field_only["key"]),
             (canonical["key"], dual["key"]),
+        ]
+
+    def test_native_duplicate_link_wins_over_conflicting_legacy_canonical(self):
+        first, second, *_ = seed_corpus()
+        duplicate = tracker.create_issue(
+            project_id="cao-system", key="cond-0015", title="conflicting duplicate", force=True
+        )
+        tracker.update_issue(duplicate["key"], status="duplicate", duplicate_of=first["key"])
+        tracker.add_link(duplicate["key"], to_key=second["key"], kind="duplicates")
+        expansions = similar._expand_duplicate_chains(
+            [first["key"], second["key"]], exclude_key=None
+        )
+        assert [(row["duplicate_of"], row["issue"]["key"]) for row in expansions] == [
+            (second["key"], duplicate["key"])
         ]
 
     def test_duplicate_cycles_are_one_level_and_source_exclusion_is_preserved(self):
@@ -469,3 +567,46 @@ class TestSimilarityProbeCoverage:
         assert payload["mode_effective"] == "hybrid"
         assert payload["degradation"]["lanes"]["semantic-issue"]["available"] is True
         assert payload["candidates"][0]["contributing_lanes"][0]["lane"] == "semantic-issue"
+
+    def test_equal_probe_rrf_tie_prefers_newer_issue_then_key(self):
+        def result(key, updated_at):
+            return {
+                "issue": {"key": key, "updated_at": updated_at},
+                "rank_score": 0.25,
+                "contributing_lanes": [{"lane": "exact", "rank": 1, "raw_score": 0.0}],
+                "matched_fields": ["title"],
+                "snippets": {"title": key},
+                "winning_comment": None,
+                "exact_boosts": [],
+                "neighborhood": [],
+                "duplicate_chain": [],
+            }
+
+        candidates, _ = similar._merge_similarity_results(
+            [
+                (
+                    "older-probe",
+                    "older query",
+                    1.0,
+                    {"results": [result("cond-0031", "2026-08-01T00:00:00Z")]},
+                ),
+                (
+                    "newer-probe",
+                    "newer query",
+                    1.0,
+                    {"results": [result("cond-0032", "2026-08-02T00:00:00Z")]},
+                ),
+            ],
+            source_key=None,
+            limit=2,
+        )
+        assert [row["issue"]["key"] for row in candidates] == ["cond-0032", "cond-0031"]
+        assert candidates[0]["probe_contributions"] == [
+            {
+                "label": "newer-probe",
+                "query": "newer query",
+                "weight": 1.0,
+                "original_rank": 1,
+                "original_score": 0.25,
+            }
+        ]

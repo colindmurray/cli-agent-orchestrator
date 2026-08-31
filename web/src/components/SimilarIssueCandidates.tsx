@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import {
-  api, errorText, RankedSearchExplanation, SimilarIssueDraft, SimilarIssuesResponse, TrackerIssue,
+  api, errorText, SimilarIssueDraft, SimilarIssueExplanation, SimilarIssuesResponse, TrackerIssue,
 } from '../api'
 import { linkPhrase } from '../lib/issueMap'
 
@@ -46,7 +46,7 @@ function CandidateRow({
   terminalStatuses,
   onOpenIssue,
 }: {
-  hit: RankedSearchExplanation
+  hit: SimilarIssueExplanation
   expansions: TrackerIssue[]
   terminalStatuses: string[]
   onOpenIssue: (key: string) => void
@@ -55,6 +55,7 @@ function CandidateRow({
   if (!issue) return null
   const terminal = terminalStatuses.includes(issue.status)
   const lanes = [...new Set(hit.contributing_lanes.map(l => l.lane))]
+  const probeContributions = hit.probe_contributions ?? []
   return (
     <div className="border-b border-gray-800/70 last:border-b-0 px-3 py-2" data-testid={`similar-candidate-${issue.key}`}>
       {/* One button per candidate row; the badges/facts below are plain text
@@ -98,6 +99,17 @@ function CandidateRow({
             {snippet}
           </p>
         ))}
+        {probeContributions.length > 0 && (
+          <div className="text-[11px] text-gray-500" data-testid="similar-probe-contributions">
+            {probeContributions.map((contribution, index) => (
+              <p key={`${contribution.label}:${contribution.original_rank}:${index}`}>
+                probe {contribution.label} · weight {contribution.weight.toFixed(2)} · rank {contribution.original_rank}
+                {contribution.original_score == null ? '' : ` · score ${contribution.original_score}`}
+                {` — ${contribution.query}`}
+              </p>
+            ))}
+          </div>
+        )}
         {hit.duplicate_chain.length > 0 && (
           <p className="text-[11px] text-gray-500" data-testid="similar-canonical">
             {hit.duplicate_chain.map((link, index) => (
@@ -226,6 +238,16 @@ export function SimilarIssueCandidates({
     ? state
     : { key: requestKey, response: null, loading: true, error: null }
   const { response, loading, error } = current
+  const coverageNeedsNotice = response?.coverage?.status === 'degraded'
+    || response?.coverage?.status === 'partial'
+    || response?.coverage?.status === 'inconclusive'
+  const emptyInconclusive = Boolean(response && response.candidates.length === 0 && (
+    response.coverage?.inconclusive
+    || coverageNeedsNotice
+    || (response.degradation?.reasons.length ?? 0) > 0
+    || ((response.mode_requested === 'semantic' || response.mode_requested === 'hybrid')
+      && response.mode_effective === 'lexical')
+  ))
   const expansionsByHit = new Map<string, TrackerIssue[]>()
   for (const expansion of response?.duplicate_expansions ?? []) {
     const rows = expansionsByHit.get(expansion.duplicate_of) ?? []
@@ -258,19 +280,21 @@ export function SimilarIssueCandidates({
           {' '}{error} Filing is unaffected.
         </div>
       )}
-      {!error && response && response.degradation && response.degradation.reasons.length > 0 && (
+      {!error && response && response.degradation && (
+        (response.degradation.reasons.length > 0 || coverageNeedsNotice || emptyInconclusive)
+      ) && (
         <div
           role="status"
           data-testid="similar-degraded"
           className="m-2 rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200"
         >
-          Similarity is advisory and running with {response.mode_effective ?? 'degraded'} coverage.
+          Similarity is advisory: mode {response.mode_effective ?? 'degraded'}, coverage {response.coverage?.status ?? 'degraded'}.
           {response.coverage?.inconclusive
-            ? ' No candidates is inconclusive while retrieval is degraded.'
+            ? ' No candidates is inconclusive while retrieval is degraded. Filing is unaffected.'
             : ' Filing is unaffected.'}
         </div>
       )}
-      {!error && response && response.candidates.length === 0 && (
+      {!error && response && response.candidates.length === 0 && !emptyInconclusive && (
         <div role="status" className="px-3 py-3 text-xs text-gray-500">
           No similar issues found in this project.
         </div>

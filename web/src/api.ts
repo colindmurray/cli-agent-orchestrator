@@ -1168,6 +1168,15 @@ export interface SimilarDuplicateExpansion {
   issue: TrackerIssue
 }
 
+/** One bounded draft probe that contributed a candidate to similarity RRF. */
+export interface SimilarProbeContribution {
+  label: string
+  query: string
+  weight: number
+  original_rank: number
+  original_score: number | null
+}
+
 export interface SimilarIssuesResponse {
   query_source: { mode: 'issue_key' | 'draft'; issue_key: string | null; kind: string }
   query: string
@@ -1183,6 +1192,7 @@ export interface SimilarIssuesResponse {
     probes_requested: number
     probes_completed: number
     probes_failed: number
+    partial?: boolean
     candidate_keys_seen: number
   }
   diagnostics?: Record<string, unknown>
@@ -1190,7 +1200,7 @@ export interface SimilarIssuesResponse {
   limit: number
   total: number
   /** Candidates keep the full ranked-search explanation objects. */
-  candidates: RankedSearchExplanation[]
+  candidates: SimilarIssueExplanation[]
   duplicate_expansions: SimilarDuplicateExpansion[]
 }
 
@@ -1223,6 +1233,12 @@ export interface RankedSearchExplanation {
   exact_boosts: string[]
   neighborhood: Array<{ from_key: string; to_key: string; kind: string }>
   duplicate_chain: Array<{ canonical_key: string; canonical_title: string | null; resolved: boolean }>
+}
+
+/** Similarity adds the probe-level audit without changing ranked search. */
+export interface SimilarIssueExplanation extends RankedSearchExplanation {
+  /** Present on the repaired service; optional for older API responses. */
+  probe_contributions?: SimilarProbeContribution[]
 }
 
 export interface RankedSearchLaneAvailability {

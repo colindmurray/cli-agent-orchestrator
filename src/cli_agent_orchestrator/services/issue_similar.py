@@ -17,10 +17,12 @@ Contract (tracker cond-0645):
 - The search spans open and terminal statuses, excludes the source issue
   itself, defaults the draft kind to ``bug`` (the create-path default), and
   keeps comment documents out of the match set.
-- Every candidate returns the full ranked-search explanation and the envelope
-  carries mode/degradation/coverage facts; confirmed duplicates of hits (via
-  either the native directional link or legacy ``duplicate_of`` field) are
-  expanded one level beside their hit.
+- Every candidate returns the full ranked-search explanation plus the bounded
+  probe contributions that produced it, and the envelope carries
+  mode/degradation/coverage facts; confirmed duplicates of hits (via either
+  the native directional link or legacy ``duplicate_of`` field) are expanded
+  one level beside their hit. Native links are authoritative when a legacy
+  field disagrees with them.
 - NON-GATING by contract: this surface is advisory. Nothing here sits in the
   create path, so a similarity failure can never block issue creation.
 """
@@ -170,22 +172,38 @@ def _similarity_probes(fields: Dict[str, Any], primary: str) -> List[Tuple[str, 
     probes: List[Tuple[str, str, float]] = []
     seen: Set[str] = set()
 
-    def add(label: str, query: str, weight: float) -> None:
+    def add(label: str, query: str, weight: float, *, dedupe: bool = True) -> None:
         normalized = _bounded_query(query)
-        if not normalized or normalized in seen or len(probes) >= SIMILARITY_MAX_PROBES:
+        if (
+            not normalized
+            or (dedupe and normalized in seen)
+            or len(probes) >= SIMILARITY_MAX_PROBES
+        ):
             return
         seen.add(normalized)
         probes.append((label, normalized, weight))
 
     add("draft", primary, SIMILARITY_PRIMARY_WEIGHT)
-    # Title first because it is the most useful identity signal.  Body and
-    # diagnostics then provide recall for create-shaped bug drafts.
+    # Reserve one probe for every populated create/search field before adding
+    # any surplus drop-one variants.  A long title must never consume the
+    # bounded budget before a precise failing command or outcome is searched.
+    # Field queries intentionally do not dedupe against the primary/each other:
+    # their labels are part of the audit trail, and the reserve is only ten
+    # slots (draft + ten fields = eleven) under the twelve-probe cap.
     field_names = ("title", "body", *QUERY_PROSE_FIELDS, *QUERY_CONTEXT_FIELDS)
     for field_name in field_names:
         value = _bounded_query(fields.get(field_name))
         if not value:
             continue
-        add(field_name, value, SIMILARITY_FALLBACK_WEIGHT)
+        add(field_name, value, SIMILARITY_FALLBACK_WEIGHT, dedupe=False)
+
+    # Title first because it is the most useful identity signal.  Body and
+    # diagnostics then provide recall for create-shaped bug drafts.  These are
+    # surplus probes only; every populated field above already has a slot.
+    for field_name in field_names:
+        value = _bounded_query(fields.get(field_name))
+        if not value:
+            continue
         units = ranked.normalize_query_units(value)
         # Removing each term is intentionally bounded.  Three or more terms
         # still retain a meaningful lexical anchor; one/two-term fields would
@@ -204,15 +222,14 @@ def _similarity_probes(fields: Dict[str, Any], primary: str) -> List[Tuple[str, 
 
 
 def _merge_similarity_results(
-    responses: List[Tuple[str, float, Dict[str, Any]]],
+    responses: List[Tuple[str, str, float, Dict[str, Any]]],
     *,
     source_key: Optional[str],
     limit: int,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Fuse probe responses by issue key, preserving honest lane facts."""
     merged: Dict[str, Dict[str, Any]] = {}
-    probe_count = len(responses)
-    for label, weight, response in responses:
+    for label, probe_query, weight, response in responses:
         for rank, result in enumerate(response.get("results", []), start=1):
             issue = result.get("issue") or {}
             key = str(issue.get("key") or "")
@@ -229,9 +246,18 @@ def _merge_similarity_results(
                     "exact_boosts": set(),
                     "neighborhood": {},
                     "duplicate_chain": {},
+                    "probe_contributions": {},
                 },
             )
             entry["score"] += weight / (SIMILARITY_RRF_K + rank)
+            contribution_key = (label, probe_query, rank, result.get("rank_score"))
+            entry["probe_contributions"][contribution_key] = {
+                "label": label,
+                "query": probe_query,
+                "weight": weight,
+                "original_rank": rank,
+                "original_score": result.get("rank_score"),
+            }
             for lane in result.get("contributing_lanes", []):
                 lane_key = (lane.get("lane"), lane.get("rank"), lane.get("raw_score"))
                 entry["lanes"][lane_key] = dict(lane)
@@ -247,8 +273,16 @@ def _merge_similarity_results(
             for chain in result.get("duplicate_chain", []):
                 entry["duplicate_chain"][chain.get("canonical_key")] = dict(chain)
 
-    def order(item: Tuple[str, Dict[str, Any]]) -> Tuple[float, str]:
-        return (-item[1]["score"], item[0])
+    def order(item: Tuple[str, Dict[str, Any]]) -> Tuple[float, str, str]:
+        result = item[1]["result"]
+        issue = result.get("issue") or {}
+        # Similarity's local RRF score is the primary order.  Equal scores
+        # follow the same freshness/key contract as ranked search.
+        return (
+            -item[1]["score"],
+            ranked._desc_key(str(issue.get("updated_at") or "")),
+            item[0],
+        )
 
     ordered = sorted(merged.items(), key=order)
     output: List[Dict[str, Any]] = []
@@ -276,8 +310,20 @@ def _merge_similarity_results(
             entry["duplicate_chain"][key]
             for key in sorted(entry["duplicate_chain"], key=lambda value: str(value or ""))
         ]
+        result["probe_contributions"] = [
+            entry["probe_contributions"][key]
+            for key in sorted(
+                entry["probe_contributions"],
+                key=lambda value: (
+                    str(value[0]),
+                    str(value[1]),
+                    int(value[2]),
+                    str(value[3]),
+                ),
+            )
+        ]
         output.append(result)
-    return output, {"probes_requested": probe_count, "candidate_keys_seen": len(merged)}
+    return output, {"candidate_keys_seen": len(merged)}
 
 
 def _expand_duplicate_chains(
@@ -286,9 +332,12 @@ def _expand_duplicate_chains(
     """Confirmed duplicates of the returned hits, expanded one level.
 
     An issue whose ``duplicate_of`` names a hit is a confirmed duplicate of
-    that hit regardless of its own status. Expansion is exactly one level —
-    chains deeper than that belong to the issue graph, not to this advisory
-    answer. The source issue never appears in its own expansion.
+    that hit regardless of its own status. A native ``duplicates`` link from
+    the duplicate source to a hit is authoritative over a conflicting legacy
+    field, so one issue never appears with two asserted canonicals. Expansion
+    is exactly one level — chains deeper than that belong to the issue graph,
+    not to this advisory answer. The source issue never appears in its own
+    expansion.
     """
     from cli_agent_orchestrator.services.issue_tracker import _issue_row
 
@@ -314,7 +363,20 @@ def _expand_duplicate_chains(
             .filter(TrackerIssueModel.key.in_(sorted(duplicate_keys)))
             .all()
         )
-        issue_by_key = {str(row.key): row for row in issues}
+        issue_by_key = {str(row.key).casefold(): row for row in issues}
+
+    # Native directional links are the current relation vocabulary.  The
+    # legacy ``duplicate_of`` field remains readable for old rows, but when a
+    # duplicate carries both representations the native target is
+    # authoritative; emitting both targets would assert two canonicals for
+    # one issue.  Multiple native targets are themselves malformed, so choose
+    # one deterministic target rather than manufacturing two claims.
+    native_targets: Dict[str, List[str]] = {}
+    for link in link_rows:
+        duplicate_key = str(link.from_key)
+        canonical = canonical_by_folded.get(str(link.to_key).casefold())
+        if canonical and duplicate_key.casefold() != canonical.casefold():
+            native_targets.setdefault(duplicate_key.casefold(), []).append(canonical)
 
     pairs: Dict[Tuple[str, str], TrackerIssueModel] = {}
     for field_row in field_rows:
@@ -322,11 +384,21 @@ def _expand_duplicate_chains(
         canonical = canonical_by_folded.get(str(field_row.duplicate_of or "").casefold())
         if not canonical or duplicate_key.casefold() == canonical.casefold():
             continue
+        if duplicate_key.casefold() in native_targets:
+            # See the native-link precedence rule above.
+            continue
         pairs[(canonical.casefold(), duplicate_key.casefold())] = field_row
-    for link in link_rows:
-        duplicate_key = str(link.from_key)
-        canonical = canonical_by_folded.get(str(link.to_key).casefold())
-        duplicate_row = issue_by_key.get(duplicate_key)
+    for duplicate_folded, canonicals in native_targets.items():
+        duplicate_key = next(
+            (
+                str(link.from_key)
+                for link in link_rows
+                if str(link.from_key).casefold() == duplicate_folded
+            ),
+            duplicate_folded,
+        )
+        canonical = sorted(set(canonicals), key=str.casefold)[0]
+        duplicate_row = issue_by_key.get(duplicate_folded)
         if (
             not canonical
             or duplicate_row is None
@@ -383,8 +455,8 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
     # near-duplicate just outside it still survives exclusion.
     fetch_limit = min(request.limit + 1, ranked.MAX_LIMIT) if source_key else request.limit
     probes = _similarity_probes(fields, query_text)
-    responses: List[Tuple[str, float, Dict[str, Any]]] = []
-    failures: List[TrackerError] = []
+    responses: List[Tuple[str, str, float, Dict[str, Any]]] = []
+    failures: List[Dict[str, str]] = []
     for label, probe_query, weight in probes:
         try:
             response = ranked.ranked_search(
@@ -398,25 +470,26 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
                     limit=fetch_limit,
                 )
             )
-            responses.append((label, weight, response))
-        except TrackerError as exc:
+            responses.append((label, probe_query, weight, response))
+        except (TrackerError, ranked.TrackerRankedSearchError) as exc:
             # A probe is advisory.  Keep useful results from sibling probes;
             # only an entirely unavailable search surface is a typed refusal.
-            failures.append(exc)
+            failures.append({"label": label, "code": exc.code, "message": exc.message})
     if not responses:
         if failures:
-            raise failures[0]
+            failure = failures[0]
+            raise TrackerError(failure["code"], failure["message"])
         raise TrackerError("invalid-query", "similarity produced no usable lexical probes")
 
     candidates, probe_facts = _merge_similarity_results(
         responses, source_key=source_key, limit=request.limit
     )
 
-    primary_response = responses[0][2]
+    primary_response = responses[0][3]
     reasons: List[str] = []
     lane_availability: Dict[str, Dict[str, Any]] = {}
     effective_modes: Set[str] = set()
-    for _, _, response in responses:
+    for _, _, _, response in responses:
         effective_modes.add(str(response.get("mode_effective") or request.mode))
         degradation = response.get("degradation") or {}
         for reason in degradation.get("reasons", []):
@@ -430,24 +503,32 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
             if availability.get("reason") and not existing.get("reason"):
                 existing["reason"] = str(availability["reason"])
 
+    for failure in failures:
+        reason = f"similarity-probe-failed:{failure['label']}:{failure['code']}"
+        if reason not in reasons:
+            reasons.append(reason)
+
     semantic_requested = request.mode in ("semantic", "hybrid")
     mode_effective = request.mode if request.mode in effective_modes else "lexical"
     if mode_effective == "hybrid" and "hybrid" not in effective_modes:
         mode_effective = "lexical"
     if mode_effective == "semantic" and "semantic" not in effective_modes:
         mode_effective = "lexical"
-    degraded = bool(reasons) or (semantic_requested and mode_effective == "lexical")
+    degraded = (
+        bool(reasons) or bool(failures) or (semantic_requested and mode_effective == "lexical")
+    )
     coverage = {
         "status": (
             "inconclusive"
             if degraded and not candidates
-            else ("degraded" if degraded else "complete")
+            else ("partial" if failures else ("degraded" if degraded else "complete"))
         ),
         "complete": not degraded,
         "inconclusive": degraded and not candidates,
         "probes_requested": len(probes),
         "probes_completed": len(responses),
         "probes_failed": len(failures),
+        "partial": bool(failures),
         **probe_facts,
     }
     # Ranked-search timings and query-time refresh counters are intentionally
@@ -470,7 +551,7 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
         {"label": label, "weight": weight, "query": probe_query}
         for label, probe_query, weight in probes
     ]
-    diagnostics["similarity_probe_failures"] = [str(exc) for exc in failures]
+    diagnostics["similarity_probe_failures"] = failures
 
     hit_keys = [
         str((candidate.get("issue") or {}).get("key"))
