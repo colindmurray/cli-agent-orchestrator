@@ -1784,9 +1784,7 @@ function ScopeEditor({
 // Item detail — factored around presentation descriptor so the two kinds share
 // one implementation and copy is not duplicated.
 
-function ItemDetail({
-  issueKey, initialKind, vocab, onChanged, onDeleted, onNavigate, commentTarget,
-}: {
+interface ItemDetailProps {
   issueKey: string
   initialKind?: string
   vocab: TrackerVocabulary
@@ -1796,9 +1794,24 @@ function ItemDetail({
   /** A ranked-search hit asked to land on this comment (§12.3 "navigate
    * directly to a matching comment"): scroll to it and ring it once loaded. */
   commentTarget?: number | null
-}) {
+}
+
+/**
+ * Identity boundary for the stateful detail editor. A key change remounts the
+ * implementation in the same render, before effects run, so no draft, delete
+ * confirmation, or mutation callback from one issue can target another.
+ */
+function ItemDetail(props: ItemDetailProps) {
+  return <ItemDetailContent key={props.issueKey} {...props} />
+}
+
+function ItemDetailContent({
+  issueKey, initialKind, vocab, onChanged, onDeleted, onNavigate, commentTarget,
+}: ItemDetailProps) {
   const { showSnackbar } = useStore()
   const [issue, setIssue] = useState<TrackerIssue | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const loadRequestRef = useRef(0)
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [labelValues, setLabelValues] = useState<string[]>([])
   const [collaboratorValues, setCollaboratorValues] = useState<string[]>([])
@@ -1826,10 +1839,17 @@ function ItemDetail({
   const isFeature = presentation.kind === 'feature'
   const isBug = presentation.kind === 'bug'
 
-  const load = useCallback(async (opts?: { preserveDraft?: boolean }) => {
+  const load = useCallback(async (opts?: { preserveDraft?: boolean; signal?: AbortSignal }) => {
+    const request = ++loadRequestRef.current
+    if (!opts?.preserveDraft) setLoadError(null)
     try {
       // Use key-universal fetch; typed wrappers would 404 on cross-kind
-      const row = await api.getTrackerIssue(issueKey)
+      const row = await api.getTrackerIssue(issueKey, opts?.signal)
+      if (opts?.signal?.aborted || request !== loadRequestRef.current) return
+      if (row.key !== issueKey) {
+        throw new Error(`tracker returned ${row.key} while loading ${issueKey}`)
+      }
+      setLoadError(null)
       setIssue(row)
       if (!opts?.preserveDraft) {
         setDraft({
@@ -1858,11 +1878,22 @@ function ItemDetail({
         setCasConflict(null)
       }
     } catch (err) {
+      if (opts?.signal?.aborted || request !== loadRequestRef.current) return
+      setLoadError(errorText(err))
       showSnackbar({ type: 'error', message: errorText(err) })
     }
   }, [issueKey, showSnackbar])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    const controller = new AbortController()
+    void load({ signal: controller.signal })
+    return () => {
+      // Invalidate before abort propagation settles; even a fetch double that
+      // ignores AbortSignal cannot commit after this identity is abandoned.
+      loadRequestRef.current += 1
+      controller.abort()
+    }
+  }, [load])
 
   // Comment navigation from a ranked-search hit: once the issue (and its
   // comments) are loaded, bring the target comment on screen and ring it
@@ -2117,6 +2148,13 @@ function ItemDetail({
   }
 
   if (!issue) {
+    if (loadError) {
+      return (
+        <div role="alert" className="px-10 py-4 text-xs text-amber-300">
+          Unable to load {issueKey}: {loadError}
+        </div>
+      )
+    }
     return <div className="px-10 py-4 text-xs text-gray-600">Loading {issueKey}…</div>
   }
 

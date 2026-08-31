@@ -1927,8 +1927,8 @@ export const api = {
       body: JSON.stringify(body),
       signal,
     }),
-  getTrackerIssue: (key: string) =>
-    fetchJSON<TrackerIssue>(`/tracker/issues/${encodeURIComponent(key)}`),
+  getTrackerIssue: (key: string, signal?: AbortSignal) =>
+    fetchJSON<TrackerIssue>(`/tracker/issues/${encodeURIComponent(key)}`, { signal }),
   createTrackerIssue: (body: Record<string, unknown>) =>
     fetchJSON<TrackerIssue>('/tracker/issues', {
       method: 'POST',

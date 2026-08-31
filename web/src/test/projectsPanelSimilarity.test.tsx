@@ -463,6 +463,101 @@ describe('ProjectsPanel pre-filing similar candidates (M2.5)', () => {
     expect(calls.some(c => c.url === '/tracker/issues/cond-0700' && c.method === 'GET')).toBe(true)
   })
 
+  it('removes stale edit and delete actions immediately when relationship navigation fails to load', async () => {
+    let releaseTarget: ((value: unknown) => void) | null = null
+    respondImpl = (url, opts) => {
+      if (url === '/tracker/issues/cond-0711') {
+        return json({
+          ...OPEN_CANDIDATE,
+          links: [{ id: 1, from_key: 'cond-0711', to_key: 'cond-0800', kind: 'blocks' }],
+        })
+      }
+      if (url === '/tracker/issues/cond-0800') {
+        return new Promise(resolve => { releaseTarget = resolve })
+      }
+      return defaultRespond(url, opts)
+    }
+    window.history.replaceState(null, '', '/?project=cao-system&section=issues&key=cond-0711')
+
+    render(<ProjectsPanel />)
+    await settle()
+    fireEvent.change(screen.getByLabelText('Bug title'), { target: { value: 'unsaved stale title' } })
+    expect(screen.getByRole('button', { name: 'Save 1 change' })).toBeInTheDocument()
+    expect(screen.getByTitle('Delete issue')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open cond-0800' }))
+
+    // Identity changes remove every action backed by cond-0711 before the new
+    // GET resolves. There is no window where old draft state targets cond-0800.
+    expect(screen.getByText('Loading cond-0800…')).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('unsaved stale title')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save 1 change' })).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Delete issue')).not.toBeInTheDocument()
+
+    await act(async () => {
+      releaseTarget!({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: () => Promise.resolve({ detail: 'target read failed' }),
+      })
+    })
+    await flush()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Unable to load cond-0800')
+    expect(screen.getByRole('alert')).toHaveTextContent('target read failed')
+    expect(screen.queryByDisplayValue('unsaved stale title')).not.toBeInTheDocument()
+    expect(calls.filter(c => c.method === 'PATCH' || c.method === 'DELETE')).toHaveLength(0)
+  })
+
+  it('keeps the newest rendered issue when rapid navigation responses resolve out of order', async () => {
+    let releaseMiddle: ((value: unknown) => void) | null = null
+    respondImpl = (url, opts) => {
+      if (url === '/tracker/issues/cond-0711') {
+        return json({
+          ...OPEN_CANDIDATE,
+          links: [{ id: 1, from_key: 'cond-0711', to_key: 'cond-0800', kind: 'blocks' }],
+        })
+      }
+      if (url === '/tracker/issues/cond-0800') {
+        return new Promise(resolve => { releaseMiddle = resolve })
+      }
+      if (url === '/tracker/issues/cond-0600') {
+        return json(issueRow('cond-0600', 'newest canonical target'))
+      }
+      return defaultRespond(url, opts)
+    }
+    window.history.replaceState(null, '', '/?project=cao-system&section=issues&key=cond-0711')
+
+    render(<ProjectsPanel />)
+    await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Open cond-0800' }))
+    expect(screen.getByText('Loading cond-0800…')).toBeInTheDocument()
+
+    await act(async () => {
+      window.history.pushState(null, '', '/?project=cao-system&section=issues&key=cond-0600')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    await flush()
+
+    expect(screen.getByText('Deep link: cond-0600 (not in current page/filters)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Bug title')).toHaveValue('newest canonical target')
+    expect(screen.getByRole('button', { name: 'Claim cond-0600' })).toBeInTheDocument()
+    expect(calls.find(c => c.url === '/tracker/issues/cond-0800')?.signal?.aborted).toBe(true)
+
+    // The abandoned middle request resolves last. It must not replace the
+    // newest target or expose actions carrying the wrong issue identity.
+    await act(async () => {
+      releaseMiddle!(json(issueRow('cond-0800', 'late obsolete relationship target')))
+    })
+    await flush()
+
+    expect(screen.getByLabelText('Bug title')).toHaveValue('newest canonical target')
+    expect(screen.getByRole('button', { name: 'Claim cond-0600' })).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('late obsolete relationship target')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Claim cond-0800' })).not.toBeInTheDocument()
+  })
+
   it('shows a visible advisory when the probe fails and filing stays enabled with no mutation calls', async () => {
     respondImpl = (url, opts) => {
       if (url === '/tracker/issues/similar') {
