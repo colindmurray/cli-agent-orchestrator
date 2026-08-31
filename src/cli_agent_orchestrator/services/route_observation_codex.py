@@ -54,6 +54,7 @@ from cli_agent_orchestrator.clients.tmux import tmux_binary
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.services import native_pane_input as npi
 from cli_agent_orchestrator.services import native_status_repair as nsr
+from cli_agent_orchestrator.services import provider_contracts
 from cli_agent_orchestrator.services import route_observation as ro
 
 #: The pinned Codex build this adapter's status panel was proven against.
@@ -499,7 +500,13 @@ def parse_codex_route_panel(
             "evidence_sha256": evidence,
         }
     try:
-        status = nsr.parse_codex_status(rows, pinned_version=pinned_version)
+        # The durable request pin may retain the provider's banner form (for
+        # example, ``codex-cli 0.149.0``), while the native status parser
+        # compares the panel's bare semver token.  Normalize only this parser
+        # expectation; request/replay/composer facts continue to carry the
+        # original banner unchanged.
+        parser_version = provider_contracts.normalized_version(pinned_version)
+        status = nsr.parse_codex_status(rows, pinned_version=parser_version)
     except nsr.PanelParseError:
         return {
             "kind": "inconclusive",
