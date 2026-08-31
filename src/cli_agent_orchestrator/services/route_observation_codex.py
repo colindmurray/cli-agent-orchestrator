@@ -93,11 +93,13 @@ _PREWRITE_READINESS_POLL_SECONDS = 0.1
 _PREWRITE_READY_STABLE_POLLS = 11
 
 # Codex renders the non-modal status panel asynchronously after the submission
-# barrier proves Enter.  Poll the exact pane through at most twenty 50 ms gaps
-# instead of treating the first pre-render frame as a permanent ambiguous
-# observation.  Each capture remains independently bounded by the pane surface.
+# barrier proves Enter.  A live 0.149 Luna route remained on its pre-render
+# composer for longer than the former 21-capture window, then rendered a valid
+# exact panel.  Poll the exact pane for a wall-clock-bounded ten seconds instead
+# of coupling the observation window to capture speed.  Each capture remains
+# independently bounded by the pane surface.
 _POST_SUBMIT_RENDER_POLL_SECONDS = 0.05
-_POST_SUBMIT_RENDER_CAPTURE_LIMIT = 21
+_POST_SUBMIT_RENDER_TIMEOUT_SECONDS = 10.0
 _POST_SUBMIT_RETRYABLE_PARSE_REASONS = frozenset(
     {"panel-unparsed", "model-row-unparsed", "model-row-absent"}
 )
@@ -866,7 +868,8 @@ class CodexRouteObserver:
             return _inconclusive_observation(request, reason="send-failed")
         if not submission_proven:
             return _inconclusive_observation(request, reason="submission-unproven")
-        for capture_number in range(_POST_SUBMIT_RENDER_CAPTURE_LIMIT):
+        render_deadline = time.monotonic() + _POST_SUBMIT_RENDER_TIMEOUT_SECONDS
+        while True:
             try:
                 rows = self._surface.capture_screen()
             except Exception:  # noqa: BLE001 - an unreadable pane is not a panel
@@ -879,10 +882,12 @@ class CodexRouteObserver:
             if (
                 parsed["kind"] == "observed"
                 or parsed.get("reason") not in _POST_SUBMIT_RETRYABLE_PARSE_REASONS
-                or capture_number + 1 == _POST_SUBMIT_RENDER_CAPTURE_LIMIT
             ):
                 break
-            time.sleep(_POST_SUBMIT_RENDER_POLL_SECONDS)
+            remaining = render_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_POST_SUBMIT_RENDER_POLL_SECONDS, remaining))
         return _observation_from_parse(request, parsed)
 
     def _reconcile_close_proof(
