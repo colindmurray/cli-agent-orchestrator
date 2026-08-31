@@ -24,8 +24,10 @@ def test_fork_start_selects_the_conductor_manifest_and_fork_lane() -> None:
 
     assert text.index("## CAO development map") < text.index("## Agent skills")
     assert "tracker project is `cao-system`" in section
+    assert "Use `$cao-issue-tracker`" in section
+    assert "Read `docs/agents/domain.md` first" in section
     assert "logical repository `cao-conductor`" in section
-    assert "`.agent-tools/code-intelligence.yml`" in section
+    assert "conductor-owned `.agent-tools/code-intelligence.yml`" in section
     assert "This fork carries no second manifest" in section
     assert not LOCAL_MANIFEST.exists()
     assert "package root is `src/cli_agent_orchestrator/`" in section
@@ -58,7 +60,9 @@ def test_branch_local_source_wins_when_index_and_worktree_diverge() -> None:
 def test_optional_search_degrades_to_direct_tools_without_copying_manuals() -> None:
     section = development_map()
 
+    assert "`$repository-evidence-search` or `$cao-code-grounded-issue-triage`" in section
     assert "QMD and codebase-memory are optional" in section
+    assert "If either is unavailable" in section
     assert "continue with direct source, `rg`, and Git" in section
     assert "Worker ownership is currently one scalar worktree path" in section
     assert "issue's `worktrees` list is provenance, not worker ownership" in section

@@ -10,9 +10,12 @@
 ## CAO development map
 
 - The authoritative tracker project is `cao-system`, shared with logical
-  repository `cao-conductor`. Resolve that repository through operator-local
+  repository `cao-conductor`. Use `$cao-issue-tracker`; when a Matt Pocock
+  engineering skill touches tracker state, also use
+  `$cao-matt-pocock-skills`. Resolve the conductor through operator-local
   bindings and read its conductor-owned `.agent-tools/code-intelligence.yml`.
   This fork carries no second manifest.
+- Read `docs/agents/domain.md` first for the cross-repository domain boundary.
 - This repository's package root is `src/cli_agent_orchestrator/`. It owns CAO
   runtime, provider integration, server/API, and dashboard behavior. Fork-only
   changes stay in this repository.
@@ -30,9 +33,11 @@
   branch/worktree revision is authoritative. Pin citations as
   `repository | resolved target SHA | path`; line numbers are observed-at
   values.
-- QMD and codebase-memory are optional routing evidence. If either is
-  unavailable or does not cover the resolved revision, continue with direct
-  source, `rg`, and Git.
+- Use `$repository-evidence-search` or `$cao-code-grounded-issue-triage` when
+  structural ownership or document vocabulary is ambiguous. QMD and
+  codebase-memory are optional routing evidence. If either is unavailable or
+  does not cover the resolved revision, continue with direct source, `rg`, and
+  Git.
 - Worker ownership is currently one scalar worktree path; an issue's
   `worktrees` list is provenance, not worker ownership. Read-only work may
   inspect two pinned repository/revision pairs. Each repository worktree keeps
