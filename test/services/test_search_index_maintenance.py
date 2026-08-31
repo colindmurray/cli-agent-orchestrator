@@ -18,6 +18,7 @@ by rewriting issues would fail, and the build-completion contract
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -269,6 +270,20 @@ class TestPrepare:
             assert again["action"] == "reused"
             assert again["generation_id"] == first["generation_id"]
         assert len(_generation_rows(store)) == 1
+
+    def test_concurrent_prepare_has_one_generation_and_one_full_queue(self, store):
+        """The identity recheck and enqueue are one immediate transaction."""
+        _populate(store)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(
+                pool.map(
+                    lambda _: maintenance.prepare_index(metadata=_prepared_metadata()), range(2)
+                )
+            )
+        assert sorted(outcome["action"] for outcome in outcomes) == ["created", "reused"]
+        assert len(_generation_rows(store)) == 1
+        assert outcomes[0]["generation_id"] == outcomes[1]["generation_id"]
+        assert outcomes[0]["enqueued_documents"] + outcomes[1]["enqueued_documents"] == 3
 
     def test_repeated_prepare_still_reuses_after_the_generation_went_active(self, store):
         """The idempotency that matters operationally: prepare, build, re-prepare.

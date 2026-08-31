@@ -108,6 +108,8 @@ _LIFECYCLE_ACTIONS = {
     "metadata-incompatible": _PREPARE_ACTION,
     "schema-missing": _SCHEMA_ACTION,
     "embedder-contract": _REBUILD_ACTION,
+    "generation-identity-mismatch": _REBUILD_ACTION,
+    "embedder-identity-invalid": _REBUILD_ACTION,
 }
 _DEFAULT_LIFECYCLE_ACTION = (
     "run `cao issue search-index refresh --all` to finish or repair the build"
@@ -204,18 +206,7 @@ def _require_derived_schema(raw: Any) -> None:
 #: Columns that together name ONE generation identity. Two rows agreeing on
 #: all of them are the same model/runtime/artifact/document build, so the
 #: second is redundant work rather than a distinct generation.
-_IDENTITY_COLUMNS = (
-    "model_id",
-    "model_revision",
-    "runtime_id",
-    "runtime_version",
-    "artifact_sha256",
-    "dimensions",
-    "element_type",
-    "distance_metric",
-    "normalized",
-    "document_schema_version",
-)
+_IDENTITY_COLUMNS = lifecycle.GENERATION_IDENTITY_COLUMNS
 
 
 def _matching_generation(raw: Any, identity: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
@@ -279,22 +270,31 @@ def ensure_generation(
 
     raw = _raw(target_engine)
     try:
-        _require_derived_schema(raw)
-        existing = _matching_generation(raw, identity)
-    finally:
-        raw.close()
-    if existing is not None:
-        return {
-            "action": "reused",
-            "generation_id": existing["generation_id"],
-            "generation_state": existing["state"],
-            "enqueued_documents": 0,
-            **identity,
-        }
-    try:
-        created = lifecycle.create_generation(metadata=metadata, target_engine=target_engine)
+        # The identity check and the generation insert/initial outbox enqueue
+        # must share one write lock. Otherwise two concurrent prepare calls can
+        # both observe no match and publish duplicate full queues.
+        raw.execute("BEGIN IMMEDIATE")
+        try:
+            _require_derived_schema(raw)
+            existing = _matching_generation(raw, identity)
+            if existing is not None:
+                raw.commit()
+                return {
+                    "action": "reused",
+                    "generation_id": existing["generation_id"],
+                    "generation_state": existing["state"],
+                    "enqueued_documents": 0,
+                    **identity,
+                }
+            created = lifecycle._create_generation_in_transaction(raw, identity)
+            raw.commit()
+        except Exception:
+            raw.rollback()
+            raise
     except lifecycle.VectorLifecycleError as exc:
         raise _as_maintenance_error(exc) from exc
+    finally:
+        raw.close()
     return {
         "action": "created",
         "generation_id": created["generation_id"],

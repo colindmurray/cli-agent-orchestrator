@@ -609,7 +609,7 @@ async def list_issues(
 
 
 @router.get("/tracker/issues/search")
-async def search_issues(
+def search_issues(
     q: str = Query(..., description="free-form ranked-search text"),
     project_id: Optional[List[str]] = Query(None, description="tracker project id, repeatable"),
     all_projects: bool = Query(False, description="search every tracker project"),
@@ -764,7 +764,7 @@ def _maintenance_http(exc: Exception) -> HTTPException:
 
 
 @router.get("/tracker/issues/search-index/status")
-async def search_index_status(_scopes: List[str] = _READ) -> Dict[str, Any]:
+def search_index_status(_scopes: List[str] = _READ) -> Dict[str, Any]:
     """Capability, engine, lexical, and semantic state of the search index.
 
     Declared before ``/tracker/issues/{issue_key}`` so the literal path wins
@@ -780,7 +780,7 @@ async def search_index_status(_scopes: List[str] = _READ) -> Dict[str, Any]:
 
 
 @router.get("/tracker/issues/search-index/integrity-check")
-async def search_index_integrity(_scopes: List[str] = _READ) -> Dict[str, Any]:
+def search_index_integrity(_scopes: List[str] = _READ) -> Dict[str, Any]:
     """Read-only §13.4 integrity report over the derived index.
 
     Reports FTS internal integrity, source-to-FTS coverage, duplicate and
@@ -795,7 +795,7 @@ async def search_index_integrity(_scopes: List[str] = _READ) -> Dict[str, Any]:
 
 
 @router.post("/tracker/issues/search-index/refresh")
-async def search_index_refresh(
+def search_index_refresh(
     body: Optional[SearchIndexRefreshBody] = None,
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
@@ -825,7 +825,7 @@ async def search_index_refresh(
 
 
 @router.post("/tracker/issues/search-index/rebuild")
-async def search_index_rebuild(
+def search_index_rebuild(
     body: Optional[SearchIndexRebuildBody] = None,
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:

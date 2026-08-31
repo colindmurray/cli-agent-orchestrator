@@ -10,6 +10,7 @@ reason the orchestrator observed plus its operator action; and no maintenance
 or search route ever downloads model weights.
 """
 
+import inspect
 from pathlib import Path
 from typing import Any, Dict
 
@@ -178,6 +179,15 @@ def test_status_resolves_before_the_issue_key_route(client):
         "next_actions",
     }
     assert body["active_generation"] is None, "nothing is prepared yet"
+
+
+def test_blocking_search_index_and_ranked_search_routes_use_fastapi_threadpool():
+    """Synchronous route callables keep SQLite/model work off Uvicorn's loop."""
+    assert not inspect.iscoroutinefunction(tracker_api.search_issues)
+    assert not inspect.iscoroutinefunction(tracker_api.search_index_status)
+    assert not inspect.iscoroutinefunction(tracker_api.search_index_integrity)
+    assert not inspect.iscoroutinefunction(tracker_api.search_index_refresh)
+    assert not inspect.iscoroutinefunction(tracker_api.search_index_rebuild)
 
 
 def test_integrity_check_resolves_before_the_issue_key_route(client):

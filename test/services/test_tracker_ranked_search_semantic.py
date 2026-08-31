@@ -36,6 +36,8 @@ from cli_agent_orchestrator.services.vector_lifecycle import (
     refresh_generation,
 )
 
+_PRODUCTION_QUERY_EMBEDDER = rsearch._query_embedder
+
 DIMENSIONS = 32
 
 
@@ -484,10 +486,12 @@ class TestPersistedMetricDecoding:
         original_embedder = rsearch._query_embedder
         rsearch.SessionLocal = sessionmaker(bind=store.engine)
         rsearch._query_embedder = lambda models_dir=None: embedder
-        return store, original_session, original_embedder
+        return store, original_session, original_embedder, embedder
 
     def test_cosine_generation_ranks_by_cosine_distance(self, tmp_path_factory):
-        store, session, embedder = self._metric_probe_store(tmp_path_factory, "cosine", "cosdb")
+        store, session, original_embedder, embedder = self._metric_probe_store(
+            tmp_path_factory, "cosine", "cosdb"
+        )
         try:
             response = search(store, "half probe", mode="semantic")
             semantic_lanes = [
@@ -500,14 +504,16 @@ class TestPersistedMetricDecoding:
             assert semantic_lanes[0]["raw_score"] == pytest.approx(0.0, abs=1e-5)
         finally:
             rsearch.SessionLocal = session
-            rsearch._query_embedder = embedder
+            rsearch._query_embedder = original_embedder
             store.engine.dispose()
 
     def test_l2_generation_ranks_by_l2_not_the_process_default(self, tmp_path_factory):
         # The adapter's process default is cosine; if the scan consulted that
         # default instead of the persisted row, this store would rank doc-a
         # first exactly like the cosine store above. It must not.
-        store, session, embedder = self._metric_probe_store(tmp_path_factory, "l2", "l2db")
+        store, session, original_embedder, embedder = self._metric_probe_store(
+            tmp_path_factory, "l2", "l2db"
+        )
         try:
             response = search(store, "half probe", mode="semantic")
             assert response["mode_effective"] == "semantic"
@@ -515,7 +521,7 @@ class TestPersistedMetricDecoding:
             assert response["generations"]["vector_generation"]["distance_metric"] == "l2"
         finally:
             rsearch.SessionLocal = session
-            rsearch._query_embedder = embedder
+            rsearch._query_embedder = original_embedder
             store.engine.dispose()
 
     def test_dimension_mismatch_between_model_and_generation_degrades(self, hybrid, monkeypatch):
@@ -670,6 +676,66 @@ class TestSemanticAggregation:
 
 
 class TestModeSurfaces:
+    def test_query_embedder_cache_is_evicted_when_activation_changes_identity(
+        self, store, monkeypatch
+    ):
+        """A cached A embedder must not produce a query vector for active B."""
+        seed(store)
+
+        class IdentityEmbedder(BasisEmbedder):
+            def __init__(self, metadata):
+                super().__init__(VOCAB, SYNONYMS)
+                self.metadata = dict(metadata)
+
+        model_a = dict(MINIMAL_RECORD)
+        model_b = dict(MINIMAL_RECORD)
+        model_b.update(
+            {"model_id": "test/model-b", "model_revision": "rev-b", "artifact_sha256": "b" * 64}
+        )
+        embed_a = IdentityEmbedder(model_a)
+        embed_b = IdentityEmbedder(model_b)
+        first = build_active_generation(store, embedder=embed_a, metadata_overrides=model_a)
+
+        session_factory = sessionmaker(bind=store.engine)
+        monkeypatch.setattr(rsearch, "SessionLocal", session_factory)
+        from cli_agent_orchestrator.services import embedding_adapter
+
+        current = [embed_a]
+        loads = []
+
+        def load(_models_dir=None):
+            loads.append(current[0])
+            return current[0]
+
+        monkeypatch.setattr(embedding_adapter, "load_embedder", load)
+        monkeypatch.setattr(rsearch, "_query_embedder", _PRODUCTION_QUERY_EMBEDDER)
+        rsearch.reset_query_embedder_cache()
+        db = session_factory()
+        try:
+            conn = db.connection()
+            context = rsearch.resolve_semantic_context(
+                conn, rsearch._meta_snapshot(conn), "deploy", []
+            )
+        finally:
+            db.close()
+        assert context is not None and context.generation_id == first
+        assert len(loads) == 1
+
+        second = build_active_generation(store, embedder=embed_b, metadata_overrides=model_b)
+        current[0] = embed_b
+        db = session_factory()
+        try:
+            conn = db.connection()
+            reasons = []
+            context = rsearch.resolve_semantic_context(
+                conn, rsearch._meta_snapshot(conn), "deploy", reasons
+            )
+        finally:
+            db.close()
+        assert context is not None and context.generation_id == second
+        assert len(loads) == 2, "activation must force a reload of the cached query embedder"
+        assert reasons == []
+
     def test_semantic_mode_serves_semantic_lanes_only(self, hybrid):
         # Paraphrase through the synonym table: no token overlap with any
         # stored field, so both lexical lanes and the exact lane find nothing;

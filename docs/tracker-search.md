@@ -25,7 +25,11 @@ snapshot, verifies its digest against the digest recorded in this build, and
 writes generation metadata under the state root (`CAO_SEARCH_MODELS_DIR`
 overrides the location). It is safe to re-run: an already-verified install is
 returned unchanged, a corrupt metadata file is rewritten from the verified
-artifact, and the matching generation is reused instead of minted again.
+artifact, and the matching generation is reused instead of minted again. The
+generation identity includes model id and revision, runtime id and version,
+artifact digest, dimensions, encoding, metric, normalization, and document
+schema. Refresh refuses to use one embedder across different identities, so a
+same-width replacement cannot publish blobs under the wrong generation.
 
 Without the `[search]` extra every surface degrades with a typed answer and
 the install command rather than a traceback: search falls back to lexical and
@@ -106,4 +110,6 @@ of the tracker API (reads accept `cao:read`; writes demand `cao:write`):
 A refusal keeps the reason the orchestrator observed and its operator action
 in the detail: an unknown scope is 400, an installation refusal is 409. There
 is no model-prepare route; preparing downloads weights and stays a CLI
-decision.
+decision. Ranked search and index-maintenance routes use FastAPI's synchronous
+worker execution for blocking SQLite, model-load, and CPU embedding work, so
+the Uvicorn event loop remains responsive while a build runs.
