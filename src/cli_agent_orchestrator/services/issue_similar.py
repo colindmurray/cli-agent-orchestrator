@@ -23,6 +23,11 @@ Contract (tracker cond-0645):
   the native directional link or legacy ``duplicate_of`` field) are expanded
   one level beside their hit. Native links are authoritative when a legacy
   field disagrees with them.
+- The probe count bounds the work. A ``hybrid`` request runs one semantic
+  search — the complete-draft probe — and every field/drop-one probe lexical,
+  so recall stays nonconjunctive without paying the semantic lane per probe;
+  ``semantic`` keeps its per-probe contract and ``lexical`` never asks for
+  the lane at all.
 - NON-GATING by contract: this surface is advisory. Nothing here sits in the
   create path, so a similarity failure can never block issue creation.
 """
@@ -85,6 +90,16 @@ SIMILARITY_PRIMARY_WEIGHT = 2.0
 SIMILARITY_FALLBACK_WEIGHT = 1.0
 SIMILARITY_DROP_ONE_WEIGHT = 0.5
 SIMILARITY_RRF_K = ranked.RRF_K
+
+#: How many probes of a ``hybrid`` request carry the semantic lane. The
+#: bounded field and drop-one probes exist to preserve nonconjunctive
+#: *lexical* recall for a single wording drift; running each of them as a
+#: complete hybrid search paid the embedding, refresh-drain, and vector-scan
+#: cost once per probe (twelve full hybrid searches per request), which is
+#: what pushed realistic drafts past the client timeout. One semantic
+#: execution on the complete draft keeps that signal; ``semantic`` mode is
+#: unchanged and probes semantically throughout (its documented contract).
+SIMILARITY_SEMANTIC_PROBES = 1
 
 
 @dataclass(frozen=True)
@@ -219,6 +234,21 @@ def _similarity_probes(fields: Dict[str, Any], primary: str) -> List[Tuple[str, 
                     SIMILARITY_DROP_ONE_WEIGHT,
                 )
     return probes
+
+
+def _probe_modes(mode: str, probe_count: int) -> List[str]:
+    """One retrieval mode per probe — where the request's semantic budget goes.
+
+    ``probes[0]`` is the complete draft by construction of
+    :func:`_similarity_probes`, so a hybrid request spends its semantic
+    execution there and every fallback probe runs lexical. ``lexical`` and
+    ``semantic`` apply to every probe unchanged.
+    """
+    if mode != "hybrid":
+        return [mode] * probe_count
+    return [
+        mode if index < SIMILARITY_SEMANTIC_PROBES else "lexical" for index in range(probe_count)
+    ]
 
 
 def _merge_similarity_results(
@@ -496,9 +526,10 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
     # near-duplicate just outside it still survives exclusion.
     fetch_limit = min(request.limit + 1, ranked.MAX_LIMIT) if source_key else request.limit
     probes = _similarity_probes(fields, query_text)
+    probe_modes = _probe_modes(request.mode, len(probes))
     responses: List[Tuple[str, str, float, Dict[str, Any]]] = []
     failures: List[Dict[str, str]] = []
-    for label, probe_query, weight in probes:
+    for (label, probe_query, weight), probe_mode in zip(probes, probe_modes):
         try:
             response = ranked.ranked_search(
                 ranked.RankedSearchRequest(
@@ -507,7 +538,7 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
                     all_projects=request.all_projects,
                     kinds=(effective_kind,),
                     include_comments=request.include_comments,
-                    mode=request.mode,
+                    mode=probe_mode,
                     limit=fetch_limit,
                 )
             )
@@ -528,7 +559,7 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
 
     primary_response = responses[0][3]
     reasons: List[str] = []
-    lane_availability: Dict[str, Dict[str, Any]] = {}
+    observed_lanes: Dict[str, Dict[str, Any]] = {}
     effective_modes: Set[str] = set()
     for _, _, _, response in responses:
         effective_modes.add(str(response.get("mode_effective") or request.mode))
@@ -537,12 +568,24 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
             if reason not in reasons:
                 reasons.append(str(reason))
         for lane_name, availability in (degradation.get("lanes") or {}).items():
-            existing = lane_availability.setdefault(lane_name, {"available": False})
-            existing["available"] = bool(existing.get("available")) or bool(
+            observed = observed_lanes.setdefault(lane_name, {"available": False, "reason": ""})
+            observed["available"] = bool(observed["available"]) or bool(
                 availability.get("available")
             )
-            if availability.get("reason") and not existing.get("reason"):
-                existing["reason"] = str(availability["reason"])
+            if not observed["reason"]:
+                observed["reason"] = str(availability.get("reason") or "")
+    # A lane any probe served is available for this answer. A probe that never
+    # asked for a lane reports it "not requested"; with mixed probe modes that
+    # note would otherwise be fused onto a lane that did serve, asserting an
+    # unavailability nobody observed.
+    lane_availability: Dict[str, Dict[str, Any]] = {}
+    for lane_name, observed in observed_lanes.items():
+        if observed["available"]:
+            lane_availability[lane_name] = {"available": True}
+        elif observed["reason"]:
+            lane_availability[lane_name] = {"available": False, "reason": observed["reason"]}
+        else:
+            lane_availability[lane_name] = {"available": False}
 
     for failure in failures:
         reason = f"similarity-probe-failed:{failure['label']}:{failure['code']}"
@@ -589,8 +632,8 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
             )
         }
     diagnostics["similarity_probes"] = [
-        {"label": label, "weight": weight, "query": probe_query}
-        for label, probe_query, weight in probes
+        {"label": label, "weight": weight, "query": probe_query, "mode": probe_mode}
+        for (label, probe_query, weight), probe_mode in zip(probes, probe_modes)
     ]
     diagnostics["similarity_probe_failures"] = failures
 

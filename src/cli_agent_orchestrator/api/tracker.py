@@ -690,7 +690,7 @@ def search_issues(
 
 
 @router.post("/tracker/issues/similar")
-async def similar_issues(
+def similar_issues(
     body: SimilarIssuesBody,
     _scopes: List[str] = _READ,
 ) -> Dict[str, Any]:
@@ -701,6 +701,12 @@ async def similar_issues(
     an issue key, exactly as ``search``, ``resolve``, and ``stats`` are
     protected above. Read-scoped and advisory by contract: nothing here sits
     in the create path, so a similarity failure can never block filing.
+
+    A synchronous route like the ranked-search and index-maintenance ones:
+    the probe plan is serial SQLite/CPU work (plus one model embedding for a
+    semantic probe), and Starlette runs this handler on its worker pool so a
+    multi-second probe cannot park the event loop and stall unrelated
+    requests.
     """
     try:
         return similar.find_similar_issues(
