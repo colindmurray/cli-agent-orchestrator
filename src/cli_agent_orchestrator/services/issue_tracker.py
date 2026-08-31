@@ -1759,6 +1759,14 @@ def _normalise_action_key(value: Optional[str]) -> Optional[str]:
     return key
 
 
+def _normalise_actor(value: Optional[str]) -> Optional[str]:
+    """Canonicalize the audit identity carried by an effect-bearing write."""
+    if value is None:
+        return None
+    actor = str(value).strip()
+    return actor or None
+
+
 def _current_matches_expected(current: Optional[str], expected: datetime) -> bool:
     if current is None:
         return False
@@ -2576,6 +2584,7 @@ def _link_action_fingerprint(
     from_key: str,
     to_key: str,
     kind: str,
+    actor: Optional[str],
     expected_from: Optional[datetime],
     expected_to: Optional[datetime],
 ) -> str:
@@ -2584,6 +2593,7 @@ def _link_action_fingerprint(
         "from_key": from_key,
         "to_key": to_key,
         "kind": kind,
+        "actor": actor,
         "expected_from_updated_at": _iso(expected_from) if expected_from else None,
         "expected_to_updated_at": _iso(expected_to) if expected_to else None,
     }
@@ -2621,6 +2631,60 @@ def _require_matching_link_receipt(
         )
 
 
+def _replay_link_action_receipt(
+    *, action_key: Optional[str], request_fingerprint: str
+) -> Optional[Dict[str, Any]]:
+    """Return a committed exact receipt without looking at the live graph."""
+    if action_key is None:
+        return None
+    try:
+        with SessionLocal() as db:
+            receipt = db.get(TrackerLinkReceiptModel, action_key)
+            if receipt is None:
+                return None
+            _require_matching_link_receipt(
+                receipt,
+                action_key=action_key,
+                request_fingerprint=request_fingerprint,
+            )
+            return _link_receipt(receipt)
+    except OperationalError as exc:
+        message = str(exc).lower()
+        if "locked" in message or "busy" in message:
+            # A failed receipt read establishes nothing. The retry path will
+            # try again before it classifies endpoint clocks or availability.
+            return None
+        raise
+
+
+def _replay_or_recheck_link_fences(
+    *,
+    action_key: Optional[str],
+    request_fingerprint: str,
+    endpoint_fences: Sequence[Tuple[str, str, Optional[datetime], Optional[str]]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[TrackerError], Dict[str, Optional[str]]]:
+    """Give an exact committed action priority over a post-write clock read.
+
+    The receipt probes deliberately bracket the endpoint re-read. A winning
+    publisher writes the receipt and both endpoint clocks atomically, so a
+    receipt committed before the observed stale clock is either seen by the
+    first probe or the second one. Fenced callers retry the bracket before a
+    final stale/busy response, covering the commit that lands in the gap.
+    """
+    replayed = _replay_link_action_receipt(
+        action_key=action_key, request_fingerprint=request_fingerprint
+    )
+    if replayed is not None:
+        return replayed, None, {}
+    stale, observed = _recheck_link_fences(endpoint_fences)
+    replayed = _replay_link_action_receipt(
+        action_key=action_key, request_fingerprint=request_fingerprint
+    )
+    if replayed is not None:
+        return replayed, None, observed
+    return None, stale, observed
+
+
 def add_link(
     from_key: str,
     *,
@@ -2645,6 +2709,7 @@ def add_link(
     if from_key == to_key:
         raise TrackerError("invalid", "an issue cannot link to itself")
     action_key = _normalise_action_key(action_key)
+    actor = _normalise_actor(actor)
     expected_from_moment = (
         _parse_timestamp(expected_from_updated_at, field="expected_from_updated_at")
         if expected_from_updated_at is not None
@@ -2668,6 +2733,7 @@ def add_link(
         from_key=from_key,
         to_key=to_key,
         kind=kind,
+        actor=actor,
         expected_from=expected_from_moment,
         expected_to=expected_to_moment,
     )
@@ -2689,13 +2755,14 @@ def add_link(
                         return _link_receipt(receipt)
                 from_row = _require_issue(db, from_key)
                 to_row = _require_issue(db, to_key)
+                precheck_stale: Optional[TrackerError] = None
                 for (label, endpoint_key, expected, expected_text), endpoint_row in zip(
                     endpoint_fences, (from_row, to_row)
                 ):
                     if expected is None:
                         continue
                     if _stored_moment(endpoint_row.updated_at) != expected:
-                        raise TrackerError(
+                        precheck_stale = TrackerError(
                             "conflict",
                             f"{endpoint_key} has changed since {expected_text} "
                             f"(current updated_at {_iso(endpoint_row.updated_at)}); re-read and retry",
@@ -2704,6 +2771,26 @@ def add_link(
                                 "current_updated_at": _iso(endpoint_row.updated_at),
                             },
                         )
+                        break
+                if precheck_stale is not None:
+                    replayed = _replay_link_action_receipt(
+                        action_key=action_key, request_fingerprint=request_fingerprint
+                    )
+                    if replayed is not None:
+                        return replayed
+                    # A same-action winner can commit between the first
+                    # receipt probe and these endpoint reads. Retry the
+                    # receipt-first sequence before reporting this stale
+                    # observation to a fenced caller.
+                    if action_key is not None and attempt < 7:
+                        time.sleep(0.005 * (attempt + 1))
+                        continue
+                    replayed = _replay_link_action_receipt(
+                        action_key=action_key, request_fingerprint=request_fingerprint
+                    )
+                    if replayed is not None:
+                        return replayed
+                    raise precheck_stale
                 existing = (
                     db.query(TrackerLinkModel)
                     .filter(
@@ -2791,16 +2878,30 @@ def add_link(
                 db.commit()
                 return result
         except _LinkRaceLost:
-            stale, _observed = _recheck_link_fences(endpoint_fences)
+            replayed, stale, _observed = _replay_or_recheck_link_fences(
+                action_key=action_key,
+                request_fingerprint=request_fingerprint,
+                endpoint_fences=endpoint_fences,
+            )
+            if replayed is not None:
+                return replayed
             if stale is not None:
-                raise stale
+                if action_key is None or attempt == 7:
+                    raise stale
             time.sleep(0.005 * (attempt + 1))
         except OperationalError as exc:
             if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                 raise
-            stale, _observed = _recheck_link_fences(endpoint_fences)
+            replayed, stale, _observed = _replay_or_recheck_link_fences(
+                action_key=action_key,
+                request_fingerprint=request_fingerprint,
+                endpoint_fences=endpoint_fences,
+            )
+            if replayed is not None:
+                return replayed
             if stale is not None:
-                raise stale
+                if action_key is None or attempt == 7:
+                    raise stale
             time.sleep(0.005 * (attempt + 1))
         except IntegrityError as exc:
             if (
@@ -2811,8 +2912,19 @@ def add_link(
             # A concurrent same-shape/action publish committed after our
             # read. Re-enter through the receipt lookup; never infer success
             # merely from the relation existing.
+            replayed = _replay_link_action_receipt(
+                action_key=action_key, request_fingerprint=request_fingerprint
+            )
+            if replayed is not None:
+                return replayed
             time.sleep(0.005 * (attempt + 1))
-    stale, observed = _recheck_link_fences(endpoint_fences)
+    replayed, stale, observed = _replay_or_recheck_link_fences(
+        action_key=action_key,
+        request_fingerprint=request_fingerprint,
+        endpoint_fences=endpoint_fences,
+    )
+    if replayed is not None:
+        return replayed
     if stale is not None:
         raise stale
     raise _busy_link_error(observed)

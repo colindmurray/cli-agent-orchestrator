@@ -818,6 +818,78 @@ class TestTrackerWriteReceiptsAndAvailability:
             == 2
         )
 
+    def test_identical_fenced_link_loser_replays_receipt_after_write_race(
+        self, cao_system, monkeypatch
+    ):
+        import threading
+
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        request = {
+            "to_key": target["key"],
+            "kind": "relates",
+            "actor": "codex:publisher-a",
+            "expected_from_updated_at": source["updated_at"],
+            "expected_to_updated_at": target["updated_at"],
+            "action_key": "same-action-write-race",
+        }
+        at_loser_write, release_loser = threading.Event(), threading.Event()
+        real_bump = tracker._bump_link_endpoints
+        paused = False
+
+        def pause_loser_before_guarded_write(db, endpoint_rows, *, now):
+            nonlocal paused
+            if not paused:
+                paused = True
+                at_loser_write.set()
+                assert release_loser.wait(timeout=5)
+            return real_bump(db, endpoint_rows, now=now)
+
+        monkeypatch.setattr(tracker, "_bump_link_endpoints", pause_loser_before_guarded_write)
+        loser_outcomes = []
+
+        def publish_loser():
+            try:
+                loser_outcomes.append(tracker.add_link(source["key"], **request))
+            except Exception as exc:  # pragma: no cover - preserves thread failure for assertion
+                loser_outcomes.append(exc)
+
+        loser = threading.Thread(target=publish_loser)
+        loser.start()
+        assert at_loser_write.wait(timeout=5)
+        winner = tracker.add_link(source["key"], **request)
+        release_loser.set()
+        loser.join(timeout=10)
+
+        assert not loser.is_alive()
+        assert loser_outcomes == [{**winner, "replayed": True}]
+
+    def test_action_key_replay_normalizes_actor_but_refuses_a_different_actor(self, cao_system):
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        request = {
+            "to_key": target["key"],
+            "kind": "relates",
+            "actor": " codex:publisher-a ",
+            "expected_from_updated_at": source["updated_at"],
+            "expected_to_updated_at": target["updated_at"],
+            "action_key": "actor-is-effect-bearing",
+        }
+        committed = tracker.add_link(source["key"], **request)
+
+        replayed = tracker.add_link(source["key"], **{**request, "actor": "codex:publisher-a"})
+        assert replayed == {**committed, "replayed": True}
+        with pytest.raises(TrackerError) as exc:
+            tracker.add_link(source["key"], **{**request, "actor": "codex:publisher-b"})
+        assert exc.value.code == "conflict"
+        assert "different request" in exc.value.message
+        assert {
+            event["actor"]
+            for key in (source["key"], target["key"])
+            for event in tracker.get_issue(key)["events"]
+            if event["kind"] == "link"
+        } == {"codex:publisher-a"}
+
     @pytest.mark.parametrize("removal", ["link", "endpoint", "project"])
     def test_fenced_link_receipt_replays_after_its_live_graph_is_removed(self, cao_system, removal):
         source = tracker.create_issue(project_id="cao-system", title="source")

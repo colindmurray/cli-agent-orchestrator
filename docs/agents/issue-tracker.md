@@ -71,8 +71,10 @@ endpoint clocks, and effect ids, even if an ordinary unlink or issue/project
 deletion has since removed the live graph rows. The receipt is retained for
 the tracker audit lifetime as append-only state rather than a child of the
 relation, and validates the complete
-fenced request identity rather than adopting a same-shaped edge from another
-publisher. A stale supplied clock is a typed conflict and writes no
+fenced request identity — normalized endpoints, relation kind, endpoint
+clocks, and actor — rather than adopting a same-shaped edge from another
+publisher. Reusing an action key with a different actor is a typed conflict.
+A stale supplied clock is a typed conflict and writes no
 partial comment, relation, audit event, or status update. A transient SQLite
 lock is retried with the same clocks; only a reread showing a changed supplied
 clock yields conflict. Exhausted unchanged locks return retryable `busy`
