@@ -67,8 +67,12 @@ The comment response carries its `id`, new parent `updated_at`, and audit
 audit `effect_ids`; a status/close response carries its committed `updated_at`
 and status `effect_id`. Fenced link creation requires a stable caller-minted
 `action_key`: reusing it after a lost response returns the original link id,
-endpoint clocks, and effect ids, rather than adopting a same-shaped edge from
-another publisher. A stale supplied clock is a typed conflict and writes no
+endpoint clocks, and effect ids, even if an ordinary unlink or issue/project
+deletion has since removed the live graph rows. The receipt is retained for
+the tracker audit lifetime as append-only state rather than a child of the
+relation, and validates the complete
+fenced request identity rather than adopting a same-shaped edge from another
+publisher. A stale supplied clock is a typed conflict and writes no
 partial comment, relation, audit event, or status update. A transient SQLite
 lock is retried with the same clocks; only a reread showing a changed supplied
 clock yields conflict. Exhausted unchanged locks return retryable `busy`

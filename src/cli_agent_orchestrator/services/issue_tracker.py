@@ -46,6 +46,7 @@ from cli_agent_orchestrator.clients.database import (
     TrackerEventModel,
     TrackerIssueModel,
     TrackerLinkModel,
+    TrackerLinkReceiptModel,
     TrackerProjectModel,
     TrackerScopeModel,
 )
@@ -2570,34 +2571,54 @@ def _bump_link_endpoints(
             raise _LinkRaceLost()
 
 
-def _link_receipt(link: TrackerLinkModel) -> Dict[str, Any]:
-    """Return the exact response-loss receipt stored with a fenced link."""
-    if (
-        not link.action_key
-        or link.from_updated_at is None
-        or link.to_updated_at is None
-        or link.from_effect_id is None
-        or link.to_effect_id is None
-    ):
-        raise TrackerError(
-            "conflict",
-            f"link {link.id} has no complete receipt for action-key replay; re-read the graph",
-        )
+def _link_action_fingerprint(
+    *,
+    from_key: str,
+    to_key: str,
+    kind: str,
+    expected_from: Optional[datetime],
+    expected_to: Optional[datetime],
+) -> str:
+    """Name the exact fenced graph request independently of its live edge."""
+    payload = {
+        "from_key": from_key,
+        "to_key": to_key,
+        "kind": kind,
+        "expected_from_updated_at": _iso(expected_from) if expected_from else None,
+        "expected_to_updated_at": _iso(expected_to) if expected_to else None,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _link_receipt(receipt: TrackerLinkReceiptModel) -> Dict[str, Any]:
+    """Return the exact response-loss receipt, even after graph deletion."""
     return {
-        "id": int(link.id),
-        "from_key": link.from_key,
-        "to_key": link.to_key,
-        "kind": link.kind,
+        "id": int(receipt.link_id),
+        "from_key": receipt.from_key,
+        "to_key": receipt.to_key,
+        "kind": receipt.kind,
         # This is the original create response, not an adoption of a live
         # graph edge. The extra bit is harmless to old callers and lets a
         # caller record that it recovered a response rather than re-published.
         "created": True,
         "replayed": True,
-        "action_key": link.action_key,
-        "from_updated_at": _iso(link.from_updated_at),
-        "to_updated_at": _iso(link.to_updated_at),
-        "effect_ids": [int(link.from_effect_id), int(link.to_effect_id)],
+        "action_key": receipt.action_key,
+        "from_updated_at": _iso(receipt.from_updated_at),
+        "to_updated_at": _iso(receipt.to_updated_at),
+        "effect_ids": [int(receipt.from_effect_id), int(receipt.to_effect_id)],
     }
+
+
+def _require_matching_link_receipt(
+    receipt: TrackerLinkReceiptModel, *, action_key: str, request_fingerprint: str
+) -> None:
+    if receipt.request_fingerprint != request_fingerprint:
+        raise TrackerError(
+            "conflict",
+            f"action_key {action_key!r} already names a different request",
+        )
 
 
 def add_link(
@@ -2643,28 +2664,31 @@ def add_link(
         ("from", from_key, expected_from_moment, expected_from_updated_at),
         ("to", to_key, expected_to_moment, expected_to_updated_at),
     )
+    request_fingerprint = _link_action_fingerprint(
+        from_key=from_key,
+        to_key=to_key,
+        kind=kind,
+        expected_from=expected_from_moment,
+        expected_to=expected_to_moment,
+    )
     for attempt in range(8):
         try:
             with SessionLocal() as db:
+                # This receipt lookup MUST precede live endpoint resolution:
+                # another ordinary graph action may already have removed an
+                # edge or whole issue after this publish committed but before
+                # its response reached the caller.
+                if action_key is not None:
+                    receipt = db.get(TrackerLinkReceiptModel, action_key)
+                    if receipt is not None:
+                        _require_matching_link_receipt(
+                            receipt,
+                            action_key=action_key,
+                            request_fingerprint=request_fingerprint,
+                        )
+                        return _link_receipt(receipt)
                 from_row = _require_issue(db, from_key)
                 to_row = _require_issue(db, to_key)
-                if action_key is not None:
-                    action_link = (
-                        db.query(TrackerLinkModel)
-                        .filter(TrackerLinkModel.action_key == action_key)
-                        .first()
-                    )
-                    if action_link is not None:
-                        if (
-                            action_link.from_key != from_key
-                            or action_link.to_key != to_key
-                            or action_link.kind != kind
-                        ):
-                            raise TrackerError(
-                                "conflict",
-                                f"action_key {action_key!r} already names a different link",
-                            )
-                        return _link_receipt(action_link)
                 for (label, endpoint_key, expected, expected_text), endpoint_row in zip(
                     endpoint_fences, (from_row, to_row)
                 ):
@@ -2733,6 +2757,24 @@ def add_link(
                 link.to_updated_at = now
                 link.from_effect_id = int(events[0].id)
                 link.to_effect_id = int(events[1].id)
+                receipt = (
+                    TrackerLinkReceiptModel(
+                        action_key=action_key,
+                        request_fingerprint=request_fingerprint,
+                        from_key=from_key,
+                        to_key=to_key,
+                        kind=kind,
+                        link_id=int(link.id),
+                        from_updated_at=now,
+                        to_updated_at=now,
+                        from_effect_id=int(events[0].id),
+                        to_effect_id=int(events[1].id),
+                    )
+                    if action_key is not None
+                    else None
+                )
+                if receipt is not None:
+                    db.add(receipt)
                 db.flush()
                 result = {
                     "id": int(link.id),
@@ -2761,7 +2803,10 @@ def add_link(
                 raise stale
             time.sleep(0.005 * (attempt + 1))
         except IntegrityError as exc:
-            if "tracker_issue_links" not in str(exc).lower():
+            if (
+                "tracker_issue_links" not in str(exc).lower()
+                and "tracker_link_receipts" not in str(exc).lower()
+            ):
                 raise
             # A concurrent same-shape/action publish committed after our
             # read. Re-enter through the receipt lookup; never infer success
@@ -2779,8 +2824,15 @@ def remove_link(
     actor: Optional[str] = None,
     expected_from_updated_at: Optional[str] = None,
     expected_to_updated_at: Optional[str] = None,
+    expected_owner_key: Optional[str] = None,
+    expected_owner_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Remove a relation as one mirrored, two-endpoint graph transition."""
+    if expected_owner_kind is not None and expected_owner_key is None:
+        raise TrackerError("invalid", "expected_owner_kind requires expected_owner_key")
+    owner_key = str(expected_owner_key).strip().lower() if expected_owner_key is not None else None
+    if owner_key == "":
+        raise TrackerError("invalid", "expected_owner_key must not be empty")
     expected_from_moment = (
         _parse_timestamp(expected_from_updated_at, field="expected_from_updated_at")
         if expected_from_updated_at is not None
@@ -2798,6 +2850,12 @@ def remove_link(
                 row = db.get(TrackerLinkModel, int(link_id))
                 if row is None:
                     raise TrackerError("not-found", f"no such link: {link_id}")
+                if owner_key is not None:
+                    owner = _require_issue(db, owner_key)
+                    if expected_owner_kind is not None and owner.kind != expected_owner_kind:
+                        raise TrackerError("not-found", f"no {expected_owner_kind}: {owner_key}")
+                    if owner_key not in (row.from_key, row.to_key):
+                        raise TrackerError("not-found", f"no link {link_id} on {owner_key}")
                 from_row = _require_issue(db, row.from_key)
                 to_row = _require_issue(db, row.to_key)
                 endpoint_fences = (
@@ -2819,6 +2877,19 @@ def remove_link(
                         )
                 now = _utcnow()
                 _bump_link_endpoints(db, ((row.from_key, from_row), (row.to_key, to_row)), now=now)
+                deleted = (
+                    db.query(TrackerLinkModel)
+                    .filter(
+                        TrackerLinkModel.id == int(link_id),
+                        TrackerLinkModel.from_key == row.from_key,
+                        TrackerLinkModel.to_key == row.to_key,
+                        TrackerLinkModel.kind == row.kind,
+                    )
+                    .delete(synchronize_session=False)
+                )
+                if deleted != 1:
+                    db.rollback()
+                    raise _LinkRaceLost()
                 events = [
                     TrackerEventModel(
                         issue_key=row.from_key,
@@ -2838,7 +2909,6 @@ def remove_link(
                     ),
                 ]
                 db.add_all(events)
-                db.delete(row)
                 db.flush()
                 result = {
                     "id": int(link_id),

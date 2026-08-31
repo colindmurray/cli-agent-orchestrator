@@ -818,6 +818,53 @@ class TestTrackerWriteReceiptsAndAvailability:
             == 2
         )
 
+    @pytest.mark.parametrize("removal", ["link", "endpoint", "project"])
+    def test_fenced_link_receipt_replays_after_its_live_graph_is_removed(self, cao_system, removal):
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        request = {
+            "to_key": target["key"],
+            "kind": "relates",
+            "expected_from_updated_at": source["updated_at"],
+            "expected_to_updated_at": target["updated_at"],
+            "action_key": f"deleted-graph-replay-{removal}",
+        }
+        committed = tracker.add_link(source["key"], **request)
+
+        if removal == "link":
+            tracker.remove_link(committed["id"])
+        elif removal == "endpoint":
+            tracker.delete_issue(target["key"])
+        else:
+            tracker.delete_project("cao-system", force=True)
+
+        replayed = tracker.add_link(source["key"], **request)
+        assert replayed == {**committed, "replayed": True}
+
+    def test_action_key_replay_refuses_a_different_fenced_request_identity(self, cao_system):
+        source = tracker.create_issue(project_id="cao-system", title="source")
+        target = tracker.create_issue(project_id="cao-system", title="target")
+        request = {
+            "to_key": target["key"],
+            "kind": "relates",
+            "expected_from_updated_at": source["updated_at"],
+            "expected_to_updated_at": target["updated_at"],
+            "action_key": "exact-request-identity",
+        }
+        tracker.add_link(source["key"], **request)
+
+        with pytest.raises(TrackerError) as exc:
+            tracker.add_link(
+                source["key"],
+                to_key=target["key"],
+                kind="relates",
+                expected_from_updated_at=tracker.get_issue(source["key"])["updated_at"],
+                expected_to_updated_at=tracker.get_issue(target["key"])["updated_at"],
+                action_key="exact-request-identity",
+            )
+        assert exc.value.code == "conflict"
+        assert "different request" in exc.value.message
+
     def test_fenced_link_requires_an_action_key_for_loss_safe_replay(self, cao_system):
         source = tracker.create_issue(project_id="cao-system", title="source")
         target = tracker.create_issue(project_id="cao-system", title="target")

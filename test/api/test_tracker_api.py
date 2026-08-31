@@ -12,7 +12,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from cli_agent_orchestrator.clients.database import Base, TerminalModel
+from cli_agent_orchestrator.clients import database as database_client
+from cli_agent_orchestrator.clients.database import Base, TerminalModel, TrackerLinkModel
 from cli_agent_orchestrator.services import issue_tracker as tracker
 from cli_agent_orchestrator.services import project_dashboard
 
@@ -669,6 +670,21 @@ class TestCommentsAndLinksRoutes:
         assert len(removed.json()["effect_ids"]) == 2
         assert client.get(f"/tracker/issues/{b['key']}").json()["links"] == []
 
+    def test_issue_link_delete_refuses_a_url_issue_that_does_not_own_the_link(
+        self, client, project
+    ):
+        source, target, stranger = _issue(client), _issue(client), _issue(client)
+        created = client.post(
+            f"/tracker/issues/{source['key']}/links",
+            json={"to_key": target["key"], "kind": "blocks"},
+        )
+        assert created.status_code == 201
+
+        refused = client.delete(f"/tracker/issues/{stranger['key']}/links/{created.json()['id']}")
+
+        assert refused.status_code == 404
+        assert client.get(f"/tracker/issues/{source['key']}").json()["links"]
+
     def test_link_forwards_both_endpoint_clocks_and_returns_both_new_clocks(self, client, project):
         a, b = _issue(client, title="a"), _issue(client, title="b")
         created = client.post(
@@ -1171,6 +1187,44 @@ class TestFeatureParity:
         )
         assert stale.status_code == 409
         assert stale.json()["detail"]["current_updated_at"] == ok.json()["updated_at"]
+
+    def test_feature_link_delete_refuses_a_reused_row_id_after_its_precheck(
+        self, client, project, monkeypatch
+    ):
+        feature = client.post(
+            "/tracker/features", json={"project_id": "cao-system", "title": "wish"}
+        ).json()
+        target, foreign_from, foreign_to = _issue(client), _issue(client), _issue(client)
+        created = client.post(
+            f"/tracker/features/{feature['key']}/links",
+            json={"to_key": target["key"], "kind": "relates"},
+        )
+        assert created.status_code == 201
+        link_id = created.json()["id"]
+        real_remove_link = tracker.remove_link
+        # The old feature route checked ownership in a separate session before
+        # calling the service. Simulate a cooperative remover/recreator in
+        # that gap; SQLite reuses the highest deleted integer primary key.
+        monkeypatch.setattr(database_client, "SessionLocal", tracker.SessionLocal)
+
+        def replace_then_remove(reused_link_id, **kwargs):
+            with tracker.SessionLocal() as db:
+                db.query(TrackerLinkModel).filter(TrackerLinkModel.id == reused_link_id).delete()
+                replacement = TrackerLinkModel(
+                    from_key=foreign_from["key"], to_key=foreign_to["key"], kind="relates"
+                )
+                db.add(replacement)
+                db.flush()
+                assert replacement.id == reused_link_id
+                db.commit()
+            return real_remove_link(reused_link_id, **kwargs)
+
+        monkeypatch.setattr(tracker, "remove_link", replace_then_remove)
+        refused = client.delete(f"/tracker/features/{feature['key']}/links/{link_id}")
+
+        assert refused.status_code == 404
+        foreign = client.get(f"/tracker/issues/{foreign_from['key']}").json()
+        assert [link["to_key"] for link in foreign["links"]] == [foreign_to["key"]]
 
     def test_the_features_list_accepts_unlabeled(self, client, project):
         client.post("/tracker/features", json={"project_id": "cao-system", "title": "bare"})

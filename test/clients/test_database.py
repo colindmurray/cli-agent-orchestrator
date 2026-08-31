@@ -1159,6 +1159,27 @@ class TestProjectAliasMigration:
 class TestTrackerLinkReceiptMigration:
     """Durable action receipts upgrade an existing tracker-links table."""
 
+    def test_receipt_table_is_independent_of_live_tracker_entities(self, tmp_path):
+        engine = create_engine(f"sqlite:///{tmp_path / 'tracker-receipts.db'}")
+        Base.metadata.create_all(bind=engine)
+        with engine.connect() as conn:
+            columns = {
+                row[1]: row
+                for row in conn.exec_driver_sql("PRAGMA table_info(tracker_link_receipts)")
+            }
+            foreign_keys = list(
+                conn.exec_driver_sql("PRAGMA foreign_key_list(tracker_link_receipts)")
+            )
+        assert {
+            "action_key",
+            "request_fingerprint",
+            "link_id",
+            "from_effect_id",
+            "to_effect_id",
+        } <= set(columns)
+        assert columns["action_key"][5] == 1
+        assert foreign_keys == []
+
     def test_adds_receipt_columns_and_unique_action_key_index_idempotently(self, tmp_path):
         from cli_agent_orchestrator.clients import database as db_mod
 

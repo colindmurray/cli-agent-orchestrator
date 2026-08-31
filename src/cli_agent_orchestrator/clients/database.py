@@ -517,6 +517,31 @@ class TrackerLinkModel(Base):
     )
 
 
+class TrackerLinkReceiptModel(Base):
+    """An append-only exact receipt for one caller-minted link action key.
+
+    This deliberately has no foreign key to the live relationship or either
+    endpoint: a response may be lost just before an ordinary unlink or issue
+    deletion removes those rows. The action key remains a durable audit
+    receipt, so retry can truthfully return the effect that DID commit instead
+    of treating a later graph shape as proof of the original request.
+    """
+
+    __tablename__ = "tracker_link_receipts"
+
+    action_key = Column(String, primary_key=True)
+    request_fingerprint = Column(String, nullable=False)
+    from_key = Column(String, nullable=False)
+    to_key = Column(String, nullable=False)
+    kind = Column(String, nullable=False)
+    link_id = Column(Integer, nullable=False)
+    from_updated_at = Column(DateTime(timezone=True), nullable=False)
+    to_updated_at = Column(DateTime(timezone=True), nullable=False)
+    from_effect_id = Column(Integer, nullable=False)
+    to_effect_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
 class SessionEnvModel(Base):
     """SQLAlchemy model for persisted per-session forwarded env vars (issue #248).
 
@@ -2338,6 +2363,7 @@ _TRACKER_ORM_TABLE_NAMES = frozenset(
         TrackerCommentModel.__tablename__,
         TrackerEventModel.__tablename__,
         TrackerLinkModel.__tablename__,
+        TrackerLinkReceiptModel.__tablename__,
     }
 )
 

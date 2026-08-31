@@ -1036,6 +1036,7 @@ async def remove_link(
             actor=actor,
             expected_from_updated_at=expected_from_updated_at,
             expected_to_updated_at=expected_to_updated_at,
+            expected_owner_key=issue_key,
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
@@ -1377,24 +1378,13 @@ async def remove_feature_link(
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
-        existing = tracker.get_issue(feature_key)
-        _assert_feature(existing)
-        # Verify link belongs to this feature (URL key must match link's from_key/to_key)
-        from cli_agent_orchestrator.clients.database import SessionLocal, TrackerLinkModel
-
-        with SessionLocal() as db:
-            link = db.get(TrackerLinkModel, int(link_id))
-            if link is None or (
-                link.from_key != feature_key.lower() and link.to_key != feature_key.lower()
-            ):
-                raise tracker.TrackerError(
-                    "not-found", f"no link {link_id} on feature {feature_key}"
-                )
         return tracker.remove_link(
             link_id,
             actor=actor,
             expected_from_updated_at=expected_from_updated_at,
             expected_to_updated_at=expected_to_updated_at,
+            expected_owner_key=feature_key,
+            expected_owner_kind="feature",
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
