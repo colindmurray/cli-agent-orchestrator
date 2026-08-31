@@ -110,6 +110,13 @@ function similarResponse(overrides?: Partial<SimilarIssuesResponse>): SimilarIss
         issue: OPEN_CANDIDATE,
         rank_score: 0.031,
         contributing_lanes: [{ lane: 'issue-bm25', rank: 1, raw_score: 5.2 }],
+        probe_contributions: [{
+          label: 'failing_command',
+          query: 'conduct deploy --dry-run',
+          weight: 1,
+          original_rank: 1,
+          original_score: 0.12,
+        }],
         matched_fields: ['title'],
         snippets: { title: '…event-mirror lock contention on reconnect…' },
         winning_comment: null,
@@ -122,6 +129,13 @@ function similarResponse(overrides?: Partial<SimilarIssuesResponse>): SimilarIss
         issue: TERMINAL_CANDIDATE,
         rank_score: 0.017,
         contributing_lanes: [{ lane: 'issue-bm25', rank: 2, raw_score: 3.4 }],
+        probe_contributions: [{
+          label: 'actual_outcome',
+          query: 'the dashboard stays disconnected',
+          weight: 0.5,
+          original_rank: 2,
+          original_score: 0.08,
+        }],
         matched_fields: ['title', 'resolution'],
         snippets: { resolution: '…fixed in the event-mirror retry loop…' },
         winning_comment: null,
@@ -621,5 +635,63 @@ describe('ProjectsPanel pre-filing similar candidates (M2.5)', () => {
 
     expect(screen.getByText('No similar issues found in this project.')).toBeInTheDocument()
     expect(screen.queryByTestId('similar-unavailable')).not.toBeInTheDocument()
+  })
+
+  it('renders probe-level audit and suppresses definitive empty text when coverage is inconclusive', async () => {
+    respondImpl = (url, opts) => {
+      if (url === '/tracker/issues/similar') {
+        return json(similarResponse({
+          total: 0,
+          candidates: [],
+          duplicate_expansions: [],
+          mode_requested: 'hybrid',
+          mode_effective: 'lexical',
+          degradation: {
+            requested_mode: 'hybrid',
+            effective_mode: 'lexical',
+            reasons: ['semantic unavailable'],
+            lanes: {},
+          },
+          coverage: {
+            status: 'inconclusive',
+            complete: false,
+            inconclusive: true,
+            partial: false,
+            probes_requested: 1,
+            probes_completed: 1,
+            probes_failed: 0,
+            candidate_keys_seen: 0,
+          },
+          diagnostics: {
+            similarity_duplicate_conflicts: [{
+              code: 'multiple-native-duplicate-targets',
+              message: 'native duplicate source has multiple canonical targets',
+              duplicate_key: 'cond-0900',
+              canonical_keys: ['cond-0901', 'cond-0902'],
+              hit_canonical_keys: [],
+            }],
+          },
+        }))
+      }
+      return defaultRespond(url, opts)
+    }
+
+    await openBugModal()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'offline retrieval' } })
+    await settle()
+
+    expect(screen.getByTestId('similar-degraded')).toHaveTextContent('No candidates is inconclusive')
+    expect(screen.getByTestId('similar-degraded')).toHaveTextContent('Filing is unaffected')
+    expect(screen.getByTestId('similar-duplicate-conflict')).toHaveTextContent('cond-0900')
+    expect(screen.getByTestId('similar-duplicate-conflict')).toHaveTextContent('no canonical was asserted')
+    expect(screen.queryByText('No similar issues found in this project.')).not.toBeInTheDocument()
+  })
+
+  it('renders which draft probe contributed a candidate', async () => {
+    await openBugModal()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'dashboard hangs on reconnect' } })
+    await settle()
+    expect(screen.getAllByTestId('similar-probe-contributions')[0]).toHaveTextContent('probe failing_command')
+    expect(screen.getAllByTestId('similar-probe-contributions')[0]).toHaveTextContent('conduct deploy --dry-run')
   })
 })

@@ -1159,6 +1159,7 @@ export interface SimilarIssuesRequest {
   project_ids?: string[]
   all_projects?: boolean
   limit?: number
+  mode?: 'lexical' | 'semantic' | 'hybrid'
 }
 
 /** A confirmed duplicate of a returned hit, expanded one level beside it. */
@@ -1167,15 +1168,50 @@ export interface SimilarDuplicateExpansion {
   issue: TrackerIssue
 }
 
+/** One bounded draft probe that contributed a candidate to similarity RRF. */
+export interface SimilarProbeContribution {
+  label: string
+  query: string
+  weight: number
+  original_rank: number
+  original_score: number | null
+}
+
+/** A malformed native duplicate source whose canonical target is ambiguous. */
+export interface SimilarDuplicateConflict {
+  code: 'multiple-native-duplicate-targets' | string
+  message: string
+  duplicate_key: string
+  canonical_keys: string[]
+  hit_canonical_keys: string[]
+}
+
 export interface SimilarIssuesResponse {
   query_source: { mode: 'issue_key' | 'draft'; issue_key: string | null; kind: string }
   query: string
   scope: RankedSearchResponse['scope']
   include_comments: boolean
+  mode_requested?: string
+  mode_effective?: string
+  degradation?: RankedSearchDegradation
+  coverage?: {
+    status: 'complete' | 'degraded' | 'inconclusive' | string
+    complete: boolean
+    inconclusive: boolean
+    probes_requested: number
+    probes_completed: number
+    probes_failed: number
+    partial?: boolean
+    candidate_keys_seen: number
+  }
+  diagnostics?: Record<string, unknown> & {
+    similarity_duplicate_conflicts?: SimilarDuplicateConflict[]
+  }
+  generations?: Record<string, unknown>
   limit: number
   total: number
   /** Candidates keep the full ranked-search explanation objects. */
-  candidates: RankedSearchExplanation[]
+  candidates: SimilarIssueExplanation[]
   duplicate_expansions: SimilarDuplicateExpansion[]
 }
 
@@ -1208,6 +1244,12 @@ export interface RankedSearchExplanation {
   exact_boosts: string[]
   neighborhood: Array<{ from_key: string; to_key: string; kind: string }>
   duplicate_chain: Array<{ canonical_key: string; canonical_title: string | null; resolved: boolean }>
+}
+
+/** Similarity adds the probe-level audit without changing ranked search. */
+export interface SimilarIssueExplanation extends RankedSearchExplanation {
+  /** Present on the repaired service; optional for older API responses. */
+  probe_contributions?: SimilarProbeContribution[]
 }
 
 export interface RankedSearchLaneAvailability {

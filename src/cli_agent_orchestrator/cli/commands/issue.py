@@ -676,8 +676,15 @@ def issue_search(
     help="search every tracker project; exactly one scope form is required",
 )
 @click.option("--limit", default=ranked.DEFAULT_LIMIT, show_default=True, type=int)
+@click.option(
+    "--mode",
+    type=click.Choice(("lexical", "semantic", "hybrid")),
+    default="hybrid",
+    show_default=True,
+    help="retrieval mode; semantic modes degrade visibly when unavailable",
+)
 @click.option("--json", "as_json", is_flag=True)
-def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, as_json):
+def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, mode, as_json):
     """Advisory similar-issue lookup: what already exists that looks like this?
 
     Exactly one of --issue-key or --draft-file, and exactly one of
@@ -701,6 +708,7 @@ def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, as_js
                 project_ids=tuple(project_ids),
                 all_projects=bool(all_projects),
                 limit=limit,
+                mode=mode,
             )
         )
     except TrackerError as exc:
@@ -709,7 +717,50 @@ def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, as_js
     def render(payload):
         source = payload["query_source"]
         origin = source["issue_key"] or "the draft"
-        click.echo(f"{payload['total']} similar issue(s) for {origin} · kind {source['kind']}")
+        degradation = payload.get("degradation") or {}
+        coverage = payload.get("coverage") or degradation.get("coverage") or {}
+        requested_mode = payload.get("mode_requested") or degradation.get(
+            "requested_mode", "unknown"
+        )
+        effective_mode = payload.get("mode_effective") or degradation.get(
+            "effective_mode", "unknown"
+        )
+        coverage_status = coverage.get("status", "unknown")
+        probe_summary = ""
+        if coverage.get("probes_requested") is not None:
+            probe_summary = (
+                f" ({coverage.get('probes_completed', 0)}/"
+                f"{coverage.get('probes_requested', 0)} probes; "
+                f"{coverage.get('probes_failed', 0)} failed)"
+            )
+        click.echo(
+            f"similarity for {origin} · kind {source['kind']} · "
+            f"mode {requested_mode}→{effective_mode} · "
+            f"coverage {coverage_status}{probe_summary}"
+        )
+        for reason in degradation.get("reasons", []):
+            click.echo(f"degraded: {reason}")
+        for failure in (payload.get("diagnostics") or {}).get("similarity_probe_failures", []):
+            click.echo(
+                f"probe failed: {failure.get('label', '-')} "
+                f"[{failure.get('code', 'unknown')}] {failure.get('message', '')}"
+            )
+        for conflict in (payload.get("diagnostics") or {}).get(
+            "similarity_duplicate_conflicts", []
+        ):
+            targets = ", ".join(str(key) for key in conflict.get("canonical_keys", []))
+            click.echo(
+                f"duplicate expansion conflict: {conflict.get('duplicate_key', '-')} "
+                f"[{conflict.get('code', 'unknown')}] native targets {targets}; "
+                "no canonical asserted"
+            )
+        if payload["total"] == 0 and coverage.get("inconclusive"):
+            click.echo(
+                f"no similar issue candidates returned for {origin}; "
+                "retrieval coverage is inconclusive"
+            )
+        else:
+            click.echo(f"{payload['total']} similar issue(s) for {origin}")
         for position, row in enumerate(payload["candidates"], start=1):
             issue = row["issue"] or {}
             severity = issue.get("severity") or "unset"
@@ -723,6 +774,12 @@ def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, as_js
             click.echo(
                 f"      score {row['rank_score']:.4f} · lanes {lanes or '-'} · matched {matched}"
             )
+            for contribution in row.get("probe_contributions", []):
+                click.echo(
+                    f"      probe {contribution['label']} · weight {contribution['weight']:.2f} "
+                    f"· rank {contribution['original_rank']} · "
+                    f"score {contribution.get('original_score', '-')}: {contribution['query']}"
+                )
             for field_name, snippet in sorted(row["snippets"].items()):
                 click.echo(f"      {field_name}: {snippet}")
         if payload["duplicate_expansions"]:
