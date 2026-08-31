@@ -957,8 +957,17 @@ async def delete_issue(issue_key: str, _scopes: List[str] = _WRITE) -> Dict[str,
         raise _http(exc) from exc
 
 
+# The comment and link writes below are deliberately sync ``def`` rather than
+# ``async def``. Each one reaches a compare-and-swap retry loop in the tracker
+# service that sleeps under SQLite lock contention, and a coroutine would run
+# that sleep on the event loop, freezing every concurrent request until the
+# store freed up. Declared sync, FastAPI runs the handler on its worker
+# threadpool and the loop keeps serving. Pinned by
+# test/api/test_tracker_route_liveness.py.
+
+
 @router.post("/tracker/issues/{issue_key}/comments", status_code=status.HTTP_201_CREATED)
-async def add_comment(
+def add_comment(
     issue_key: str,
     body: CommentBody,
     _scopes: List[str] = _WRITE,
@@ -976,7 +985,7 @@ async def add_comment(
 
 
 @router.patch("/tracker/issues/{issue_key}/comments/{comment_id}")
-async def set_comment_importance(
+def set_comment_importance(
     issue_key: str,
     comment_id: int,
     body: CommentImportanceBody,
@@ -995,7 +1004,7 @@ async def set_comment_importance(
 
 
 @router.delete("/tracker/issues/{issue_key}/comments/{comment_id}")
-async def delete_comment(
+def delete_comment(
     issue_key: str,
     comment_id: int,
     actor: Optional[str] = Query(None),
@@ -1008,7 +1017,7 @@ async def delete_comment(
 
 
 @router.post("/tracker/issues/{issue_key}/links", status_code=status.HTTP_201_CREATED)
-async def add_link(
+def add_link(
     issue_key: str,
     body: LinkBody,
     _scopes: List[str] = _WRITE,
@@ -1028,7 +1037,7 @@ async def add_link(
 
 
 @router.delete("/tracker/issues/{issue_key}/links/{link_id}")
-async def remove_link(
+def remove_link(
     issue_key: str,
     link_id: int,
     actor: Optional[str] = Query(None),
@@ -1298,7 +1307,7 @@ async def delete_feature(feature_key: str, _scopes: List[str] = _WRITE) -> Dict[
 
 
 @router.post("/tracker/features/{feature_key}/comments", status_code=201)
-async def add_feature_comment(
+def add_feature_comment(
     feature_key: str,
     body: CommentBody,
     _scopes: List[str] = _WRITE,
@@ -1318,7 +1327,7 @@ async def add_feature_comment(
 
 
 @router.patch("/tracker/features/{feature_key}/comments/{comment_id}")
-async def set_feature_comment_importance(
+def set_feature_comment_importance(
     feature_key: str,
     comment_id: int,
     body: CommentImportanceBody,
@@ -1338,7 +1347,7 @@ async def set_feature_comment_importance(
 
 
 @router.delete("/tracker/features/{feature_key}/comments/{comment_id}")
-async def delete_feature_comment(
+def delete_feature_comment(
     feature_key: str,
     comment_id: int,
     actor: Optional[str] = Query(None),
@@ -1353,7 +1362,7 @@ async def delete_feature_comment(
 
 
 @router.post("/tracker/features/{feature_key}/links", status_code=201)
-async def add_feature_link(
+def add_feature_link(
     feature_key: str,
     body: LinkBody,
     _scopes: List[str] = _WRITE,
@@ -1375,7 +1384,7 @@ async def add_feature_link(
 
 
 @router.delete("/tracker/features/{feature_key}/links/{link_id}")
-async def remove_feature_link(
+def remove_feature_link(
     feature_key: str,
     link_id: int,
     actor: Optional[str] = Query(None),
