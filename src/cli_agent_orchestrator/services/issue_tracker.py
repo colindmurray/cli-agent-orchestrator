@@ -26,6 +26,7 @@ must not merge their memory recall as a side effect.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -36,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.exc import OperationalError
 
 from cli_agent_orchestrator.clients.database import (
@@ -1272,6 +1273,236 @@ def get_issue(key: str) -> Dict[str, Any]:
             .all()
         ]
         return payload
+
+
+def snapshot_issues(*, project_id: str, keys: Sequence[str]) -> Dict[str, Any]:
+    """Return a deterministic issue/reference closure from one read instant."""
+    project_id = _validate_slug(project_id)
+    normalised_keys = [str(key or "").strip().lower() for key in keys]
+    if not normalised_keys:
+        raise TrackerError("invalid", "snapshot selection must contain at least one issue key")
+    invalid_keys = sorted({key for key in normalised_keys if not _KEY_RE.match(key)})
+    if invalid_keys:
+        raise TrackerError(
+            "invalid",
+            f"invalid issue keys in snapshot selection: {', '.join(invalid_keys)}",
+            details={"invalid_keys": invalid_keys},
+        )
+    duplicate_keys = sorted({key for key in normalised_keys if normalised_keys.count(key) > 1})
+    if duplicate_keys:
+        raise TrackerError(
+            "invalid",
+            f"duplicate issue keys in snapshot selection: {', '.join(duplicate_keys)}",
+            details={"duplicate_keys": duplicate_keys},
+        )
+    selected_keys = sorted(normalised_keys)
+    digest_input = "".join(f"{key}\n" for key in selected_keys).encode("utf-8")
+
+    with SessionLocal() as db:
+        # sqlite3's legacy transaction control does not start a read
+        # transaction for SELECT. SQLAlchemy's Session autobegin therefore is
+        # not enough: issue and comment reads could otherwise observe two WAL
+        # instants.
+        db.execute(text("BEGIN"))
+        issue_rows = (
+            db.query(TrackerIssueModel)
+            .filter(TrackerIssueModel.key.in_(selected_keys))
+            .order_by(TrackerIssueModel.key.asc())
+            .all()
+        )
+        rows_by_key = {row.key: row for row in issue_rows}
+        missing_selected = sorted(set(selected_keys) - set(rows_by_key))
+        if missing_selected:
+            raise TrackerError(
+                "not-found",
+                f"selected issue keys do not exist: {', '.join(missing_selected)}",
+                details={"missing_keys": missing_selected},
+            )
+        mismatches = [
+            {"key": row.key, "project_id": row.project_id}
+            for row in issue_rows
+            if row.project_id != project_id
+        ]
+        if mismatches:
+            raise TrackerError(
+                "conflict",
+                f"selected issue keys do not belong to project {project_id}",
+                details={"project_mismatches": mismatches},
+            )
+
+        comments_by_key: Dict[str, List[Dict[str, Any]]] = {}
+        links_by_id: Dict[int, Dict[str, Any]] = {}
+        hydrated: set[str] = set()
+        attempted: set[str] = set(selected_keys)
+        unresolved_sources: Dict[str, set[str]] = {}
+        issue_ref_pattern = re.compile(r"\b[a-z][a-z0-9-]{0,15}-\d{1,9}\b", re.IGNORECASE)
+
+        while set(rows_by_key) - hydrated:
+            wave = sorted(set(rows_by_key) - hydrated)
+            comments = (
+                db.query(TrackerCommentModel)
+                .filter(TrackerCommentModel.issue_key.in_(wave))
+                .order_by(
+                    TrackerCommentModel.issue_key.asc(),
+                    TrackerCommentModel.created_at.asc(),
+                    TrackerCommentModel.id.asc(),
+                )
+                .all()
+            )
+            for key in wave:
+                comments_by_key[key] = []
+            for comment in comments:
+                comments_by_key[comment.issue_key].append(
+                    {
+                        "id": comment.id,
+                        "author": comment.author,
+                        "body": comment.body,
+                        "important": bool(getattr(comment, "important", False)),
+                        "created_at": _iso(comment.created_at),
+                    }
+                )
+
+            links = (
+                db.query(TrackerLinkModel)
+                .filter((TrackerLinkModel.from_key.in_(wave)) | (TrackerLinkModel.to_key.in_(wave)))
+                .order_by(
+                    TrackerLinkModel.from_key.asc(),
+                    TrackerLinkModel.to_key.asc(),
+                    TrackerLinkModel.kind.asc(),
+                    TrackerLinkModel.id.asc(),
+                )
+                .all()
+            )
+            discovered: Dict[str, set[str]] = {}
+            for link in links:
+                links_by_id[link.id] = {
+                    "id": link.id,
+                    "kind": link.kind,
+                    "from_key": link.from_key,
+                    "to_key": link.to_key,
+                }
+                for endpoint in (link.from_key, link.to_key):
+                    if endpoint not in rows_by_key:
+                        discovered.setdefault(endpoint, set()).add("native-link")
+
+            for key in wave:
+                row = rows_by_key[key]
+                texts = [row.title or "", row.body or ""]
+                texts.extend(comment["body"] for comment in comments_by_key[key])
+                for match in issue_ref_pattern.finditer("\n".join(texts)):
+                    reference = match.group(0).lower()
+                    if reference not in rows_by_key:
+                        discovered.setdefault(reference, set()).add("text")
+
+            for key, sources in discovered.items():
+                if key in attempted and key not in rows_by_key:
+                    unresolved_sources.setdefault(key, set()).update(sources)
+            pending = sorted(set(discovered) - attempted)
+            attempted.update(pending)
+            if pending:
+                found = (
+                    db.query(TrackerIssueModel)
+                    .filter(TrackerIssueModel.key.in_(pending))
+                    .order_by(TrackerIssueModel.key.asc())
+                    .all()
+                )
+                rows_by_key.update((row.key, row) for row in found)
+                missing = set(pending) - {row.key for row in found}
+                for key in missing:
+                    unresolved_sources.setdefault(key, set()).update(discovered[key])
+            hydrated.update(wave)
+
+        part_of_parents: Dict[str, set[str]] = {}
+        for link in links_by_id.values():
+            if link["kind"] == "part-of":
+                part_of_parents.setdefault(link["from_key"], set()).add(link["to_key"])
+        root_keys_set: set[str] = set()
+        frontier = list(selected_keys)
+        while frontier:
+            child = frontier.pop()
+            for parent in part_of_parents.get(child, set()):
+                if (
+                    parent in rows_by_key
+                    and parent not in root_keys_set
+                    and parent not in selected_keys
+                ):
+                    root_keys_set.add(parent)
+                    frontier.append(parent)
+
+        root_keys = sorted(root_keys_set)
+        reference_keys = sorted(set(rows_by_key) - set(selected_keys) - root_keys_set)
+        roles = []
+        for key in sorted(rows_by_key):
+            role = (
+                "selected"
+                if key in selected_keys
+                else "root" if key in root_keys_set else "reference"
+            )
+            roles.append({"key": key, "role": role})
+
+        issues = []
+        for key in sorted(rows_by_key):
+            issue = _issue_row(rows_by_key[key])
+            issue["comments"] = comments_by_key[key]
+            issue["links"] = sorted(
+                (
+                    link
+                    for link in links_by_id.values()
+                    if link["from_key"] == key or link["to_key"] == key
+                ),
+                key=lambda link: (
+                    link["from_key"],
+                    link["to_key"],
+                    link["kind"],
+                    link["id"],
+                ),
+            )
+            issues.append(issue)
+
+        project_ids = sorted({row.project_id for row in rows_by_key.values()})
+        project_rows = (
+            db.query(TrackerProjectModel)
+            .filter(TrackerProjectModel.id.in_(project_ids))
+            .order_by(TrackerProjectModel.id.asc())
+            .all()
+        )
+        projects = [_project_row(row) for row in project_rows]
+        missing_projects = sorted(set(project_ids) - {row.id for row in project_rows})
+        unresolved_references: List[Dict[str, Any]] = [
+            {
+                "kind": "issue",
+                "key": key,
+                "reason": "not-found",
+                "sources": sorted(sources),
+            }
+            for key, sources in sorted(unresolved_sources.items())
+        ]
+        unresolved_references.extend(
+            {
+                "kind": "project",
+                "id": missing,
+                "reason": "not-found",
+                "sources": ["issue.project_id"],
+            }
+            for missing in missing_projects
+        )
+
+        return {
+            "schema": "cao-tracker-issue-snapshot-v1",
+            "project_id": project_id,
+            "selected_keys": selected_keys,
+            "selected_keys_digest": {
+                "algorithm": "sha256-sorted-newline-v1",
+                "value": hashlib.sha256(digest_input).hexdigest(),
+            },
+            "roles": roles,
+            "root_keys": root_keys,
+            "reference_keys": reference_keys,
+            "issues": issues,
+            "projects": projects,
+            "unresolved_references": unresolved_references,
+            "consistency": {"kind": "sqlite-read-transaction"},
+        }
 
 
 def list_issues(

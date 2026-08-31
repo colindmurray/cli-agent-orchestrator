@@ -11,9 +11,51 @@ Check if the server is running.
 ```json
 {
   "status": "ok",
-  "service": "cli-agent-orchestrator"
+  "service": "cli-agent-orchestrator",
+  "tracker_capabilities": ["atomic-issue-snapshot", "..."]
 }
 ```
+
+---
+
+## Issue tracker snapshots
+
+### POST /tracker/issues/snapshot
+
+Export a selected issue cohort and its current reference closure from one
+SQLite read transaction. The request body is strict: unknown fields are
+rejected.
+
+**Request:**
+
+```json
+{
+  "project_id": "cao-system",
+  "keys": ["cond-0002", "cond-0001"]
+}
+```
+
+The response uses schema `cao-tracker-issue-snapshot-v1`. `selected_keys` is
+sorted, and `selected_keys_digest` hashes each sorted key followed by a newline
+using `sha256-sorted-newline-v1`. The response contains:
+
+- every materialized issue shaped like `GET /tracker/issues/{issue_key}`,
+  except that issue events are omitted;
+- every comment and every native link touching any materialized issue;
+- transitive `part-of` roots;
+- the current native-link and title/body/comment reference closure;
+- relevant project rows and typed unresolved discovered references; and
+- `{"consistency":{"kind":"sqlite-read-transaction"}}`.
+
+The response is deterministic for unchanged tracker state and contains no
+capture timestamp or transaction identifier. This endpoint reads current
+tracker truth only; it neither reconstructs historical cohort membership nor
+mutates tracker records.
+
+Duplicate keys and malformed requests return 400, missing selected keys return
+404, and selected keys belonging to another project return 409. Clients can
+detect support through `atomic-issue-snapshot` in the health response's
+`tracker_capabilities` list.
 
 ---
 

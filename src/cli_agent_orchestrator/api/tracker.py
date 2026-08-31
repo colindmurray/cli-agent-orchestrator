@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 TRACKER_API_VERSION = 2
 TRACKER_CAPABILITIES = (
+    "atomic-issue-snapshot",
     "generic-item-kinds",
     "bug-diagnostics",
     "claims",
@@ -286,6 +287,11 @@ class SimilarIssuesBody(StrictBody):
     project_ids: Optional[List[str]] = None
     all_projects: bool = False
     limit: int = Field(ranked.DEFAULT_LIMIT, ge=ranked.MIN_LIMIT, le=ranked.MAX_LIMIT)
+
+
+class IssueSnapshotBody(StrictBody):
+    project_id: str
+    keys: List[str] = Field(min_length=1)
 
 
 # --------------------------------------------------------------------------
@@ -668,6 +674,23 @@ async def similar_issues(
                 limit=body.limit,
             )
         )
+    except tracker.TrackerError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/tracker/issues/snapshot")
+async def snapshot_issues(
+    body: IssueSnapshotBody,
+    _scopes: List[str] = _READ,
+) -> Dict[str, Any]:
+    """One deterministic tracker export from a single SQLite read instant.
+
+    This literal route is declared before ``/tracker/issues/{issue_key}`` so
+    ``snapshot`` cannot be interpreted as an issue key by a parameterised
+    route in this or a later API version.
+    """
+    try:
+        return tracker.snapshot_issues(project_id=body.project_id, keys=body.keys)
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 

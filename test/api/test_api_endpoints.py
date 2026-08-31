@@ -41,6 +41,7 @@ class TestHealthCheck:
         assert data["installation_id"] == "11111111-1111-4111-8111-111111111111"
         assert data["tracker_api_version"] == 2
         assert "issue-graph" in data["tracker_capabilities"]
+        assert "atomic-issue-snapshot" in data["tracker_capabilities"]
         components = data["components"]
         assert components["cao"] == "ok"
         assert components["herdr"] in ("ok", "unavailable")

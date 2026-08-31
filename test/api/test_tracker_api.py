@@ -634,6 +634,42 @@ class TestVocabularyAndExport:
         assert "## cond-0001 — [P2] event-mirror traceback" in response.text
 
 
+class TestIssueSnapshotRoute:
+    def test_literal_snapshot_route_precedes_issue_key_and_returns_the_service_contract(
+        self, client, project
+    ):
+        issue = _issue(client, title="selected")
+
+        response = client.post(
+            "/tracker/issues/snapshot",
+            json={"project_id": "cao-system", "keys": [issue["key"]]},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["selected_keys"] == [issue["key"]]
+        route_paths = [route.path for route in client.app.routes]
+        assert route_paths.index("/tracker/issues/snapshot") < route_paths.index(
+            "/tracker/issues/{issue_key}"
+        )
+
+    def test_snapshot_body_is_strict_and_service_refusals_keep_their_http_type(
+        self, client, project
+    ):
+        unknown = client.post(
+            "/tracker/issues/snapshot",
+            json={"project_id": "cao-system", "keys": ["cond-0001"], "key": "cond-0001"},
+        )
+        assert unknown.status_code == 422
+        assert "key" in unknown.text
+
+        missing = client.post(
+            "/tracker/issues/snapshot",
+            json={"project_id": "cao-system", "keys": ["cond-9999"]},
+        )
+        assert missing.status_code == 404
+        assert missing.json()["detail"]["missing_keys"] == ["cond-9999"]
+
+
 class TestUnknownFieldsAreRefused:
     """An unknown field is a 422 naming it, never a silently ignored 200.
 
