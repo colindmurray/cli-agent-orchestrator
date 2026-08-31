@@ -662,6 +662,15 @@ describe('ProjectsPanel pre-filing similar candidates (M2.5)', () => {
             probes_failed: 0,
             candidate_keys_seen: 0,
           },
+          diagnostics: {
+            similarity_duplicate_conflicts: [{
+              code: 'multiple-native-duplicate-targets',
+              message: 'native duplicate source has multiple canonical targets',
+              duplicate_key: 'cond-0900',
+              canonical_keys: ['cond-0901', 'cond-0902'],
+              hit_canonical_keys: [],
+            }],
+          },
         }))
       }
       return defaultRespond(url, opts)
@@ -673,6 +682,8 @@ describe('ProjectsPanel pre-filing similar candidates (M2.5)', () => {
 
     expect(screen.getByTestId('similar-degraded')).toHaveTextContent('No candidates is inconclusive')
     expect(screen.getByTestId('similar-degraded')).toHaveTextContent('Filing is unaffected')
+    expect(screen.getByTestId('similar-duplicate-conflict')).toHaveTextContent('cond-0900')
+    expect(screen.getByTestId('similar-duplicate-conflict')).toHaveTextContent('no canonical was asserted')
     expect(screen.queryByText('No similar issues found in this project.')).not.toBeInTheDocument()
   })
 

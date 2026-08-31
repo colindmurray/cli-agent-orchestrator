@@ -1177,6 +1177,15 @@ export interface SimilarProbeContribution {
   original_score: number | null
 }
 
+/** A malformed native duplicate source whose canonical target is ambiguous. */
+export interface SimilarDuplicateConflict {
+  code: 'multiple-native-duplicate-targets' | string
+  message: string
+  duplicate_key: string
+  canonical_keys: string[]
+  hit_canonical_keys: string[]
+}
+
 export interface SimilarIssuesResponse {
   query_source: { mode: 'issue_key' | 'draft'; issue_key: string | null; kind: string }
   query: string
@@ -1195,7 +1204,9 @@ export interface SimilarIssuesResponse {
     partial?: boolean
     candidate_keys_seen: number
   }
-  diagnostics?: Record<string, unknown>
+  diagnostics?: Record<string, unknown> & {
+    similarity_duplicate_conflicts?: SimilarDuplicateConflict[]
+  }
   generations?: Record<string, unknown>
   limit: number
   total: number

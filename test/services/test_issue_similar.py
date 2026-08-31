@@ -453,6 +453,68 @@ class TestDuplicateChainExpansion:
         assert (first["key"], second["key"]) in pairs
         assert len(pairs) == len(set(pairs))
 
+    def test_multiple_native_targets_are_conflict_inconclusive_when_both_hit(self):
+        tracker.create_project(name="CAO System", project_id="cao-system", issue_prefix="cond")
+        first = tracker.create_issue(
+            project_id="cao-system", key="cond-0022", title="shared canonical alpha", force=True
+        )
+        second = tracker.create_issue(
+            project_id="cao-system", key="cond-0023", title="shared canonical beta", force=True
+        )
+        duplicate = tracker.create_issue(
+            project_id="cao-system", key="cond-0024", title="unrelated duplicate source", force=True
+        )
+        tracker.add_link(duplicate["key"], to_key=first["key"], kind="duplicates")
+        tracker.add_link(duplicate["key"], to_key=second["key"], kind="duplicates")
+
+        payload = similar.find_similar_issues(
+            similar.SimilarIssuesRequest(
+                draft={"title": "shared canonical"}, project_ids=("cao-system",)
+            )
+        )
+
+        assert {first["key"], second["key"]} <= set(_keys(payload))
+        assert not payload["duplicate_expansions"]
+        assert payload["diagnostics"]["similarity_duplicate_conflicts"] == [
+            {
+                "code": "multiple-native-duplicate-targets",
+                "message": "native duplicate source has multiple canonical targets",
+                "duplicate_key": duplicate["key"],
+                "canonical_keys": [first["key"], second["key"]],
+                "hit_canonical_keys": [first["key"], second["key"]],
+            }
+        ]
+
+    def test_multiple_native_targets_are_conflict_inconclusive_when_one_hit(self):
+        tracker.create_project(name="CAO System", project_id="cao-system", issue_prefix="cond")
+        first = tracker.create_issue(
+            project_id="cao-system", key="cond-0025", title="only alpha canonical", force=True
+        )
+        second = tracker.create_issue(
+            project_id="cao-system", key="cond-0026", title="different beta record", force=True
+        )
+        duplicate = tracker.create_issue(
+            project_id="cao-system", key="cond-0027", title="unrelated duplicate source", force=True
+        )
+        tracker.add_link(duplicate["key"], to_key=first["key"], kind="duplicates")
+        tracker.add_link(duplicate["key"], to_key=second["key"], kind="duplicates")
+
+        payload = similar.find_similar_issues(
+            similar.SimilarIssuesRequest(draft={"title": "only alpha"}, project_ids=("cao-system",))
+        )
+
+        assert _keys(payload) == [first["key"]]
+        assert not payload["duplicate_expansions"]
+        assert payload["diagnostics"]["similarity_duplicate_conflicts"] == [
+            {
+                "code": "multiple-native-duplicate-targets",
+                "message": "native duplicate source has multiple canonical targets",
+                "duplicate_key": duplicate["key"],
+                "canonical_keys": [first["key"], second["key"]],
+                "hit_canonical_keys": [first["key"]],
+            }
+        ]
+
 
 class TestSimilarityProbeCoverage:
     def test_one_token_title_drift_is_recalled_with_bounded_probes(self):

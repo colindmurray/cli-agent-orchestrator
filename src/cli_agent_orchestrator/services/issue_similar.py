@@ -327,17 +327,22 @@ def _merge_similarity_results(
 
 
 def _expand_duplicate_chains(
-    hit_keys: List[str], *, exclude_key: Optional[str]
+    hit_keys: List[str],
+    *,
+    exclude_key: Optional[str],
+    conflicts: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Confirmed duplicates of the returned hits, expanded one level.
 
     An issue whose ``duplicate_of`` names a hit is a confirmed duplicate of
     that hit regardless of its own status. A native ``duplicates`` link from
     the duplicate source to a hit is authoritative over a conflicting legacy
-    field, so one issue never appears with two asserted canonicals. Expansion
-    is exactly one level — chains deeper than that belong to the issue graph,
-    not to this advisory answer. The source issue never appears in its own
-    expansion.
+    field, so one issue never appears with two asserted canonicals. Multiple
+    distinct native targets are malformed rather than a deterministic choice:
+    no expansion is asserted, and callers may receive a typed conflict fact
+    through ``conflicts``. Expansion is exactly one level — chains deeper than
+    that belong to the issue graph, not to this advisory answer. The source
+    issue never appears in its own expansion.
     """
     from cli_agent_orchestrator.services.issue_tracker import _issue_row
 
@@ -348,7 +353,7 @@ def _expand_duplicate_chains(
         field_rows = (
             db.query(TrackerIssueModel).filter(TrackerIssueModel.duplicate_of.in_(hit_keys)).all()
         )
-        link_rows = (
+        hit_link_rows = (
             db.query(TrackerLinkModel)
             .filter(
                 TrackerLinkModel.kind == "duplicates",
@@ -357,56 +362,92 @@ def _expand_duplicate_chains(
             .all()
         )
         duplicate_keys = {str(row.key) for row in field_rows}
-        duplicate_keys.update(str(row.from_key) for row in link_rows)
+        duplicate_keys.update(str(row.from_key) for row in hit_link_rows)
         issues = (
             db.query(TrackerIssueModel)
             .filter(TrackerIssueModel.key.in_(sorted(duplicate_keys)))
             .all()
         )
         issue_by_key = {str(row.key).casefold(): row for row in issues}
+        # The first query finds duplicate sources related to a returned hit;
+        # the second observes every native target for those sources.  Limiting
+        # the latter to hit targets would hide a conflicting second target in
+        # a one-hit query and make the selected canonical query-dependent.
+        link_rows = (
+            db.query(TrackerLinkModel)
+            .filter(
+                TrackerLinkModel.kind == "duplicates",
+                TrackerLinkModel.from_key.in_(sorted(duplicate_keys)),
+            )
+            .all()
+        )
 
     # Native directional links are the current relation vocabulary.  The
     # legacy ``duplicate_of`` field remains readable for old rows, but when a
     # duplicate carries both representations the native target is
     # authoritative; emitting both targets would assert two canonicals for
-    # one issue.  Multiple native targets are themselves malformed, so choose
-    # one deterministic target rather than manufacturing two claims.
+    # one issue. Multiple native targets are malformed, so report a conflict
+    # and omit the expansion rather than asserting an arbitrary canonical.
     native_targets: Dict[str, List[str]] = {}
+    native_source_names: Dict[str, List[str]] = {}
     for link in link_rows:
         duplicate_key = str(link.from_key)
-        canonical = canonical_by_folded.get(str(link.to_key).casefold())
-        if canonical and duplicate_key.casefold() != canonical.casefold():
-            native_targets.setdefault(duplicate_key.casefold(), []).append(canonical)
+        target_key = str(link.to_key)
+        if duplicate_key.casefold() != target_key.casefold():
+            native_targets.setdefault(duplicate_key.casefold(), []).append(target_key)
+            native_source_names.setdefault(duplicate_key.casefold(), []).append(duplicate_key)
 
     pairs: Dict[Tuple[str, str], TrackerIssueModel] = {}
     for field_row in field_rows:
         duplicate_key = str(field_row.key)
-        canonical = canonical_by_folded.get(str(field_row.duplicate_of or "").casefold())
-        if not canonical or duplicate_key.casefold() == canonical.casefold():
+        field_canonical = canonical_by_folded.get(str(field_row.duplicate_of or "").casefold())
+        if not field_canonical or duplicate_key.casefold() == field_canonical.casefold():
             continue
         if duplicate_key.casefold() in native_targets:
             # See the native-link precedence rule above.
             continue
-        pairs[(canonical.casefold(), duplicate_key.casefold())] = field_row
-    for duplicate_folded, canonicals in native_targets.items():
-        duplicate_key = next(
-            (
-                str(link.from_key)
-                for link in link_rows
-                if str(link.from_key).casefold() == duplicate_folded
-            ),
-            duplicate_folded,
-        )
-        canonical = sorted(set(canonicals), key=str.casefold)[0]
+        pairs[(field_canonical.casefold(), duplicate_key.casefold())] = field_row
+    for duplicate_folded in sorted(native_targets):
+        canonicals = native_targets[duplicate_folded]
+        canonical_by_target_folded: Dict[str, str] = {}
+        for target_key in canonicals:
+            target_folded = target_key.casefold()
+            previous = canonical_by_target_folded.get(target_folded)
+            if previous is None or (target_folded, target_key) < (target_folded, previous):
+                canonical_by_target_folded[target_folded] = target_key
+        canonical_keys = [
+            canonical_by_target_folded[key] for key in sorted(canonical_by_target_folded)
+        ]
+        duplicate_key = sorted(
+            set(native_source_names.get(duplicate_folded, [duplicate_folded])),
+            key=lambda value: (value.casefold(), value),
+        )[0]
+        if len(canonical_keys) > 1:
+            if conflicts is not None:
+                conflicts.append(
+                    {
+                        "code": "multiple-native-duplicate-targets",
+                        "message": "native duplicate source has multiple canonical targets",
+                        "duplicate_key": duplicate_key,
+                        "canonical_keys": canonical_keys,
+                        "hit_canonical_keys": [
+                            canonical_by_folded[key]
+                            for key in sorted(canonical_by_target_folded)
+                            if key in canonical_by_folded
+                        ],
+                    }
+                )
+            continue
+        native_canonical = canonical_by_folded.get(canonical_keys[0].casefold())
         duplicate_row = issue_by_key.get(duplicate_folded)
         if (
-            not canonical
+            not native_canonical
             or duplicate_row is None
-            or duplicate_key.casefold() == canonical.casefold()
+            or duplicate_key.casefold() == native_canonical.casefold()
         ):
             continue
         # A dual field/link representation is one expansion, never two.
-        pairs[(canonical.casefold(), duplicate_key.casefold())] = duplicate_row
+        pairs[(native_canonical.casefold(), duplicate_key.casefold())] = duplicate_row
 
     expansions: List[Dict[str, Any]] = []
     for (canonical_folded, _), row in sorted(pairs.items()):
@@ -558,7 +599,11 @@ def find_similar_issues(request: SimilarIssuesRequest) -> Dict[str, Any]:
         for candidate in candidates
         if (candidate.get("issue") or {}).get("key")
     ]
-    expansions = _expand_duplicate_chains(hit_keys, exclude_key=source_key)
+    duplicate_conflicts: List[Dict[str, Any]] = []
+    expansions = _expand_duplicate_chains(
+        hit_keys, exclude_key=source_key, conflicts=duplicate_conflicts
+    )
+    diagnostics["similarity_duplicate_conflicts"] = duplicate_conflicts
 
     return {
         "query_source": {

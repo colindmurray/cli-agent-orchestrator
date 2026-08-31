@@ -238,6 +238,7 @@ export function SimilarIssueCandidates({
     ? state
     : { key: requestKey, response: null, loading: true, error: null }
   const { response, loading, error } = current
+  const duplicateConflicts = response?.diagnostics?.similarity_duplicate_conflicts ?? []
   const coverageNeedsNotice = response?.coverage?.status === 'degraded'
     || response?.coverage?.status === 'partial'
     || response?.coverage?.status === 'inconclusive'
@@ -292,6 +293,16 @@ export function SimilarIssueCandidates({
           {response.coverage?.inconclusive
             ? ' No candidates is inconclusive while retrieval is degraded. Filing is unaffected.'
             : ' Filing is unaffected.'}
+        </div>
+      )}
+      {!error && response && duplicateConflicts.length > 0 && (
+        <div
+          role="status"
+          data-testid="similar-duplicate-conflict"
+          className="m-2 rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200"
+        >
+          Similarity found conflicting native duplicate targets for{' '}
+          {duplicateConflicts.map(conflict => conflict.duplicate_key).join(', ')}; no canonical was asserted.
         </div>
       )}
       {!error && response && response.candidates.length === 0 && !emptyInconclusive && (

@@ -275,6 +275,15 @@ class TestHumanRenderingAndRefusals:
                     "similarity_probes": [
                         {"label": "draft", "query": "offline similarity", "weight": 2.0}
                     ],
+                    "similarity_duplicate_conflicts": [
+                        {
+                            "code": "multiple-native-duplicate-targets",
+                            "message": "native duplicate source has multiple canonical targets",
+                            "duplicate_key": "cond-0900",
+                            "canonical_keys": ["cond-0901", "cond-0902"],
+                            "hit_canonical_keys": [],
+                        }
+                    ],
                 },
                 "generations": {},
                 "include_comments": False,
@@ -293,6 +302,9 @@ class TestHumanRenderingAndRefusals:
         assert "mode hybrid→lexical" in out
         assert "coverage inconclusive" in out
         assert "degraded: semantic unavailable" in out
+        assert "duplicate expansion conflict: cond-0900" in out
+        assert "native targets cond-0901, cond-0902" in out
+        assert "no canonical asserted" in out
         assert "retrieval coverage is inconclusive" in out
         assert "0 similar issue(s)" not in out
 

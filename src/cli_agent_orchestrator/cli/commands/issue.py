@@ -745,6 +745,15 @@ def issue_similar(issue_key, draft_file, project_ids, all_projects, limit, mode,
                 f"probe failed: {failure.get('label', '-')} "
                 f"[{failure.get('code', 'unknown')}] {failure.get('message', '')}"
             )
+        for conflict in (payload.get("diagnostics") or {}).get(
+            "similarity_duplicate_conflicts", []
+        ):
+            targets = ", ".join(str(key) for key in conflict.get("canonical_keys", []))
+            click.echo(
+                f"duplicate expansion conflict: {conflict.get('duplicate_key', '-')} "
+                f"[{conflict.get('code', 'unknown')}] native targets {targets}; "
+                "no canonical asserted"
+            )
         if payload["total"] == 0 and coverage.get("inconclusive"):
             click.echo(
                 f"no similar issue candidates returned for {origin}; "
