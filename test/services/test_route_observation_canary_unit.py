@@ -16,6 +16,7 @@ summaries auto)`` suffix yields effort ``medium`` and ignores its annotation.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -431,6 +432,123 @@ class TestAmbiguousCloseNoSecondEscape:
 
 
 class TestRestartRecovery:
+    def test_execute_restart_interrupt_wires_the_geometry_gate(self, _db, monkeypatch, tmp_path):
+        request = _request()
+        surface = fixtures.FakeCodexPaneSurface(
+            rows=list(fixtures.CAPTURED_STATUS_80X30_ROWS), pane_width=80
+        )
+        prepared = {
+            "case": "restart-recovery",
+            "spec": {"runtime": {}},
+            "request": dataclasses.asdict(request),
+        }
+        monkeypatch.setattr(canary_runner, "_read", lambda path: prepared)
+        monkeypatch.setattr(
+            canary_runner,
+            "_surface",
+            lambda runtime, *, ambiguous: surface,
+        )
+        monkeypatch.setattr(
+            canary_runner,
+            "_generation_probe",
+            lambda runtime: lambda terminal_id: request.requester_generation,
+        )
+
+        with pytest.raises(
+            canary_runner.LiveCanaryInvalid,
+            match="restart interrupt refused before provider input: geometry-insufficient",
+        ):
+            canary_runner._execute(
+                "restart-recovery",
+                tmp_path / "prepared.json",
+                tmp_path / "evidence.json",
+                restart_phase="interrupt",
+            )
+
+        assert surface.status_commands_sent == 0
+        assert surface.key_events == []
+        record = ro.get(request.operation_id)
+        assert record is not None
+        assert record["state"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+
+    def test_restart_interrupt_refuses_80_column_geometry_before_any_input(self, _db):
+        request = _request()
+        surface = fixtures.FakeCodexPaneSurface(
+            rows=list(fixtures.CAPTURED_STATUS_80X30_ROWS), pane_width=80
+        )
+        observer = roc.CodexRouteObserver(surface=surface)
+
+        with pytest.raises(
+            canary_runner.LiveCanaryInvalid,
+            match="restart interrupt refused before provider input: geometry-insufficient",
+        ):
+            canary_runner._restart_interrupt(
+                request,
+                observer,
+                surface,
+                lambda terminal_id: request.requester_generation,
+            )
+
+        assert surface.status_commands_sent == 0
+        assert surface.key_events == []
+        record = ro.get(request.operation_id)
+        assert record is not None
+        assert record["state"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+        final_event = json.loads(record["final_event_json"])
+        assert final_event["disposition"] == roc.DISPOSITION_GEOMETRY_INSUFFICIENT
+
+    def test_restart_interrupt_proceeds_with_supported_geometry(self, _db):
+        request = _request()
+        surface = fixtures.FakeCodexPaneSurface(
+            rows=fixtures.codex_route_panel_rows(), pane_width=100
+        )
+        outcome = canary_runner._restart_interrupt(
+            request,
+            roc.CodexRouteObserver(surface=surface),
+            surface,
+            lambda terminal_id: request.requester_generation,
+        )
+
+        assert outcome["phase"] == "interrupt"
+        assert outcome["terminal"] is False
+        assert outcome["observation"]["observed_state"] == "observed"
+        assert surface.status_commands_sent == 1
+        assert surface.key_events == []
+
+    def test_restart_interrupt_adopts_durable_observation_after_a_resize(self, _db):
+        request = _request()
+        first_surface = fixtures.FakeCodexPaneSurface(
+            rows=fixtures.codex_route_panel_rows(), pane_width=100
+        )
+        first = canary_runner._restart_interrupt(
+            request,
+            roc.CodexRouteObserver(surface=first_surface),
+            first_surface,
+            lambda terminal_id: request.requester_generation,
+        )
+        assert first["observation"]["observed_state"] == "observed"
+        assert first_surface.status_commands_sent == 1
+
+        resized_surface = fixtures.FakeCodexPaneSurface(
+            rows=list(fixtures.CAPTURED_STATUS_80X30_ROWS), pane_width=80
+        )
+        retried = canary_runner._restart_interrupt(
+            request,
+            roc.CodexRouteObserver(surface=resized_surface),
+            resized_surface,
+            lambda terminal_id: request.requester_generation,
+        )
+
+        assert retried["observation"] == first["observation"]
+        assert resized_surface.status_commands_sent == 0
+        assert resized_surface.key_events == []
+        stored = ro.get(request.operation_id)
+        assert stored is not None
+        assert stored["state"] == ro.STATE_REQUESTED
+        assert stored["observation_json"] is not None
+        assert stored["close_proof_json"] is None
+
     def test_durable_stage_facts_survive_a_crash_without_duplicating_an_effect(
         self, _db, monkeypatch
     ):
