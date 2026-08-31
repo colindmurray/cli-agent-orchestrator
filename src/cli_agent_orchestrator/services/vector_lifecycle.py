@@ -53,6 +53,7 @@ __all__ = [
     "issue_document_text",
     "comment_document_text",
     "new_generation_id",
+    "generation_record_from_metadata",
     "create_generation",
     "refresh_generation",
     "drain_bounded_batch",
@@ -203,8 +204,14 @@ def _require_derived_schema(raw: Any) -> None:
         )
 
 
-def _generation_record_from_metadata(metadata: Mapping[str, Any]) -> Dict[str, Any]:
-    """Project adapter metadata onto the generation-table columns, typed."""
+def generation_record_from_metadata(metadata: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project prepared-model metadata onto the generation-table columns, typed.
+
+    Public because the maintenance orchestrator needs the SAME projection the
+    insert uses: deciding reuse-vs-create means comparing a candidate
+    generation's identity against the rows already stored, and a second copy
+    of this mapping could quietly disagree with the one that writes the row.
+    """
 
     def required(key: str) -> Any:
         value = metadata.get(key)
@@ -292,7 +299,7 @@ def create_generation(
             "no prepared-model metadata found; run the explicit model prepare "
             "command before creating a vector generation",
         )
-    record = _generation_record_from_metadata(metadata)
+    record = generation_record_from_metadata(metadata)
     created_at = _utcnow_iso()
     generation_id = new_generation_id()
     raw = (target_engine if target_engine is not None else engine).raw_connection()
