@@ -1157,6 +1157,7 @@ export function ProjectsPanel() {
                       vocab={vocab}
                       onChanged={refreshAfterIssueChange}
                       onDeleted={() => { setSelectedKey(null); refreshAfterIssueChange() }}
+                      onNavigate={key => { setSelectedKey(key); setCommentTarget(null) }}
                       commentTarget={commentTarget && commentTarget.issueKey === issue.key ? commentTarget.commentId : null}
                     />
                   )}
@@ -1174,6 +1175,7 @@ export function ProjectsPanel() {
                   vocab={vocab}
                   onChanged={refreshAfterIssueChange}
                   onDeleted={() => { setSelectedKey(null); refreshAfterIssueChange() }}
+                  onNavigate={key => { setSelectedKey(key); setCommentTarget(null) }}
                   commentTarget={commentTarget && commentTarget.issueKey === selectedKey ? commentTarget.commentId : null}
                 />
               </div>
@@ -1277,7 +1279,7 @@ export function ProjectsPanel() {
           kind={kind === 'all' ? 'bug' : kind}
           onClose={() => setShowNewIssue(false)}
           onCreated={async key => { setShowNewIssue(false); setSelectedKey(key); await refreshAfterIssueChange() }}
-          onOpenIssue={key => { setShowNewIssue(false); setCommentTarget(null); setSelectedKey(key); setProjectTab('issues') }}
+          onIssueChanged={refreshAfterIssueChange}
         />
       )}
 
@@ -2783,15 +2785,14 @@ function NewProjectModal({
 // do not diverge.
 
 function NewItemModal({
-  project, vocab, kind, onClose, onCreated, onOpenIssue,
+  project, vocab, kind, onClose, onCreated, onIssueChanged,
 }: {
   project: TrackerProject
   vocab: TrackerVocabulary
   kind: ItemKind
   onClose: () => void
   onCreated: (key: string) => void
-  /** A similar-candidate pick: closes this form and opens the normal detail. */
-  onOpenIssue: (key: string) => void
+  onIssueChanged: () => Promise<void>
 }) {
   const presentation = KIND_PRESENTATION[kind]
   const { showSnackbar } = useStore()
@@ -2814,6 +2815,7 @@ function NewItemModal({
   const [actualOutcome, setActualOutcome] = useState('')
   const [favorite, setFavorite] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [inspectingIssueKey, setInspectingIssueKey] = useState<string | null>(null)
 
   // Reset body when kind switches (modal is remounted via key, but guard anyway)
   useEffect(() => {
@@ -2917,6 +2919,34 @@ function NewItemModal({
     failingCommand, reproductionSteps, expectedOutcome, actualOutcome,
     presentation.bodyStarter,
   ])
+
+  // Keep this component mounted while inspecting a candidate so every create
+  // field retains its exact local value. ItemDetail remains the single full
+  // issue-inspection surface and can navigate the candidate's relationships.
+  if (inspectingIssueKey) {
+    return (
+      <Modal title={`Inspect ${inspectingIssueKey}`} onClose={() => setInspectingIssueKey(null)}>
+        <button
+          type="button"
+          onClick={() => setInspectingIssueKey(null)}
+          aria-label={`Back to new ${presentation.kind} draft`}
+          className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300"
+        >
+          <ChevronRight size={13} className="rotate-180" /> Back to draft
+        </button>
+        <ItemDetail
+          issueKey={inspectingIssueKey}
+          vocab={vocab}
+          onChanged={onIssueChanged}
+          onDeleted={() => {
+            setInspectingIssueKey(null)
+            void onIssueChanged()
+          }}
+          onNavigate={setInspectingIssueKey}
+        />
+      </Modal>
+    )
+  }
 
   return (
     <Modal title={presentation.modalTitle(project.name)} onClose={onClose}>
@@ -3034,7 +3064,7 @@ function NewItemModal({
         projectId={project.id}
         draft={similarDraft}
         terminalStatuses={vocab.terminal_statuses}
-        onOpenIssue={onOpenIssue}
+        onOpenIssue={setInspectingIssueKey}
       />
       {activeWithoutOwner && (
         <div role="alert" className="rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">

@@ -33,6 +33,8 @@ function laneLabel(lane: string): string {
 }
 
 interface SimilarState {
+  /** Serialized draft whose response/error this state describes. */
+  key: string | null
   response: SimilarIssuesResponse | null
   loading: boolean
   error: string | null
@@ -98,22 +100,62 @@ function CandidateRow({
         ))}
         {hit.duplicate_chain.length > 0 && (
           <p className="text-[11px] text-gray-500" data-testid="similar-canonical">
-            {hit.duplicate_chain.map(link =>
-              `duplicate of ${link.canonical_key}${link.canonical_title ? ` — ${link.canonical_title}` : ''}${link.resolved ? ' (resolved)' : ''}`,
-            ).join('; ')}
+            {hit.duplicate_chain.map((link, index) => (
+              <span key={link.canonical_key}>
+                {index > 0 && '; '}
+                duplicate of{' '}
+                <button
+                  type="button"
+                  onClick={() => onOpenIssue(link.canonical_key)}
+                  aria-label={`Inspect canonical ${link.canonical_key}`}
+                  className="font-mono text-emerald-400 hover:underline"
+                >
+                  {link.canonical_key}
+                </button>
+                {link.canonical_title ? ` — ${link.canonical_title}` : ''}
+                {link.resolved ? ' (resolved)' : ''}
+              </span>
+            ))}
           </p>
         )}
         {expansions.length > 0 && (
           <p className="text-[11px] text-gray-500" data-testid="similar-expansion">
-            Confirmed duplicates: {expansions.map(dup => `${dup.key}${dup.title ? ` — ${dup.title}` : ''}`).join('; ')}
+            Confirmed duplicates:{' '}
+            {expansions.map((dup, index) => (
+              <span key={dup.key}>
+                {index > 0 && '; '}
+                <button
+                  type="button"
+                  onClick={() => onOpenIssue(dup.key)}
+                  aria-label={`Inspect confirmed duplicate ${dup.key}`}
+                  className="font-mono text-emerald-400 hover:underline"
+                >
+                  {dup.key}
+                </button>
+                {dup.title ? ` — ${dup.title}` : ''}
+              </span>
+            ))}
           </p>
         )}
         {hit.neighborhood.length > 0 && (
           <p className="text-[11px] text-gray-500" data-testid="similar-neighborhood">
-            {hit.neighborhood.map(link => {
+            {hit.neighborhood.map((link, index) => {
               const { phrase, other } = linkPhrase(link, issue.key)
-              return `${phrase} ${other}`
-            }).join('; ')}
+              return (
+                <span key={`${link.from_key}:${link.kind}:${link.to_key}`}>
+                  {index > 0 && '; '}
+                  {phrase}{' '}
+                  <button
+                    type="button"
+                    onClick={() => onOpenIssue(other)}
+                    aria-label={`Inspect related ${other}`}
+                    className="font-mono text-emerald-400 hover:underline"
+                  >
+                    {other}
+                  </button>
+                </span>
+              )
+            })}
           </p>
         )}
       </div>
@@ -134,19 +176,22 @@ export function SimilarIssueCandidates({
   terminalStatuses: string[]
   onOpenIssue: (key: string) => void
 }) {
-  const [state, setState] = useState<SimilarState>({ response: null, loading: false, error: null })
-  // Draft identity for the effect is the serialized CONTENT, not the object:
-  // the form rebuilds the object on every render.
-  const draftKey = JSON.stringify(draft)
+  const [state, setState] = useState<SimilarState>({ key: null, response: null, loading: false, error: null })
+  // Request identity is serialized scope + CONTENT, not object identity: the
+  // form rebuilds the draft object on every render.
+  const requestKey = JSON.stringify([projectId, draft])
 
   useEffect(() => {
     if (!draft) {
-      setState({ response: null, loading: false, error: null })
+      setState({ key: null, response: null, loading: false, error: null })
       return
     }
     const controller = new AbortController()
+    // Invalidate the prior answer as soon as this effect observes the new
+    // draft. The render below also checks the key, so old candidates are
+    // already non-actionable during the render-before-effect window.
+    setState({ key: requestKey, response: null, loading: true, error: null })
     const handle = setTimeout(() => {
-      setState(prev => ({ ...prev, loading: true, error: null }))
       api.similarTrackerIssues(
         { draft, project_ids: [projectId], limit: SIMILAR_LIMIT },
         controller.signal,
@@ -156,14 +201,14 @@ export function SimilarIssueCandidates({
           // older draft and must never replace the newest results.
           if (controller.signal.aborted) return
           if (!response || !Array.isArray(response.candidates) || !Array.isArray(response.duplicate_expansions)) {
-            setState({ response: null, loading: false, error: 'the tracker returned an unrecognized similarity response' })
+            setState({ key: requestKey, response: null, loading: false, error: 'the tracker returned an unrecognized similarity response' })
             return
           }
-          setState({ response, loading: false, error: null })
+          setState({ key: requestKey, response, loading: false, error: null })
         })
         .catch(err => {
           if (controller.signal.aborted) return
-          setState({ response: null, loading: false, error: errorText(err) })
+          setState({ key: requestKey, response: null, loading: false, error: errorText(err) })
         })
     }, SIMILAR_DEBOUNCE_MS)
     return () => {
@@ -171,10 +216,16 @@ export function SimilarIssueCandidates({
       controller.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftKey, projectId])
+  }, [requestKey, projectId])
 
   if (!draft) return null
-  const { response, loading, error } = state
+  // A draft edit re-renders before its effect runs. Key the visible state to
+  // the exact draft so a response from the previous render is never displayed
+  // or clickable during that gap, the debounce, or request latency.
+  const current = state.key === requestKey
+    ? state
+    : { key: requestKey, response: null, loading: true, error: null }
+  const { response, loading, error } = current
   const expansionsByHit = new Map<string, TrackerIssue[]>()
   for (const expansion of response?.duplicate_expansions ?? []) {
     const rows = expansionsByHit.get(expansion.duplicate_of) ?? []
@@ -194,7 +245,7 @@ export function SimilarIssueCandidates({
       </div>
       {loading && !response && !error && (
         <div role="status" className="px-3 py-3 text-xs text-gray-500 flex items-center gap-2">
-          <Loader2 size={12} className="animate-spin" /> Checking for similar issues…
+          <Loader2 size={12} className="animate-spin" /> Updating similar issues…
         </div>
       )}
       {error && (

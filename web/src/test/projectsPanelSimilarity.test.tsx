@@ -265,6 +265,44 @@ describe('ProjectsPanel pre-filing similar candidates (M2.5)', () => {
     expect(similarCalls()[0].body.project_ids).toEqual(['cao-system'])
   })
 
+  it('hides stale candidates immediately while the replacement draft is debouncing and loading', async () => {
+    let releaseReplacement: ((value: unknown) => void) | null = null
+    let similarCount = 0
+    respondImpl = (url, opts) => {
+      if (url === '/tracker/issues/similar') {
+        similarCount += 1
+        if (similarCount === 2) {
+          return new Promise(resolve => { releaseReplacement = resolve })
+        }
+        return json(similarResponse())
+      }
+      return defaultRespond(url, opts)
+    }
+
+    await openBugModal()
+    const title = screen.getByLabelText('Title')
+    fireEvent.change(title, { target: { value: 'lock contention' } })
+    await settle()
+    expect(screen.getByRole('button', { name: /^Open cond-0711: / })).toBeEnabled()
+
+    fireEvent.change(title, { target: { value: 'a different reconnect failure' } })
+
+    // The prior answer belongs to the prior draft. It disappears in the same
+    // render as the edit, before the debounce expires, so it cannot be acted on.
+    expect(screen.queryByRole('button', { name: /^Open cond-0711: / })).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Updating similar issues')
+    expect(similarCalls()).toHaveLength(1)
+
+    await settle()
+    expect(similarCalls()).toHaveLength(2)
+    expect(screen.queryByRole('button', { name: /^Open cond-0711: / })).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Updating similar issues')
+
+    await act(async () => { releaseReplacement!(json(similarResponse())) })
+    await flush()
+    expect(screen.getByRole('button', { name: /^Open cond-0711: / })).toBeEnabled()
+  })
+
   it('aborts the superseded probe and a late response cannot replace the newest results', async () => {
     let releaseStale: ((value: unknown) => void) | null = null
     let similarCount = 0
@@ -335,19 +373,94 @@ describe('ProjectsPanel pre-filing similar candidates (M2.5)', () => {
     expect(terminalRow).toHaveTextContent('relates to cond-0601')
   })
 
-  it('opens the normal full issue detail from a candidate and closes the create form', async () => {
+  it('preserves the complete draft while inspecting a candidate, then returns and files normally', async () => {
     await openBugModal()
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'dashboard hangs on reconnect' } })
+    fireEvent.change(screen.getByLabelText('Body'), { target: { value: 'The reconnect path hangs after wake.' } })
+    fireEvent.change(screen.getByLabelText('Severity'), { target: { value: 'P1' } })
+    fireEvent.change(screen.getByLabelText('Evidence'), { target: { value: '/tmp/reconnect.log' } })
+    fireEvent.change(screen.getByLabelText('Failing command'), { target: { value: 'cao web' } })
+    fireEvent.change(screen.getByLabelText('Reproduction steps'), { target: { value: '1. suspend\n2. resume' } })
+    fireEvent.change(screen.getByLabelText('Expected outcome'), { target: { value: 'The dashboard reconnects' } })
+    fireEvent.change(screen.getByLabelText('Actual outcome'), { target: { value: 'The dashboard stays disconnected' } })
+    const favorite = screen.getByText('Show this item on the project Home dashboard').querySelector('input')!
+    fireEvent.click(favorite)
     await settle()
 
     fireEvent.click(screen.getByRole('button', { name: /^Open cond-0711: / }))
     await settle()
 
-    // The create modal is gone and the normal ItemDetail surface opened for
-    // the candidate — the deep-link path, since cond-0711 is off-page.
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(screen.getByText('Deep link: cond-0711 (not in current page/filters)')).toBeInTheDocument()
+    // Candidate inspection uses the normal full ItemDetail while keeping the
+    // create component mounted, so every draft field survives the round trip.
+    expect(screen.getByRole('dialog', { name: 'Inspect cond-0711' })).toBeInTheDocument()
     expect(calls.some(c => c.url === '/tracker/issues/cond-0711' && c.method === 'GET')).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to new bug draft' }))
+    expect(screen.getByRole('dialog', { name: 'Log a bug against CAO System' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Title')).toHaveValue('dashboard hangs on reconnect')
+    expect(screen.getByLabelText('Body')).toHaveValue('The reconnect path hangs after wake.')
+    expect(screen.getByLabelText('Severity')).toHaveValue('P1')
+    expect(screen.getByLabelText('Evidence')).toHaveValue('/tmp/reconnect.log')
+    expect(screen.getByLabelText('Failing command')).toHaveValue('cao web')
+    expect(screen.getByLabelText('Reproduction steps')).toHaveValue('1. suspend\n2. resume')
+    expect(screen.getByLabelText('Expected outcome')).toHaveValue('The dashboard reconnects')
+    expect(screen.getByLabelText('Actual outcome')).toHaveValue('The dashboard stays disconnected')
+    expect(screen.getByText('Show this item on the project Home dashboard').querySelector('input')).toBeChecked()
+
+    fireEvent.click(screen.getByRole('button', { name: /^File bug$/ }))
+    await settle()
+    const created = calls.filter(c => c.url === '/tracker/issues' && c.method === 'POST')
+    expect(created).toHaveLength(1)
+    expect(created[0].body).toMatchObject({
+      title: 'dashboard hangs on reconnect',
+      body: 'The reconnect path hangs after wake.',
+      severity: 'P1',
+      evidence: '/tmp/reconnect.log',
+      failing_command: 'cao web',
+      reproduction_steps: '1. suspend\n2. resume',
+      expected_outcome: 'The dashboard reconnects',
+      actual_outcome: 'The dashboard stays disconnected',
+      favorite: true,
+    })
+  })
+
+  it('opens canonical and relationship-neighbor issues directly from candidate facts', async () => {
+    await openBugModal()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'dashboard hangs on reconnect' } })
+    await settle()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect canonical cond-0600' }))
+    await settle()
+    expect(screen.getByRole('dialog', { name: 'Inspect cond-0600' })).toBeInTheDocument()
+    expect(calls.some(c => c.url === '/tracker/issues/cond-0600' && c.method === 'GET')).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to new bug draft' }))
+    await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect related cond-0700' }))
+    await settle()
+    expect(screen.getByRole('dialog', { name: 'Inspect cond-0700' })).toBeInTheDocument()
+    expect(calls.some(c => c.url === '/tracker/issues/cond-0700' && c.method === 'GET')).toBe(true)
+  })
+
+  it('navigates relationships from an off-page deep-linked ItemDetail', async () => {
+    respondImpl = (url, opts) => {
+      if (url === '/tracker/issues/cond-0711') {
+        return json({
+          ...OPEN_CANDIDATE,
+          links: [{ id: 1, from_key: 'cond-0711', to_key: 'cond-0700', kind: 'blocks' }],
+        })
+      }
+      return defaultRespond(url, opts)
+    }
+    window.history.replaceState(null, '', '/?project=cao-system&section=issues&key=cond-0711')
+
+    render(<ProjectsPanel />)
+    await settle()
+    expect(screen.getByText('Deep link: cond-0711 (not in current page/filters)')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open cond-0700' }))
+    await settle()
+    expect(calls.some(c => c.url === '/tracker/issues/cond-0700' && c.method === 'GET')).toBe(true)
   })
 
   it('shows a visible advisory when the probe fails and filing stays enabled with no mutation calls', async () => {
