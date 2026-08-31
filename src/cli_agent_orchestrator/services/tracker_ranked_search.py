@@ -44,7 +44,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import text as _sql_text
 
@@ -661,6 +661,37 @@ def reset_query_embedder_cache() -> None:
     _EMBEDDER_CACHE.clear()
 
 
+def _embedder_matches_generation(embedder: Any, generation: Dict[str, Any]) -> bool:
+    """Require every persisted identity field when an embedder proves one."""
+    metadata = getattr(embedder, "metadata", None)
+    if not isinstance(metadata, Mapping):
+        # Lightweight injected embedders (used by callers/tests) may only
+        # expose dimensions.  They remain usable for an explicit generation,
+        # while production LoadedEmbedder always carries complete metadata.
+        return True
+    try:
+        from cli_agent_orchestrator.services.vector_lifecycle import (
+            generation_record_from_metadata,
+        )
+
+        bound = generation_record_from_metadata(metadata)
+    except Exception:
+        return False
+    identity_fields = (
+        "model_id",
+        "model_revision",
+        "runtime_id",
+        "runtime_version",
+        "artifact_sha256",
+        "dimensions",
+        "element_type",
+        "distance_metric",
+        "normalized",
+        "document_schema_version",
+    )
+    return all(bound.get(field) == generation.get(field) for field in identity_fields)
+
+
 def _open_search_engine(db_path: str) -> Any:
     """Open one pinned sqlite-vec connection through the dedicated factory.
 
@@ -737,8 +768,9 @@ def resolve_semantic_context(
         return None
     row = _exec(
         conn,
-        f"SELECT generation_id, state, model_id, model_revision, dimensions,\n"
-        f"       element_type, distance_metric, normalized, document_schema_version\n"
+        f"SELECT generation_id, state, model_id, model_revision, runtime_id,\n"
+        f"       runtime_version, artifact_sha256, dimensions, element_type,\n"
+        f"       distance_metric, normalized, document_schema_version\n"
         f"FROM {tracker_search_schema.VECTOR_GENERATIONS_TABLE}\n"
         " WHERE generation_id = :pointer",
         {"pointer": pointer},
@@ -755,17 +787,37 @@ def resolve_semantic_context(
         "state": str(row[1]),
         "model_id": str(row[2]),
         "model_revision": str(row[3]),
-        "dimensions": int(row[4]),
-        "element_type": str(row[5]),
-        "distance_metric": str(row[6]),
-        "normalized": bool(row[7]),
-        "document_schema_version": int(row[8]),
+        "runtime_id": str(row[4]),
+        "runtime_version": str(row[5]),
+        "artifact_sha256": str(row[6]),
+        "dimensions": int(row[7]),
+        "element_type": str(row[8]),
+        "distance_metric": str(row[9]),
+        "normalized": bool(row[10]),
+        "document_schema_version": int(row[11]),
     }
     try:
         embedder = _query_embedder()
     except Exception as exc:  # noqa: BLE001 - any capability refusal degrades visibly
         reasons.append(f"embedding model unavailable: {exc}")
         return None
+    if not _embedder_matches_generation(embedder, generation):
+        # Activation can move the pointer to a different model while this
+        # process still holds the previous query embedder.  Evict it before
+        # retrying, and never run a query vector produced for the old identity
+        # against the new generation's vectors.
+        reset_query_embedder_cache()
+        try:
+            embedder = _query_embedder()
+        except Exception as exc:  # noqa: BLE001 - typed degradation at query boundary
+            reasons.append(f"embedding model unavailable after generation activation: {exc}")
+            return None
+        if not _embedder_matches_generation(embedder, generation):
+            reasons.append(
+                f"query embedder identity does not match active generation "
+                f"{generation['generation_id']!r}; refusing cross-generation retrieval"
+            )
+            return None
     declared_dimensions = int(generation["dimensions"])
     embedder_dims = getattr(embedder, "dimensions", None)
     if embedder_dims is not None and int(embedder_dims) != declared_dimensions:

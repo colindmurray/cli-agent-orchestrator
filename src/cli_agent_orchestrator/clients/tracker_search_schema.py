@@ -921,13 +921,10 @@ def rebuild_lexical(raw: Any, *, rebuilt_at: str) -> Dict[str, Any]:
     return {"documents_rebuilt": written, "issues": issues_written, "comments": comments_written}
 
 
-def enqueue_all_live_documents(raw: Any) -> int:
-    """Queue every live document for every active/building generation.
-
-    Content versions come from the freshly written FTS documents, so a vector
-    produced against pre-rebuild text can never satisfy the eligibility join
-    even if its dirty row were removed before refresh.
-    """
+def _enqueue_live_documents(
+    raw: Any, *, generation_where: str, generation_params: Tuple[Any, ...] = ()
+) -> int:
+    """Queue every live document for the selected generation rows."""
     enqueued = 0
     for document_kind in ("issue", "comment"):
         source_table = "tracker_issues" if document_kind == "issue" else "tracker_issue_comments"
@@ -943,11 +940,36 @@ def enqueue_all_live_documents(raw: Any) -> int:
             source_id_expr="s.id",
             version_expr=f"(SELECT f.content_version FROM {fts_table} AS f WHERE f.rowid = s.id)",
             from_clause=f"{_ACTIVE_GENERATIONS_FROM}, {source_table} AS s",
-            where_clause=_ACTIVE_GENERATIONS_WHERE,
+            where_clause=generation_where,
         )
-        cursor = raw.execute(statement)
+        cursor = raw.execute(statement, generation_params)
         enqueued += int(cursor.rowcount if cursor.rowcount is not None else 0)
     return enqueued
+
+
+def enqueue_generation_live_documents(raw: Any, generation_id: str) -> int:
+    """Queue every live document for one newly-created building generation.
+
+    Generation creation must not dirty an existing active generation: its
+    vectors still describe the current FTS content and remain the safe serving
+    fallback while the new model builds. Source triggers enqueue subsequent
+    mutations for both active and building generations.
+    """
+    return _enqueue_live_documents(
+        raw,
+        generation_where="g.generation_id = ? AND g.state = 'building'",
+        generation_params=(generation_id,),
+    )
+
+
+def enqueue_all_live_documents(raw: Any) -> int:
+    """Queue every live document for every active/building generation.
+
+    Content versions come from the freshly written FTS documents, so a vector
+    produced against pre-rebuild text can never satisfy the eligibility join
+    even if its dirty row were removed before refresh.
+    """
+    return _enqueue_live_documents(raw, generation_where=_ACTIVE_GENERATIONS_WHERE)
 
 
 def prune_stale_dirty_rows(raw: Any) -> int:

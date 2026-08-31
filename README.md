@@ -269,6 +269,12 @@ Existing markdown ledgers import with their ids, filing dates, severities and
 reporters intact (`cao issue import-ledger OPEN_ISSUES.md --project <id>`), and
 the markdown becomes a rendered export rather than a second source of truth.
 
+Issue search is hybrid: the lexical lane is always on, and the semantic lane
+activates after you install the optional `[search]` extra, run `cao issue
+search-index model prepare`, and build a generation with `cao issue
+search-index refresh --all`. Maintenance verbs touch the derived index only.
+See [docs/tracker-search.md](docs/tracker-search.md).
+
 The Issues area has a generic **Graph** view rooted at any issue. Its
 **Hierarchy** mode follows `part-of` transitively, so a project can unfold into
 milestones, goals, stories, tasks, and bugs without prescribing which kinds may

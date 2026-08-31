@@ -53,6 +53,7 @@ __all__ = [
     "issue_document_text",
     "comment_document_text",
     "new_generation_id",
+    "generation_record_from_metadata",
     "create_generation",
     "refresh_generation",
     "drain_bounded_batch",
@@ -79,6 +80,22 @@ DOCUMENT_FIELD_LIMIT = 4000
 BOUNDED_REFRESH_BATCH = 32
 
 _DIRTY_KEY_COLUMNS = "generation_id, document_key"
+
+# Keep this tuple in lockstep with the generation table.  A dimension-only
+# check is insufficient: two model revisions/artifacts can emit same-shaped
+# blobs that are numerically incompatible.
+GENERATION_IDENTITY_COLUMNS = (
+    "model_id",
+    "model_revision",
+    "runtime_id",
+    "runtime_version",
+    "artifact_sha256",
+    "dimensions",
+    "element_type",
+    "distance_metric",
+    "normalized",
+    "document_schema_version",
+)
 
 
 class VectorLifecycleError(RuntimeError):
@@ -203,8 +220,14 @@ def _require_derived_schema(raw: Any) -> None:
         )
 
 
-def _generation_record_from_metadata(metadata: Mapping[str, Any]) -> Dict[str, Any]:
-    """Project adapter metadata onto the generation-table columns, typed."""
+def generation_record_from_metadata(metadata: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project prepared-model metadata onto the generation-table columns, typed.
+
+    Public because the maintenance orchestrator needs the SAME projection the
+    insert uses: deciding reuse-vs-create means comparing a candidate
+    generation's identity against the rows already stored, and a second copy
+    of this mapping could quietly disagree with the one that writes the row.
+    """
 
     def required(key: str) -> Any:
         value = metadata.get(key)
@@ -292,37 +315,13 @@ def create_generation(
             "no prepared-model metadata found; run the explicit model prepare "
             "command before creating a vector generation",
         )
-    record = _generation_record_from_metadata(metadata)
-    created_at = _utcnow_iso()
-    generation_id = new_generation_id()
+    record = generation_record_from_metadata(metadata)
     raw = (target_engine if target_engine is not None else engine).raw_connection()
     try:
         raw.execute("BEGIN IMMEDIATE")
         try:
             _require_derived_schema(raw)
-            raw.execute(
-                f"INSERT INTO {schema.VECTOR_GENERATIONS_TABLE} (\n"
-                "  generation_id, state, model_id, model_revision, runtime_id,\n"
-                "  runtime_version, artifact_sha256, dimensions, element_type,\n"
-                "  distance_metric, normalized, document_schema_version,\n"
-                "  created_at\n"
-                ") VALUES (?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    generation_id,
-                    record["model_id"],
-                    record["model_revision"],
-                    record["runtime_id"],
-                    record["runtime_version"],
-                    record["artifact_sha256"],
-                    record["dimensions"],
-                    record["element_type"],
-                    record["distance_metric"],
-                    record["normalized"],
-                    record["document_schema_version"],
-                    created_at,
-                ),
-            )
-            enqueued = schema.enqueue_all_live_documents(raw)
+            created = _create_generation_in_transaction(raw, record)
             raw.commit()
         except Exception:
             raw.rollback()
@@ -330,11 +329,49 @@ def create_generation(
     finally:
         raw.close()
     return {
+        **created,
+        **record,
+    }
+
+
+def _create_generation_in_transaction(raw: Any, record: Mapping[str, Any]) -> Dict[str, Any]:
+    """Insert and enqueue one generation while the caller owns BEGIN IMMEDIATE.
+
+    The helper is deliberately private: :func:`ensure_generation` uses it to
+    keep its identity recheck, insert, and initial queue in one transaction,
+    while the public create verb retains its explicit fresh-generation
+    semantics for recovery/build repair callers.
+    """
+    created_at = _utcnow_iso()
+    generation_id = new_generation_id()
+    raw.execute(
+        f"INSERT INTO {schema.VECTOR_GENERATIONS_TABLE} (\n"
+        "  generation_id, state, model_id, model_revision, runtime_id,\n"
+        "  runtime_version, artifact_sha256, dimensions, element_type,\n"
+        "  distance_metric, normalized, document_schema_version,\n"
+        "  created_at\n"
+        ") VALUES (?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            generation_id,
+            record["model_id"],
+            record["model_revision"],
+            record["runtime_id"],
+            record["runtime_version"],
+            record["artifact_sha256"],
+            record["dimensions"],
+            record["element_type"],
+            record["distance_metric"],
+            record["normalized"],
+            record["document_schema_version"],
+            created_at,
+        ),
+    )
+    enqueued = schema.enqueue_generation_live_documents(raw, generation_id)
+    return {
         "generation_id": generation_id,
         "state": "building",
         "created_at": created_at,
         "enqueued_documents": enqueued,
-        **record,
     }
 
 
@@ -371,6 +408,44 @@ def _resolve_target_generations(raw: Any, generation_id: Optional[str]) -> List[
             "generations accept refresh work",
         )
     return [generation_id]
+
+
+def _generation_identity(raw: Any, generation_id: str) -> Dict[str, Any]:
+    """Read the complete persisted identity for one refresh target."""
+    row = raw.execute(
+        f"SELECT {', '.join(GENERATION_IDENTITY_COLUMNS)} "
+        f"FROM {schema.VECTOR_GENERATIONS_TABLE} WHERE generation_id = ?",
+        (generation_id,),
+    ).fetchone()
+    if row is None:
+        raise VectorLifecycleError(
+            "unknown-generation", f"no generation row named {generation_id!r}"
+        )
+    return dict(zip(GENERATION_IDENTITY_COLUMNS, row))
+
+
+def _embedder_identity(embedder: Any) -> Optional[Dict[str, Any]]:
+    """Project an embedder's bound metadata, when it exposes that contract.
+
+    Test/dry-run embedders may intentionally be metadata-free; a single
+    explicitly selected generation can still use one of those. A refresh
+    spanning generations with different persisted identities needs this
+    binding so it can select only the generation the embedder can safely fill.
+    """
+    metadata = getattr(embedder, "metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    try:
+        return generation_record_from_metadata(metadata)
+    except VectorLifecycleError as exc:
+        raise VectorLifecycleError(
+            "embedder-identity-invalid",
+            f"embedder metadata cannot establish a generation identity: {exc}",
+        ) from exc
+
+
+def _same_generation_identity(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return all(left.get(column) == right.get(column) for column in GENERATION_IDENTITY_COLUMNS)
 
 
 def _select_eligible_batch(
@@ -589,10 +664,38 @@ def refresh_generation(
         "failed": 0,
         "damaged_skipped": 0,
     }
+    resolved_embedder = embedder
     with open_search_connection(db_path=db_path, connection_factory=connection_factory) as sc:
         raw = sc.connection
         raw.row_factory = sqlite3.Row
         targets = _resolve_target_generations(raw, generation_id)
+        identities = [_generation_identity(raw, target) for target in targets]
+        if identities and any(
+            not _same_generation_identity(identities[0], identity) for identity in identities[1:]
+        ):
+            if resolved_embedder is None:
+                from cli_agent_orchestrator.services.embedding_adapter import load_embedder
+
+                resolved_embedder = load_embedder(models_dir)
+            bound_identity = _embedder_identity(resolved_embedder)
+            if bound_identity is None:
+                raise VectorLifecycleError(
+                    "generation-identity-mismatch",
+                    "one refresh pass selected multiple active/building generations with "
+                    "different identities, but the embedder exposes no persisted identity",
+                )
+            matched = [
+                (target, identity)
+                for target, identity in zip(targets, identities)
+                if _same_generation_identity(identity, bound_identity)
+            ]
+            if not matched:
+                raise VectorLifecycleError(
+                    "generation-identity-mismatch",
+                    "embedder identity matches none of the active/building generations",
+                )
+            targets = [target for target, _identity in matched]
+            identities = [identity for _target, identity in matched]
         batch = _select_eligible_batch(
             raw, targets, limit, _sqlite_moment(datetime.now(timezone.utc))
         )
@@ -622,11 +725,19 @@ def refresh_generation(
             # capability-absent runtime stays a typed refusal: it is not a
             # per-document embedding failure and must not spend dirty rows'
             # retry state on it.
-            resolved_embedder = embedder
             if resolved_embedder is None:
                 from cli_agent_orchestrator.services.embedding_adapter import load_embedder
 
                 resolved_embedder = load_embedder(models_dir)
+            bound_identity = _embedder_identity(resolved_embedder)
+            if bound_identity is not None and any(
+                not _same_generation_identity(identity, bound_identity) for identity in identities
+            ):
+                raise VectorLifecycleError(
+                    "generation-identity-mismatch",
+                    "embedder identity does not match the persisted target generation; "
+                    "refusing to publish blobs under the wrong generation",
+                )
             try:
                 blobs = resolved_embedder.embed(texts)
                 if len(blobs) != len(texts):

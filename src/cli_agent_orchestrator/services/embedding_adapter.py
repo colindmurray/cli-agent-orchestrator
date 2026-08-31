@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import platform
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -232,9 +233,19 @@ def _default_snapshot_downloader(
 
 def _write_metadata_atomic(path: Path, record: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(dict(record), indent=2, sort_keys=True) + "\n")
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict(record), indent=2, sort_keys=True) + "\n")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def read_metadata(models_dir: Union[str, Path]) -> Optional[Dict[str, Any]]:

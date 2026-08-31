@@ -25,9 +25,11 @@ from cli_agent_orchestrator.security.auth import (
     SCOPE_WRITE,
     require_any_scope,
 )
+from cli_agent_orchestrator.services import embedding_adapter
 from cli_agent_orchestrator.services import issue_similar as similar
 from cli_agent_orchestrator.services import issue_tracker as tracker
 from cli_agent_orchestrator.services import project_dashboard
+from cli_agent_orchestrator.services import search_index_maintenance as maintenance
 from cli_agent_orchestrator.services import tracker_ranked_search as ranked
 
 logger = logging.getLogger(__name__)
@@ -292,6 +294,32 @@ class SimilarIssuesBody(StrictBody):
 class IssueSnapshotBody(StrictBody):
     project_id: str
     keys: List[str] = Field(min_length=1)
+
+
+class SearchIndexRefreshBody(StrictBody):
+    """POST /tracker/issues/search-index/refresh — outbox maintenance.
+
+    ``all`` selects the full drain (and the activation offer for a finished
+    building generation) over the bounded batch. ``retry_failed`` resets the
+    backoff of documents whose embedding failed; ``limit`` bounds either the
+    retry reset or the batch. Every field defaults, so a bare ``POST`` is the
+    bounded read-shaped refresh.
+    """
+
+    all: bool = False
+    retry_failed: bool = False
+    limit: Optional[int] = Field(None, ge=1, le=1_000_000)
+
+
+class SearchIndexRebuildBody(StrictBody):
+    """POST /tracker/issues/search-index/rebuild — the derived-state repair verb.
+
+    ``scope`` is exactly one of ``lexical`` (FTS documents), ``vectors`` (a
+    fresh generation built and activated), or ``all``. Both scopes rebuild
+    derived rows only and never touch an issue, comment, link, or event.
+    """
+
+    scope: str = Field("all", description="lexical|vectors|all")
 
 
 # --------------------------------------------------------------------------
@@ -581,7 +609,7 @@ async def list_issues(
 
 
 @router.get("/tracker/issues/search")
-async def search_issues(
+def search_issues(
     q: str = Query(..., description="free-form ranked-search text"),
     project_id: Optional[List[str]] = Query(None, description="tracker project id, repeatable"),
     all_projects: bool = Query(False, description="search every tracker project"),
@@ -704,6 +732,116 @@ async def issue_stats(
         return tracker.stats(project_id)
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
+
+
+# --------------------------------------------------------------------------
+# search-index maintenance (cond-0770)
+# --------------------------------------------------------------------------
+
+# A maintenance refusal keeps the reason the orchestrator observed. Most of
+# them are "the installation is not in the state this verb needs" rather than
+# "the request is malformed", so 409 — not 400 — is the honest default; a
+# caller branches on ``reason`` in the detail either way.
+_STATUS_FOR_MAINTENANCE_REASON = {
+    "invalid-scope": status.HTTP_400_BAD_REQUEST,
+    "unknown-generation": status.HTTP_404_NOT_FOUND,
+}
+_MAINTENANCE_DEFAULT_STATUS = status.HTTP_409_CONFLICT
+
+
+def _maintenance_http(exc: Exception) -> HTTPException:
+    """Carry a typed maintenance refusal, its reason, and its remedy over HTTP."""
+    reason = getattr(exc, "reason", type(exc).__name__)
+    message = str(getattr(exc, "message", None) or exc)
+    detail: Any = {"message": message, "reason": reason}
+    action = getattr(exc, "action", None)
+    if action:
+        detail["action"] = action
+    return HTTPException(
+        status_code=_STATUS_FOR_MAINTENANCE_REASON.get(reason, _MAINTENANCE_DEFAULT_STATUS),
+        detail=detail,
+    )
+
+
+@router.get("/tracker/issues/search-index/status")
+def search_index_status(_scopes: List[str] = _READ) -> Dict[str, Any]:
+    """Capability, engine, lexical, and semantic state of the search index.
+
+    Declared before ``/tracker/issues/{issue_key}`` so the literal path wins
+    over the parameterised one, exactly like ``search``, ``similar``, and
+    ``stats``. Read-only and cheap enough to poll: it never loads model
+    weights, and every degraded state names the operator action that repairs
+    it under ``next_actions``.
+    """
+    try:
+        return maintenance.index_status()
+    except maintenance.SearchIndexMaintenanceError as exc:
+        raise _maintenance_http(exc) from exc
+
+
+@router.get("/tracker/issues/search-index/integrity-check")
+def search_index_integrity(_scopes: List[str] = _READ) -> Dict[str, Any]:
+    """Read-only §13.4 integrity report over the derived index.
+
+    Reports FTS internal integrity, source-to-FTS coverage, duplicate and
+    orphan document keys, dirty/failed/ready vector counts, stale vectors,
+    generation provenance, per-project coverage, and last failures. It
+    repairs nothing — ``rebuild`` is the counterpart verb.
+    """
+    try:
+        return maintenance.integrity_check()
+    except maintenance.SearchIndexMaintenanceError as exc:
+        raise _maintenance_http(exc) from exc
+
+
+@router.post("/tracker/issues/search-index/refresh")
+def search_index_refresh(
+    body: Optional[SearchIndexRefreshBody] = None,
+    _scopes: List[str] = _WRITE,
+) -> Dict[str, Any]:
+    """Embed queued documents for the prepared model's generation.
+
+    The body is optional and every field defaults, so a bare ``POST`` is the
+    bounded read-shaped refresh. Write-scoped maintenance per §9.2: unlike the
+    query-time bounded drain a semantic search performs, ``all=true`` drains
+    completely and offers a finished building generation for activation. The
+    old active generation stays untouched during a model migration. An
+    incomplete replacement is kept from going live by the coverage proof
+    inside the activation transaction, not by this route's judgement.
+    """
+    refresh_all = body.all if body is not None else False
+    retry_failed = body.retry_failed if body is not None else False
+    limit = body.limit if body is not None else None
+    try:
+        return maintenance.refresh_index(
+            all=refresh_all,
+            retry_failed=retry_failed,
+            limit=limit,
+        )
+    except (
+        maintenance.SearchIndexMaintenanceError,
+        embedding_adapter.EmbeddingCapabilityError,
+    ) as exc:
+        raise _maintenance_http(exc) from exc
+
+
+@router.post("/tracker/issues/search-index/rebuild")
+def search_index_rebuild(
+    body: Optional[SearchIndexRebuildBody] = None,
+    _scopes: List[str] = _WRITE,
+) -> Dict[str, Any]:
+    """Repair the derived index; never rewrites authoritative tracker rows.
+
+    The body is optional and defaults to the full rebuild. ``scope=lexical``
+    repopulates the FTS documents with fresh content versions and requeues
+    every live document; ``scope=vectors`` builds a fresh generation and
+    activates it only after the coverage proof passes; ``scope=all`` does both
+    in that order.
+    """
+    try:
+        return maintenance.rebuild_index(scope=body.scope if body is not None else "all")
+    except maintenance.SearchIndexMaintenanceError as exc:
+        raise _maintenance_http(exc) from exc
 
 
 @router.post("/tracker/issues", status_code=status.HTTP_201_CREATED)
