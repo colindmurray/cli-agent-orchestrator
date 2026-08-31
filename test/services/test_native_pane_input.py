@@ -167,3 +167,40 @@ def test_composer_observation_pin_is_build_exact():
     assert native_pane_input.composer_observation_pin_for("kimi_cli", "0.33.1") is None
     assert native_pane_input.composer_observation_pin_for("kimi_cli", "0.34.0") is None
     assert native_pane_input.composer_observation_pin_for("claude_code", "2.1.220") is None
+
+
+def test_codex_0149_composer_emptiness_pin_reuses_the_verified_footer_rule():
+    pin = native_pane_input.composer_emptiness_pin_for("codex", "0.149.0")
+
+    assert pin is not None
+    assert pin.rule == native_pane_input._RULE_CODEX_PROMPT_FOOTER
+    assert pin.styled is True
+    assert native_pane_input.composer_emptiness_pin_for("codex", "0.149.1") is None
+
+
+def test_codex_submission_does_not_treat_one_transient_empty_repaint_as_submitted(
+    monkeypatch,
+):
+    """A slash-menu repaint may briefly empty the composer before restoring it."""
+    barrier = native_pane_input.submission_barrier_for("codex")
+    assert barrier is not None
+    now = [0.0]
+    monkeypatch.setattr(native_pane_input.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        native_pane_input.time,
+        "sleep",
+        lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+    transient_empty = ["› ", "", "  gpt-5.6-luna high · ~/project"]
+    still_composed = ["› /status", "", "  gpt-5.6-luna high · ~/project"]
+    frames = iter([transient_empty, still_composed])
+
+    observed, evidence = native_pane_input.observe_submission(
+        "%7",
+        "/status",
+        barrier=barrier,
+        screen=lambda: next(frames, still_composed),
+    )
+
+    assert observed == native_pane_input.SUBMISSION_UNSUBMITTED
+    assert evidence is not None

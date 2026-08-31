@@ -58,6 +58,7 @@ from typing import Any, Optional
 
 import pytest
 
+from cli_agent_orchestrator.services import native_pane_input as npi
 from cli_agent_orchestrator.services import native_status_repair as nsr
 from cli_agent_orchestrator.services import route_observation as ro
 from cli_agent_orchestrator.services import route_observation_codex as roc
@@ -330,6 +331,27 @@ class TestStubBinaryRendersFixtures:
                 )
             finally:
                 h.kill_pane(pane)
+
+    def test_interactive_empty_composer_is_a_styled_0149_frame(
+        self, h: th.T2Harness, installed_stub: Path
+    ) -> None:
+        """The stub's writable surface must preserve the real empty-composer
+        distinction: its placeholder is dim, never ordinary operator prefill.
+        This goes through the same escape-preserving tmux capture and pinned
+        reader the zero-effect guard uses; removing the styling makes both
+        assertions fail rather than silently weakening the fixture.
+        """
+        pane = h.new_pane(width=100, height=31, command=f"exec {installed_stub}")
+        try:
+            _wait_capture(h, pane)
+            pin = npi.composer_emptiness_pin_for("codex", CODEX_PINNED_VERSION)
+            assert pin is not None
+            styled_rows = npi.capture_pane_screen_styled(pane)
+
+            assert "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m" in styled_rows
+            assert npi.observe_composer_empty(pane, pin) is True
+        finally:
+            h.kill_pane(pane)
 
 
 # ---------------------------------------------------------------------------

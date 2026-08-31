@@ -484,7 +484,9 @@ class TestRestartRecovery:
 class TestCapturedRenderFloorFixtures:
     def test_80x30_render_is_below_the_model_floor_and_never_guessed(self):
         parsed = roc.parse_codex_route_panel(
-            list(fixtures.CAPTURED_STATUS_80X30_ROWS), pane_width=80
+            list(fixtures.CAPTURED_STATUS_80X30_ROWS),
+            pane_width=80,
+            pinned_version=fixtures.CODEX_PINNED_VERSION,
         )
         assert parsed["kind"] == "partial"
         assert parsed["reason"] == "render-floor-model"
@@ -496,7 +498,9 @@ class TestCapturedRenderFloorFixtures:
 
     def test_100x30_render_extracts_effort_before_trailing_annotation(self):
         parsed = roc.parse_codex_route_panel(
-            list(fixtures.CAPTURED_STATUS_100X30_ROWS), pane_width=100
+            list(fixtures.CAPTURED_STATUS_100X30_ROWS),
+            pane_width=100,
+            pinned_version=fixtures.CODEX_PINNED_VERSION,
         )
         assert parsed["kind"] == "observed"
         assert parsed["session_id"] == fixtures.SESSION_ID
@@ -506,13 +510,13 @@ class TestCapturedRenderFloorFixtures:
         assert parsed["parser_key"] == nsr.PARSER_CODEX_STATUS
 
     def test_the_fixtures_are_faithful_to_the_captured_build(self):
-        # both retained captures carry exactly one branded 0.147.0 header and
+        # both retained captures carry exactly one branded 0.149.0 header and
         # exactly one Session row naming the substituted concrete UUID.
         for rows in (
             fixtures.CAPTURED_STATUS_80X30_ROWS,
             fixtures.CAPTURED_STATUS_100X30_ROWS,
         ):
-            headers = [row for row in rows if ">_ OpenAI Codex (v0.147.0)" in row]
+            headers = [row for row in rows if ">_ OpenAI Codex (v0.149.0)" in row]
             sessions = [row for row in rows if row.lstrip().startswith("│  Session:")]
             assert len(headers) == 1
             assert len(sessions) == 1
@@ -712,6 +716,9 @@ class TestRunnerEntryPoints:
             def await_input_ready(self):
                 return roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
 
+            def prove_composer_empty(self, provider_version):
+                return roc.PrewriteReadiness(roc.PREWRITE_READY, None)
+
             def send_status_command(self):
                 return True
 
@@ -729,6 +736,14 @@ class TestRunnerEntryPoints:
         assert evidence["outcome"]["receipt_digest"]
         assert evidence["outcome"]["inbox_message_id"]
         assert evidence["inbox_message_status"] == MessageStatus.PENDING.value
+        proofs = [
+            event
+            for event in canary_runner._read_events(event_log)
+            if event["kind"] == "composer-emptiness-proof"
+        ]
+        assert [(proof["provider_version"], proof["reason"]) for proof in proofs] == [
+            (fixtures.CODEX_PINNED_VERSION, roc.PREWRITE_READY)
+        ]
 
     def test_replay_execute_retries_the_terminal_operation_without_another_effect(
         self, _db, tmp_path, monkeypatch
@@ -758,6 +773,9 @@ class TestRunnerEntryPoints:
 
             def await_input_ready(self):
                 return roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
+
+            def prove_composer_empty(self, provider_version):
+                return roc.PrewriteReadiness(roc.PREWRITE_READY, None)
 
             def send_status_command(self):
                 return True
@@ -802,6 +820,45 @@ class TestRunnerEntryPoints:
 
         assert surface.status_commands_sent == 0
 
+    def test_restart_interrupt_revalidates_requester_after_composer_proof(self, _db):
+        request = _request()
+
+        class OrderedSurface(fixtures.FakeCodexPaneSurface):
+            composer_proven = False
+
+            def prove_composer_empty(self, provider_version):
+                self.composer_proven = True
+                return super().prove_composer_empty(provider_version)
+
+        surface = OrderedSurface(rows=fixtures.codex_route_panel_rows())
+        observer = roc.CodexRouteObserver(surface=surface)
+        probe_calls = 0
+
+        def requester_generation(_terminal_id):
+            nonlocal probe_calls
+            probe_calls += 1
+            if probe_calls == 1:
+                return request.requester_generation
+            assert surface.composer_proven is True
+            return "different-generation"
+
+        with pytest.raises(
+            canary_runner.LiveCanaryInvalid,
+            match="stale requester generation after composer proof",
+        ):
+            canary_runner._restart_interrupt(
+                request,
+                observer,
+                surface,
+                requester_generation,
+            )
+
+        assert probe_calls == 2
+        assert surface.status_commands_sent == 0
+        record = ro.get(request.operation_id)
+        assert record is not None
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
     def test_ambiguous_close_refuses_an_inconclusive_observation(self, _db, tmp_path, monkeypatch):
         case = cases.AMBIGUOUS_CLOSE
         spec_path = tmp_path / "spec.json"
@@ -823,6 +880,9 @@ class TestRunnerEntryPoints:
 
             def await_input_ready(self):
                 return roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
+
+            def prove_composer_empty(self, provider_version):
+                return roc.PrewriteReadiness(roc.PREWRITE_READY, None)
 
             def send_status_command(self):
                 return True
