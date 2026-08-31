@@ -3,7 +3,7 @@ import {
   api, ApiError, errorText, conflictDetail, TrackerProject, TrackerIssue, TrackerIssuePage,
   TrackerVocabulary, TrackerScope, TrackerOptionField, TrackerIssueBrief, TrackerProjectHome,
   TrackerProjectSessions, TrackerProjectSessionDetail, TrackerProjectSessionSummary,
-  RankedSearchResponse,
+  RankedSearchResponse, SimilarIssueDraft,
 } from '../api'
 import { linkPhrase } from '../lib/issueMap'
 import { useStore } from '../store'
@@ -12,6 +12,7 @@ import { IssueGraphPanel } from './IssueGraphPanel'
 import { WayfinderPanel } from './WayfinderPanel'
 import { SearchableMultiSelect, SearchableOption, SearchableSelect } from './SearchablePicker'
 import { RankedSearchResults } from './RankedSearchResults'
+import { SimilarIssueCandidates } from './SimilarIssueCandidates'
 import {
   FolderGit2, Plus, Search, Trash2, X, Loader2, Archive, ChevronRight, MessageSquare,
   History, Link2, Save, FileDown, CircleDot, CheckCircle2, Lightbulb, Compass, List,
@@ -1276,6 +1277,7 @@ export function ProjectsPanel() {
           kind={kind === 'all' ? 'bug' : kind}
           onClose={() => setShowNewIssue(false)}
           onCreated={async key => { setShowNewIssue(false); setSelectedKey(key); await refreshAfterIssueChange() }}
+          onOpenIssue={key => { setShowNewIssue(false); setCommentTarget(null); setSelectedKey(key); setProjectTab('issues') }}
         />
       )}
 
@@ -2781,13 +2783,15 @@ function NewProjectModal({
 // do not diverge.
 
 function NewItemModal({
-  project, vocab, kind, onClose, onCreated,
+  project, vocab, kind, onClose, onCreated, onOpenIssue,
 }: {
   project: TrackerProject
   vocab: TrackerVocabulary
   kind: ItemKind
   onClose: () => void
   onCreated: (key: string) => void
+  /** A similar-candidate pick: closes this form and opens the normal detail. */
+  onOpenIssue: (key: string) => void
 }) {
   const presentation = KIND_PRESENTATION[kind]
   const { showSnackbar } = useStore()
@@ -2882,6 +2886,37 @@ function NewItemModal({
   const loadBranches = useCallback((query: string) => loadFieldOptions('branch', query), [loadFieldOptions])
   const loadWorktrees = useCallback((query: string) => loadFieldOptions('worktree', query), [loadFieldOptions])
   const loadPullRequests = useCallback((query: string) => loadFieldOptions('pull_request', query), [loadFieldOptions])
+
+  // M2.5 pre-filing probe (§11/§12.3): once the draft carries meaningful
+  // content, SimilarIssueCandidates debounces one project-scoped similar
+  // query per settled draft. The probe is advisory only — it never feeds the
+  // submit button's disabled state and never mutates tracker state.
+  const similarDraft = useMemo<SimilarIssueDraft | null>(() => {
+    const bodyIsStarter = body === presentation.bodyStarter
+    const meaningful = title.trim().length > 0 || (!bodyIsStarter && body.trim().length > 0)
+    if (!meaningful) return null
+    const draft: SimilarIssueDraft = { kind, title }
+    // An untouched feature template is scaffolding, not signal: sending it
+    // would match every other template-bearing feature.
+    if (!bodyIsStarter && body.trim()) draft.body = body
+    if (severity !== 'unset') draft.severity = severity
+    if (component.trim()) draft.component = component.trim()
+    if (requester.trim()) draft.reporter = requester.trim()
+    if (owner.trim()) draft.assignee = owner.trim()
+    if (labels.length) draft.labels = labels
+    if (evidence.trim()) draft.evidence = evidence.trim()
+    if (kind === 'bug') {
+      if (failingCommand.trim()) draft.failing_command = failingCommand.trim()
+      if (reproductionSteps.trim()) draft.reproduction_steps = reproductionSteps.trim()
+      if (expectedOutcome.trim()) draft.expected_outcome = expectedOutcome.trim()
+      if (actualOutcome.trim()) draft.actual_outcome = actualOutcome.trim()
+    }
+    return draft
+  }, [
+    kind, title, body, severity, component, requester, owner, labels, evidence,
+    failingCommand, reproductionSteps, expectedOutcome, actualOutcome,
+    presentation.bodyStarter,
+  ])
 
   return (
     <Modal title={presentation.modalTitle(project.name)} onClose={onClose}>
@@ -2995,6 +3030,12 @@ function NewItemModal({
         <SearchableMultiSelect values={pullRequests} onChange={setPullRequests} loadOptions={loadPullRequests}
           placeholder="Search or add PR URLs / references" ariaLabel="Pull requests" allowCreate className="mt-1" />
       </label>
+      <SimilarIssueCandidates
+        projectId={project.id}
+        draft={similarDraft}
+        terminalStatuses={vocab.terminal_statuses}
+        onOpenIssue={onOpenIssue}
+      />
       {activeWithoutOwner && (
         <div role="alert" className="rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
           In-progress work should have one primary {presentation.assigneeLabel.toLowerCase()}.
