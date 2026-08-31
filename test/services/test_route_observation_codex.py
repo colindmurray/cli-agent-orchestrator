@@ -94,6 +94,8 @@ def codex_panel_rows(
 class FakeCodexPaneSurface:
     """A fake Codex pane surface: canned screen, configured width/verdicts.
 
+    ``geometry_width`` models the one pre-input geometry proof separately from
+    the post-submit width used by render-floor parser tests.
     Records every status command and every key event so the tests can prove
     at-most-once ``/status`` and the ordered pre-submit suggestion dismissal.
     """
@@ -103,6 +105,7 @@ class FakeCodexPaneSurface:
         *,
         rows: list[str],
         pane_width: int | None = 100,
+        geometry_width: object | None = None,
         submission_proven: bool = True,
         composer_restored: bool | None = True,
         prewrite_readiness: roc.PrewriteReadiness | None = None,
@@ -112,6 +115,8 @@ class FakeCodexPaneSurface:
     ) -> None:
         self._rows = list(rows)
         self._pane_width = pane_width
+        self._geometry_width = pane_width if geometry_width is None else geometry_width
+        self._pane_width_calls = 0
         self._submission_proven = submission_proven
         self._composer_restored = composer_restored
         self._prewrite_readiness = prewrite_readiness or roc.PrewriteReadiness(
@@ -137,6 +142,9 @@ class FakeCodexPaneSurface:
         return list(self._rows)
 
     def pane_width(self) -> int | None:
+        self._pane_width_calls += 1
+        if self._pane_width_calls == 1:
+            return self._geometry_width
         return self._pane_width
 
     def await_input_ready(self) -> roc.PrewriteReadiness:
@@ -402,6 +410,172 @@ class TestZeroEffectAndResponseLossReplay:
 
 
 class TestPrewriteReadiness:
+    def test_80x24_refuses_as_status_panel_geometry_before_pre_probe(self, _db):
+        request = _request()
+
+        def assert_pre_probe_absent():
+            record = ro.get(request.operation_id)
+            assert record is not None
+            assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(),
+            pane_width=80,
+            readiness_hook=assert_pre_probe_absent,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_GEOMETRY_INSUFFICIENT
+        assert outcome["prewrite_readiness"]["reason"] == roc.PREWRITE_GEOMETRY_INSUFFICIENT
+        assert outcome["prewrite_readiness"]["detail"] == (
+            "status panel requires at least 87 columns; observed 80"
+        )
+        assert surface.status_commands_sent == 0
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+        assert json.loads(record["final_event_json"])["disposition"] == (
+            roc.DISPOSITION_GEOMETRY_INSUFFICIENT
+        )
+        replay = roc.CodexRouteObserver(surface=surface).observe(request)
+        assert replay["replayed"] is True
+        assert surface.status_commands_sent == 0
+        with database.SessionLocal() as session:
+            assert session.query(database.InboxModel).count() == 1
+
+    @pytest.mark.parametrize("pane_width", [None, True, False, "100", (100, 30), "100x30"])
+    def test_unreadable_or_malformed_geometry_refuses_without_status_input(self, _db, pane_width):
+        request = _request()
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), pane_width=pane_width)
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_GEOMETRY_UNPROVEN
+        assert outcome["prewrite_readiness"]["reason"] == roc.PREWRITE_GEOMETRY_UNPROVEN
+        assert surface.status_commands_sent == 0
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+    def test_raising_geometry_probe_refuses_without_status_input(self, _db):
+        class RaisingGeometrySurface(FakeCodexPaneSurface):
+            def pane_width(self) -> int | None:
+                raise roc.npi.NativePaneInputUnavailable("tmux display failed")
+
+        request = _request()
+        surface = RaisingGeometrySurface(rows=codex_panel_rows())
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_GEOMETRY_UNPROVEN
+        assert outcome["prewrite_readiness"] == {
+            "reason": roc.PREWRITE_GEOMETRY_UNPROVEN,
+            "provider_status": None,
+            "detail": "tmux display failed",
+        }
+        assert surface.status_commands_sent == 0
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+    def test_87_column_geometry_passes_once_before_final_requester_revalidation(self, _db):
+        request = _request()
+        events: list[str] = []
+
+        class OrderedSurface(FakeCodexPaneSurface):
+            def prove_composer_empty(self, provider_version: str) -> roc.PrewriteReadiness:
+                events.append("composer-empty")
+                return super().prove_composer_empty(provider_version)
+
+            def pane_width(self) -> int | None:
+                events.append("geometry")
+                return super().pane_width()
+
+            def send_status_command(self) -> bool:
+                events.append("status")
+                return super().send_status_command()
+
+        requester_checks = 0
+
+        def requester_generation(_terminal_id: str) -> str:
+            nonlocal requester_checks
+            requester_checks += 1
+            events.append("requester")
+            return request.requester_generation
+
+        surface = OrderedSurface(rows=codex_panel_rows(), pane_width=87)
+        outcome = roc.CodexRouteObserver(
+            surface=surface, requester_generation_probe=requester_generation
+        ).observe(request)
+
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["disposition"] == roc.DISPOSITION_DELIVERED
+        assert surface.status_commands_sent == 1
+        assert events.index("composer-empty") < events.index("geometry")
+        assert events.index("geometry") < events.index("requester", 1)
+        assert events.index("requester", 1) < events.index("status")
+        assert requester_checks == 2
+
+    @pytest.mark.parametrize(
+        ("stdout", "expected"), [("100", 100), ("100 nope", None), ("oops", None)]
+    )
+    def test_geometry_probe_reads_width_in_one_tmux_query(self, monkeypatch, stdout, expected):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        monkeypatch.setattr(roc.subprocess, "run", run)
+
+        assert roc._pane_width("%7", timeout=1.0) == expected
+        assert len(calls) == 1
+        assert calls[0][0][-1] == "#{pane_width}"
+
+    def test_real_surface_rechecks_live_width_for_post_submit_parsing(self, monkeypatch):
+        widths = iter([100, 80])
+        calls = []
+
+        def pane_width(pane_id, *, timeout):
+            calls.append((pane_id, timeout))
+            return next(widths)
+
+        monkeypatch.setattr(roc, "_pane_width", pane_width)
+        surface = roc.RealCodexPaneSurface("%7", timeout=1.0)
+
+        assert surface.pane_width() == 100
+        assert surface.pane_width() == 80
+        assert len(calls) == 2
+
+    def test_post_submit_resize_cannot_bind_a_narrow_capture_to_a_wide_floor(
+        self, _db, monkeypatch
+    ):
+        request = _request()
+
+        class ResizedSurface(FakeCodexPaneSurface):
+            def __init__(self):
+                super().__init__(rows=codex_panel_rows(), pane_width=100)
+                self._prewrite_width_read = False
+
+            def pane_width(self) -> int | None:
+                if not self._prewrite_width_read:
+                    self._prewrite_width_read = True
+                    return 100
+                return 80 if self.capture_count == 0 else 100
+
+        monkeypatch.setattr(roc, "_POST_SUBMIT_RENDER_TIMEOUT_SECONDS", 0.0)
+        surface = ResizedSurface()
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert surface.status_commands_sent == 1
+        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["receipt_digest"] is None
+        assert outcome["observation"]["observed_state"] == "inconclusive"
+        assert outcome["observation"]["reason"] == "pane-width-changed"
+        assert outcome["observation"]["render_floor"] == {"width": None}
+
     def test_composer_refusal_is_wired_before_pre_probe(self, _db):
         request = _request(provider_version="0.149.0")
 
@@ -911,6 +1085,7 @@ class TestPrewriteReadiness:
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         monkeypatch.setattr(roc.npi, "_run", run)
+        monkeypatch.setattr(roc, "_pane_width", lambda pane_id, *, timeout: 100)
         monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
         surface = roc.RealCodexPaneSurface(
             "%7",
@@ -1338,7 +1513,7 @@ class _RaisingSendSurface(FakeCodexPaneSurface):
 class TestRenderFloor:
     def test_width_below_the_session_floor_cannot_assert_identity(self, _db):
         request = _request()
-        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), pane_width=70)
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), pane_width=70, geometry_width=100)
         outcome = roc.CodexRouteObserver(surface=surface).observe(request)
         assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
         assert outcome["observation"]["observed_state"] == "inconclusive"
@@ -1346,7 +1521,7 @@ class TestRenderFloor:
 
     def test_width_between_the_floors_asserts_session_but_not_model(self, _db):
         request = _request()
-        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), pane_width=80)
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(), pane_width=80, geometry_width=100)
         outcome = roc.CodexRouteObserver(surface=surface).observe(request)
         assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
         assert outcome["observation"]["observed_state"] == "inconclusive"
@@ -1391,6 +1566,7 @@ class TestRenderFloor:
         surface = FakeCodexPaneSurface(
             rows=codex_panel_rows(model="gpt-5.4-codex (reasoning h", effort=None),
             pane_width=roc.MODEL_RENDER_FLOOR_COLUMNS,
+            geometry_width=100,
         )
         outcome = roc.CodexRouteObserver(surface=surface).observe(request)
         assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
@@ -1410,7 +1586,7 @@ class TestRenderFloor:
             "Model: gpt-5.4-codex (reasoning h",  # truncated at the pane edge
             "cwd: /Users/x/repo",
         ]
-        surface = FakeCodexPaneSurface(rows=rows, pane_width=None)
+        surface = FakeCodexPaneSurface(rows=rows, pane_width=None, geometry_width=100)
         outcome = roc.CodexRouteObserver(surface=surface).observe(request)
         assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
         assert outcome["observation"]["observed_state"] == "inconclusive"
