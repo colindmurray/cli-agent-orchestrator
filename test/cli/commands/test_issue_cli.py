@@ -603,6 +603,64 @@ class TestEditConcurrencyAndLabelFlags:
         assert "[conflict]" in result.output
         assert tracker.get_issue("cond-0001")["body"] == "somebody else"
 
+    def test_close_forwards_the_clock_fence_and_reports_the_status_effect(self, runner):
+        current = tracker.get_issue("cond-0001")["updated_at"]
+        payload = json.loads(
+            run(
+                runner,
+                issue_cli.issue,
+                "close",
+                "cond-0001",
+                "--as",
+                "resolved",
+                "--expect-updated-at",
+                current,
+                "--json",
+            )
+        )
+        assert payload["status"] == "resolved"
+        assert payload["effect_id"] in payload["effect_ids"]
+        assert payload["updated_at"] == tracker.get_issue("cond-0001")["updated_at"]
+
+    def test_comment_and_link_flags_forward_reviewed_clocks(self, runner):
+        run(runner, issue_cli.issue, "file", "--title", "other", "--project", "cao-system")
+        source = tracker.get_issue("cond-0001")
+        target = tracker.get_issue("cond-0002")
+        comment = json.loads(
+            run(
+                runner,
+                issue_cli.issue,
+                "comment",
+                "cond-0001",
+                "--body",
+                "audited",
+                "--expect-updated-at",
+                source["updated_at"],
+                "--json",
+            )
+        )
+        assert comment["effect_id"] > 0
+        source_after_comment = tracker.get_issue("cond-0001")
+        link = json.loads(
+            run(
+                runner,
+                issue_cli.issue,
+                "link",
+                "cond-0001",
+                "--to",
+                "cond-0002",
+                "--expect-from-updated-at",
+                source_after_comment["updated_at"],
+                "--expect-to-updated-at",
+                target["updated_at"],
+                "--action-key",
+                "cli-audit-publish-1",
+                "--json",
+            )
+        )
+        assert len(link["effect_ids"]) == 2
+        assert link["action_key"] == "cli-audit-publish-1"
+
     def test_add_and_remove_label_flags_merge(self, runner):
         run(
             runner,

@@ -997,14 +997,24 @@ def issue_edit(
     default="closed",
 )
 @click.option("--actor", default=None)
+@click.option(
+    "--expect-updated-at",
+    default=None,
+    help="refuse the close unless the issue's updated_at still equals this ISO timestamp",
+)
 @click.option("--json", "as_json", is_flag=True)
-def issue_close(issue_key, resolution, final_status, actor, as_json):
+def issue_close(issue_key, resolution, final_status, actor, expect_updated_at, as_json):
     """Close an issue."""
     changes: Dict[str, Any] = {"status": final_status}
     if resolution:
         changes["resolution"] = resolution
     try:
-        row = tracker.update_issue(issue_key, actor=actor, **changes)
+        row = tracker.update_issue(
+            issue_key,
+            actor=actor,
+            expected_updated_at=expect_updated_at,
+            **changes,
+        )
     except TrackerError as exc:
         _fail(exc)
     _emit(row, as_json, lambda r: click.echo(f"{r['key']} -> {r['status']}"))
@@ -1016,8 +1026,13 @@ def issue_close(issue_key, resolution, final_status, actor, as_json):
 @click.option("--body-file", type=click.Path(exists=True), default=None)
 @click.option("--author", default=None)
 @click.option("--important", is_flag=True, help="flag this comment as high-signal now")
+@click.option(
+    "--expect-updated-at",
+    default=None,
+    help="refuse the comment unless the issue's updated_at still equals this ISO timestamp",
+)
 @click.option("--json", "as_json", is_flag=True)
-def issue_comment(issue_key, body, body_file, author, important, as_json):
+def issue_comment(issue_key, body, body_file, author, important, expect_updated_at, as_json):
     """Add a comment."""
     if body_file:
         with open(body_file, "r", encoding="utf-8") as handle:
@@ -1026,7 +1041,13 @@ def issue_comment(issue_key, body, body_file, author, important, as_json):
         click.echo("a comment needs --body or --body-file", err=True)
         sys.exit(1)
     try:
-        row = tracker.add_comment(issue_key, body=body, author=author, important=bool(important))
+        row = tracker.add_comment(
+            issue_key,
+            body=body,
+            author=author,
+            important=bool(important),
+            expected_updated_at=expect_updated_at,
+        )
     except TrackerError as exc:
         _fail(exc)
     _emit(row, as_json, lambda r: click.echo(f"comment {r['id']} on {r['issue_key']}"))
@@ -1073,11 +1094,43 @@ def issue_comment_importance(issue_key, comment_id, weight, actor, as_json):
 @click.option("--to", "to_key", required=True)
 @click.option("--kind", type=click.Choice(tracker.LINK_KINDS), default="relates")
 @click.option("--actor", default=None)
+@click.option(
+    "--expect-from-updated-at",
+    default=None,
+    help="refuse unless this issue's updated_at still equals this ISO timestamp",
+)
+@click.option(
+    "--expect-to-updated-at",
+    default=None,
+    help="refuse unless the --to issue's updated_at still equals this ISO timestamp",
+)
+@click.option(
+    "--action-key",
+    default=None,
+    help="stable caller-minted key that permits an exact lost-response replay",
+)
 @click.option("--json", "as_json", is_flag=True)
-def issue_link(issue_key, to_key, kind, actor, as_json):
+def issue_link(
+    issue_key,
+    to_key,
+    kind,
+    actor,
+    expect_from_updated_at,
+    expect_to_updated_at,
+    action_key,
+    as_json,
+):
     """Relate two issues. `part-of` runs child -> parent: CHILD part-of PARENT."""
     try:
-        row = tracker.add_link(issue_key, to_key=to_key, kind=kind, actor=actor)
+        row = tracker.add_link(
+            issue_key,
+            to_key=to_key,
+            kind=kind,
+            actor=actor,
+            expected_from_updated_at=expect_from_updated_at,
+            expected_to_updated_at=expect_to_updated_at,
+            action_key=action_key,
+        )
     except TrackerError as exc:
         _fail(exc)
     _emit(row, as_json, lambda r: click.echo(f"{r['from_key']} {r['kind']} {r['to_key']}"))

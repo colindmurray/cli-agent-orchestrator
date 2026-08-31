@@ -59,6 +59,7 @@ _STATUS_FOR_CODE = {
     "invalid": status.HTTP_400_BAD_REQUEST,
     "not-found": status.HTTP_404_NOT_FOUND,
     "conflict": status.HTTP_409_CONFLICT,
+    "busy": status.HTTP_503_SERVICE_UNAVAILABLE,
     "unresolved": status.HTTP_422_UNPROCESSABLE_ENTITY,
 }
 
@@ -251,6 +252,8 @@ class CommentBody(StrictBody):
     author: Optional[str] = None
     # Optional at creation; defaults to ordinary/routine weight.
     important: bool = False
+    # Optional audit-publisher fence on the parent issue's reviewed clock.
+    expected_updated_at: Optional[str] = None
 
 
 class CommentImportanceBody(StrictBody):
@@ -264,6 +267,12 @@ class LinkBody(StrictBody):
     to_key: str
     kind: str
     actor: Optional[str] = None
+    # A relation changes both endpoint projections, so an audit publisher may
+    # pin each side independently.  Omitted clocks retain ordinary linking.
+    expected_from_updated_at: Optional[str] = None
+    expected_to_updated_at: Optional[str] = None
+    # Stable caller-minted identity for an exact fenced-publish replay receipt.
+    action_key: Optional[str] = None
 
 
 class ClaimBody(StrictBody):
@@ -950,7 +959,11 @@ async def add_comment(
 ) -> Dict[str, Any]:
     try:
         return tracker.add_comment(
-            issue_key, body=body.body, author=body.author, important=body.important
+            issue_key,
+            body=body.body,
+            author=body.author,
+            important=body.important,
+            expected_updated_at=body.expected_updated_at,
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
@@ -995,7 +1008,15 @@ async def add_link(
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
-        return tracker.add_link(issue_key, to_key=body.to_key, kind=body.kind, actor=body.actor)
+        return tracker.add_link(
+            issue_key,
+            to_key=body.to_key,
+            kind=body.kind,
+            actor=body.actor,
+            expected_from_updated_at=body.expected_from_updated_at,
+            expected_to_updated_at=body.expected_to_updated_at,
+            action_key=body.action_key,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
@@ -1005,10 +1026,18 @@ async def remove_link(
     issue_key: str,
     link_id: int,
     actor: Optional[str] = Query(None),
+    expected_from_updated_at: Optional[str] = Query(None),
+    expected_to_updated_at: Optional[str] = Query(None),
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
-        return tracker.remove_link(link_id, actor=actor)
+        return tracker.remove_link(
+            link_id,
+            actor=actor,
+            expected_from_updated_at=expected_from_updated_at,
+            expected_to_updated_at=expected_to_updated_at,
+            expected_owner_key=issue_key,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
@@ -1272,7 +1301,11 @@ async def add_feature_comment(
         existing = tracker.get_issue(feature_key)
         _assert_feature(existing)
         return tracker.add_comment(
-            feature_key, body=body.body, author=body.author, important=body.important
+            feature_key,
+            body=body.body,
+            author=body.author,
+            important=body.important,
+            expected_updated_at=body.expected_updated_at,
         )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
@@ -1322,7 +1355,15 @@ async def add_feature_link(
     try:
         existing = tracker.get_issue(feature_key)
         _assert_feature(existing)
-        return tracker.add_link(feature_key, to_key=body.to_key, kind=body.kind, actor=body.actor)
+        return tracker.add_link(
+            feature_key,
+            to_key=body.to_key,
+            kind=body.kind,
+            actor=body.actor,
+            expected_from_updated_at=body.expected_from_updated_at,
+            expected_to_updated_at=body.expected_to_updated_at,
+            action_key=body.action_key,
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 
@@ -1332,23 +1373,19 @@ async def remove_feature_link(
     feature_key: str,
     link_id: int,
     actor: Optional[str] = Query(None),
+    expected_from_updated_at: Optional[str] = Query(None),
+    expected_to_updated_at: Optional[str] = Query(None),
     _scopes: List[str] = _WRITE,
 ) -> Dict[str, Any]:
     try:
-        existing = tracker.get_issue(feature_key)
-        _assert_feature(existing)
-        # Verify link belongs to this feature (URL key must match link's from_key/to_key)
-        from cli_agent_orchestrator.clients.database import SessionLocal, TrackerLinkModel
-
-        with SessionLocal() as db:
-            link = db.get(TrackerLinkModel, int(link_id))
-            if link is None or (
-                link.from_key != feature_key.lower() and link.to_key != feature_key.lower()
-            ):
-                raise tracker.TrackerError(
-                    "not-found", f"no link {link_id} on feature {feature_key}"
-                )
-        return tracker.remove_link(link_id, actor=actor)
+        return tracker.remove_link(
+            link_id,
+            actor=actor,
+            expected_from_updated_at=expected_from_updated_at,
+            expected_to_updated_at=expected_to_updated_at,
+            expected_owner_key=feature_key,
+            expected_owner_kind="feature",
+        )
     except tracker.TrackerError as exc:
         raise _http(exc) from exc
 

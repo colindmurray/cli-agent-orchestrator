@@ -51,6 +51,41 @@ conduct issue link --id <blocker> --to <dependent> --kind blocks
 conduct issue link --id <a> --to <b> --kind relates
 ```
 
+When a publisher reviewed the endpoint clocks before writing, fence the write
+at commit time instead of trusting that earlier read:
+
+```sh
+conduct issue comment --id <key> --body-file <path> --expect-updated-at <clock> --json
+conduct issue link --id <from> --to <to> \
+  --expect-from-updated-at <from-clock> --expect-to-updated-at <to-clock> \
+  --action-key <stable-publish-key> --json
+conduct issue close --id <key> --as resolved --expect-updated-at <clock> --json
+```
+
+The comment response carries its `id`, new parent `updated_at`, and audit
+`effect_id`; a new link carries its `id`, both new endpoint clocks, and both
+audit `effect_ids`; a status/close response carries its committed `updated_at`
+and status `effect_id`. Fenced link creation requires a stable caller-minted
+`action_key`: reusing it after a lost response returns the original link id,
+endpoint clocks, and effect ids, even if an ordinary unlink or issue/project
+deletion has since removed the live graph rows. The receipt is retained for
+the tracker audit lifetime as append-only state rather than a child of the
+relation, and validates the complete
+fenced request identity — normalized endpoints, relation kind, endpoint
+clocks, and actor — rather than adopting a same-shaped edge from another
+publisher. Reusing an action key with a different actor is a typed conflict.
+A stale supplied clock is a typed conflict and writes no
+partial comment, relation, audit event, or status update. A transient SQLite
+lock is retried with the same clocks; only a reread showing a changed supplied
+clock yields conflict. Exhausted unchanged locks return retryable `busy`
+(`503` over HTTP) with observed clock values. Omitting clocks and action keys
+preserves ordinary unfenced work.
+
+Removing a link is the same two-endpoint transition: the optional endpoint
+clocks fence it, and a successful response includes both new clocks plus two
+mirrored `unlink` effect ids. Removing an issue also advances and audits every
+surviving peer whose incident link disappeared.
+
 Labels represent workflow state, initiatives, sessions, and other
 cross-cutting cohorts. Relationships represent containment and execution
 order. A cross-repository outcome may use one issue with multiple recorded

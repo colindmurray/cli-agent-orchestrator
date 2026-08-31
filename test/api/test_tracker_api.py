@@ -12,7 +12,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from cli_agent_orchestrator.clients.database import Base, TerminalModel
+from cli_agent_orchestrator.clients import database as database_client
+from cli_agent_orchestrator.clients.database import Base, TerminalModel, TrackerLinkModel
 from cli_agent_orchestrator.services import issue_tracker as tracker
 from cli_agent_orchestrator.services import project_dashboard
 
@@ -521,6 +522,60 @@ class TestCommentsAndLinksRoutes:
         detail = client.get(f"/tracker/issues/{issue['key']}").json()
         assert detail["comments"][0]["important"] is True
 
+    def test_comment_forwards_the_parent_clock_fence_and_returns_its_effect(self, client, project):
+        issue = _issue(client)
+        created = client.post(
+            f"/tracker/issues/{issue['key']}/comments",
+            json={
+                "body": "audited",
+                "important": True,
+                "expected_updated_at": issue["updated_at"],
+            },
+        )
+        assert created.status_code == 201
+        result = created.json()
+        assert result["important"] is True
+        assert result["effect_id"] > 0
+        assert (
+            result["updated_at"]
+            == client.get(f"/tracker/issues/{issue['key']}").json()["updated_at"]
+        )
+
+    def test_stale_comment_clock_is_a_conflict_without_a_comment(self, client, project):
+        issue = _issue(client)
+        client.patch(f"/tracker/issues/{issue['key']}", json={"body": "changed"})
+        response = client.post(
+            f"/tracker/issues/{issue['key']}/comments",
+            json={"body": "stale", "expected_updated_at": issue["updated_at"]},
+        )
+        assert response.status_code == 409
+        assert client.get(f"/tracker/issues/{issue['key']}").json()["comments"] == []
+
+    def test_retryable_tracker_busy_is_a_typed_503_not_a_stale_conflict(
+        self, client, project, monkeypatch
+    ):
+        issue = _issue(client)
+
+        def busy(*_args, **_kwargs):
+            raise tracker.TrackerError(
+                "busy",
+                "the tracker write lock is busy",
+                details={"retryable": True, "observed_updated_at": issue["updated_at"]},
+            )
+
+        monkeypatch.setattr(tracker, "add_comment", busy)
+        response = client.post(
+            f"/tracker/issues/{issue['key']}/comments",
+            json={"body": "retry later", "expected_updated_at": issue["updated_at"]},
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"] == {
+            "message": "the tracker write lock is busy",
+            "code": "busy",
+            "retryable": True,
+            "observed_updated_at": issue["updated_at"],
+        }
+
     def test_comment_importance_set_clear_and_retry(self, client, project):
         issue = _issue(client)
         comment = client.post(
@@ -610,8 +665,85 @@ class TestCommentsAndLinksRoutes:
         )
         assert created.status_code == 201
         link_id = created.json()["id"]
-        assert client.delete(f"/tracker/issues/{a['key']}/links/{link_id}").status_code == 200
+        removed = client.delete(f"/tracker/issues/{a['key']}/links/{link_id}")
+        assert removed.status_code == 200
+        assert len(removed.json()["effect_ids"]) == 2
         assert client.get(f"/tracker/issues/{b['key']}").json()["links"] == []
+
+    def test_issue_link_delete_refuses_a_url_issue_that_does_not_own_the_link(
+        self, client, project
+    ):
+        source, target, stranger = _issue(client), _issue(client), _issue(client)
+        created = client.post(
+            f"/tracker/issues/{source['key']}/links",
+            json={"to_key": target["key"], "kind": "blocks"},
+        )
+        assert created.status_code == 201
+
+        refused = client.delete(f"/tracker/issues/{stranger['key']}/links/{created.json()['id']}")
+
+        assert refused.status_code == 404
+        assert client.get(f"/tracker/issues/{source['key']}").json()["links"]
+
+    def test_link_forwards_both_endpoint_clocks_and_returns_both_new_clocks(self, client, project):
+        a, b = _issue(client, title="a"), _issue(client, title="b")
+        created = client.post(
+            f"/tracker/issues/{a['key']}/links",
+            json={
+                "to_key": b["key"],
+                "kind": "blocks",
+                "expected_from_updated_at": a["updated_at"],
+                "expected_to_updated_at": b["updated_at"],
+                "action_key": "api-link-success",
+            },
+        )
+        assert created.status_code == 201
+        result = created.json()
+        assert len(result["effect_ids"]) == 2
+        assert (
+            result["from_updated_at"]
+            == client.get(f"/tracker/issues/{a['key']}").json()["updated_at"]
+        )
+        assert (
+            result["to_updated_at"]
+            == client.get(f"/tracker/issues/{b['key']}").json()["updated_at"]
+        )
+
+    def test_link_forwards_the_second_endpoint_clock(self, client, project):
+        a, b = _issue(client, title="a"), _issue(client, title="b")
+        client.patch(f"/tracker/issues/{b['key']}", json={"body": "changed"})
+        response = client.post(
+            f"/tracker/issues/{a['key']}/links",
+            json={
+                "to_key": b["key"],
+                "kind": "blocks",
+                "expected_from_updated_at": a["updated_at"],
+                "expected_to_updated_at": b["updated_at"],
+                "action_key": "api-link-stale-target",
+            },
+        )
+        assert response.status_code == 409
+        assert client.get(f"/tracker/issues/{a['key']}").json()["links"] == []
+
+    def test_link_action_key_replays_the_original_receipt_after_response_loss(
+        self, client, project
+    ):
+        a, b = _issue(client, title="a"), _issue(client, title="b")
+        body = {
+            "to_key": b["key"],
+            "kind": "blocks",
+            "expected_from_updated_at": a["updated_at"],
+            "expected_to_updated_at": b["updated_at"],
+            "action_key": "wire-replay-1",
+        }
+        committed = client.post(f"/tracker/issues/{a['key']}/links", json=body)
+        assert committed.status_code == 201
+        client.patch(f"/tracker/issues/{a['key']}", json={"body": "later"})
+        replay = client.post(f"/tracker/issues/{a['key']}/links", json=body)
+        assert replay.status_code == 201
+        assert replay.json()["replayed"] is True
+        for field in ("id", "from_updated_at", "to_updated_at", "effect_ids", "action_key"):
+            assert replay.json()[field] == committed.json()[field]
 
     def test_an_unknown_link_kind_is_400(self, client, project):
         a, b = _issue(client, title="a"), _issue(client, title="b")
@@ -1055,6 +1187,44 @@ class TestFeatureParity:
         )
         assert stale.status_code == 409
         assert stale.json()["detail"]["current_updated_at"] == ok.json()["updated_at"]
+
+    def test_feature_link_delete_refuses_a_reused_row_id_after_its_precheck(
+        self, client, project, monkeypatch
+    ):
+        feature = client.post(
+            "/tracker/features", json={"project_id": "cao-system", "title": "wish"}
+        ).json()
+        target, foreign_from, foreign_to = _issue(client), _issue(client), _issue(client)
+        created = client.post(
+            f"/tracker/features/{feature['key']}/links",
+            json={"to_key": target["key"], "kind": "relates"},
+        )
+        assert created.status_code == 201
+        link_id = created.json()["id"]
+        real_remove_link = tracker.remove_link
+        # The old feature route checked ownership in a separate session before
+        # calling the service. Simulate a cooperative remover/recreator in
+        # that gap; SQLite reuses the highest deleted integer primary key.
+        monkeypatch.setattr(database_client, "SessionLocal", tracker.SessionLocal)
+
+        def replace_then_remove(reused_link_id, **kwargs):
+            with tracker.SessionLocal() as db:
+                db.query(TrackerLinkModel).filter(TrackerLinkModel.id == reused_link_id).delete()
+                replacement = TrackerLinkModel(
+                    from_key=foreign_from["key"], to_key=foreign_to["key"], kind="relates"
+                )
+                db.add(replacement)
+                db.flush()
+                assert replacement.id == reused_link_id
+                db.commit()
+            return real_remove_link(reused_link_id, **kwargs)
+
+        monkeypatch.setattr(tracker, "remove_link", replace_then_remove)
+        refused = client.delete(f"/tracker/features/{feature['key']}/links/{link_id}")
+
+        assert refused.status_code == 404
+        foreign = client.get(f"/tracker/issues/{foreign_from['key']}").json()
+        assert [link["to_key"] for link in foreign["links"]] == [foreign_to["key"]]
 
     def test_the_features_list_accepts_unlabeled(self, client, project):
         client.post("/tracker/features", json={"project_id": "cao-system", "title": "bare"})
