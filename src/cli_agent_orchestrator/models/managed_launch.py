@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import Any, Literal, Optional, TypeAlias
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 PROTOCOL_VERSION = "cao-managed-launch-v1"
 ProtocolVersion: TypeAlias = Literal["cao-managed-launch-v1"]
@@ -29,6 +29,15 @@ class ManagedLaunchReserveRequest(BaseModel):
     reservation_id: str
     session_name: str = Field(min_length=1)
     provider: str = Field(min_length=1)
+    #: Whether this reservation starts a provider session or resumes the
+    #: canonical provider identity supplied below.  The default preserves the
+    #: original v1 request shape: callers predating this field still create a
+    #: new provider session.
+    launch_kind: Literal["new", "resume"] = "new"
+    #: The predecessor provider session for ``launch_kind='resume'``. Claude
+    #: identities are canonical UUID text, so accepting another spelling here
+    #: would make the durable request, argv, and SessionStart proof disagree.
+    provider_session_id: Optional[str] = None
     agent_profile: str = Field(min_length=1)
     caller_id: str = Field(pattern=r"^[a-f0-9]{8}$")
     # Immutable orchestration identity is present before the no-task launch
@@ -115,6 +124,22 @@ class ManagedLaunchReserveRequest(BaseModel):
         if value is not None and not _SHA256_RE.fullmatch(value):
             raise ValueError("provider_executable_sha256 must be 64 lowercase hex characters")
         return value
+
+    @field_validator("provider_session_id")
+    @classmethod
+    def _validate_provider_session_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            return _uuid_text(value, "provider_session_id")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_launch_identity_pair(self) -> "ManagedLaunchReserveRequest":
+        if self.launch_kind == "new":
+            if self.provider_session_id is not None:
+                raise ValueError("launch_kind='new' must not carry provider_session_id")
+        elif self.provider_session_id is None:
+            raise ValueError("launch_kind='resume' requires provider_session_id")
+        return self
 
 
 class ManagedLaunchAdmitRequest(BaseModel):

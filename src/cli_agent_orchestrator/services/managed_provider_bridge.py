@@ -45,6 +45,7 @@ from cli_agent_orchestrator.providers.codex import (
 )
 from cli_agent_orchestrator.services import (
     actor_broker,
+    claude_native_launch,
     claude_native_readiness,
     companion_receipts,
     deepseek_acp_route,
@@ -71,6 +72,42 @@ from cli_agent_orchestrator.utils.tool_mapping import resolve_allowed_tools
 logger = logging.getLogger(__name__)
 
 BRIDGE_VERSION = "cao-native-provider-bridge-v1"
+ACP_EXACT_RESUME_CAPABILITY_SCHEMA = "cao-managed-acp-exact-resume-capability-v1"
+# This is the one bridge-owned statement of what can resume exactly on the
+# v1 ACP surface.  Capability advertisement and launch validation both read
+# it so an advertised route cannot drift from the argv branch that exists.
+ACP_EXACT_RESUME_SUPPORT: dict[str, dict[str, Any]] = {
+    "claude_code": {
+        "provider_routes": (
+            "anthropic",
+            deepseek_acp_route.PROVIDER_ROUTE_DEEPSEEK,
+        ),
+        "identity_option": claude_native_launch.RESUME_OPTION,
+    },
+}
+
+
+def acp_exact_resume_capability() -> dict[str, Any]:
+    """The versioned ACP resume contract a conductor must negotiate first."""
+    return {
+        "schema_version": ACP_EXACT_RESUME_CAPABILITY_SCHEMA,
+        "providers": {
+            provider: {
+                "supported": True,
+                "provider_routes": list(support["provider_routes"]),
+                "identity_option": support["identity_option"],
+            }
+            for provider, support in ACP_EXACT_RESUME_SUPPORT.items()
+        },
+    }
+
+
+def supports_acp_exact_resume(*, provider: str, provider_route: str) -> bool:
+    """Whether this bridge has an exact resume branch for this route."""
+    support = ACP_EXACT_RESUME_SUPPORT.get(provider)
+    return bool(support and provider_route in support["provider_routes"])
+
+
 #: The first-admission system/init wait bound for a Claude Code session.
 #: Generous for a real gateway cold start; a module-level name so tests can
 #: shrink it without touching the contract.
@@ -1250,6 +1287,36 @@ def _profile_material(agent_profile: str, terminal_id: str) -> dict[str, Any]:
     return _profile_material_from_profile(load_agent_profile(agent_profile), terminal_id)
 
 
+def _validated_launch_identity(request: dict[str, Any]) -> tuple[str, Optional[str]]:
+    """Return the v1 launch pair after refusing impossible bridge requests.
+
+    Missing fields are the compatibility form of a new launch.  A resume,
+    however, names an already-existing Claude session and must reach the
+    provider through the one advertised exact-resume adapter.
+    """
+    launch_kind = request.get("launch_kind", "new")
+    provider_session_id = request.get("provider_session_id")
+    if launch_kind == "new":
+        if provider_session_id is not None:
+            raise BridgeError("launch_kind='new' must not carry provider_session_id")
+        return launch_kind, None
+    if launch_kind != "resume":
+        raise BridgeError(f"unknown managed ACP launch_kind {launch_kind!r}")
+    if not supports_acp_exact_resume(
+        provider=str(request.get("provider") or ""),
+        provider_route=str(request.get("provider_route") or "anthropic"),
+    ):
+        raise BridgeError(
+            "managed ACP exact resume is unsupported for "
+            f"provider={request.get('provider')!r} provider_route="
+            f"{request.get('provider_route', 'anthropic')!r}"
+        )
+    try:
+        return launch_kind, claude_native_launch.validate_session_id(provider_session_id)
+    except claude_native_launch.ClaudeNativeLaunchError as exc:
+        raise BridgeError(str(exc)) from exc
+
+
 def write_request(reservation_id: str, request: dict[str, Any]) -> dict[str, pathlib.Path]:
     delivery_id = request.get("delivery_id")
     try:
@@ -1258,6 +1325,7 @@ def write_request(reservation_id: str, request: dict[str, Any]) -> dict[str, pat
         raise BridgeError("managed provider request requires a canonical delivery_id") from exc
     if delivery_id != canonical_delivery_id:
         raise BridgeError("managed provider request delivery_id is not canonical")
+    _validated_launch_identity(request)
     identity = binding_identity(request)
     target = paths(reservation_id, request)
     target["root"].mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2278,7 +2346,7 @@ class _ProviderSession:
         ):
             model_matches = deepseek_acp_route.observed_model_matches(model, observed_model)
         else:
-            model_matches = observed_model == model
+            model_matches = claude_native_launch.observed_model_matches(model, observed_model)
         if not model_matches:
             raise BridgeError(
                 "Claude Code system/init resolved the wrong model: "
@@ -2340,14 +2408,10 @@ class _ProviderSession:
 
         env = _provider_child_environment(self.request)
 
-        session_id = self.request.get("provider_session_id")
-        if session_id:
-            if not isinstance(session_id, str) or not re.fullmatch(
-                r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", session_id
-            ):
-                raise BridgeError(
-                    "Claude managed launch requires a valid canonical UUID session id"
-                )
+        launch_kind, predecessor_session_id = _validated_launch_identity(self.request)
+        if launch_kind == "resume":
+            assert predecessor_session_id is not None
+            session_id = predecessor_session_id
         else:
             session_id = str(uuid.uuid4())
 
@@ -2364,11 +2428,8 @@ class _ProviderSession:
         # exactly once; the wrapper claims the token and execs the inner
         # (real) Claude binary.  The version probe above ran the inner
         # binary directly and never invoked the wrapper.
-        argv = [
-            envelope["wrapper_executable"] if is_deepseek and envelope else claude_bin,
+        provider_argv = [
             "-p",
-            "--session-id",
-            session_id,
             "--input-format",
             "stream-json",
             "--output-format",
@@ -2388,7 +2449,7 @@ class _ProviderSession:
         # unrestricted default.
         allowed = list(self.profile_material.get("allowed_tools") or [])
         if "*" in allowed:
-            argv.append("--dangerously-skip-permissions")
+            provider_argv.append("--dangerously-skip-permissions")
         else:
             native_tools = _claude_native_tool_names(allowed)
             if not native_tools:
@@ -2396,13 +2457,30 @@ class _ProviderSession:
                     "resolved profile tool posture has no Claude Code native "
                     "tools; refusing to expose an unrestricted default tool set"
                 )
-            argv.extend(["--allowedTools", ",".join(sorted(native_tools))])
+            provider_argv.extend(["--allowedTools", ",".join(sorted(native_tools))])
         if provider_contracts.route_selects_effort(self.request["effort"]):
-            argv.extend(["--effort", self.request["effort"]])
+            provider_argv.extend(["--effort", self.request["effort"]])
         if self.profile_material.get("system_prompt"):
-            argv.extend(["--append-system-prompt", self.profile_material["system_prompt"]])
+            provider_argv.extend(["--append-system-prompt", self.profile_material["system_prompt"]])
         if not self.profile_material.get("mcp_servers"):
-            argv.append("--strict-mcp-config")
+            provider_argv.append("--strict-mcp-config")
+
+        provider_binary = envelope["wrapper_executable"] if is_deepseek and envelope else claude_bin
+        if launch_kind == "resume":
+            # ``build_resume_argv`` forbids a second identity option and
+            # validates Claude's exact resume form.  In particular, a
+            # predecessor is never reintroduced with ``--session-id``.
+            argv = claude_native_launch.build_resume_argv(
+                session_id=session_id,
+                claude_binary=provider_binary,
+                extra_args=provider_argv,
+            )
+        else:
+            argv = claude_native_launch.build_launch_argv(
+                session_id=session_id,
+                claude_binary=provider_binary,
+                extra_args=provider_argv,
+            )
 
         argv = _launcher_argv(
             paths(self.request["reservation_id"], self.request)["socket"],
@@ -2428,6 +2506,17 @@ class _ProviderSession:
             session_id,
             timeout=claude_native_readiness.READY_TIMEOUT_SECONDS,
         )
+        # The hook is provider-authored evidence.  Keep the explicit
+        # comparison here even though the waiter also searches for this id:
+        # a changed waiter must not turn a foreign SessionStart into a ready
+        # resume, and no task has crossed the provider boundary yet.
+        observed_hook_session_id = readiness_record.get("native_session_id")
+        if launch_kind == "resume" and observed_hook_session_id != predecessor_session_id:
+            raise BridgeError(
+                "Claude Code SessionStart hook did not confirm the requested "
+                "resumed provider session: "
+                f"observed {observed_hook_session_id!r}, expected {predecessor_session_id!r}"
+            )
         # Claude Code 2.1.x emits system/init only when the first real user
         # message is available, so readiness cannot demand it without either
         # spending a provider turn or inventing a synthetic trigger.  The
@@ -2443,6 +2532,18 @@ class _ProviderSession:
                 f"directory: {observed_hook_cwd!r} (expected "
                 f"{self.request['working_directory']!r})"
             )
+        if launch_kind == "resume":
+            observed_hook_model = readiness_record.get("model")
+            route_matches = (
+                deepseek_acp_route.observed_model_matches(model, observed_hook_model)
+                if is_deepseek
+                else claude_native_launch.observed_model_matches(model, observed_hook_model)
+            )
+            if not route_matches:
+                raise BridgeError(
+                    "Claude Code SessionStart hook resolved the wrong resumed route: "
+                    f"{observed_hook_model!r} (expected {model!r})"
+                )
         if is_deepseek and envelope is not None:
             if not deepseek_acp_route.consumed_marker_exists(envelope["consumed_marker_path"]):
                 raise BridgeError(
@@ -2466,8 +2567,9 @@ class _ProviderSession:
             # hook named the exact session and its cwd — never a restatement
             # of the request fields.
             "session_start": {
-                "session_id": readiness_record.get("native_session_id"),
+                "session_id": observed_hook_session_id,
                 "cwd": observed_hook_cwd,
+                "model": readiness_record.get("model"),
                 "hook_event": readiness_record.get("hook_event"),
             },
             "model_input_ready": True,

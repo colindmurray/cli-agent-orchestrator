@@ -227,6 +227,68 @@ def test_delivery_identity_is_required_and_cannot_be_rebound(isolated_memory_db,
         managed_launch.reserve(changed)
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"launch_kind": "new", "provider_session_id": "44444444-4444-4444-8444-444444444444"},
+        {"launch_kind": "resume", "provider_session_id": None},
+        {"launch_kind": "resume", "provider_session_id": "not-a-canonical-session-id"},
+        {
+            "launch_kind": "resume",
+            "provider_session_id": "abcdefab-cdef-4abc-8def-abcdefabcdef".upper(),
+        },
+    ],
+)
+def test_reserve_launch_intent_is_a_discriminated_pydantic_pair(tmp_path, changes):
+    """A resume never reaches persistence unless its predecessor is exact."""
+    payload = _reserve_request(tmp_path).model_dump(mode="json")
+    payload.update(changes)
+
+    with pytest.raises(ValueError):
+        ManagedLaunchReserveRequest(**payload)
+
+
+def _resume_request(tmp_path, **changes):
+    payload = _reserve_request(
+        tmp_path,
+        provider="claude_code",
+        trusted_project_root=None,
+        expected_model="claude-3-7-sonnet-20250219",
+        expected_effort="high",
+        launch_kind="resume",
+        provider_session_id="44444444-4444-4444-8444-444444444444",
+    ).model_dump(mode="json")
+    payload.update(changes)
+    return ManagedLaunchReserveRequest(**payload)
+
+
+def test_resume_intent_is_persisted_and_echoed_on_the_v1_record(isolated_memory_db, tmp_path):
+    request = _resume_request(tmp_path)
+
+    created, was_created = managed_launch.reserve(request)
+    fetched = managed_launch.get(request.reservation_id)
+
+    assert was_created is True
+    for record in (created, fetched):
+        assert record["launch_kind"] == "resume"
+        assert record["provider_session_id"] == request.provider_session_id
+        assert record["request"]["launch_kind"] == "resume"
+        assert record["request"]["provider_session_id"] == request.provider_session_id
+
+
+def test_resume_is_refused_for_a_provider_without_an_exact_acp_adapter(
+    isolated_memory_db, tmp_path
+):
+    request = _reserve_request(
+        tmp_path,
+        launch_kind="resume",
+        provider_session_id="44444444-4444-4444-8444-444444444444",
+    )
+
+    with pytest.raises(managed_launch.ManagedLaunchConflict, match="no exact ACP resume adapter"):
+        managed_launch.reserve(request)
+
+
 def test_launch_failure_finalizes_exact_delivery_once_and_rejects_tampering(
     isolated_memory_db, tmp_path
 ):
@@ -661,6 +723,58 @@ async def test_launch_reserved_uses_exact_provider_bridge_before_readiness(
     assert written["rendezvous_identity"]["project"] == request.project
     assert written["rendezvous_identity"]["task_id"] == request.task_id
     assert written["delivery_id"] == request.delivery_id
+    # A request predating the new fields remains a normal new provider
+    # session; the bridge receives the resolved compatibility form.
+    assert written["launch_kind"] == "new"
+    assert written["provider_session_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_launch_reserved_propagates_the_persisted_resume_pair_to_bridge(
+    isolated_memory_db, tmp_path, monkeypatch
+):
+    request = _resume_request(tmp_path)
+    _commit_fixture_worktree(tmp_path)
+    record, _ = managed_launch.reserve(request)
+    written = {}
+
+    monkeypatch.setattr(managed_launch, "_executable_identity", lambda _: ("/provider", "d" * 64))
+    monkeypatch.setattr(bridge, "profile_digest", lambda _: "e" * 64)
+    monkeypatch.setattr(
+        bridge,
+        "write_request",
+        lambda reservation_id, body: written.update(
+            {"reservation_id": reservation_id, "body": body}
+        ),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "request_bridge",
+        lambda _reservation_id, _body, timeout: {
+            "state": "ready",
+            "readiness": {
+                **_ready_receipt_for(record, request),
+                "provider_receipt_kind": "claude-session-start",
+                "provider_session_id": request.provider_session_id,
+                "receipt_id": request.provider_session_id,
+            },
+        },
+    )
+
+    async def fake_create_terminal(**_kwargs):
+        return SimpleNamespace(status="idle")
+
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.services.terminal_service.create_terminal",
+        fake_create_terminal,
+    )
+
+    ready = await managed_launch.launch_reserved(request.reservation_id)
+
+    assert ready["state"] == "ready"
+    assert written["reservation_id"] == request.reservation_id
+    assert written["body"]["launch_kind"] == "resume"
+    assert written["body"]["provider_session_id"] == request.provider_session_id
 
 
 @pytest.mark.asyncio

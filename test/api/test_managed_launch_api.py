@@ -6,7 +6,7 @@ import uuid
 from cli_agent_orchestrator.models.managed_launch import PROTOCOL_VERSION
 from cli_agent_orchestrator.services import managed_launch
 from cli_agent_orchestrator.services import managed_launch_v2 as v2
-from cli_agent_orchestrator.services import muse_native_launch
+from cli_agent_orchestrator.services import managed_provider_bridge, muse_native_launch
 
 
 def _reservation(tmp_path):
@@ -154,6 +154,16 @@ def test_capability_handshake_is_exact_and_versioned(client, monkeypatch):
         "execution_mode_selection": True,
         "glm_route_envelope": True,
         "deepseek_acp_route_envelope": True,
+        "acp_exact_resume": {
+            "schema_version": "cao-managed-acp-exact-resume-capability-v1",
+            "providers": {
+                "claude_code": {
+                    "supported": True,
+                    "provider_routes": ["anthropic", "deepseek"],
+                    "identity_option": "--resume",
+                },
+            },
+        },
         # Only the modes this surface can actually run. Native TUI is
         # absent until a native launch branch exists, so a consumer that
         # gates a native claim on this list is fail-closed by default.
@@ -172,6 +182,29 @@ def test_capability_handshake_is_exact_and_versioned(client, monkeypatch):
         "native_tui": {
             "schema_version": 1,
             "providers": _expected_native_tui_providers(),
+        },
+    }
+
+
+def test_acp_exact_resume_capability_is_derived_from_the_bridge_support_map(client, monkeypatch):
+    support = {
+        "claude_code": {
+            "provider_routes": ("anthropic",),
+            "identity_option": "--resume",
+        },
+    }
+    monkeypatch.setattr(managed_provider_bridge, "ACP_EXACT_RESUME_SUPPORT", support)
+
+    advertised = client.get("/managed-launch/capabilities").json()["acp_exact_resume"]
+
+    assert advertised == {
+        "schema_version": "cao-managed-acp-exact-resume-capability-v1",
+        "providers": {
+            "claude_code": {
+                "supported": True,
+                "provider_routes": ["anthropic"],
+                "identity_option": "--resume",
+            },
         },
     }
 

@@ -181,7 +181,7 @@ class _FakeClaudeProcess:
         self.provider_argv = argv[argv.index("--") + 1 :] if "--" in argv else argv
         self.session_id = "test-session-uuid"
         for i, arg in enumerate(self.provider_argv):
-            if arg == "--session-id" and i + 1 < len(self.provider_argv):
+            if arg in {"--session-id", "--resume"} and i + 1 < len(self.provider_argv):
                 self.session_id = self.provider_argv[i + 1]
 
         # The wrapper's claim side effect: consume the one-shot token and
@@ -365,6 +365,7 @@ def _build_session(
     envelope: Optional[dict] = None,
     allowed_tools: Optional[list[str]] = None,
     init_event: Optional[dict[str, Any]] = None,
+    init_model: Optional[str] = None,
     emit_init: bool = True,
     consume: bool = True,
     echo_user: bool = True,
@@ -393,7 +394,7 @@ def _build_session(
                 "type": "system",
                 "subtype": "init",
                 "session_id": "__from_argv__",
-                "model": request["model"],
+                "model": request["model"] if init_model is None else init_model,
                 "cwd": request["working_directory"],
                 "tools": ["Bash", "Read"],
             }
@@ -415,6 +416,120 @@ def _build_session(
 
 
 class TestDeepSeekReadinessAndAdmission:
+    @pytest.mark.parametrize(
+        ("provider_route", "model"),
+        [
+            ("anthropic", "claude-3-7-sonnet-20250219"),
+            ("deepseek", "deepseek-v4-flash"),
+        ],
+    )
+    def test_resume_uses_one_exact_resume_option_and_preserves_route_arguments(
+        self,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider_route: str,
+        model: str,
+    ) -> None:
+        predecessor = "44444444-4444-4444-8444-444444444444"
+        session, request, procs = _build_session(
+            tmp_path,
+            monkeypatch,
+            provider_route=provider_route,
+            model=model,
+        )
+        request.update({"launch_kind": "resume", "provider_session_id": predecessor})
+
+        readiness = session.initialize()
+        argv = procs[0].provider_argv
+
+        assert argv.count("--resume") == 1
+        assert argv[argv.index("--resume") + 1] == predecessor
+        assert "--session-id" not in argv
+        assert argv.count("--resume") + argv.count("-r") == 1
+        for required in (
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "--settings",
+            "--model",
+        ):
+            assert required in argv
+        assert argv[argv.index("--model") + 1] == model
+        if provider_route == "deepseek":
+            assert argv[0] == request["route_envelope"]["wrapper_executable"]
+        else:
+            assert argv[0] == request["provider_executable"]
+        assert readiness["provider_session_id"] == predecessor
+        assert readiness["session_start"]["session_id"] == predecessor
+
+    def test_resume_refuses_a_mismatched_provider_session_start_before_task_admission(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        predecessor = "44444444-4444-4444-8444-444444444444"
+        session, request, procs = _build_session(tmp_path, monkeypatch)
+        request.update({"launch_kind": "resume", "provider_session_id": predecessor})
+        monkeypatch.setattr(
+            "cli_agent_orchestrator.services.claude_native_readiness.await_session_start",
+            lambda _path, _session_id, **_kw: {
+                "schema": "cao-claude-native-readiness-v1",
+                "hook_event": "SessionStart",
+                "native_session_id": "55555555-5555-4555-8555-555555555555",
+                "cwd": request["working_directory"],
+                "model": request["model"],
+            },
+        )
+
+        with pytest.raises(bridge.BridgeError, match="did not confirm the requested resumed"):
+            session.initialize()
+
+        assert len(procs) == 1
+        assert procs[0].sent_messages == []
+        assert session.provider_session_id is None
+        assert session.readiness is None
+
+    @pytest.mark.parametrize(
+        ("requested_model", "observed_model"),
+        [
+            ("sonnet", "claude-sonnet-5"),
+            ("claude-opus-5", "claude-opus-5[1m]"),
+        ],
+    )
+    def test_resumed_anthropic_model_observation_uses_native_model_matching(
+        self,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        requested_model: str,
+        observed_model: str,
+    ) -> None:
+        predecessor = "44444444-4444-4444-8444-444444444444"
+        session, request, _procs = _build_session(
+            tmp_path,
+            monkeypatch,
+            model=requested_model,
+            provider_route="anthropic",
+            init_model=observed_model,
+        )
+        request.update({"launch_kind": "resume", "provider_session_id": predecessor})
+        monkeypatch.setattr(
+            "cli_agent_orchestrator.services.claude_native_readiness.await_session_start",
+            lambda _path, _session_id, **_kw: {
+                "schema": "cao-claude-native-readiness-v1",
+                "hook_event": "SessionStart",
+                "native_session_id": predecessor,
+                "cwd": request["working_directory"],
+                "model": observed_model,
+            },
+        )
+
+        readiness = session.initialize()
+        submission = session.admit(_admission(request))
+
+        assert readiness["session_start"]["model"] == observed_model
+        assert submission["provider_receipt_kind"] == "claude-turn-start"
+        assert session._claude_init is not None
+        assert session._claude_init["model"] == observed_model
+
     def test_envelope_launch_readiness_and_first_turn(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
