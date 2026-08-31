@@ -320,26 +320,23 @@ class TestReplayNoDuplicate:
 
 
 class TestAmbiguousCloseNoSecondEscape:
-    def test_captured_80x30_render_is_render_floor_model_and_ambiguous(self, _db):
+    def test_captured_80x30_render_refuses_geometry_before_status_input(self, _db):
         request = _request()
         surface = fixtures.FakeCodexPaneSurface(
             rows=list(fixtures.CAPTURED_STATUS_80X30_ROWS), pane_width=80
         )
         outcome = roc.CodexRouteObserver(surface=surface).observe(request)
 
-        assert surface.status_commands_sent == 1
+        assert surface.status_commands_sent == 0
         assert surface.key_events == []
-        assert outcome["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_GEOMETRY_INSUFFICIENT
         assert outcome["terminal"] is True
         assert outcome["receipt_digest"] is None
-        assert outcome["observation"]["observed_state"] == "inconclusive"
-        assert outcome["observation"]["reason"] == "render-floor-model"
-        # the session identity is still asserted at 80 columns; the Model
-        # value is not-rendered and never guessed.
-        assert outcome["observation"]["session_id"] == request.native_session_id
-        assert outcome["observation"]["model"] is None
-        assert outcome["observation"]["effort"] is None
-        assert outcome["close_proof"]["outcome"] == "composer-restored"
+        assert outcome["observation"] is None
+        assert outcome["close_proof"] is None
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
 
     def test_captured_100x30_render_ignores_trailing_annotation(self, _db):
         request = _request()

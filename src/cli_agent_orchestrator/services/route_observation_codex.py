@@ -86,6 +86,8 @@ DISPOSITION_PROVIDER_UNSUPPORTED = "provider-unsupported"
 DISPOSITION_COMPOSER_NONEMPTY = "composer-nonempty"
 DISPOSITION_COMPOSER_UNPROVEN = "composer-unproven"
 DISPOSITION_COMPOSER_UNREADABLE = "composer-unreadable"
+DISPOSITION_GEOMETRY_UNPROVEN = "geometry-unproven"
+DISPOSITION_GEOMETRY_INSUFFICIENT = "geometry-insufficient"
 
 PREWRITE_READY = "ready"
 PREWRITE_PROVIDER_NOT_READY = "provider-not-ready"
@@ -94,6 +96,8 @@ PREWRITE_PROVIDER_UNSUPPORTED = "provider-unsupported"
 PREWRITE_COMPOSER_NONEMPTY = "composer-nonempty"
 PREWRITE_COMPOSER_UNPROVEN = "composer-unproven"
 PREWRITE_COMPOSER_UNREADABLE = "composer-unreadable"
+PREWRITE_GEOMETRY_UNPROVEN = "geometry-unproven"
+PREWRITE_GEOMETRY_INSUFFICIENT = "geometry-insufficient"
 _PREWRITE_READINESS_POLL_SECONDS = 0.1
 # Codex can briefly redraw an idle composer between asynchronous MCP-startup
 # updates.  Restart-5 observed MCP work about 0.4 seconds after the first ready
@@ -110,7 +114,7 @@ _PREWRITE_READY_STABLE_POLLS = 11
 _POST_SUBMIT_RENDER_POLL_SECONDS = 0.05
 _POST_SUBMIT_RENDER_TIMEOUT_SECONDS = 10.0
 _POST_SUBMIT_RETRYABLE_PARSE_REASONS = frozenset(
-    {"panel-unparsed", "model-row-unparsed", "model-row-absent"}
+    {"panel-unparsed", "model-row-unparsed", "model-row-absent", "pane-width-changed"}
 )
 
 #: Close-proof outcome vocabulary for the non-modal surface.  A proven
@@ -198,9 +202,8 @@ def _now() -> str:
 def _pane_width(pane_id: str, *, timeout: float) -> Optional[int]:
     """The pane's current column width, or None when it cannot be read.
 
-    None is the conservative "render floor unknown" answer: the observer then
-    asserts only the rows the capture literally renders, never a value a
-    narrow pane could have hidden.
+    The geometry gate consumes this one bounded width observation before input;
+    post-submit parsing observes width again so a resize cannot be hidden.
     """
     try:
         result = subprocess.run(
@@ -216,7 +219,7 @@ def _pane_width(pane_id: str, *, timeout: float) -> Optional[int]:
         return None
     try:
         width = int((result.stdout or "").strip())
-    except ValueError:
+    except (TypeError, ValueError):
         return None
     return width if width > 0 else None
 
@@ -705,6 +708,28 @@ def _read_wake(inbox_message_id: Optional[int], *, db: Any = None) -> Optional[d
         return _one(session)
 
 
+def _prove_status_panel_geometry(surface: CodexPaneSurface) -> PrewriteReadiness:
+    """Prove the width needed for the authoritative Model status row."""
+    try:
+        width = surface.pane_width()
+    except Exception as exc:  # noqa: BLE001 - unreadable is a typed refusal
+        return PrewriteReadiness(PREWRITE_GEOMETRY_UNPROVEN, None, str(exc))
+    if isinstance(width, bool) or not isinstance(width, int) or width <= 0:
+        return PrewriteReadiness(
+            PREWRITE_GEOMETRY_UNPROVEN,
+            None,
+            "the exact pane width was unreadable or malformed",
+        )
+    if width < MODEL_RENDER_FLOOR_COLUMNS:
+        return PrewriteReadiness(
+            PREWRITE_GEOMETRY_INSUFFICIENT,
+            None,
+            f"status panel requires at least {MODEL_RENDER_FLOOR_COLUMNS} columns; "
+            f"observed {width}",
+        )
+    return PrewriteReadiness(PREWRITE_READY, None)
+
+
 # ---------------------------------------------------------------------------
 # the orchestrator
 # ---------------------------------------------------------------------------
@@ -751,12 +776,15 @@ class CodexRouteObserver:
             readiness = self._surface.await_input_ready()
             if not readiness.ready:
                 return self._prewrite_refusal_outcome(request, readiness=readiness, db=db)
-            # The composer proof is the literal last pane read before the
-            # requester revalidation.  Revalidate only after both bounded
-            # surface waits, immediately before pre_probe authorizes input.
+            # The composer and geometry proofs are the final pane reads before
+            # requester revalidation. Revalidate only after both bounded
+            # surface checks, immediately before pre_probe authorizes input.
             composer = self._surface.prove_composer_empty(request.provider_version)
             if not composer.ready:
                 return self._prewrite_refusal_outcome(request, readiness=composer, db=db)
+            geometry = _prove_status_panel_geometry(self._surface)
+            if not geometry.ready:
+                return self._prewrite_refusal_outcome(request, readiness=geometry, db=db)
             if not self._requester_is_current(request):
                 return self._stale_requester_outcome(request, db=db)
 
@@ -811,6 +839,8 @@ class CodexRouteObserver:
             PREWRITE_COMPOSER_NONEMPTY: DISPOSITION_COMPOSER_NONEMPTY,
             PREWRITE_COMPOSER_UNPROVEN: DISPOSITION_COMPOSER_UNPROVEN,
             PREWRITE_COMPOSER_UNREADABLE: DISPOSITION_COMPOSER_UNREADABLE,
+            PREWRITE_GEOMETRY_UNPROVEN: DISPOSITION_GEOMETRY_UNPROVEN,
+            PREWRITE_GEOMETRY_INSUFFICIENT: DISPOSITION_GEOMETRY_INSUFFICIENT,
         }
         disposition = dispositions.get(readiness.reason)
         if disposition is None:
@@ -935,15 +965,25 @@ class CodexRouteObserver:
             return _inconclusive_observation(request, reason="submission-unproven")
         render_deadline = time.monotonic() + _POST_SUBMIT_RENDER_TIMEOUT_SECONDS
         while True:
+            width_before = self._surface.pane_width()
             try:
                 rows = self._surface.capture_screen()
             except Exception:  # noqa: BLE001 - an unreadable pane is not a panel
                 rows = []
-            parsed = parse_codex_route_panel(
-                rows,
-                pinned_version=request.provider_version,
-                pane_width=self._surface.pane_width(),
-            )
+            width_after = self._surface.pane_width()
+            if width_before != width_after:
+                parsed = {
+                    "kind": "inconclusive",
+                    "reason": "pane-width-changed",
+                    "pane_width": None,
+                    "evidence_sha256": nsr.evidence_digest(rows),
+                }
+            else:
+                parsed = parse_codex_route_panel(
+                    rows,
+                    pinned_version=request.provider_version,
+                    pane_width=width_after,
+                )
             if (
                 parsed["kind"] == "observed"
                 or parsed.get("reason") not in _POST_SUBMIT_RETRYABLE_PARSE_REASONS
