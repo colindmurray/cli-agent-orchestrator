@@ -7,6 +7,42 @@
 - Preserve unrelated work. Use dedicated worktrees for changes and do not
   rewrite or delete user state to simplify an implementation.
 
+## CAO development map
+
+- The authoritative tracker project is `cao-system`, shared with logical
+  repository `cao-conductor`. Use `$cao-issue-tracker`; when a Matt Pocock
+  engineering skill touches tracker state, also use
+  `$cao-matt-pocock-skills`. Resolve the conductor through operator-local
+  bindings and read its conductor-owned `.agent-tools/code-intelligence.yml`.
+  This fork carries no second manifest.
+- Read `docs/agents/domain.md` first for the cross-repository domain boundary.
+- This repository's package root is `src/cli_agent_orchestrator/`. It owns CAO
+  runtime, provider integration, server/API, and dashboard behavior. Fork-only
+  changes stay in this repository.
+- `cao-conductor` owns campaign policy, managed execution, skills, project
+  configuration, tracker workflow, and deployment coordination. For a change
+  crossing that boundary, inspect both repositories and record both revisions;
+  cross-repository writes use an explicit companion lane/worktree/PR.
+- At the `/tracker/issues/similar` seam this fork's server owns similarity,
+  admission, scope, and bounds; the conductor CLI is a thin client that adds no
+  logic and remaps no refusal.
+- Index output is routing evidence. An index and worktree may diverge in either
+  direction: a stable/main index omits branch-local and uncommitted changes,
+  while an active tree may also change after indexing. For branch-local work,
+  inspect the exact worktree and its diff. Direct source at the resolved
+  branch/worktree revision is authoritative. Pin citations as
+  `repository | resolved target SHA | path`; line numbers are observed-at
+  values.
+- Use `$repository-evidence-search` or `$cao-code-grounded-issue-triage` when
+  structural ownership or document vocabulary is ambiguous. QMD and
+  codebase-memory are optional routing evidence. If either is unavailable or
+  does not cover the resolved revision, continue with direct source, `rg`, and
+  Git.
+- Worker ownership is currently one scalar worktree path; an issue's
+  `worktrees` list is provenance, not worker ownership. Read-only work may
+  inspect two pinned repository/revision pairs. Each repository worktree keeps
+  a separate index identity, never one synthetic repository index.
+
 ## Agent skills
 
 ### Issue tracker
