@@ -151,6 +151,7 @@ from cli_agent_orchestrator.services import (
     macro_notation,
     managed_launch,
     managed_launch_v2,
+    managed_provider_bridge,
     model_turn_receipt_contract,
     native_attachment_recovery,
     operator_message_service,
@@ -1987,6 +1988,10 @@ async def managed_launch_capabilities(
         # older fork would ignore the field and run the pinned Claude
         # binary on its default Anthropic path.
         "deepseek_acp_route_envelope": True,
+        # A caller that needs truthful ACP session continuation reads this
+        # versioned block before reserving.  Its absence on an older peer is
+        # unsupported, never permission to send a resume-shaped v1 request.
+        "acp_exact_resume": managed_provider_bridge.acp_exact_resume_capability(),
         "bridge_environment_inventory": "names-only-sha256",
         "post_allocation_bridge_failure_finalization": True,
         "launch_failure_evidence_schema": "cao-managed-bridge-launch-failure-v1",

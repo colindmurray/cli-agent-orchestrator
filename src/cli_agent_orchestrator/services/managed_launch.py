@@ -138,6 +138,8 @@ SUPPORTED_EXECUTION_MODES: tuple[str, ...] = (em.ACP,)
 #: Request keys introduced after this surface shipped.  A reservation
 #: written before they existed simply has no such key.
 _ADDITIVE_REQUEST_KEYS = (
+    "launch_kind",
+    "provider_session_id",
     "execution_mode",
     "worker_class",
     "provider_route",
@@ -248,7 +250,14 @@ def _reconciled_request_json(stored_json: str, incoming: dict[str, Any]) -> Opti
     comparison = dict(incoming)
     quota_enriched = False
     for key in _ADDITIVE_REQUEST_KEYS:
-        if key == "quota_provider":
+        if key == "launch_kind":
+            # The request model defaults omitted fields to a new launch.  A
+            # row created before exact-resume-v1 therefore remains a lawful
+            # replay only for that historical new-session intent; a resume is
+            # a different provider effect and must get a new reservation.
+            if incoming.get(key) == "new":
+                normalized[key] = "new"
+        elif key == "quota_provider":
             incoming_quota = incoming.get(key)
             if normalized.get(key) is None and incoming_quota is not None:
                 normalized[key] = incoming_quota
@@ -345,6 +354,11 @@ def _row_dict(row: Any) -> dict[str, Any]:
         "caller_id": row.caller_id,
         "working_directory": row.working_directory,
         "trusted_project_root": row.trusted_project_root,
+        # Project the durable launch intent at the record boundary as well as
+        # inside ``request``.  Legacy rows predate this contract and are
+        # always the historical new-session behaviour.
+        "launch_kind": request.get("launch_kind", "new"),
+        "provider_session_id": request.get("provider_session_id"),
         "launch_facts": _parse_json(getattr(row, "launch_facts_json", None), None),
         "state": row.state,
         # The durable reconciled request. An omitted mode still echoes as
@@ -589,6 +603,21 @@ def _validate_request_identity(request: ManagedLaunchReserveRequest) -> dict[str
         raise ManagedLaunchConflict(
             "a deepseek model requires provider_route='deepseek' with a route envelope"
         )
+    if request.launch_kind == "resume":
+        # Exact resume exists only where the bridge owns a real resume argv
+        # and a provider-authored SessionStart identity proof.  Rejecting this
+        # before persistence/provider I/O prevents a codex/kimi reservation
+        # from silently becoming a new session while wearing resume metadata.
+        from cli_agent_orchestrator.services import managed_provider_bridge
+
+        if not managed_provider_bridge.supports_acp_exact_resume(
+            provider=request.provider,
+            provider_route=request.provider_route,
+        ):
+            raise ManagedLaunchConflict(
+                "managed-launch v1 has no exact ACP resume adapter for "
+                f"provider={request.provider!r} provider_route={request.provider_route!r}"
+            )
     # Resolved and admitted before the payload is built, so an
     # unsupported or contradictory mode fails with nothing persisted.
     _resolve_execution_mode(request)
@@ -2367,6 +2396,8 @@ async def launch_reserved(reservation_id: str, *, registry=None) -> dict[str, An
             "terminal_id": record["terminal_id"],
             "generation": record["generation"],
             "provider": record["provider"],
+            "launch_kind": request.get("launch_kind", "new"),
+            "provider_session_id": request.get("provider_session_id"),
             "agent_profile": record["agent_profile"],
             "profile_sha256": profile_digest(record["agent_profile"]),
             "model": request["expected_model"],
