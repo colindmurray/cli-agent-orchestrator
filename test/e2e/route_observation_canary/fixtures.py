@@ -16,7 +16,7 @@ Two kinds of surface, both fake — nothing here touches a live pane:
   guessed.
 - **Synthetic pinned panels** — a full-width panel whose Model row carries an
   exactly-parseable reasoning suffix, used by the positive-path case.  It
-  mirrors the captured build's layout (``>_ OpenAI Codex (v0.147.0)`` brand
+  mirrors the captured build's layout (``>_ OpenAI Codex (v0.149.0)`` brand
   header, ``Session:`` row, value column at index 39) but with a Model value
   inside the closed effort vocabulary, because the captured full-width render
   deliberately is NOT a positive observation.
@@ -28,7 +28,7 @@ from typing import Optional, Sequence
 
 from cli_agent_orchestrator.services import route_observation_codex as roc
 
-CODEX_PINNED_VERSION = "0.147.0"
+CODEX_PINNED_VERSION = "0.149.0"
 
 #: One concrete canonical session UUID substituting the ``<UUID>`` redaction
 #: the retained capture artifacts carry.  The branded parser rejects any
@@ -50,7 +50,7 @@ CAPTURED_STATUS_100X30_ROWS: tuple[str, ...] = (
     "/status",
     "",
     "╭────────────────────────────────────────────────────────────────────────────────────────────────╮",
-    "│  >_ OpenAI Codex (v0.147.0)                                                                    │",
+    "│  >_ OpenAI Codex (v0.149.0)                                                                    │",
     "│                                                                                                │",
     "│ Visit https://chatgpt.com/codex/settings/usage for up-to-date                                  │",
     "│ information on rate limits and credits                                                         │",
@@ -86,7 +86,7 @@ CAPTURED_STATUS_80X30_ROWS: tuple[str, ...] = (
     "/status",
     "",
     "╭──────────────────────────────────────────────────────────────────────────────╮",
-    "│  >_ OpenAI Codex (v0.147.0)                                                  │",
+    "│  >_ OpenAI Codex (v0.149.0)                                                  │",
     "│                                                                              │",
     "│ Visit https://chatgpt.com/codex/settings/usage for up-to-date                │",
     "│ information on rate limits and credits                                       │",
@@ -111,7 +111,7 @@ CAPTURED_STATUS_80X30_ROWS: tuple[str, ...] = (
     "  gpt-5.6-luna medium · <SCRATCH>/worktree",
 )
 
-#: The closed reasoning-effort vocabulary the installed 0.147.0 build accepts.
+#: The closed reasoning-effort vocabulary the installed 0.149.0 build accepts.
 #: Mirrors ``route_observation_codex._CODEX_EFFORT_VOCABULARY``; a suffix
 #: outside this set is malformed evidence and is refused, never guessed.
 CODEX_EFFORT_VOCABULARY = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "ultra"})
@@ -127,7 +127,7 @@ def codex_route_panel_rows(
     """A synthetic pinned Codex status panel with a parseable Model row.
 
     Mirrors the captured build's layout — brand header ``>_ OpenAI Codex
-    (v0.147.0)``, a ``Session:`` row, value column at index 39 — with a Model
+    (v0.149.0)``, a ``Session:`` row, value column at index 39 — with a Model
     value whose reasoning suffix is exactly in the closed effort vocabulary.
     The captured full-width render carries
     ``(reasoning medium, summaries auto)``; the adapter extracts ``medium``
@@ -148,11 +148,11 @@ class FakeCodexPaneSurface:
     """A fake Codex pane surface for one canary case.
 
     Records every status command and every key event so a case can prove
-    at-most-once ``/status`` and the absence of any ``Escape`` on the
-    non-modal surface.  ``composer_restored`` is the close-proof verdict:
+    at-most-once ``/status`` and the pre-submit suggestion dismissal.
+    ``composer_restored`` is the close-proof verdict:
     ``True`` (proven), ``False`` (proven not restored), or ``None``
-    (unprovable -> ``indeterminate``).  ``send_key`` exists only as the
-    recording seam for a hypothetical Escape; the adapter never calls it.
+    (unprovable -> ``indeterminate``).  ``send_key`` records keys when a
+    fake surface needs to model a suggestion dismissal.
     """
 
     def __init__(
@@ -182,6 +182,9 @@ class FakeCodexPaneSurface:
 
     def await_input_ready(self) -> roc.PrewriteReadiness:
         return roc.PrewriteReadiness(roc.PREWRITE_READY, "idle")
+
+    def prove_composer_empty(self, provider_version: str) -> roc.PrewriteReadiness:
+        return roc.PrewriteReadiness(roc.PREWRITE_READY, None)
 
     def send_status_command(self) -> bool:
         self.status_commands_sent += 1

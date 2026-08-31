@@ -13,11 +13,11 @@ atomic ``complete(...)``, and this orchestrator follows it exactly — one
 operation id, the exact target/requester binding, and never two effects
 journaled in one stage.
 
-The Codex ``/status`` surface is **non-modal**: the panel is printed output in
-the transcript and the composer stays rendered at the bottom, so there is no
-modal to dismiss and no ``Escape`` to issue.  The pre-close intent and close
-proof therefore encode the ambiguous-close handling honestly: the close action
-is ``"none"`` and the close proof outcome is ``composer-restored``,
+The Codex ``/status`` panel is non-modal printed output.  Its slash-command
+suggestions are dismissed with one pre-submit ``Escape`` before the sole
+``Enter``; the close action remains ``"none"``.  The pre-close intent and
+close proof therefore encode the ambiguous-close handling honestly: the close
+proof outcome is ``composer-restored``,
 ``not-restored``, or ``indeterminate`` — an unprovable close is never
 fabricated into a second ``Escape``, and the terminal result is
 ``ambiguous-after-possible-effect`` when the close is unproven.
@@ -81,10 +81,18 @@ DISPOSITION_REQUESTER_STALE = "requester-stale"
 DISPOSITION_REPLAYED = "replayed"
 DISPOSITION_PROVIDER_NOT_READY = "provider-not-ready"
 DISPOSITION_PANE_UNREADABLE = "pane-unreadable"
+DISPOSITION_PROVIDER_UNSUPPORTED = "provider-unsupported"
+DISPOSITION_COMPOSER_NONEMPTY = "composer-nonempty"
+DISPOSITION_COMPOSER_UNPROVEN = "composer-unproven"
+DISPOSITION_COMPOSER_UNREADABLE = "composer-unreadable"
 
 PREWRITE_READY = "ready"
 PREWRITE_PROVIDER_NOT_READY = "provider-not-ready"
 PREWRITE_PANE_UNREADABLE = "pane-unreadable"
+PREWRITE_PROVIDER_UNSUPPORTED = "provider-unsupported"
+PREWRITE_COMPOSER_NONEMPTY = "composer-nonempty"
+PREWRITE_COMPOSER_UNPROVEN = "composer-unproven"
+PREWRITE_COMPOSER_UNREADABLE = "composer-unreadable"
 _PREWRITE_READINESS_POLL_SECONDS = 0.1
 # Codex can briefly redraw an idle composer between asynchronous MCP-startup
 # updates.  Restart-5 observed MCP work about 0.4 seconds after the first ready
@@ -163,6 +171,7 @@ class CodexPaneSurface(Protocol):
     def capture_screen(self) -> list[str]: ...
     def pane_width(self) -> Optional[int]: ...
     def await_input_ready(self) -> PrewriteReadiness: ...
+    def prove_composer_empty(self, provider_version: str) -> PrewriteReadiness: ...
     def send_status_command(self) -> bool: ...
     def composer_restored(self) -> Optional[bool]: ...
 
@@ -223,7 +232,7 @@ class RealCodexPaneSurface:
     (``test/e2e/test_m17_t2_synthlive.py``); the fake surface drives the
     observer in the unit mirrors.  This is the pinned delivery seam: the
     literal ``/status`` write and its single Enter through ``TmuxPaneInput``,
-    the cond-0026 submission barrier, the escape-free capture, and the Codex
+    the cond-0026 submission barrier, its suggestion-dismissal reproof, and the Codex
     turn-state observer for the composer-restored close proof.
     """
 
@@ -303,6 +312,39 @@ class RealCodexPaneSurface:
                 return latest
             time.sleep(min(_PREWRITE_READINESS_POLL_SECONDS, remaining))
 
+    def prove_composer_empty(self, provider_version: str) -> PrewriteReadiness:
+        """Prove that this exact build's styled composer is empty, without input.
+
+        The durable request carries the provider version.  Looking up its
+        evidence-backed pin here makes the final check about the request that
+        is about to be authorized, rather than a constructor default that can
+        drift from it.
+        """
+        pin = npi.composer_emptiness_pin_for(CODE_PROVIDER, provider_version)
+        if pin is None:
+            return PrewriteReadiness(
+                PREWRITE_PROVIDER_UNSUPPORTED,
+                None,
+                "the exact Codex build has no verified composer-emptiness pin",
+            )
+        try:
+            composer_empty = npi.observe_composer_empty(self.pane_id, pin)
+        except Exception as exc:  # noqa: BLE001 - a failed read remains zero effect
+            return PrewriteReadiness(PREWRITE_COMPOSER_UNREADABLE, None, str(exc))
+        if composer_empty is True:
+            return PrewriteReadiness(PREWRITE_READY, None)
+        if composer_empty is False:
+            return PrewriteReadiness(
+                PREWRITE_COMPOSER_NONEMPTY,
+                None,
+                "the styled Codex composer holds content",
+            )
+        return PrewriteReadiness(
+            PREWRITE_COMPOSER_UNPROVEN,
+            None,
+            "the styled Codex composer could not be proven empty",
+        )
+
     def send_status_command(self) -> bool:
         """Type literal ``/status`` and at most one Enter; return whether the
         composer provably gave the control up (submission proven)."""
@@ -313,6 +355,14 @@ class RealCodexPaneSurface:
             typed.send_enter()
             return True
         if not npi.await_compose_visible(self.pane_id, STATUS_COMMAND, barrier=barrier):
+            return False
+        typed.send_key("Escape")
+        if not npi.await_compose_visible(
+            self.pane_id,
+            STATUS_COMMAND,
+            barrier=barrier,
+            require_codex_suggestions_absent=True,
+        ):
             return False
         typed.send_enter()
         observed, _ = npi.observe_submission(self.pane_id, STATUS_COMMAND, barrier=barrier)
@@ -694,9 +744,12 @@ class CodexRouteObserver:
             readiness = self._surface.await_input_ready()
             if not readiness.ready:
                 return self._prewrite_refusal_outcome(request, readiness=readiness, db=db)
-            # Readiness is a bounded wait.  Revalidate after it so a requester that
-            # was superseded during that window still gets the normative zero-input
-            # disposition immediately before provider input is authorized.
+            # The composer proof is the literal last pane read before the
+            # requester revalidation.  Revalidate only after both bounded
+            # surface waits, immediately before pre_probe authorizes input.
+            composer = self._surface.prove_composer_empty(request.provider_version)
+            if not composer.ready:
+                return self._prewrite_refusal_outcome(request, readiness=composer, db=db)
             if not self._requester_is_current(request):
                 return self._stale_requester_outcome(request, db=db)
 
@@ -744,11 +797,16 @@ class CodexRouteObserver:
         db: Any = None,
     ) -> dict[str, Any]:
         """Seal a bounded readiness refusal while every effect fact is null."""
-        if readiness.reason == PREWRITE_PROVIDER_NOT_READY:
-            disposition = DISPOSITION_PROVIDER_NOT_READY
-        elif readiness.reason == PREWRITE_PANE_UNREADABLE:
-            disposition = DISPOSITION_PANE_UNREADABLE
-        else:
+        dispositions = {
+            PREWRITE_PROVIDER_NOT_READY: DISPOSITION_PROVIDER_NOT_READY,
+            PREWRITE_PANE_UNREADABLE: DISPOSITION_PANE_UNREADABLE,
+            PREWRITE_PROVIDER_UNSUPPORTED: DISPOSITION_PROVIDER_UNSUPPORTED,
+            PREWRITE_COMPOSER_NONEMPTY: DISPOSITION_COMPOSER_NONEMPTY,
+            PREWRITE_COMPOSER_UNPROVEN: DISPOSITION_COMPOSER_UNPROVEN,
+            PREWRITE_COMPOSER_UNREADABLE: DISPOSITION_COMPOSER_UNREADABLE,
+        }
+        disposition = dispositions.get(readiness.reason)
+        if disposition is None:
             raise ro.RouteObservationInvalid(
                 f"prewrite refusal requires a non-ready reason; got {readiness.reason!r}"
             )

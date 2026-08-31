@@ -466,6 +466,7 @@ class SubmissionBarrier:
     composer_tail_rows: int
     composer_region_rule: str = "tail"
     capture_styled: bool = False
+    stable_empty_polls: int = 1
 
 
 # The observation matches on the *tail* of the control text, not the whole
@@ -502,6 +503,7 @@ _SUBMISSION_BARRIERS = {
         composer_tail_rows=4,
         composer_region_rule="codex-prompt-region",
         capture_styled=True,
+        stable_empty_polls=2,
     ),
     # Kimi Code (pinned 0.29-0.30): the bottom five rows contain the three-row
     # prompt box followed by its model and context status rows.  A submitted
@@ -703,6 +705,17 @@ _CODEX_BARRIER_STATUS_SUGGESTIONS = (
 )
 
 
+def _codex_status_suggestions_present(rows: Sequence[str]) -> bool:
+    """Whether the known ``/status`` completion rows remain on screen."""
+    parsed = _parse_styled_rows(rows)
+    if parsed is None:
+        return True
+    plain = ["".join(char for char, _, _ in row) for row in parsed]
+    return any(
+        suggestion.match(row) for suggestion in _CODEX_BARRIER_STATUS_SUGGESTIONS for row in plain
+    )
+
+
 def _codex_composer_text_state(rows: Sequence[str], text: str) -> str:
     """Classify ``text`` against Codex's structurally live composer.
 
@@ -823,6 +836,7 @@ def await_compose_visible(
     barrier: SubmissionBarrier,
     deadline_monotonic: Optional[float] = None,
     screen: Optional[Callable[[], Sequence[str]]] = None,
+    require_codex_suggestions_absent: bool = False,
 ) -> bool:
     """Poll until the control text is compose-visible, or the settle expires.
 
@@ -850,7 +864,9 @@ def await_compose_visible(
             )
         except NativePaneInputUnavailable:
             rows = ()
-        if _barrier_text_state(rows, text, barrier=barrier) == _COMPOSER_EXPECTED:
+        if _barrier_text_state(rows, text, barrier=barrier) == _COMPOSER_EXPECTED and (
+            not require_codex_suggestions_absent or not _codex_status_suggestions_present(rows)
+        ):
             return True
         remaining = settle_end - time.monotonic()
         if remaining <= 0:
@@ -886,6 +902,7 @@ def observe_submission(
         observe_end = min(observe_end, deadline_monotonic)
     last_rows: Optional[Sequence[str]] = None
     last_state = _COMPOSER_UNPARSEABLE
+    consecutive_empty = 0
     while True:
         try:
             rows = _capture_rows(
@@ -903,10 +920,15 @@ def observe_submission(
             last_rows = rows
             last_state = _barrier_text_state(rows, text, barrier=barrier)
             if last_state == _COMPOSER_EMPTY:
-                return (SUBMISSION_SUBMITTED, submission_evidence_ref(pane_id, rows))
+                consecutive_empty += 1
+                if consecutive_empty >= barrier.stable_empty_polls:
+                    return (SUBMISSION_SUBMITTED, submission_evidence_ref(pane_id, rows))
+            else:
+                consecutive_empty = 0
         else:
             last_rows = None
             last_state = _COMPOSER_UNPARSEABLE
+            consecutive_empty = 0
         remaining = observe_end - time.monotonic()
         if remaining <= 0:
             break
@@ -993,6 +1015,14 @@ _CODEX_EMPTY_EVIDENCE = (
     "content"
 )
 
+_CODEX_0149_EMPTY_EVIDENCE = (
+    "live-verified on the installed Codex CLI 0.149.0 (cond-0768): the "
+    "footer-anchored composer retains the same last '›' prompt row and "
+    "following blank separator as 0.146.0.  An empty composer renders only "
+    "a dim-styled placeholder, while /status and arbitrary prefill render "
+    "normally; slash suggestions sit below the separator and are excluded."
+)
+
 
 #: The per-provider+build emptiness pins, keyed by normalized version.
 #: A build appears here only when its composer layout was read; an
@@ -1024,6 +1054,12 @@ _COMPOSER_EMPTINESS_PINS: dict[str, dict[str, ComposerEmptinessPin]] = {
             rule=_RULE_CODEX_PROMPT_FOOTER,
             styled=True,
             evidence=_CODEX_EMPTY_EVIDENCE,
+        ),
+        "0.149.0": ComposerEmptinessPin(
+            provider="codex",
+            rule=_RULE_CODEX_PROMPT_FOOTER,
+            styled=True,
+            evidence=_CODEX_0149_EMPTY_EVIDENCE,
         ),
     },
 }

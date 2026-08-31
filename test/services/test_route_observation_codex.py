@@ -10,9 +10,10 @@ or delivers a wake.
 The four required effect stages stay distinct in the journal exactly as the
 stage machine orders them: pre-probe intent (first-CAS authorizes the one
 ``/status``), provider-surface observation, pre-close intent, close proof.
-The Codex surface is non-modal: no ``Escape`` is ever issued and the close
-proof encodes ``composer-restored`` / ``not-restored`` / ``indeterminate``
-honestly, never a fabricated second ``Escape``.
+The Codex surface is non-modal after submission: one pre-submit ``Escape``
+dismisses slash suggestions, while close proof encodes
+``composer-restored`` / ``not-restored`` / ``indeterminate`` honestly, never
+a fabricated cleanup key.
 """
 
 from __future__ import annotations
@@ -94,8 +95,7 @@ class FakeCodexPaneSurface:
     """A fake Codex pane surface: canned screen, configured width/verdicts.
 
     Records every status command and every key event so the tests can prove
-    at-most-once ``/status`` and the absence of any ``Escape`` on the
-    non-modal surface.
+    at-most-once ``/status`` and the ordered pre-submit suggestion dismissal.
     """
 
     def __init__(
@@ -106,7 +106,9 @@ class FakeCodexPaneSurface:
         submission_proven: bool = True,
         composer_restored: bool | None = True,
         prewrite_readiness: roc.PrewriteReadiness | None = None,
+        composer_readiness: roc.PrewriteReadiness | None = None,
         readiness_hook=None,
+        composer_proof_hook=None,
     ) -> None:
         self._rows = list(rows)
         self._pane_width = pane_width
@@ -115,8 +117,13 @@ class FakeCodexPaneSurface:
         self._prewrite_readiness = prewrite_readiness or roc.PrewriteReadiness(
             roc.PREWRITE_READY, TerminalStatus.IDLE.value
         )
+        self._composer_readiness = composer_readiness or roc.PrewriteReadiness(
+            roc.PREWRITE_READY, None
+        )
         self._readiness_hook = readiness_hook
+        self._composer_proof_hook = composer_proof_hook
         self.readiness_checks = 0
+        self.composer_proof_versions: list[str] = []
         self.capture_count = 0
         self.status_commands_sent = 0
         self.key_events: list[str] = []
@@ -137,6 +144,12 @@ class FakeCodexPaneSurface:
         if self._readiness_hook is not None:
             self._readiness_hook()
         return self._prewrite_readiness
+
+    def prove_composer_empty(self, provider_version: str) -> roc.PrewriteReadiness:
+        self.composer_proof_versions.append(provider_version)
+        if self._composer_proof_hook is not None:
+            self._composer_proof_hook()
+        return self._composer_readiness
 
     def send_status_command(self) -> bool:
         self.status_commands_sent += 1
@@ -185,9 +198,11 @@ class TestPositivePath:
         assert outcome["replayed"] is False
         assert outcome["disposition"] == roc.DISPOSITION_DELIVERED
         assert outcome["receipt_digest"]
-        # the one /status was issued exactly once and no Escape ever was.
+        # The fake surface records only its high-level command, while the real
+        # transport regression below proves literal -> Escape -> Enter.
         assert surface.status_commands_sent == 1
         assert surface.key_events == []
+        assert surface.composer_proof_versions == [request.provider_version]
 
         record = ro.get(request.operation_id)
         assert record["state"] == ro.RESULT_OBSERVED_CLOSED
@@ -387,6 +402,239 @@ class TestZeroEffectAndResponseLossReplay:
 
 
 class TestPrewriteReadiness:
+    def test_composer_refusal_is_wired_before_pre_probe(self, _db):
+        request = _request(provider_version="0.149.0")
+
+        def assert_pre_probe_absent():
+            record = ro.get(request.operation_id)
+            assert record is not None
+            assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(version="0.149.0"),
+            composer_readiness=roc.PrewriteReadiness(
+                roc.PREWRITE_COMPOSER_NONEMPTY,
+                None,
+                "the styled Codex composer holds content",
+            ),
+            readiness_hook=assert_pre_probe_absent,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_COMPOSER_NONEMPTY
+        assert surface.composer_proof_versions == [request.provider_version]
+        assert surface.status_commands_sent == 0
+
+    def test_real_surface_0149_empty_composer_passes_the_final_zero_effect_proof(self, monkeypatch):
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_codex_turn_state",
+            lambda *args, **kwargs: TerminalStatus.IDLE,
+        )
+        styled_empty = [
+            "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        observe_composer_empty = roc.npi.observe_composer_empty
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_composer_empty",
+            lambda pane_id, pin: observe_composer_empty(pane_id, pin, screen=lambda: styled_empty),
+        )
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        assert surface.await_input_ready() == roc.PrewriteReadiness(
+            roc.PREWRITE_READY, TerminalStatus.IDLE.value
+        )
+        assert surface.prove_composer_empty("0.149.0") == roc.PrewriteReadiness(
+            roc.PREWRITE_READY, None
+        )
+
+    @pytest.mark.parametrize("prefill", ["/status", "tell worker to continue"])
+    def test_prewrite_composer_prefill_refuses_without_status_input(
+        self, _db, monkeypatch, prefill
+    ):
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_codex_turn_state",
+            lambda *args, **kwargs: TerminalStatus.IDLE,
+        )
+        styled_prefill = [
+            f"\x1b[1m›\x1b[0m {prefill}",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        observe_composer_empty = roc.npi.observe_composer_empty
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_composer_empty",
+            lambda pane_id, pin: observe_composer_empty(
+                pane_id, pin, screen=lambda: styled_prefill
+            ),
+        )
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        tmux_calls = []
+        monkeypatch.setattr(
+            roc.npi,
+            "_run",
+            lambda argv, *, timeout: tmux_calls.append((argv, timeout)),
+        )
+        request = _request(provider_version="0.149.0")
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_COMPOSER_NONEMPTY
+        assert tmux_calls == []
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+    @pytest.mark.parametrize(
+        ("composer", "reason", "disposition"),
+        [
+            (
+                lambda: ["not a styled Codex composer"],
+                "composer-unproven",
+                "composer-unproven",
+            ),
+            (
+                lambda: (_ for _ in ()).throw(
+                    roc.npi.NativePaneInputUnavailable("tmux capture failed")
+                ),
+                "composer-unreadable",
+                "composer-unreadable",
+            ),
+        ],
+    )
+    def test_prewrite_composer_unproven_or_unreadable_refuses_without_status_input(
+        self, _db, monkeypatch, composer, reason, disposition
+    ):
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_codex_turn_state",
+            lambda *args, **kwargs: TerminalStatus.IDLE,
+        )
+        observe_composer_empty = roc.npi.observe_composer_empty
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_composer_empty",
+            lambda pane_id, pin: observe_composer_empty(pane_id, pin, screen=composer),
+        )
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        tmux_calls = []
+        monkeypatch.setattr(
+            roc.npi,
+            "_run",
+            lambda argv, *, timeout: tmux_calls.append((argv, timeout)),
+        )
+        request = _request(provider_version="0.149.0")
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["prewrite_readiness"]["reason"] == reason
+        assert outcome["disposition"] == disposition
+        assert tmux_calls == []
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+    def test_missing_exact_composer_pin_refuses_as_provider_unsupported(self, _db, monkeypatch):
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_codex_turn_state",
+            lambda *args, **kwargs: TerminalStatus.IDLE,
+        )
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        tmux_calls = []
+        monkeypatch.setattr(
+            roc.npi,
+            "_run",
+            lambda argv, *, timeout: tmux_calls.append((argv, timeout)),
+        )
+        request = _request(provider_version="0.149.1")
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_PROVIDER_UNSUPPORTED
+        assert outcome["prewrite_readiness"]["reason"] == roc.PREWRITE_PROVIDER_UNSUPPORTED
+        assert tmux_calls == []
+        assert all(ro.get(request.operation_id)[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+    def test_final_ready_composer_mutation_refuses_before_pre_probe(self, _db, monkeypatch):
+        frames = [
+            [
+                "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m",
+                "",
+                "  gpt-5.6-luna high · ~/project",
+            ]
+        ] * 10 + [["\x1b[1m›\x1b[0m /status", "", "  gpt-5.6-luna high · ~/project"]]
+        current = [frames[0]]
+
+        def turn_state(*args, **kwargs):
+            current[0] = frames.pop(0)
+            return TerminalStatus.IDLE
+
+        monkeypatch.setattr(roc.npi, "observe_codex_turn_state", turn_state)
+        observe_composer_empty = roc.npi.observe_composer_empty
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_composer_empty",
+            lambda pane_id, pin: observe_composer_empty(pane_id, pin, screen=lambda: current[0]),
+        )
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        tmux_calls = []
+        monkeypatch.setattr(
+            roc.npi,
+            "_run",
+            lambda argv, *, timeout: tmux_calls.append((argv, timeout)),
+        )
+        request = _request(provider_version="0.149.0")
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert outcome["disposition"] == roc.DISPOSITION_COMPOSER_NONEMPTY
+        assert tmux_calls == []
+        assert all(ro.get(request.operation_id)[field] is None for field in ro.STAGE_FACT_FIELDS)
+
     def test_rendered_current_mcp_frame_resets_the_real_surface_ready_streak(self, monkeypatch):
         ready_frame = [
             ">_ OpenAI Codex (v0.149.0)",
@@ -536,8 +784,8 @@ class TestPrewriteReadiness:
             "",
             "  gpt-5.6-luna high · ~/project",
         ]
-        empty_frame = ["› ", "", "  gpt-5.6-luna high · ~/project"]
-        composed_frame = [
+        post_submit_empty_frame = ["› ", "", "  gpt-5.6-luna high · ~/project"]
+        suggestion_open_frame = [
             "transcript",
             "› /status",
             "",
@@ -545,23 +793,40 @@ class TestPrewriteReadiness:
             "  /statusline  configure which items appear in the status line",
             *([""] * 12),
         ]
-        plain_frames = iter([ready_frame] * 11 + [codex_panel_rows(), ready_frame])
-        styled_frames = iter([composed_frame, empty_frame])
+        suggestion_closed_frame = [
+            "transcript",
+            "› /status",
+            "",
+            "  gpt-5.6-luna high · ~/project",
+        ]
+        plain_frames = iter([ready_frame] * 11 + [codex_panel_rows(version="0.149.0"), ready_frame])
+        styled_frames = iter(
+            [
+                suggestion_open_frame,
+                suggestion_closed_frame,
+                post_submit_empty_frame,
+                post_submit_empty_frame,
+            ]
+        )
         captures = []
         tmux_calls = []
+        events = []
 
         def capture(pane_id, *, timeout):
             frame = next(plain_frames)
             captures.append(("plain", pane_id, timeout, frame))
+            events.append(("capture", "plain", frame))
             return frame
 
         def capture_styled(pane_id, *, timeout):
             frame = next(styled_frames)
             captures.append(("styled", pane_id, timeout, frame))
+            events.append(("capture", "styled", frame))
             return frame
 
         def run(argv, *, timeout):
             tmux_calls.append((list(argv), timeout))
+            events.append(("key", argv[-1]))
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         monkeypatch.setattr(roc.npi, "capture_pane_screen", capture)
@@ -575,6 +840,7 @@ class TestPrewriteReadiness:
             return status
 
         monkeypatch.setattr(roc.npi, "observe_codex_turn_state", completed_turn_state)
+        monkeypatch.setattr(roc.npi, "observe_composer_empty", lambda *args, **kwargs: True)
         monkeypatch.setattr(roc.npi, "_tmux_binary", lambda: "tmux")
         monkeypatch.setattr(roc.npi, "_run", run)
         monkeypatch.setattr(roc, "_pane_width", lambda pane_id, *, timeout: 100)
@@ -587,21 +853,85 @@ class TestPrewriteReadiness:
             timeout=1.0,
         )
 
-        outcome = roc.CodexRouteObserver(surface=surface).observe(_request())
+        outcome = roc.CodexRouteObserver(surface=surface).observe(
+            _request(provider_version="0.149.0")
+        )
 
         assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
         assert observed_statuses == [TerminalStatus.COMPLETED] * 12
-        assert len(captures) == 15
+        assert len(captures) == 17
         assert [capture[0] for capture in captures] == [
             *(["plain"] * 11),
-            "styled",
-            "styled",
+            *(["styled"] * 4),
             "plain",
             "plain",
         ]
         assert [call[0] for call in tmux_calls] == [
             ["tmux", "send-keys", "-t", "%7", "-l", "--", "/status"],
+            ["tmux", "send-keys", "-t", "%7", "Escape"],
             ["tmux", "send-keys", "-t", "%7", "Enter"],
+        ]
+        literal_at = events.index(("key", "/status"))
+        first_composed_at = events.index(("capture", "styled", suggestion_open_frame))
+        escape_at = events.index(("key", "Escape"))
+        reproof_at = events.index(("capture", "styled", suggestion_closed_frame))
+        enter_at = events.index(("key", "Enter"))
+        assert literal_at < first_composed_at < escape_at < reproof_at < enter_at
+
+    def test_failed_escape_reproof_leaves_a_fresh_operation_without_a_second_write(
+        self, _db, monkeypatch
+    ):
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_codex_turn_state",
+            lambda *args, **kwargs: TerminalStatus.IDLE,
+        )
+        composer_proofs = iter([True, False])
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_composer_empty",
+            lambda *args, **kwargs: next(composer_proofs),
+        )
+        compose_visible = iter([True, False])
+        monkeypatch.setattr(
+            roc.npi,
+            "await_compose_visible",
+            lambda *args, **kwargs: next(compose_visible),
+        )
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_submission",
+            lambda *args, **kwargs: (roc.npi.SUBMISSION_UNSUBMITTED, "not reached"),
+        )
+        monkeypatch.setattr(roc.npi, "_tmux_binary", lambda: "tmux")
+        calls = []
+
+        def run(argv, *, timeout):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(roc.npi, "_run", run)
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        surface = roc.RealCodexPaneSurface(
+            "%7",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+        observer = roc.CodexRouteObserver(surface=surface)
+        first_request = _request(provider_version="0.149.0")
+        second_request = _request(provider_version="0.149.0")
+
+        first = observer.observe(first_request)
+        second = observer.observe(second_request)
+
+        assert first["result"] == ro.RESULT_AMBIGUOUS_AFTER_POSSIBLE_EFFECT
+        assert second["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert second["disposition"] == roc.DISPOSITION_COMPOSER_NONEMPTY
+        assert calls == [
+            ["tmux", "send-keys", "-t", "%7", "-l", "--", "/status"],
+            ["tmux", "send-keys", "-t", "%7", "Escape"],
         ]
 
     def test_real_surface_unreadable_observer_writes_no_literal_or_enter(self, _db, monkeypatch):
@@ -728,6 +1058,27 @@ class TestPrewriteReadiness:
         assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
         assert outcome["disposition"] == roc.DISPOSITION_REQUESTER_STALE
         assert surface.readiness_checks == 1
+        assert surface.status_commands_sent == 0
+        record = ro.get(request.operation_id)
+        assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)
+
+    def test_requester_drift_during_composer_proof_refuses_before_pre_probe(self, _db):
+        request = _request(provider_version="0.149.0")
+        generation = [request.requester_generation]
+        surface = FakeCodexPaneSurface(
+            rows=codex_panel_rows(version="0.149.0"),
+            composer_proof_hook=lambda: generation.__setitem__(0, "gen-drifted"),
+        )
+        observer = roc.CodexRouteObserver(
+            surface=surface,
+            requester_generation_probe=lambda _terminal_id: generation[0],
+        )
+
+        outcome = observer.observe(request)
+
+        assert outcome["result"] == ro.RESULT_ZERO_EFFECT_REFUSAL
+        assert outcome["disposition"] == roc.DISPOSITION_REQUESTER_STALE
+        assert surface.composer_proof_versions == [request.provider_version]
         assert surface.status_commands_sent == 0
         record = ro.get(request.operation_id)
         assert all(record[field] is None for field in ro.STAGE_FACT_FIELDS)

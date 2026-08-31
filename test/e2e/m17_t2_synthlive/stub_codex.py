@@ -108,9 +108,25 @@ def _draw(rows: list[str]) -> None:
     sys.stdout.flush()
 
 
-def _draw_composer(rows: list[str], text: str) -> None:
-    composer = ["", f"› {text}", ""]
-    if text.startswith("/"):
+_EMPTY_COMPOSER = "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m"
+_COMPOSER_FOOTER = "  gpt-5.6-luna high · ~/project"
+
+
+def _draw_composer(rows: list[str], text: str, *, suggestions: bool | None = None) -> None:
+    """Draw the 0.149 composer state with the captured footer anchor.
+
+    The source fixture carries an old plain prompt row in its retained panel
+    context; the trailing synthetic prompt marker is replaced by the current
+    writable composer.  An empty composer is deliberately a dim-styled
+    placeholder: ``capture-pane -e`` is the production seam that distinguishes
+    it from ordinary operator prefill.
+    """
+    surface = rows[:-1] if rows and rows[-1].startswith("› ") else rows
+    prompt = _EMPTY_COMPOSER if not text else f"\x1b[1m›\x1b[0m {text}"
+    composer = ["", prompt, ""]
+    if suggestions is None:
+        suggestions = text.startswith("/")
+    if suggestions:
         composer.extend(
             [
                 "  /status      show current session configuration and token usage",
@@ -118,8 +134,8 @@ def _draw_composer(rows: list[str], text: str) -> None:
             ]
         )
     else:
-        composer.append("  gpt-5.6-luna high · ~/project")
-    _draw([*rows, *composer])
+        composer.append(_COMPOSER_FOOTER)
+    _draw([*surface, *composer])
 
 
 def _interactive_terminal_settings(prior_terminal: list[object]) -> list[object]:
@@ -142,8 +158,9 @@ def _redraw_on_submit(
     ``redraw_delay`` gives the pane-death case a deterministic window after
     the barrier passes and before the composer is cleared.
     """
-    _draw(rows)
+    _draw_composer(rows, "")
     line = b""
+    suggestions_dismissed = False
     stdin_fd = sys.stdin.fileno()
     prior_terminal = termios.tcgetattr(stdin_fd)
     interactive_terminal = _interactive_terminal_settings(prior_terminal)
@@ -156,9 +173,21 @@ def _redraw_on_submit(
                 break
             if not chunk:
                 break
+            if chunk == b"\x1b":
+                # Codex 0.149 closes slash suggestions without changing the
+                # composed command.  This is not submission; the following
+                # Enter remains the only key that executes /status.
+                try:
+                    composed = line.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                suggestions_dismissed = True
+                _draw_composer(rows, composed, suggestions=False)
+                continue
             if chunk in {b"\r", b"\n"}:
                 submitted = line
                 line = b""
+                suggestions_dismissed = False
                 if redraw_delay > 0:
                     time.sleep(redraw_delay)
                 if submitted == b"/status" and after_status_rows is not None:
@@ -171,7 +200,7 @@ def _redraw_on_submit(
                 composed = line.decode("utf-8")
             except UnicodeDecodeError:
                 continue
-            _draw_composer(rows, composed)
+            _draw_composer(rows, composed, suggestions=not suggestions_dismissed)
     finally:
         termios.tcsetattr(stdin_fd, termios.TCSANOW, prior_terminal)
 

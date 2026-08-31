@@ -162,6 +162,19 @@ class _TracedRealSurface:
         )
         return readiness
 
+    def prove_composer_empty(self, provider_version: str) -> roc.PrewriteReadiness:
+        proof = self._inner.prove_composer_empty(provider_version)
+        _append_event(
+            self._event_log,
+            {
+                "kind": "composer-emptiness-proof",
+                "at": _now(),
+                "provider_version": provider_version,
+                "reason": proof.reason,
+            },
+        )
+        return proof
+
     def send_status_command(self) -> bool:
         _append_event(self._event_log, {"kind": "status-authorized", "at": _now()})
         submitted = self._inner.send_status_command()
@@ -263,11 +276,17 @@ def _restart_interrupt(
         raise LiveCanaryInvalid(
             f"restart interrupt refused before provider input: {readiness.reason}"
         )
+    composer = surface.prove_composer_empty(request.provider_version)
+    if not composer.ready:
+        observer._prewrite_refusal_outcome(request, readiness=composer)
+        raise LiveCanaryInvalid(
+            f"restart interrupt refused before provider input: {composer.reason}"
+        )
     current_requester_generation = requester_generation_probe(request.requester_terminal_id)
     if current_requester_generation != request.requester_generation:
         observer._stale_requester_outcome(request)
         raise LiveCanaryInvalid(
-            "restart interrupt found a stale requester generation after readiness"
+            "restart interrupt found a stale requester generation after composer proof"
         )
     probe = ro.pre_probe(
         request,
