@@ -1296,6 +1296,7 @@ export interface RankedSearchResponse {
 export interface RankedSearchFilters {
   projectId?: string
   q: string
+  mode?: 'lexical' | 'semantic' | 'hybrid'
   kind?: string
   status?: string[]
   severity?: string[]
@@ -1470,6 +1471,7 @@ function linkClockQuery(clocks?: {
  * text (the empty-query surface stays on the issue list). */
 function rankedSearchQuery(filters: RankedSearchFilters): string {
   const parts: string[] = [`q=${encodeURIComponent(filters.q)}`]
+  if (filters.mode) parts.push(`mode=${encodeURIComponent(filters.mode)}`)
   if (filters.projectId) parts.push(`project_id=${encodeURIComponent(filters.projectId)}`)
   if (filters.kind && filters.kind !== 'all') parts.push(`kind=${encodeURIComponent(filters.kind)}`)
   for (const s of filters.status ?? []) parts.push(`status=${encodeURIComponent(s)}`)

@@ -290,7 +290,7 @@ describe('ProjectsPanel ranked search (M1.5)', () => {
     expect(screen.getAllByText(/fusion lane weights/).length).toBeGreaterThan(0)
   })
 
-  it('forwards the active structured filters to the ranked search', async () => {
+  it('requests hybrid retrieval and forwards the active structured filters', async () => {
     render(<ProjectsPanel />)
     await openIssuesTab()
     await settle()
@@ -303,6 +303,7 @@ describe('ProjectsPanel ranked search (M1.5)', () => {
 
     const url = searchCalls()[0]?.url ?? ''
     expect(url).toContain('q=deadlock')
+    expect(url).toContain('mode=hybrid')
     expect(url).toContain('project_id=cao-system')
     expect(url).toContain('kind=bug')
     expect(url).toContain('status=blocked')

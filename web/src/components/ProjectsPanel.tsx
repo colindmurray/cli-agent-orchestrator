@@ -476,6 +476,7 @@ export function ProjectsPanel() {
     api.searchTrackerIssues({
       projectId: activeId,
       q: f.effectiveQuery,
+      mode: 'hybrid',
       kind: kind === 'all' ? undefined : kind,
       status: f.statusFilter.length ? f.statusFilter : undefined,
       severity: f.severityFilter.length ? f.severityFilter : undefined,
