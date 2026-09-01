@@ -84,7 +84,7 @@ FORBIDDEN_OPTIONS = (
 #:     --model <model>   Model for the current session. Provide an alias
 #:                       for the latest model (e.g. 'fable', 'opus', or
 #:                       'sonnet') or a model's full name (e.g.
-#:                       'claude-fable-5').
+#:                       'claude-fable-5-1').
 #:
 #: A launch that omits it runs on whatever the provider would choose,
 #: which is how a session requested as sonnet came up as a 1M Opus route.
@@ -110,7 +110,7 @@ MODEL_ALIASES = ("opus", "sonnet", "haiku", "fable")
 #: The family tokens a full model name may name. Read off the ids this
 #: machine's provider has actually reported, never guessed:
 #: ``claude-opus-5[1m]`` from a live SessionStart, plus ``claude-opus-5``,
-#: ``claude-sonnet-5``, ``claude-sonnet-4-6``, ``claude-fable-5`` and
+#: ``claude-sonnet-5``, ``claude-sonnet-4-6``, ``claude-fable-5-1`` and
 #: ``claude-haiku-4-5-20251001`` from provider-authored transcripts.
 MODEL_FAMILIES = MODEL_ALIASES
 
