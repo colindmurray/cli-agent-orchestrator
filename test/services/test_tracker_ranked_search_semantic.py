@@ -13,6 +13,8 @@ weights. The real-model gate lives in the harness comparison module.
 """
 
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -39,6 +41,37 @@ from cli_agent_orchestrator.services.vector_lifecycle import (
 _PRODUCTION_QUERY_EMBEDDER = rsearch._query_embedder
 
 DIMENSIONS = 32
+
+
+class _ConcurrentMissCache(dict):
+    """Make every worker observe the first cache miss before any can load."""
+
+    def __init__(self, workers):
+        super().__init__()
+        self._first_lookup = threading.Barrier(workers)
+        self._seen_threads = set()
+        self._seen_lock = threading.Lock()
+
+    def _is_first_lookup(self):
+        thread_id = threading.get_ident()
+        with self._seen_lock:
+            first_lookup = thread_id not in self._seen_threads
+            self._seen_threads.add(thread_id)
+        return first_lookup
+
+    def __contains__(self, key):
+        if self._is_first_lookup():
+            present = super().__contains__(key)
+            self._first_lookup.wait(timeout=5)
+            return present
+        return super().__contains__(key)
+
+    def get(self, key, default=None):
+        if self._is_first_lookup():
+            value = super().get(key, default)
+            self._first_lookup.wait(timeout=5)
+            return value
+        return super().get(key, default)
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +709,53 @@ class TestSemanticAggregation:
 
 
 class TestModeSurfaces:
+    def test_query_embedder_cold_load_is_single_flight(self, monkeypatch):
+        """Concurrent misses load one model and all callers reuse it."""
+        from cli_agent_orchestrator.services import embedding_adapter
+
+        workers = 5
+        sentinel = object()
+        loads = []
+        load_lock = threading.Lock()
+
+        def load(models_dir=None):
+            with load_lock:
+                loads.append(models_dir)
+            return sentinel
+
+        monkeypatch.setattr(rsearch, "_EMBEDDER_CACHE", _ConcurrentMissCache(workers))
+        monkeypatch.setattr(embedding_adapter, "load_embedder", load)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(
+                pool.map(lambda _: _PRODUCTION_QUERY_EMBEDDER("/models"), range(workers))
+            )
+
+        assert results == [sentinel] * workers
+        assert loads == ["/models"]
+
+    def test_query_embedder_failed_load_is_not_cached(self, monkeypatch):
+        """A failed first load leaves the next caller able to retry."""
+        from cli_agent_orchestrator.services import embedding_adapter
+
+        sentinel = object()
+        loads = []
+
+        def load(models_dir=None):
+            loads.append(models_dir)
+            if len(loads) == 1:
+                raise RuntimeError("cold load failed")
+            return sentinel
+
+        monkeypatch.setattr(rsearch, "_EMBEDDER_CACHE", {})
+        monkeypatch.setattr(embedding_adapter, "load_embedder", load)
+
+        with pytest.raises(RuntimeError, match="cold load failed"):
+            _PRODUCTION_QUERY_EMBEDDER("/models")
+
+        assert _PRODUCTION_QUERY_EMBEDDER("/models") is sentinel
+        assert loads == ["/models", "/models"]
+
     def test_query_embedder_cache_is_evicted_when_activation_changes_identity(
         self, store, monkeypatch
     ):
