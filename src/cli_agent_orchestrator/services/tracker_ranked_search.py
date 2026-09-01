@@ -42,6 +42,7 @@ store file. Model weights load once per process and embed outside SQLite.
 from __future__ import annotations
 
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
@@ -639,6 +640,7 @@ class SemanticContext:
 
 
 _EMBEDDER_CACHE: Dict[str, Any] = {}
+_EMBEDDER_CACHE_LOCK = threading.Lock()
 
 
 def _query_embedder(models_dir: Optional[str] = None) -> Any:
@@ -650,15 +652,18 @@ def _query_embedder(models_dir: Optional[str] = None) -> Any:
     """
     key = str(models_dir) if models_dir is not None else "<default>"
     if key not in _EMBEDDER_CACHE:
-        from cli_agent_orchestrator.services.embedding_adapter import load_embedder
+        with _EMBEDDER_CACHE_LOCK:
+            if key not in _EMBEDDER_CACHE:
+                from cli_agent_orchestrator.services.embedding_adapter import load_embedder
 
-        _EMBEDDER_CACHE[key] = load_embedder(models_dir)
+                _EMBEDDER_CACHE[key] = load_embedder(models_dir)
     return _EMBEDDER_CACHE[key]
 
 
 def reset_query_embedder_cache() -> None:
     """Drop the cached embedder (tests, explicit re-prepare drills)."""
-    _EMBEDDER_CACHE.clear()
+    with _EMBEDDER_CACHE_LOCK:
+        _EMBEDDER_CACHE.clear()
 
 
 def _embedder_matches_generation(embedder: Any, generation: Dict[str, Any]) -> bool:
