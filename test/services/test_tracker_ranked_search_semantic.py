@@ -52,16 +52,26 @@ class _ConcurrentMissCache(dict):
         self._seen_threads = set()
         self._seen_lock = threading.Lock()
 
-    def __contains__(self, key):
+    def _is_first_lookup(self):
         thread_id = threading.get_ident()
         with self._seen_lock:
             first_lookup = thread_id not in self._seen_threads
             self._seen_threads.add(thread_id)
-        if first_lookup:
+        return first_lookup
+
+    def __contains__(self, key):
+        if self._is_first_lookup():
             present = super().__contains__(key)
             self._first_lookup.wait(timeout=5)
             return present
         return super().__contains__(key)
+
+    def get(self, key, default=None):
+        if self._is_first_lookup():
+            value = super().get(key, default)
+            self._first_lookup.wait(timeout=5)
+            return value
+        return super().get(key, default)
 
 
 # ---------------------------------------------------------------------------
