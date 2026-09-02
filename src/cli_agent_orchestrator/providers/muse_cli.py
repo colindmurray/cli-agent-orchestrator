@@ -1,8 +1,8 @@
-"""Muse Code CLI provider — Meta's native terminal agent on Muse Spark 1.2.
+"""Muse Code CLI provider — Meta's native terminal agent on Muse Spark 1.3.
 
 Muse Code (https://developer.meta.com/ai/lp/start-building/) is Meta's
 terminal coding agent. CAO launches it as a native-CLI worker (the same shape as
-``kimi_cli``) so the Muse Spark 1.2 model runs through its own harness rather
+``kimi_cli``) so the Muse Spark 1.3 model runs through its own harness rather
 than a Claude Code gateway: the Meta Model API rejects several Anthropic-API
 fields Claude Code 2.x always sends (``context_management``, ``output_config``),
 so a claude_code-on-Muse route cannot work directly.
@@ -68,7 +68,7 @@ REPLY_LEAD_PATTERN = r"^◆[ \t]+(.+)$"
 
 
 class MuseCliProvider(BaseProvider):
-    """Native Muse Code worker provider (Muse Spark 1.2 standard or Contributor).
+    """Native Muse Code worker provider (Muse Spark 1.3 standard or Contributor).
 
     The model is resolved in this order: ``expected_model`` (CAO's managed-launch
     override, set by ``conduct spawn`` from the route model, so a single profile
