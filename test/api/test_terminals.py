@@ -284,14 +284,14 @@ class TestTerminalCreationWithWorkingDirectory:
                 },
                 json={
                     "initial_message": "do work",
-                    "expected_model": "muse-spark-1.2-contributor",
+                    "expected_model": "muse-spark-1.3-contributor",
                     "expected_effort": "high",
                 },
             )
 
             assert response.status_code == 201
             call_kwargs = mock_svc.create_terminal.call_args.kwargs
-            assert call_kwargs.get("expected_model") == "muse-spark-1.2-contributor"
+            assert call_kwargs.get("expected_model") == "muse-spark-1.3-contributor"
             assert call_kwargs.get("expected_effort") == "high"
             assert call_kwargs.get("initial_message") == "do work"
 

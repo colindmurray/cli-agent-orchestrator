@@ -72,7 +72,7 @@ class MuseCliProvider(BaseProvider):
 
     The model is resolved in this order: ``expected_model`` (CAO's managed-launch
     override, set by ``conduct spawn`` from the route model, so a single profile
-    can target either ``muse-spark-1.2`` or ``muse-spark-1.2-contributor`` at
+    can target either ``muse-spark-1.3`` or ``muse-spark-1.3-contributor`` at
     launch), then the profile's ``model`` field, then Muse Code's default.
     """
 

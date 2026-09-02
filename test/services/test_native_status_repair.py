@@ -181,7 +181,7 @@ def muse_panel_rows(
         brand,
         "╭────────────────────────────────────────────╮",
         "│ Session: " + session_id,
-        "│ Model: muse-spark-1.2-contributor (reasoning high)",
+        "│ Model: muse-spark-1.3-contributor (reasoning high)",
         "│ Agent profile: native-basic",
         "│ Model provider: meta",
         "│ Directory: /Users/x/repo",

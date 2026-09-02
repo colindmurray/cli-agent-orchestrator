@@ -13,7 +13,7 @@ session ``adcb742e-2ab5-4239-9fe2-b503005db341``, agent profile
 The installed 0.1.0-R708.1 meta panel renders model and effort together in
 one line::
 
-    Model: muse-spark-1.2-contributor (reasoning high)
+    Model: muse-spark-1.3-contributor (reasoning high)
 
 There is no separate Reasoning row on that build; the echo provider renders
 a bare model with no effort at all.  The parser therefore splits an exact
@@ -27,7 +27,7 @@ The 0.2.1-R1215.1 build replaced that labeled panel with a box drawn in
 ``┌│└─`` furniture whose rows carry uppercase labels without colons, and
 moved the reasoning effort out of the Model value onto a `` · ``-separated
 segment (verified live on the installed meta build, where ``/status``
-renders ``MODEL  muse-spark-1.2-contributor · ultra`` over the provider and
+renders ``MODEL  muse-spark-1.3-contributor · ultra`` over the provider and
 profile row ``meta · native-basic``, a ``SESSION`` row naming the
 canonical-UUID session id, a ``USAGE`` row of ``N tokens · N turns · N
 subagents``, and an ``IDLE`` badge on the header row).  Both shapes parse

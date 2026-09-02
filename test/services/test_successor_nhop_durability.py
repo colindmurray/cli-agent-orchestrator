@@ -67,7 +67,7 @@ _NATIVE_ID = "11111111-2222-4333-8444-555555555555"
 _SESSION = "cao-campaign-a"
 _MODEL = "claude-sonnet-4-5"
 _EFFORT = "high"
-_VERSION = "muse-spark-1.2-contributor (full banner)"
+_VERSION = "muse-spark-1.3-contributor (full banner)"
 
 
 def _stamp() -> str:

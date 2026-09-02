@@ -199,7 +199,7 @@ class TestManagedBridgeLocaleGuarantee:
         request = {
             "provider": "muse_cli",
             "provider_route": "anthropic",
-            "model": "muse-spark-1.2-contributor",
+            "model": "muse-spark-1.3-contributor",
             "effort": "high",
         }
         with patch.dict(os.environ, {"HOME": "/home/user", "LANG": "C", "LC_ALL": "C"}, clear=True):
@@ -385,7 +385,7 @@ class TestManagedLaunchV2LocaleGuarantee:
                                 },
                                 capture=lambda pane_id: [],
                                 bootstrap={
-                                    "requested_model": "muse-spark-1.2-contributor",
+                                    "requested_model": "muse-spark-1.3-contributor",
                                     "requested_effort": "high",
                                     "provider_version": "0.2.1",
                                 },
@@ -433,7 +433,7 @@ class TestManagedLaunchV2LocaleGuarantee:
                                 },
                                 capture=lambda pane_id: [],
                                 bootstrap={
-                                    "requested_model": "muse-spark-1.2-contributor",
+                                    "requested_model": "muse-spark-1.3-contributor",
                                     "requested_effort": "high",
                                     "provider_version": "0.2.1",
                                 },
@@ -569,7 +569,7 @@ class TestLaunchNativeTuiLocaleWiring:
         record = {
             "provider": "muse_cli",
             "request": {
-                "expected_model": "muse-spark-1.2-contributor",
+                "expected_model": "muse-spark-1.3-contributor",
                 "expected_effort": "high",
                 "provider_route": "anthropic",
                 "route_envelope": None,
@@ -588,7 +588,7 @@ class TestLaunchNativeTuiLocaleWiring:
             "provider_executable_sha256": "c" * 64,
             "profile_sha256": "same-sha-muse",
             "provider": "muse_cli",
-            "model": "muse-spark-1.2-contributor",
+            "model": "muse-spark-1.3-contributor",
         }
         captured_env: dict = {}
 

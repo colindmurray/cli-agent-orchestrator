@@ -2984,8 +2984,8 @@ async def create_terminal_in_session(
 
         # Forward managed-launch model/effort overrides so native-CLI providers
         # (e.g. muse_cli, kimi_cli) launch the caller-selected model — one
-        # profile can then target either tier (muse-spark-1.2 vs
-        # muse-spark-1.2-contributor) at spawn time.
+        # profile can then target either tier (muse-spark-1.3 vs
+        # muse-spark-1.3-contributor) at spawn time.
         expected_model = body.expected_model if body else None
         expected_effort = body.expected_effort if body else None
         assigned_quota_provider = body.quota_provider if body else None

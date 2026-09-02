@@ -84,7 +84,7 @@ def test_a_probed_carrier_produces_an_honest_receipt(tmp_path, monkeypatch):
     )
 
     receipt = attest_muse_route(
-        str(tmp_path), expected_model="muse-spark-1.2-contributor", expected_effort="high"
+        str(tmp_path), expected_model="muse-spark-1.3-contributor", expected_effort="high"
     )
 
     assert receipt["probe_version"] == "muse-carrier-route-v1"
@@ -110,10 +110,10 @@ def test_requested_is_recorded_and_observed_stays_null_with_the_reason(tmp_path,
     )
 
     receipt = attest_muse_route(
-        str(tmp_path), expected_model="muse-spark-1.2-contributor", expected_effort="high"
+        str(tmp_path), expected_model="muse-spark-1.3-contributor", expected_effort="high"
     )
 
-    assert receipt["requested_model"] == "muse-spark-1.2-contributor"
+    assert receipt["requested_model"] == "muse-spark-1.3-contributor"
     assert receipt["requested_effort"] == "high"
     assert receipt["observed_model"] is None
     assert receipt["observed_effort"] is None
@@ -121,7 +121,7 @@ def test_requested_is_recorded_and_observed_stays_null_with_the_reason(tmp_path,
     assert "--reasoning-effort" in receipt["unobserved_reason"]
     assert receipt["terminal_route_argv_pins"] == [
         "--model",
-        "muse-spark-1.2-contributor",
+        "muse-spark-1.3-contributor",
         "--reasoning-effort",
         "high",
     ]

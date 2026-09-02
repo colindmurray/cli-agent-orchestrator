@@ -25,13 +25,13 @@ def _provider(expected_model=None, expected_effort=None, agent_profile=None):
 
 class TestBuildCommand:
     def test_yolo_and_model_and_effort(self):
-        p = _provider(expected_model="muse-spark-1.2", expected_effort="high")
+        p = _provider(expected_model="muse-spark-1.3", expected_effort="high")
         cmd = p._build_command()
-        assert cmd == "muse --yolo --model muse-spark-1.2 --reasoning-effort high"
+        assert cmd == "muse --yolo --model muse-spark-1.3 --reasoning-effort high"
 
     def test_contributor_model_wins_over_none(self):
-        p = _provider(expected_model="muse-spark-1.2-contributor")
-        assert "--model muse-spark-1.2-contributor" in p._build_command()
+        p = _provider(expected_model="muse-spark-1.3-contributor")
+        assert "--model muse-spark-1.3-contributor" in p._build_command()
 
     def test_no_model_leaves_flag_out(self):
         p = _provider()
@@ -88,6 +88,6 @@ class TestManagerDispatch:
             "win",
             agent_profile="implementer-muse",
             allowed_tools=["@builtin", "execute_bash"],
-            expected_model="muse-spark-1.2",
+            expected_model="muse-spark-1.3",
         )
         assert isinstance(provider, MuseCliProvider)

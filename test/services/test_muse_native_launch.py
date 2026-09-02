@@ -27,9 +27,9 @@ class TestBuildResumeArgv:
 
     def test_profile_args_follow_identity_pair(self):
         sid = _uuid()
-        argv = mnl.build_resume_argv(session_id=sid, extra_args=["--model", "muse-spark-1.2"])
+        argv = mnl.build_resume_argv(session_id=sid, extra_args=["--model", "muse-spark-1.3"])
         assert argv[:3] == ["muse", "resume", sid]
-        assert argv[3:] == ["--model", "muse-spark-1.2"]
+        assert argv[3:] == ["--model", "muse-spark-1.3"]
 
     def test_rejects_non_canonical_session_id(self):
         with pytest.raises(mnl.MuseNativeLaunchError):

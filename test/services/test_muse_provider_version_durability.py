@@ -45,7 +45,7 @@ BANNER = "Muse Code 0.1.0 (0.1.0-R708.1)"
 REVISION = "0.1.0-R708.1"
 _NATIVE_ID = "11111111-2222-4333-8444-555555555555"
 _SESSION = "cao-campaign-a"
-_MODEL = "muse-spark-1.2-contributor"
+_MODEL = "muse-spark-1.3-contributor"
 _EFFORT = "high"
 _REFUSAL_LACKS_BANNER = (
     "the Muse restore contract lacks the wrapper path/full version banner "

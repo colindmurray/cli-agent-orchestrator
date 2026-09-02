@@ -1199,7 +1199,7 @@ class TestRouteAttestationDispatchesByProvider:
             provider="muse_cli",
             agent_profile="reviewer",
             working_directory=str(tmp_path),
-            expected_model="muse-spark-1.2-contributor",
+            expected_model="muse-spark-1.3-contributor",
             expected_effort="high",
         )
         receipt = managed_launch.attest_route(request)
@@ -1262,7 +1262,7 @@ class TestRouteAttestationDispatchesByProvider:
             provider="muse_cli",
             agent_profile="reviewer",
             working_directory=str(tmp_path),
-            expected_model="muse-spark-1.2-contributor",
+            expected_model="muse-spark-1.3-contributor",
             expected_effort="high",
         )
         return request
@@ -1283,7 +1283,7 @@ class TestRouteAttestationDispatchesByProvider:
         assert provider_receipt["carrier_verdict"] == "probed"
         # Requested is not resolved, and the receipt says so in both
         # directions rather than leaving the reader to infer it.
-        assert provider_receipt["requested_model"] == "muse-spark-1.2-contributor"
+        assert provider_receipt["requested_model"] == "muse-spark-1.3-contributor"
         assert provider_receipt["observed_model"] is None
         assert provider_receipt["observed_effort"] is None
         assert provider_receipt["pre_turn_route_surface"] is False
@@ -1312,7 +1312,7 @@ class TestRouteAttestationDispatchesByProvider:
                     tmp_path,
                     "muse_cli",
                     trusted_project_root=str(tmp_path),
-                    expected_model="muse-spark-1.2-contributor",
+                    expected_model="muse-spark-1.3-contributor",
                     expected_effort="high",
                 )
             )

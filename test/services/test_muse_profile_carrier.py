@@ -339,7 +339,7 @@ def test_disproved_carrier_refuses_before_profile_file_or_pane_effect(monkeypatc
     with pytest.raises(ManagedLaunchConflict, match="Muse profile carrier is unavailable"):
         v2._prepare_muse_fresh_launch(
             record={"terminal_id": "t", "generation": "g", "working_directory": str(tmp_path)},
-            request={"expected_model": "muse-spark-1.2-contributor", "expected_effort": "high"},
+            request={"expected_model": "muse-spark-1.3-contributor", "expected_effort": "high"},
             executable=str(wrapper),
             version_output=BANNER,
             digest=hashlib.sha256(wrapper.read_bytes()).hexdigest(),

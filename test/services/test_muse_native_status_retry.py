@@ -26,7 +26,7 @@ from cli_agent_orchestrator.services import native_pane_input
 
 #: A provider-generated id from a real 0.2.1-R1215.1 meta TUI.
 PROBE_SESSION_ID = "e10c3a42-a792-406c-98f3-b0ed88f747e2"
-MUSE_MODEL = "muse-spark-1.2-contributor"
+MUSE_MODEL = "muse-spark-1.3-contributor"
 MUSE_EFFORT = "high"
 
 

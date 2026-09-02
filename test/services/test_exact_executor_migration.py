@@ -426,7 +426,7 @@ def test_successor_launch_facts_record_and_survive_restart(tmp_path, monkeypatch
         "effort": "high",
         "provider_executable": os.path.realpath(str(tmp_path / "claude")),
         "provider_executable_sha256": "b" * 64,
-        "provider_executable_version": "muse-spark-1.2-contributor (banner)",
+        "provider_executable_version": "muse-spark-1.3-contributor (banner)",
     }
     stored = oj.record_successor_launch_facts(request.operation_id, facts)
     assert stored["operation"]["successor_launch_facts_json"] is not None
@@ -519,7 +519,7 @@ def test_successor_launch_facts_adopt_or_conflict_after_final(tmp_path, monkeypa
         "effort": "high",
         "provider_executable": os.path.realpath(str(tmp_path / "claude")),
         "provider_executable_sha256": "b" * 64,
-        "provider_executable_version": "muse-spark-1.2-contributor (banner)",
+        "provider_executable_version": "muse-spark-1.3-contributor (banner)",
     }
 
     # Before a final result the write stays a plain overwrite: a corrected

@@ -72,7 +72,7 @@ from cli_agent_orchestrator.services.managed_launch import ManagedLaunchConflict
 
 MUSE_BANNER = "Muse Code 0.1.0 (0.1.0-R708.1)"
 MUSE_INNER_SHA256 = "4290bfafa5bbb81a6fd493aaea12f848c789b1d22edfa0c4b849151deba3e70c"
-MUSE_MODEL = "muse-spark-1.2-contributor"
+MUSE_MODEL = "muse-spark-1.3-contributor"
 MUSE_EFFORT = "high"
 DELIVERY_ID = "44444444-4444-4444-8444-444444444444"
 TASK_MESSAGE = "review this diff"
@@ -190,7 +190,7 @@ def status_panel_rows(
     The coordinator no-prompt canary on 2026-08-10 rendered the meta panel
     with model and effort in ONE line::
 
-        Model: muse-spark-1.2-contributor (reasoning high)
+        Model: muse-spark-1.3-contributor (reasoning high)
 
     (there is no separate Reasoning row).  The echo provider renders a
     bare model with no effort at all.  ``reasoning_line``/``reasoning_label``
@@ -548,7 +548,7 @@ def test_provider_default_effort_sentinel_requires_no_reasoning_line():
     "mutate",
     [
         lambda rows, sid: status_panel_rows(None, sid, session_line=str(uuid.uuid4())),
-        lambda rows, sid: status_panel_rows(None, sid, model="muse-spark-1.2"),
+        lambda rows, sid: status_panel_rows(None, sid, model="muse-spark-1.3"),
         lambda rows, sid: status_panel_rows(None, sid, reasoning="low"),
         lambda rows, sid: status_panel_rows(None, sid, agent_profile="miniswe"),
         lambda rows, sid: status_panel_rows(None, sid, provider="echo"),
@@ -1075,7 +1075,7 @@ async def test_muse_launch_blocks_tears_down_and_never_advertises_when_discovery
     if broken == "non_canonical_id":
         rows = status_panel_rows(worktree, "not-a-canonical-uuid")
     elif broken == "wrong_model":
-        rows = status_panel_rows(worktree, PROVIDER_SESSION_ID, model="muse-spark-1.2")
+        rows = status_panel_rows(worktree, PROVIDER_SESSION_ID, model="muse-spark-1.3")
     elif broken == "wrong_effort":
         rows = status_panel_rows(worktree, PROVIDER_SESSION_ID, reasoning="low")
     elif broken == "wrong_profile":
@@ -1273,7 +1273,7 @@ async def test_muse_launch_exposes_a_cleanup_failure_in_the_preflight_detail(
 ):
     """A failed pane teardown is never hidden by a "torn down" claim."""
     muse_harness.captures.append(
-        status_panel_rows(worktree, PROVIDER_SESSION_ID, model="muse-spark-1.2")
+        status_panel_rows(worktree, PROVIDER_SESSION_ID, model="muse-spark-1.3")
     )
 
     def _delete_terminal_fail(terminal_id, **kwargs):
@@ -1823,7 +1823,7 @@ def footer_only_rows(worktree, *, model: str = MUSE_MODEL, effort: Optional[str]
         "",
         "  Muse Code 0.2.1",
         "",
-        "  Model set to muse-spark-1.2-contributor",
+        "  Model set to muse-spark-1.3-contributor",
         "  ⎿  Discounted tokens: your content may be used for product improvement.",
         "",
         "── Voice input (⌥V to start) ───────────────────────────────────────────",
@@ -2280,13 +2280,13 @@ async def test_muse_store_fallback_refuses_a_footer_that_disagrees_with_the_requ
 
     monkeypatch.setattr(terminal_service, "create_terminal", _create_terminal_and_register_session)
     muse_harness.captures.append(
-        footer_only_rows(worktree, model="muse-spark-1.2", effort=MUSE_EFFORT)
+        footer_only_rows(worktree, model="muse-spark-1.3", effort=MUSE_EFFORT)
     )
     _record, result = await _launch(worktree, tmp_path, muse_harness)
     assert result["state"] == "preflight_blocked"
     detail = result["preflight_failure"]["detail"]
     assert "does not describe the claimed launch" in detail
-    assert "muse-spark-1.2" in detail
+    assert "muse-spark-1.3" in detail
     # Nothing was bound or advertised for the refused identity.
     assert native_attachment.get("muse_cli", store_session_id) is None
     assert bridge.read_state(result["reservation_id"]) is None

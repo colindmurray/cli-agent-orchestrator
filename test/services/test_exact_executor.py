@@ -1590,7 +1590,7 @@ def test_muse_resume_revalidates_the_profile_carrier_and_proves_its_inner_image(
         launch_root,
         harness="muse_cli",
         provider="muse_cli",
-        model=_fact("muse-spark-1.2"),
+        model=_fact("muse-spark-1.3"),
         effort=_fact("high"),
         executable=_fact(
             {
@@ -1620,7 +1620,7 @@ def test_muse_resume_revalidates_the_profile_carrier_and_proves_its_inner_image(
         contract,
         harness="muse_cli",
         route_provider="muse_cli",
-        model_requested="muse-spark-1.2",
+        model_requested="muse-spark-1.3",
         effort_requested="high",
         compatibility_cell_ref="muse_cli:meta:native_tui:r708.1",
     )
@@ -1646,7 +1646,7 @@ def test_muse_resume_revalidates_the_profile_carrier_and_proves_its_inner_image(
             "resume",
             _NATIVE_ID,
             "--model",
-            "muse-spark-1.2",
+            "muse-spark-1.3",
             "--reasoning-effort",
             "high",
             "--trust-workspace",
@@ -1677,7 +1677,7 @@ def test_muse_resume_revalidates_the_profile_carrier_and_proves_its_inner_image(
         "resume",
         _NATIVE_ID,
         "--model",
-        "muse-spark-1.2",
+        "muse-spark-1.3",
         "--reasoning-effort",
         "high",
         "--trust-workspace",
@@ -1700,7 +1700,7 @@ def test_muse_profile_carrier_drift_refuses_before_effects(launch_root, monkeypa
         launch_root,
         harness="muse_cli",
         provider="muse_cli",
-        model=_fact("muse-spark-1.2"),
+        model=_fact("muse-spark-1.3"),
         effort=_fact("high"),
         executable=_fact(
             {
@@ -1730,7 +1730,7 @@ def test_muse_profile_carrier_drift_refuses_before_effects(launch_root, monkeypa
         contract,
         harness="muse_cli",
         route_provider="muse_cli",
-        model_requested="muse-spark-1.2",
+        model_requested="muse-spark-1.3",
         effort_requested="high",
         compatibility_cell_ref="muse_cli:meta:native_tui:r708.1",
     )
@@ -1767,8 +1767,8 @@ def test_route_pin_maps_each_supported_harness():
     args, env = xe._route_pin("kimi_cli", "k2.7", "max")
     assert env == {"KIMI_MODEL_THINKING_EFFORT": "max"}
 
-    args, env = xe._route_pin("muse_cli", "muse-spark-1.2", "low")
-    assert args == ["--model", "muse-spark-1.2", "--reasoning-effort", "low"]
+    args, env = xe._route_pin("muse_cli", "muse-spark-1.3", "low")
+    assert args == ["--model", "muse-spark-1.3", "--reasoning-effort", "low"]
     assert env == {}
 
     args, env = xe._route_pin("codex", "gpt-5.3-codex", None)
