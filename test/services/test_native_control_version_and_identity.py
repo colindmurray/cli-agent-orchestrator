@@ -27,6 +27,7 @@ from typing import Any, Dict, Optional
 import pytest
 
 from cli_agent_orchestrator.services import claude_native_control as claude
+from cli_agent_orchestrator.services import codex_native_control as codex
 from cli_agent_orchestrator.services import control_input_service as cis
 from cli_agent_orchestrator.services import kimi_native_control as kimi
 from cli_agent_orchestrator.services import provider_contracts
@@ -36,6 +37,12 @@ CLAUDE_BANNER = "2.1.220 (Claude Code)"
 CLAUDE_BARE = "2.1.220"
 KIMI_BANNER = "kimi 0.29.0"
 KIMI_BARE = "0.29.0"
+#: The exact banner the cond-0588 Luna spawn bound (spawn-delivery.json
+#: ``native_binding.provider_version``): a prerelease token the old
+#: bare-``X.Y.Z`` normalizer reduced to ``""``, so every composer row
+#: missed and multiline admission refused with zero task bytes.
+CODEX_ALPHA_BANNER = "codex-cli 0.151.0-alpha.7.1"
+CODEX_ALPHA_BARE = "0.151.0-alpha.7.1"
 NATIVE_SESSION = "3e9989ee-6465-4f80-8eee-6837f225bf37"
 PROVIDER_PROCESS = "4242@Jul 25 20:00:00 2026"
 
@@ -69,6 +76,27 @@ class TestTheDurableBannerResolvesThePin:
         """
         assert provider_contracts.normalized_version(CLAUDE_BANNER) == CLAUDE_BARE
 
+    def test_a_prerelease_banner_normalizes_to_its_full_token(self):
+        """The cond-0810 defect: an alpha banner normalized to ``""``.
+
+        The suffix is part of the build identity, so the whole prerelease
+        token survives — still one exact build, never a range.
+        """
+        assert provider_contracts.normalized_version(CODEX_ALPHA_BANNER) == CODEX_ALPHA_BARE
+        assert provider_contracts.normalized_version(CODEX_ALPHA_BARE) == CODEX_ALPHA_BARE
+        assert provider_contracts.normalized_version("codex-cli 0.149.0") == "0.149.0"
+        assert provider_contracts.normalized_version("not-a-version") == ""
+
+    def test_the_codex_alpha_banner_resolves_its_exact_row(self):
+        """The Luna generation's verbatim banner admits a multiline plan."""
+        plan = codex.plan_composer_keystrokes("one\ntwo", provider_version=CODEX_ALPHA_BANNER)
+
+        assert plan["deliverable"] is True
+        assert plan["soft_newline_keystroke"] == "C-j"
+        assert plan["submit_settle_seconds"] == 0.2
+        assert plan["submit_settle_proven"] is True
+        assert plan["undeliverable_reason"] is None
+
 
 class TestThePinIsNotWidened:
     """Normalizing the lookup input is not loosening the pin."""
@@ -85,9 +113,23 @@ class TestThePinIsNotWidened:
         assert plan["undeliverable_reason"] is not None
         assert plan["deliverable"] is False
 
+    def test_a_neighbouring_alpha_does_not_inherit_the_proven_row(self):
+        """The suffix is identity: 7.2 is a different build from proven 7.1."""
+        plan = codex.plan_composer_keystrokes(
+            "one\ntwo", provider_version="codex-cli 0.151.0-alpha.7.2"
+        )
+
+        assert plan["undeliverable_reason"] is not None
+        assert plan["deliverable"] is False
+        assert plan["soft_newline_keystroke"] is None
+
     def test_the_tables_hold_only_bare_exact_versions(self):
         """A table of proven builds, never a table of spellings."""
-        for table in (claude._PROVEN_COMPOSER_NEWLINE, kimi._PROVEN_COMPOSER_NEWLINE):
+        for table in (
+            claude._PROVEN_COMPOSER_NEWLINE,
+            kimi._PROVEN_COMPOSER_NEWLINE,
+            codex._PROVEN_COMPOSER_NEWLINE,
+        ):
             assert table
             for key in table:
                 assert key == provider_contracts.normalized_version(key), key
