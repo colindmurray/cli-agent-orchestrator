@@ -3571,6 +3571,75 @@ class TestCommandClassGuard:
         assert client.writes == []
         assert adapter.calls == []
 
+    def test_a_codex_alpha_build_with_both_pins_delivers_declared_compact(
+        self, monkeypatch, journal
+    ):
+        """cond-0812: the exact 0.151.0-alpha.7.1 build carries both pins,
+        so a declared /compact against a proven-empty composer delivers —
+        and the r11 close runs the real completion observation through the
+        new execution pin against the canary's exact notice."""
+        real_observe_execution = native_pane_input.observe_command_execution
+        resolved = _seq_resolved(provider="codex", provider_version="codex-cli 0.151.0-alpha.7.1")
+        adapter = _FakeSequenceAdapter()
+        client, observations = self._wire(
+            monkeypatch, resolved, adapter, {0: {"lines": ["/compact"]}}, empty=True
+        )
+        notice = [
+            "\x1b[2m• \x1b[0mContext compacted",
+            "",
+            "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m",
+            "",
+            "  \x1b[2mgpt-5.6-sol xhigh · ~/project · Context 100% left\x1b[0m",
+        ]
+        seen_pins = []
+
+        def _observing(pane_id, pin, **kwargs):
+            seen_pins.append(pin)
+            kwargs["screen"] = lambda: notice
+            return real_observe_execution(pane_id, pin, **kwargs)
+
+        monkeypatch.setattr(native_pane_input, "observe_command_execution", _observing)
+        result = _deliver_declared(journal)
+        assert result.outcome == ACCEPTED
+        assert result.request_schema_version == 4
+        assert adapter.calls == [({"lines": ["/compact"]}, True)]
+        # The planner ran the real guard through the new emptiness pin ...
+        assert observations == [
+            (
+                PANE,
+                native_pane_input.composer_emptiness_pin_for(
+                    "codex", "codex-cli 0.151.0-alpha.7.1"
+                ),
+            )
+        ]
+        # ... and the completion observation through the new execution pin.
+        assert seen_pins == [
+            native_pane_input.command_execution_pin_for("codex", "codex-cli 0.151.0-alpha.7.1")
+        ]
+        assert result.submission_observed == "submitted"
+        assert result.submission_evidence_ref.startswith("capture-pane:%17:")
+
+    def test_a_codex_neighbor_build_without_pins_is_provider_unsupported(
+        self, monkeypatch, journal
+    ):
+        """cond-0812: 0.151.0-alpha.7.2 carries neither pin, so a declared
+        /compact refuses provider-unsupported pre-write with zero bytes —
+        the composer is never even observed."""
+        resolved = _seq_resolved(provider="codex", provider_version="codex-cli 0.151.0-alpha.7.2")
+        adapter = _FakeSequenceAdapter()
+        client, _ = self._wire(
+            monkeypatch,
+            resolved,
+            adapter,
+            {0: {"lines": ["/compact"]}},
+            empty=AssertionError("an unpinned build must never be observed"),
+        )
+        result = _deliver_declared(journal)
+        assert result.outcome == REFUSED
+        assert result.reason_code == REASON_PROVIDER_UNSUPPORTED
+        assert client.writes == []
+        assert adapter.calls == []
+
     def test_the_guard_is_journaled_and_reconciles_by_exact_id(self, monkeypatch, journal):
         result, _, _, _ = self._declared(journal, monkeypatch, empty=False)
         assert result.reason_code == REASON_COMPOSER_NONEMPTY

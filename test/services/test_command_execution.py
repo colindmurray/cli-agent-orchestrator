@@ -279,6 +279,77 @@ class TestObserveCommandExecution:
         assert observed == SUBMISSION_SUBMITTED
         assert ref
 
+    def test_codex_0151_alpha_pin_reuses_the_compaction_signal(self):
+        """cond-0812: the exact 0.151.0-alpha.7.1 build carries the same
+        context-compacted notice rule; the installed banner resolves it."""
+        for version in ("0.151.0-alpha.7.1", "codex-cli 0.151.0-alpha.7.1"):
+            pin = npi.command_execution_pin_for("codex", version)
+            assert pin is not None, version
+            assert pin.rule == "codex-compaction-signal"
+            assert pin.signal == "the context-compacted notice"
+            assert pin.styled is True
+            assert pin.provider == "codex"
+
+    def test_codex_0151_alpha_neighbors_and_0149_keep_no_execution_pin(self):
+        """cond-0812: no range, no inheritance. The neighboring prerelease,
+        the bare final, and unknown builds stay unpinned — and 0.149.0,
+        which holds an emptiness pin, still holds no execution pin, so a
+        declared /compact there keeps refusing provider-unsupported."""
+        for build in (
+            "0.151.0-alpha.7.2",
+            "codex-cli 0.151.0-alpha.7.2",
+            "0.151.0",
+            "0.149.0",
+            "0.145.0",
+        ):
+            assert npi.command_execution_pin_for("codex", build) is None, build
+
+    def test_codex_0151_alpha_pin_records_its_live_provenance(self):
+        pin = npi.command_execution_pin_for("codex", "0.151.0-alpha.7.1")
+        assert pin is not None
+        for token in (
+            "codex-cli 0.151.0-alpha.7.1",
+            "66e7d232b966323138265d5eda007f9672bbce5f7b8e3e92769fce4523bef24d",
+            "2026-09-03",
+            "cond0812-codex-151-compact-canary.md",
+            "gpt-5.6-sol",
+            "Context compacted",
+            "Context 100% left",
+        ):
+            assert token in pin.evidence, token
+
+    def test_codex_0151_alpha_exact_notice_counts_and_busy_does_not(self):
+        """cond-0812: the canary's exact '• Context compacted' notice is
+        the signal on the new pin; busy/working rows are not completion."""
+        pin = npi.command_execution_pin_for("codex", "codex-cli 0.151.0-alpha.7.1")
+        assert pin is not None
+        notice = f"{DIM}• {RESET}Context compacted"
+        assert npi._execution_signal_count(pin, _codex_screen([notice]), "/compact") == 1
+        assert npi._execution_signal_count(pin, _codex_screen([notice, notice]), "/compact") == 2
+        assert npi._execution_signal_count(pin, _codex_screen([]), "/compact") == 0
+        busy = _codex_screen(
+            [
+                "■ '/compact' is disabled while a task is in progress.",
+                "• Working (9s • esc to interrupt)",
+            ]
+        )
+        assert npi._execution_signal_count(pin, busy, "/compact") == 0
+
+    def test_codex_0151_alpha_notice_above_baseline_closes_submitted(self):
+        pin = npi.command_execution_pin_for("codex", "0.151.0-alpha.7.1")
+        composer = npi.composer_emptiness_pin_for("codex", "0.151.0-alpha.7.1")
+        assert pin is not None and composer is not None
+        observed, ref = npi.observe_command_execution(
+            "%5",
+            pin,
+            command_text="/compact",
+            composer_pin=composer,
+            baseline_rows=_codex_screen([]),
+            screen=lambda: _codex_screen([f"{DIM}• {RESET}Context compacted"]),
+        )
+        assert observed == SUBMISSION_SUBMITTED
+        assert ref and ref.startswith("capture-pane:%5:")
+
 
 class TestTheDeadlineBoundaryIsAuthoritative:
     """The r11 bounded window: a capture completing after the deadline
