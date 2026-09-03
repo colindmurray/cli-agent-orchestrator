@@ -2,10 +2,19 @@
 
 The app-server ``thread/start`` response is Codex's pre-turn native identity
 source.  A zero-turn ``thread/start`` alone is not written to Codex's rollout
-store, so an exact CLI resume cannot find it after app-server exits.  This
-bootstrap follows the start with the metadata-only ``thread/name/set`` method,
-proves the exact rollout exists, sends no ``turn/start``, closes and reaps the
-app-server, and returns the exact thread id that the native TUI may resume.
+store, so an exact CLI resume cannot find it after app-server exits.  Worse,
+the metadata-only ``thread/name/set`` method only persists the name to the
+SQLite/index metadata: it never creates the rollout file, so the minted id is
+still unloadable (``thread/resume`` answers ``no rollout found for thread
+id``) once the minter exits.  This bootstrap therefore follows the start with
+both ``thread/name/set`` (operator-visible name in the metadata store) and
+``thread/inject_items`` carrying a single contentless ``reasoning`` item.
+Codex documents ``thread/inject_items`` as appending history "without
+starting a user turn", and that append is what forces the exact advertised
+rollout file to exist.  The bootstrap then proves the exact rollout exists,
+proves a fresh process adopts the exact id with zero turns, sends no
+``turn/start`` anywhere, closes and reaps the app-server, and returns the
+exact thread id that the native TUI may resume.
 """
 
 from __future__ import annotations
@@ -33,7 +42,14 @@ from cli_agent_orchestrator.services.codex_trust import (
 
 BOOTSTRAP_SCHEMA = "cao-codex-native-bootstrap-v1"
 EXIT_PROOF_SCHEMA = "cao-codex-native-bootstrap-exit-v1"
-MATERIALIZATION_METHOD = "thread/name/set"
+# Naming persists the operator-visible title to the metadata store only; it
+# never creates the rollout file, so it is not the materializer.
+NAMING_METHOD = "thread/name/set"
+# The wire name uses an underscore (``thread/inject_items``); the schema title
+# reads ``Thread/injectItemsRequest``.  Bind the wire spelling exactly: the
+# server rejects the camelCase guess as an unknown method.
+MATERIALIZATION_METHOD = "thread/inject_items"
+TURNS_LIST_METHOD = "thread/turns/list"
 RESUME_ADOPTION_SCHEMA = "cao-codex-native-resume-adoption-v1"
 RESUME_METHOD = "thread/resume"
 RESUME_THREAD_ID_PARAM = "threadId"
@@ -55,6 +71,11 @@ _SCHEMA_REQUIREMENTS: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "ThreadSetNameResponse",
         ("threadId", "name"),
     ),
+    "thread/inject_items": (
+        "ThreadInjectItemsParams",
+        "ThreadInjectItemsResponse",
+        ("threadId", "items"),
+    ),
     "thread/resume": ("ThreadResumeParams", "ThreadResumeResponse", ("threadId",)),
 }
 
@@ -71,6 +92,19 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _materialization_items() -> list[dict[str, Any]]:
+    """Return a fresh copy of the single history item that forces persistence.
+
+    The item is a contentless ``reasoning`` item: model-internal scratch with
+    no user-request semantics and zero content bytes.  A contentless ``user``
+    message would also satisfy the server's non-empty-items rule, but a
+    trailing user message risks reading as a pending prompt; a contentless
+    reasoning item can never become a turn request, carries no task text, and
+    leaves ``has_user_event`` unset.
+    """
+    return [{"type": "reasoning", "summary": []}]
 
 
 def _find_schema_definition(schema: Mapping[str, Any], name: str) -> Optional[Mapping[str, Any]]:
@@ -285,6 +319,11 @@ def _prove_resume_adoption(
             "method": RESUME_METHOD,
             "params": {RESUME_THREAD_ID_PARAM: native_id},
         },
+        {
+            "id": 3,
+            "method": TURNS_LIST_METHOD,
+            "params": {RESUME_THREAD_ID_PARAM: native_id},
+        },
     ]
     before = _digest_or_absent(config_path)
     try:
@@ -314,14 +353,40 @@ def _prove_resume_adoption(
         raise CodexBootstrapError(
             f"codex {RESUME_METHOD} adopted {adopted!r}, not the minted {native_id!r}"
         )
+    turns_response = _response_by_id(stdout, 3)
+    if "error" in turns_response or "result" not in turns_response:
+        raise CodexBootstrapError(
+            f"codex {TURNS_LIST_METHOD} failed for {native_id}: {turns_response.get('error')!r}"
+        )
+    observed_turns = (turns_response.get("result") or {}).get("data")
+    if not isinstance(observed_turns, list) or len(observed_turns) != 0:
+        raise CodexBootstrapError(
+            f"codex {native_id} is not a zero-turn thread: "
+            f"{TURNS_LIST_METHOD} observed {observed_turns!r}; refusing the minted id "
+            "so no terminal can attach to a thread that already ran"
+        )
+    inline_turns = thread.get("turns")
+    if inline_turns is not None and list(inline_turns) != []:
+        raise CodexBootstrapError(
+            f"codex {native_id} is not a zero-turn thread: {RESUME_METHOD} carried "
+            f"{len(list(inline_turns))} inline turn(s); refusing the minted id "
+            "so no terminal can attach to a thread that already ran"
+        )
     return {
         "schema": RESUME_ADOPTION_SCHEMA,
         "method": RESUME_METHOD,
         "adopted_session_id": adopted,
         "adopted_in_fresh_process": True,
         "sent_no_turn": True,
+        "observed_turns": [],
         "exit_status": returncode,
-        "exchange_sha256": _digest({"initialize": _response_by_id(stdout, 1), "resume": response}),
+        "exchange_sha256": _digest(
+            {
+                "initialize": _response_by_id(stdout, 1),
+                "resume": response,
+                "turns": turns_response,
+            }
+        ),
         "protected_config_sha256": before,
     }
 
@@ -420,15 +485,26 @@ def mint_session(
             raise CodexBootstrapError(
                 f"Codex thread/start returned an unusable thread id before materialization: {exc}"
             ) from exc
+        # Naming first (metadata store), then the contentless inject that
+        # forces the rollout file.  Both stay in the minter process: after it
+        # exits the thread must be loadable by id with zero turns.
         return [
             {
                 "id": 4,
-                "method": MATERIALIZATION_METHOD,
+                "method": NAMING_METHOD,
                 "params": {
                     "threadId": native_id,
                     "name": f"CAO managed Codex session {native_id[:8]}",
                 },
-            }
+            },
+            {
+                "id": 5,
+                "method": MATERIALIZATION_METHOD,
+                "params": {
+                    "threadId": native_id,
+                    "items": _materialization_items(),
+                },
+            },
         ]
 
     configured_home = (child_env or os.environ).get("CODEX_HOME")
@@ -469,7 +545,8 @@ def mint_session(
         (1, "initialize"),
         (2, "config/read"),
         (3, "thread/start"),
-        (4, MATERIALIZATION_METHOD),
+        (4, NAMING_METHOD),
+        (5, MATERIALIZATION_METHOD),
     ):
         response = _response_by_id(stdout, request_id)
         if "error" in response or "result" not in response:
@@ -535,6 +612,7 @@ def mint_session(
         "requested_effort": expected_effort,
         "sent_no_turn": True,
         "materialization_method": MATERIALIZATION_METHOD,
+        "materialization_items_sha256": _digest(_materialization_items()),
         "materialization_sent_no_turn": True,
         "rollout_path": str(rollout_path),
         "rollout_sha256": hashlib.sha256(rollout_path.read_bytes()).hexdigest(),
@@ -549,7 +627,8 @@ def mint_session(
                 "initialize": _response_by_id(stdout, 1),
                 "config": _response_by_id(stdout, 2),
                 "thread": _response_by_id(stdout, 3),
-                "materialization": _response_by_id(stdout, 4),
+                "naming": _response_by_id(stdout, 4),
+                "materialization": _response_by_id(stdout, 5),
             }
         ),
         "protected_config_sha256": config_after,
@@ -564,6 +643,7 @@ def bootstrap_intent(receipt: Mapping[str, Any], *, note: Optional[str] = None) 
         or receipt.get("schema") != BOOTSTRAP_SCHEMA
         or receipt.get("sent_no_turn") is not True
         or receipt.get("materialization_method") != MATERIALIZATION_METHOD
+        or receipt.get("materialization_items_sha256") != _digest(_materialization_items())
         or receipt.get("materialization_sent_no_turn") is not True
         or not isinstance(rollout_path, str)
         or not os.path.isabs(rollout_path)

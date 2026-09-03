@@ -57,7 +57,8 @@ def test_bootstrap_materializes_a_resumable_zero_turn_thread(tmp_path, codex_bin
                 "\n".join(
                     [
                         _response(1, {"userAgent": "codex-test"}),
-                        _response(2, {"thread": {"id": SESSION, "ephemeral": False}}),
+                        _response(2, {"thread": {"id": SESSION, "ephemeral": False, "turns": []}}),
+                        _response(3, {"data": []}),
                     ]
                 ),
                 "",
@@ -93,6 +94,7 @@ def test_bootstrap_materializes_a_resumable_zero_turn_thread(tmp_path, codex_bin
                 ),
                 json.dumps(start_response),
                 _response(4, {}),
+                _response(5, {}),
             ]
         )
         return stdout, "", -15
@@ -120,24 +122,39 @@ def test_bootstrap_materializes_a_resumable_zero_turn_thread(tmp_path, codex_bin
                 "threadId": SESSION,
                 "name": f"CAO managed Codex session {SESSION[:8]}",
             },
-        }
+        },
+        {
+            "id": 5,
+            "method": "thread/inject_items",
+            "params": {
+                "threadId": SESSION,
+                "items": [{"type": "reasoning", "summary": []}],
+            },
+        },
     ]
     thread_params = seen["requests"][-1]["params"]
     assert thread_params["ephemeral"] is False
     assert "turn/start" not in methods
+    assert "turn/start" not in [request["method"] for request in seen["followups"]]
     assert receipt["native_session_id"] == SESSION
     assert receipt["sent_no_turn"] is True
-    assert receipt["materialization_method"] == "thread/name/set"
+    assert receipt["materialization_method"] == "thread/inject_items"
+    assert receipt["materialization_items_sha256"] == cnb._digest(
+        [{"type": "reasoning", "summary": []}]
+    )
     assert receipt["materialization_sent_no_turn"] is True
     assert receipt["rollout_path"].endswith(f"-{SESSION}.jsonl")
     assert receipt["detached_before_launch"] is True
     assert receipt["exit_proof"]["reaped"] is True
+    assert receipt["resume_adoption_proof"]["observed_turns"] == []
     assert seen["argv"][-2:] == ["app-server", "--stdio"]
     assert [request["method"] for request in seen["adoption_requests"]] == [
         "initialize",
         "initialized",
         "thread/resume",
+        "thread/turns/list",
     ]
+    assert seen["adoption_requests"][-2]["params"] == {"threadId": SESSION}
     assert seen["adoption_requests"][-1]["params"] == {"threadId": SESSION}
     assert "turn/start" not in [request["method"] for request in seen["adoption_requests"]]
 
@@ -159,6 +176,7 @@ def test_default_route_omits_model_and_records_provider_observation(
                     [
                         _response(1, {"userAgent": "codex-test"}),
                         _response(2, {"thread": {"id": SESSION, "ephemeral": False}}),
+                        _response(3, {"data": []}),
                     ]
                 ),
                 "",
@@ -193,6 +211,7 @@ def test_default_route_omits_model_and_records_provider_observation(
                     ),
                     json.dumps(start_response),
                     _response(4, {}),
+                    _response(5, {}),
                 ]
             ),
             "",
@@ -246,6 +265,7 @@ def test_route_drift_is_refused(tmp_path, codex_binary, monkeypatch):
                     [
                         _response(1, {}),
                         _response(2, {"thread": {"id": SESSION, "ephemeral": False}}),
+                        _response(3, {"data": []}),
                     ]
                 ),
                 "",
@@ -275,6 +295,7 @@ def test_route_drift_is_refused(tmp_path, codex_binary, monkeypatch):
                 ),
                 json.dumps(start_response),
                 _response(4, {}),
+                _response(5, {}),
             ]
         )
         return stdout, "", 0
@@ -312,6 +333,7 @@ def test_bootstrap_refuses_when_materialization_leaves_no_rollout(
                     [
                         _response(1, {}),
                         _response(2, {"thread": {"id": SESSION, "ephemeral": False}}),
+                        _response(3, {"data": []}),
                     ]
                 ),
                 "",
@@ -341,6 +363,7 @@ def test_bootstrap_refuses_when_materialization_leaves_no_rollout(
                     ),
                     json.dumps(start_response),
                     _response(4, {}),
+                    _response(5, {}),
                 ]
             ),
             "",
@@ -401,6 +424,213 @@ def test_bootstrap_intent_refuses_an_unmaterialized_legacy_receipt():
                 "exit_proof": {"reaped": True},
             }
         )
+
+
+def test_materialization_binds_the_exact_underscore_wire_method():
+    # The schema title reads Thread/injectItemsRequest but the wire method is
+    # thread/inject_items; the camelCase guess is an unknown method server-side.
+    assert cnb.MATERIALIZATION_METHOD == "thread/inject_items"
+    assert cnb.NAMING_METHOD == "thread/name/set"
+    assert cnb._SCHEMA_REQUIREMENTS["thread/inject_items"] == (
+        "ThreadInjectItemsParams",
+        "ThreadInjectItemsResponse",
+        ("threadId", "items"),
+    )
+
+
+def test_materialization_payload_is_contentless_and_fresh_per_mint():
+    first = cnb._materialization_items()
+    assert first == [{"type": "reasoning", "summary": []}]
+    first[0]["summary"].append({"text": "mutated"})
+    assert cnb._materialization_items() == [{"type": "reasoning", "summary": []}]
+
+
+def _mint_exchange_with_adoption(tmp_path, codex_home, *, resume_thread, turns_data):
+    """Fake both legs: the minter succeeds with a rollout file on disk, and
+    the fresh-process adoption leg replays the given resume thread/turns."""
+
+    def exchange(_argv, _requests, _timeout, *, env=None, followup_factory=None):
+        if followup_factory is None:
+            return (
+                "\n".join(
+                    [
+                        _response(1, {}),
+                        _response(2, {"thread": resume_thread}),
+                        _response(3, {"data": turns_data}),
+                    ]
+                ),
+                "",
+                0,
+            )
+        start_response = {
+            "id": 3,
+            "result": {
+                "thread": {"id": SESSION},
+                "model": "gpt-5.6-sol",
+                "reasoningEffort": "xhigh",
+                "cwd": os.path.realpath(tmp_path),
+            },
+        }
+        followup_factory({3: start_response})
+        rollout = codex_home / "sessions" / "2026" / "09" / "03"
+        rollout.mkdir(parents=True)
+        (rollout / f"rollout-test-{SESSION}.jsonl").write_text('{"type":"session_meta"}\n')
+        return (
+            "\n".join(
+                [
+                    _response(1, {}),
+                    _response(
+                        2,
+                        {
+                            "config": {
+                                "projects": {os.path.realpath(tmp_path): {"trust_level": "trusted"}}
+                            }
+                        },
+                    ),
+                    json.dumps(start_response),
+                    _response(4, {}),
+                    _response(5, {}),
+                ]
+            ),
+            "",
+            0,
+        )
+
+    return exchange
+
+
+def _mint_kwargs(tmp_path, codex_home, codex_binary):
+    path, digest = codex_binary
+    return {
+        "codex_binary": path,
+        "binary_sha256": digest,
+        "version_output": "codex-cli 0.151.0",
+        "working_directory": os.path.realpath(tmp_path),
+        "model": "gpt-5.6-sol",
+        "effort": "xhigh",
+        "profile_args": [],
+        "environment": {"CODEX_HOME": str(codex_home)},
+    }
+
+
+def test_adoption_refuses_a_thread_with_listed_turns(tmp_path, codex_binary, monkeypatch):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setattr(
+        cnb,
+        "_run_app_server_probe",
+        _mint_exchange_with_adoption(
+            tmp_path,
+            codex_home,
+            resume_thread={"id": SESSION},
+            turns_data=[{"id": "turn-1"}],
+        ),
+    )
+    with pytest.raises(cnb.CodexBootstrapError, match="not a zero-turn thread"):
+        cnb.mint_session(**_mint_kwargs(tmp_path, codex_home, codex_binary))
+
+
+def test_adoption_refuses_inline_turns_on_the_resumed_thread(tmp_path, codex_binary, monkeypatch):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setattr(
+        cnb,
+        "_run_app_server_probe",
+        _mint_exchange_with_adoption(
+            tmp_path,
+            codex_home,
+            resume_thread={"id": SESSION, "turns": [{"id": "turn-1"}]},
+            turns_data=[],
+        ),
+    )
+    with pytest.raises(cnb.CodexBootstrapError, match="not a zero-turn thread"):
+        cnb.mint_session(**_mint_kwargs(tmp_path, codex_home, codex_binary))
+
+
+def test_bootstrap_refuses_when_inject_reports_an_error(tmp_path, codex_binary, monkeypatch):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+
+    def exchange(_argv, _requests, _timeout, *, env=None, followup_factory=None):
+        if followup_factory is None:
+            raise AssertionError("mint must fail before the adoption probe")
+        start_response = {
+            "id": 3,
+            "result": {
+                "thread": {"id": SESSION},
+                "model": "gpt-5.6-sol",
+                "reasoningEffort": "xhigh",
+                "cwd": os.path.realpath(tmp_path),
+            },
+        }
+        followup_factory({3: start_response})
+        return (
+            "\n".join(
+                [
+                    _response(1, {}),
+                    _response(
+                        2,
+                        {
+                            "config": {
+                                "projects": {os.path.realpath(tmp_path): {"trust_level": "trusted"}}
+                            }
+                        },
+                    ),
+                    json.dumps(start_response),
+                    _response(4, {}),
+                    json.dumps(
+                        {
+                            "id": 5,
+                            "error": {"code": -32600, "message": "items must not be empty"},
+                        }
+                    ),
+                ]
+            ),
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(cnb, "_run_app_server_probe", exchange)
+    path, digest = codex_binary
+    with pytest.raises(cnb.CodexBootstrapError, match="thread/inject_items"):
+        cnb.mint_session(**_mint_kwargs(tmp_path, codex_home, codex_binary))
+
+
+def _valid_intent_receipt():
+    return {
+        "schema": cnb.BOOTSTRAP_SCHEMA,
+        "provider": "codex",
+        "native_session_id": SESSION,
+        "sent_no_turn": True,
+        "materialization_method": cnb.MATERIALIZATION_METHOD,
+        "materialization_items_sha256": cnb._digest(cnb._materialization_items()),
+        "materialization_sent_no_turn": True,
+        "rollout_path": f"/tmp/rollout-test-{SESSION}.jsonl",
+        "rollout_sha256": "b" * 64,
+        "detached_before_launch": True,
+        "exit_proof": {"reaped": True},
+    }
+
+
+def test_bootstrap_intent_binds_the_contentless_materialization_payload():
+    intent = cnb.bootstrap_intent(_valid_intent_receipt())
+    assert intent["acquisition_method"] == native_attachment.ACQUISITION_ZERO_TURN_BOOTSTRAP
+
+
+def test_bootstrap_intent_refuses_a_legacy_name_set_receipt():
+    receipt = _valid_intent_receipt()
+    receipt["materialization_method"] = "thread/name/set"
+    with pytest.raises(cnb.CodexBootstrapError, match="materialized"):
+        cnb.bootstrap_intent(receipt)
+
+
+def test_bootstrap_intent_refuses_a_non_canonical_materialization_payload():
+    receipt = _valid_intent_receipt()
+    receipt["materialization_items_sha256"] = cnb._digest(
+        [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}]
+    )
+    with pytest.raises(cnb.CodexBootstrapError, match="materialized"):
+        cnb.bootstrap_intent(receipt)
 
 
 def _schema_fixture():
@@ -504,6 +734,7 @@ def test_repeated_mints_keep_the_digest_schema_verdict_and_bindable_proofs(
                     [
                         _response(1, {}),
                         _response(2, {"thread": {"id": native_id, "ephemeral": False}}),
+                        _response(3, {"data": []}),
                     ]
                 ),
                 "",
@@ -536,6 +767,7 @@ def test_repeated_mints_keep_the_digest_schema_verdict_and_bindable_proofs(
                     ),
                     json.dumps(start),
                     _response(4, {}),
+                    _response(5, {}),
                 ]
             ),
             "",
