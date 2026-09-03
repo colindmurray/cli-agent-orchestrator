@@ -634,6 +634,66 @@ class TestPrewriteReadiness:
             roc.PREWRITE_READY, None
         )
 
+    def test_real_surface_0151_alpha_empty_composer_passes_the_final_zero_effect_proof(
+        self, monkeypatch
+    ):
+        """cond-0812: the exact 0.151.0-alpha.7.1 build resolves its pin
+        from the installed banner and passes the final zero-effect proof
+        on the canary's post-completion screen."""
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_codex_turn_state",
+            lambda *args, **kwargs: TerminalStatus.IDLE,
+        )
+        styled_empty = [
+            "• Context compacted",
+            "",
+            "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m",
+            "",
+            "  gpt-5.6-sol xhigh · ~/project · Context 100% left",
+        ]
+        observe_composer_empty = roc.npi.observe_composer_empty
+        monkeypatch.setattr(
+            roc.npi,
+            "observe_composer_empty",
+            lambda pane_id, pin: observe_composer_empty(pane_id, pin, screen=lambda: styled_empty),
+        )
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        surface = roc.RealCodexPaneSurface(
+            "%5",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        assert surface.await_input_ready() == roc.PrewriteReadiness(
+            roc.PREWRITE_READY, TerminalStatus.IDLE.value
+        )
+        assert surface.prove_composer_empty("codex-cli 0.151.0-alpha.7.1") == (
+            roc.PrewriteReadiness(roc.PREWRITE_READY, None)
+        )
+
+    def test_real_surface_0151_alpha_neighbor_has_no_composer_pin(self, monkeypatch):
+        """cond-0812: the neighboring 0.151.0-alpha.7.2 build stays
+        provider-unsupported pre-write — no range, no inheritance."""
+        monkeypatch.setattr(roc.time, "sleep", lambda _seconds: None)
+        surface = roc.RealCodexPaneSurface(
+            "%5",
+            terminal_id="term-target",
+            session_name="cao-target",
+            window_name="managed-target",
+            timeout=1.0,
+        )
+
+        assert surface.prove_composer_empty("codex-cli 0.151.0-alpha.7.2") == (
+            roc.PrewriteReadiness(
+                roc.PREWRITE_PROVIDER_UNSUPPORTED,
+                None,
+                "the exact Codex build has no verified composer-emptiness pin",
+            )
+        )
+
     @pytest.mark.parametrize("prefill", ["/status", "tell worker to continue"])
     def test_prewrite_composer_prefill_refuses_without_status_input(
         self, _db, monkeypatch, prefill

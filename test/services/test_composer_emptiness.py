@@ -304,6 +304,61 @@ class TestObserveComposerEmpty:
         prompt = f"{ESC}[1m›{RESET} /compact"
         assert npi.observe_composer_empty("%1", pin, screen=lambda: _codex_rows(prompt)) is False
 
+    def test_codex_0151_alpha_pin_resolves_from_the_installed_banner(self):
+        """cond-0812: the exact 0.151.0-alpha.7.1 build reuses the verified
+        footer rule; the installed banner normalizes to the same key."""
+        for version in ("0.151.0-alpha.7.1", "codex-cli 0.151.0-alpha.7.1"):
+            pin = npi.composer_emptiness_pin_for("codex", version)
+            assert pin is not None, version
+            assert pin.rule == "codex-prompt-footer"
+            assert pin.styled is True
+            assert pin.provider == "codex"
+
+    def test_codex_0151_alpha_neighbors_stay_unpinned(self):
+        """cond-0812: no range, no inheritance — the neighboring prerelease,
+        the bare final, and unknown builds refuse provider-unsupported."""
+        for build in ("0.151.0-alpha.7.2", "codex-cli 0.151.0-alpha.7.2", "0.151.0", "9.9.9"):
+            assert npi.composer_emptiness_pin_for("codex", build) is None, build
+
+    def test_codex_0151_alpha_pin_records_its_live_provenance(self):
+        pin = npi.composer_emptiness_pin_for("codex", "0.151.0-alpha.7.1")
+        assert pin is not None
+        for token in (
+            "codex-cli 0.151.0-alpha.7.1",
+            "66e7d232b966323138265d5eda007f9672bbce5f7b8e3e92769fce4523bef24d",
+            "2026-09-03",
+            "cond0812-codex-151-compact-canary.md",
+            "gpt-5.6-sol",
+        ):
+            assert token in pin.evidence, token
+
+    def test_codex_0151_alpha_post_compaction_screen_is_proven_empty(self):
+        """cond-0812: the canary's post-completion shape — the exact notice
+        in the transcript, the empty idle composer, the model/context
+        footer — proves empty under the new pin."""
+        pin = npi.composer_emptiness_pin_for("codex", "codex-cli 0.151.0-alpha.7.1")
+        assert pin is not None
+        screen = [
+            f"{ESC}[1m›{RESET} Reply with exactly READY. Do not use tools.",
+            "",
+            "• READY",
+            "",
+            "• Context compacted",
+            "",
+            f"{ESC}[1m›{RESET} {DIM}Ask Codex to do anything{RESET}",
+            "",
+            f"  {DIM}gpt-5.6-sol xhigh · ~/project · Context 100% left{RESET}",
+        ]
+        assert npi.observe_composer_empty("%5", pin, screen=lambda: screen) is True
+        typed = [
+            "• Context compacted",
+            "",
+            f"{ESC}[1m›{RESET} /compact",
+            "",
+            f"  {DIM}gpt-5.6-sol xhigh · ~/project · Context 100% left{RESET}",
+        ]
+        assert npi.observe_composer_empty("%5", pin, screen=lambda: typed) is False
+
     def test_an_unknown_rule_proves_nothing(self):
         pin = npi.ComposerEmptinessPin(
             provider="future", rule="some-future-rule", styled=False, evidence=""

@@ -1023,6 +1023,22 @@ _CODEX_0149_EMPTY_EVIDENCE = (
     "normally; slash suggestions sit below the separator and are excluded."
 )
 
+_CODEX_0151_ALPHA_EMPTY_EVIDENCE = (
+    "live-verified on the installed Codex CLI 0.151.0-alpha.7.1 "
+    "(cond-0812, 2026-09-03, canary "
+    "cond0812-codex-151-compact-canary.md): the footer-anchored composer "
+    "retains the same last '›' prompt row and following blank separator "
+    "as 0.146.0/0.149.0 — after a one-second-settled literal /compact the "
+    "pane returned to the empty idle composer '› Ask Codex to do anything' "
+    "above the 'gpt-5.6-sol xhigh · ... · Context 100% left' footer, with "
+    "the exact '• Context compacted' notice in the transcript above it.  "
+    "Banner 'codex-cli 0.151.0-alpha.7.1', native binary sha256 "
+    "66e7d232b966323138265d5eda007f9672bbce5f7b8e3e92769fce4523bef24d.  "
+    "The setup turn used gpt-5.6-sol xhigh read-only, and its first Enter "
+    "sent immediately after tmux paste was swallowed, so the 0.2s submit "
+    "settle floor is unchanged."
+)
+
 
 #: The per-provider+build emptiness pins, keyed by normalized version.
 #: A build appears here only when its composer layout was read; an
@@ -1060,6 +1076,12 @@ _COMPOSER_EMPTINESS_PINS: dict[str, dict[str, ComposerEmptinessPin]] = {
             rule=_RULE_CODEX_PROMPT_FOOTER,
             styled=True,
             evidence=_CODEX_0149_EMPTY_EVIDENCE,
+        ),
+        "0.151.0-alpha.7.1": ComposerEmptinessPin(
+            provider="codex",
+            rule=_RULE_CODEX_PROMPT_FOOTER,
+            styled=True,
+            evidence=_CODEX_0151_ALPHA_EMPTY_EVIDENCE,
         ),
     },
 }
@@ -1502,6 +1524,20 @@ _CODEX_EXECUTION_EVIDENCE = (
     "distinguishes this command's completion from any earlier compaction"
 )
 
+_CODEX_0151_ALPHA_EXECUTION_EVIDENCE = (
+    "live-proven on the installed Codex CLI 0.151.0-alpha.7.1 "
+    "(cond-0812, 2026-09-03, canary "
+    "cond0812-codex-151-compact-canary.md): a one-second-settled literal "
+    "/compact on the idle composer produced the exact transcript notice "
+    "'• Context compacted', restored the footer to 'Context 100% left', "
+    "and returned to the empty '› Ask Codex to do anything' composer; the "
+    "occurrence count over a pre-write baseline distinguishes this "
+    "command's completion from any earlier compaction.  Banner 'codex-cli "
+    "0.151.0-alpha.7.1', native binary sha256 "
+    "66e7d232b966323138265d5eda007f9672bbce5f7b8e3e92769fce4523bef24d; "
+    "the setup turn used gpt-5.6-sol xhigh read-only."
+)
+
 
 #: The per-provider+build execution pins.  Same scope as the emptiness
 #: pins — a build appears only with live evidence; an unpinned build
@@ -1532,6 +1568,13 @@ _COMMAND_EXECUTION_PINS: dict[str, dict[str, CommandExecutionPin]] = {
             signal="the context-compacted notice",
             styled=True,
             evidence=_CODEX_EXECUTION_EVIDENCE,
+        ),
+        "0.151.0-alpha.7.1": CommandExecutionPin(
+            provider="codex",
+            rule=_RULE_CODEX_COMPACTION_SIGNAL,
+            signal="the context-compacted notice",
+            styled=True,
+            evidence=_CODEX_0151_ALPHA_EXECUTION_EVIDENCE,
         ),
     },
 }
