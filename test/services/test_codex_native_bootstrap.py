@@ -620,7 +620,7 @@ def test_bootstrap_intent_binds_the_contentless_materialization_payload():
 def test_bootstrap_intent_refuses_a_legacy_name_set_receipt():
     receipt = _valid_intent_receipt()
     receipt["materialization_method"] = "thread/name/set"
-    with pytest.raises(cnb.CodexBootstrapError, match="materialized"):
+    with pytest.raises(cnb.CodexBootstrapError, match="thread/name/set"):
         cnb.bootstrap_intent(receipt)
 
 
@@ -629,14 +629,47 @@ def test_bootstrap_intent_refuses_a_non_canonical_materialization_payload():
     receipt["materialization_items_sha256"] = cnb._digest(
         [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}]
     )
-    with pytest.raises(cnb.CodexBootstrapError, match="materialized"):
+    with pytest.raises(cnb.CodexBootstrapError, match="payload digest"):
         cnb.bootstrap_intent(receipt)
+
+
+def test_bootstrap_intent_refuses_a_non_mapping_receipt():
+    with pytest.raises(cnb.CodexBootstrapError, match="materialized"):
+        cnb.bootstrap_intent(None)
+
+
+# The protocol shape the schema probe must certify, pinned independently of
+# the implementation's _SCHEMA_REQUIREMENTS.  The fixture derives from this
+# fixed contract — never from the implementation — so a wrong method, type,
+# or field name in _SCHEMA_REQUIREMENTS fails the equality assertion below
+# instead of certifying itself.  This is a protocol-shape pin, not a
+# version allowlist: any build whose generated schema carries these shapes
+# passes regardless of its version string.
+_EXPECTED_SCHEMA_CONTRACT = {
+    "config/read": ("ConfigReadParams", "ConfigReadResponse", ("cwd",)),
+    "thread/start": (
+        "ThreadStartParams",
+        "ThreadStartResponse",
+        ("cwd", "ephemeral"),
+    ),
+    "thread/name/set": (
+        "ThreadSetNameParams",
+        "ThreadSetNameResponse",
+        ("threadId", "name"),
+    ),
+    "thread/inject_items": (
+        "ThreadInjectItemsParams",
+        "ThreadInjectItemsResponse",
+        ("threadId", "items"),
+    ),
+    "thread/resume": ("ThreadResumeParams", "ThreadResumeResponse", ("threadId",)),
+}
 
 
 def _schema_fixture():
     definitions = {}
     requests = []
-    for method, (params, response, fields) in cnb._SCHEMA_REQUIREMENTS.items():
+    for method, (params, response, fields) in _EXPECTED_SCHEMA_CONTRACT.items():
         definitions[params] = {"properties": {field: {} for field in fields}}
         definitions[response] = {
             "properties": {"thread": {}} if "thread" in response.lower() else {}
@@ -653,8 +686,9 @@ def _schema_fixture():
 
 
 def test_schema_probe_requires_every_load_bearing_method_and_field():
+    assert dict(cnb._SCHEMA_REQUIREMENTS) == dict(_EXPECTED_SCHEMA_CONTRACT)
     assert set(cnb._validate_schema_bundle(_schema_fixture())["methods"]) == set(
-        cnb._SCHEMA_REQUIREMENTS
+        _EXPECTED_SCHEMA_CONTRACT
     )
     broken = _schema_fixture()
     del broken["definitions"]["v2"]["ThreadResumeParams"]["properties"]["threadId"]

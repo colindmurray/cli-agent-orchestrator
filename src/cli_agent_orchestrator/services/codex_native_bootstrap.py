@@ -3,11 +3,11 @@
 The app-server ``thread/start`` response is Codex's pre-turn native identity
 source.  A zero-turn ``thread/start`` alone is not written to Codex's rollout
 store, so an exact CLI resume cannot find it after app-server exits.  Worse,
-the metadata-only ``thread/name/set`` method only persists the name to the
-SQLite/index metadata: it never creates the rollout file, so the minted id is
+the metadata-only ``thread/name/set`` method only records the name in the
+session index: it never creates the rollout file, so the minted id is
 still unloadable (``thread/resume`` answers ``no rollout found for thread
 id``) once the minter exits.  This bootstrap therefore follows the start with
-both ``thread/name/set`` (operator-visible name in the metadata store) and
+both ``thread/name/set`` (operator-visible name in the session index) and
 ``thread/inject_items`` carrying a single contentless ``reasoning`` item.
 Codex documents ``thread/inject_items`` as appending history "without
 starting a user turn", and that append is what forces the exact advertised
@@ -42,7 +42,7 @@ from cli_agent_orchestrator.services.codex_trust import (
 
 BOOTSTRAP_SCHEMA = "cao-codex-native-bootstrap-v1"
 EXIT_PROOF_SCHEMA = "cao-codex-native-bootstrap-exit-v1"
-# Naming persists the operator-visible title to the metadata store only; it
+# Naming records the operator-visible title in the session index only; it
 # never creates the rollout file, so it is not the materializer.
 NAMING_METHOD = "thread/name/set"
 # The wire name uses an underscore (``thread/inject_items``); the schema title
@@ -485,7 +485,7 @@ def mint_session(
             raise CodexBootstrapError(
                 f"Codex thread/start returned an unusable thread id before materialization: {exc}"
             ) from exc
-        # Naming first (metadata store), then the contentless inject that
+        # Naming first (session index), then the contentless inject that
         # forces the rollout file.  Both stay in the minter process: after it
         # exits the thread must be loadable by id with zero turns.
         return [
@@ -638,12 +638,34 @@ def mint_session(
 def bootstrap_intent(receipt: Mapping[str, Any], *, note: Optional[str] = None) -> dict[str, Any]:
     rollout_path = receipt.get("rollout_path") if isinstance(receipt, Mapping) else None
     rollout_sha256 = receipt.get("rollout_sha256") if isinstance(receipt, Mapping) else None
+    # The two materialization fields get their own refusals: a legacy
+    # name/set-only receipt and a foreign-payload receipt are different
+    # observed facts and the operator must be able to tell them apart.  Both
+    # still refuse before any identity is claimed.
+    materialization_method = (
+        receipt.get("materialization_method") if isinstance(receipt, Mapping) else None
+    )
+    if materialization_method != MATERIALIZATION_METHOD:
+        raise CodexBootstrapError(
+            "Codex receipt does not prove a materialized bootstrap: "
+            f"materialization_method is {materialization_method!r}, expected "
+            f"{MATERIALIZATION_METHOD!r}; a name/set-only receipt never proves "
+            "a rollout file exists"
+        )
+    materialization_items_sha256 = (
+        receipt.get("materialization_items_sha256") if isinstance(receipt, Mapping) else None
+    )
+    if materialization_items_sha256 != _digest(_materialization_items()):
+        raise CodexBootstrapError(
+            "Codex receipt does not prove a materialized bootstrap: "
+            f"materialization payload digest is {materialization_items_sha256!r}, expected "
+            "the canonical contentless payload; refusing a thread that may "
+            "carry foreign history bytes"
+        )
     if (
         not isinstance(receipt, Mapping)
         or receipt.get("schema") != BOOTSTRAP_SCHEMA
         or receipt.get("sent_no_turn") is not True
-        or receipt.get("materialization_method") != MATERIALIZATION_METHOD
-        or receipt.get("materialization_items_sha256") != _digest(_materialization_items())
         or receipt.get("materialization_sent_no_turn") is not True
         or not isinstance(rollout_path, str)
         or not os.path.isabs(rollout_path)
