@@ -104,7 +104,8 @@ async def test_launch_resumes_the_bootstrapped_thread_as_the_pane_process(
             "model": kwargs["model"],
             "effort": kwargs["effort"],
             "sent_no_turn": True,
-            "materialization_method": "thread/name/set",
+            "materialization_method": "thread/inject_items",
+            "materialization_items_sha256": bootstrap._digest(bootstrap._materialization_items()),
             "materialization_sent_no_turn": True,
             "rollout_path": os.path.join(
                 kwargs["working_directory"], f"rollout-test-{SESSION}.jsonl"

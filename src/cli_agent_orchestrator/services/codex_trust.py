@@ -92,8 +92,9 @@ def _run_app_server_probe(
 
     ``followup_factory`` is evaluated only after every fixed request has a
     response.  It exists for provider operations whose parameters come from
-    an earlier response in the same app-server lifetime, such as materializing
-    a newly assigned thread id with ``thread/name/set``.  The factory receives
+    an earlier response in the same app-server lifetime, such as naming and
+    materializing a newly assigned thread id with ``thread/name/set`` and
+    ``thread/inject_items``.  The factory receives
     only parsed responses keyed by request id; notifications cannot become
     accidental authority for a dependent request.
     """
