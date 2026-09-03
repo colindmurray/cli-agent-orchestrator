@@ -591,16 +591,25 @@ class ResumeFormRefused(ProviderContractError):
     """A forbidden or non-exact resume form was requested."""
 
 
+#: A released version token: a semver core with an optional prerelease
+#: and/or build suffix (``0.151.0-alpha.7.1``).  Still one exact build,
+#: never a range — the suffix is part of the identity, so an alpha and
+#: its final release are different table keys and neither inherits the
+#: other's proof.
+_SEMVER_TOKEN = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
+
+
 def normalized_version(installed_version: str) -> str:
     """The first semver-shaped token in a ``<name> <version> ...`` banner.
 
     ``"codex 0.146.0"``, ``"2.1.220 (Claude Code)"``, ``"kimi 0.29.1"`` all
-    yield the bare version; an absent one yields ``""``.  Exposed so a
+    yield the bare version, and ``"codex-cli 0.151.0-alpha.7.1"`` yields
+    the full prerelease token; an absent one yields ``""``.  Exposed so a
     caller can record the *actual* validated version rather than a pin
     constant that may name the wrong one of several accepted builds.
     """
     for token in installed_version.strip().split():
-        if re.fullmatch(r"\d+\.\d+\.\d+", token):
+        if _SEMVER_TOKEN.fullmatch(token):
             return token
     return ""
 

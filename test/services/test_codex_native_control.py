@@ -521,6 +521,45 @@ class TestMultiLineDelivery:
         assert record["refusal_reason"] == cnc.REFUSED_UNPROVEN_COMPOSER_NEWLINE
         assert recorder.calls == []
 
+    def test_the_0151_alpha_build_posts_multi_line_through_real_admission(self):
+        """The cond-0588 Luna banner reaches the transport, not the refusal.
+
+        Bind and readiness already proved on ``codex-cli
+        0.151.0-alpha.7.1``; this is the seam that refused it with zero
+        task bytes. Two lines go in with one C-j between them and exactly
+        one submit Enter — multiline preservation through ``queue`` itself,
+        not just the plan helper.
+        """
+        _attach()
+        recorder = Recorder()
+
+        record = _queue(
+            "op-20a",
+            text="one\ntwo",
+            transport=recorder,
+            provider_version="codex-cli 0.151.0-alpha.7.1",
+        )
+
+        assert record["state"] == cnc.POSTED
+        assert recorder.calls == ["literal:one", "key:C-j", "literal:two", "enter"]
+        assert recorder.calls.count("enter") == 1
+
+    def test_an_unlisted_alpha_is_refused_before_any_input(self):
+        """7.2 is a different build from proven 7.1: same typed refusal."""
+        _attach()
+        recorder = Recorder()
+
+        record = _queue(
+            "op-20b",
+            text="one\ntwo",
+            transport=recorder,
+            provider_version="codex-cli 0.151.0-alpha.7.2",
+        )
+
+        assert record["state"] == cnc.REFUSED
+        assert record["refusal_reason"] == cnc.REFUSED_UNPROVEN_COMPOSER_NEWLINE
+        assert recorder.calls == []
+
     def test_a_single_line_needs_no_proven_keystroke(self):
         _attach()
         recorder = Recorder()
@@ -1046,6 +1085,33 @@ class TestDefensiveGuards:
         assert plan["submit_settle_seconds"] == 0.2
         assert plan["submit_settle_proven"] is True
         assert plan["composer_evidence"]["live_canary"]
+        assert plan["undeliverable_reason"] is None
+
+    def test_0151_alpha_has_its_live_proven_composer_authority(self):
+        """The installed 0.151.0-alpha.7.1 build carries the Luna banner's task.
+
+        Source-proven at the exact release commit with the installed
+        binary's keymap shape read to match, and live-proven in the
+        cond-0810 zero-turn TUI canary — recorded as exactly that, with
+        no submit normalization asserted.
+        """
+        _attach()
+        plan = cnc.plan_composer_keystrokes(
+            "one\ntwo", provider_version="codex-cli 0.151.0-alpha.7.1"
+        )
+        assert plan["deliverable"] is True
+        assert plan["soft_newline_keystroke"] == "C-j"
+        assert plan["submit_settle_seconds"] == 0.2
+        assert plan["submit_settle_proven"] is True
+        assert plan["submit_normalization_proven"] is False
+        evidence = plan["composer_evidence"]
+        assert evidence["source_ref"] == "openai/codex rust-v0.151.0-alpha.7.1"
+        assert evidence["source_commit"] == "ece348ff63c2cf0922eef45fee4c487375117e57"
+        assert evidence["installed_binary_sha256"] == (
+            "66e7d232b966323138265d5eda007f9672bbce5f7b8e3e92769fce4523bef24d"
+        )
+        assert "COND0810_LINE_ONE" in evidence["live_canary"]
+        assert "without Enter" in evidence["live_canary"]
         assert plan["undeliverable_reason"] is None
 
     def test_0148_does_not_inherit_0147_composer_authority(self):

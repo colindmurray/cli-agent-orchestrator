@@ -124,6 +124,11 @@ ENCODING_SOFT_NEWLINE = "soft-newline-lines-then-enter"
 #: 0.147.0 fact was checked both against the exact rust-v0.147.0 source and
 #: in a disposable TUI canary: Ctrl-J left two lines in the composer with no
 #: turn, and a settled Enter submitted those lines as one message.
+#: 0.151.0-alpha.7.1 is proven at its exact release commit, against the
+#: installed binary's matching keymap shape, and in a disposable zero-turn
+#: TUI canary (cond-0810): C-j left two literal lines in the composer with
+#: no turn, and the pane was killed without Enter.  Its prerelease banner
+#: previously normalized to ``""`` and missed every row.
 _PROVEN_COMPOSER_NEWLINE: dict[str, dict[str, Any]] = {
     "0.146.0": {
         "keystroke": "C-j",
@@ -177,6 +182,44 @@ _PROVEN_COMPOSER_NEWLINE: dict[str, dict[str, Any]] = {
         # The canary proved the editor newline. The tagged source proves the
         # submit dispatch and burst window, but neither establishes every
         # leading/trailing-whitespace normalization case.
+        "submit_normalization_proven": False,
+    },
+    "0.151.0-alpha.7.1": {
+        "keystroke": "C-j",
+        "submit_settle_seconds": 0.2,
+        "evidence": {
+            "source_ref": "openai/codex rust-v0.151.0-alpha.7.1",
+            "source_commit": "ece348ff63c2cf0922eef45fee4c487375117e57",
+            "composer_binding": (
+                "EditorKeymap.insert_newline defaults include Ctrl-J "
+                "(codex-rs/tui/src/keymap.rs); "
+                "composer.submit defaults to plain Enter"
+            ),
+            "settle_source": (
+                "paste_burst PASTE_ENTER_SUPPRESS_WINDOW=120ms "
+                "(codex-rs/tui/src/bottom_pane/paste_burst.rs:158)"
+            ),
+            "installed_binary_sha256": (
+                "66e7d232b966323138265d5eda007f9672bbce5f7b8e3e92769fce4523bef24d"
+            ),
+            "installed_version": (
+                "0.151.0-alpha.7.1: npm package.json and `codex --version` agree; "
+                "installed bytes carry the same compiled keymap shape "
+                "(TuiEditorKeymap/insert_newline, TuiComposerKeymap/submit, "
+                "paste_burst) with no readable ctrl+j binding string, so no "
+                "bundle derivation exists for this build either"
+            ),
+            "live_canary": (
+                "disposable Codex 0.151.0-alpha.7.1 TUI (`codex --sandbox "
+                "read-only`, tmux cao0810-canary): literal COND0810_LINE_ONE + "
+                "C-j + literal COND0810_LINE_TWO rendered as two literal "
+                "composer lines with Context 100% left and no Working/thinking/"
+                "token/turn output; pane killed without Enter, 2026-09-03"
+            ),
+        },
+        # The canary proved the editor newline on the installed build; the
+        # tagged source proves the submit dispatch and burst window. Neither
+        # establishes every leading/trailing-whitespace normalization case.
         "submit_normalization_proven": False,
     },
 }
