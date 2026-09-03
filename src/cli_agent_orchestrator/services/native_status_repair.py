@@ -193,8 +193,18 @@ _SGR_SEQUENCE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 #: post-Escape composer proof must still see.
 _PROMPT_PREFIX = re.compile(r"^\s*>\s*_+\s*")
 
-#: A provider brand header: ``Brand (vX.Y.Z)`` or ``Brand (X.Y.Z)``.
-_BRAND_HEADER = re.compile(r"^(?P<brand>[A-Za-z][A-Za-z ]*) \((?:v)?(?P<version>\d+\.\d+\.\d+)\)$")
+#: A provider brand header: ``Brand (vX.Y.Z)`` or ``Brand (X.Y.Z)``,
+#: with an optional prerelease/build suffix as part of the exact build
+#: identity (``0.151.0-alpha.7.1``).  The suffix is matched, never ranged
+#: over: ``_require_brand_header`` still compares the observed token to the
+#: expected build with exact string equality, so an alpha and its final
+#: release are different identities and neither inherits the other's proof.
+#: Mirrors ``provider_contracts._SEMVER_TOKEN``; arbitrary version text
+#: (``(vlatest)``, ``(vsomeday)``) still matches nothing here.
+_BRAND_HEADER = re.compile(
+    r"^(?P<brand>[A-Za-z][A-Za-z ]*) \((?:v)?"
+    r"(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\)$"
+)
 
 _DETAIL_MAX = 500
 

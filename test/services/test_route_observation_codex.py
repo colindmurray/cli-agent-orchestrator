@@ -1763,6 +1763,40 @@ class TestBannerVersionNormalization:
         assert parsed["reason"] == "panel-unparsed"
 
 
+class TestPrereleaseStatusHeader:
+    """The installed 0.151.0-alpha.7.1 prerelease header (cond-0811)."""
+
+    def test_parser_observes_the_exact_prerelease_panel(self):
+        parsed = roc.parse_codex_route_panel(
+            codex_panel_rows(version="0.151.0-alpha.7.1"),
+            pinned_version="codex-cli 0.151.0-alpha.7.1",
+            pane_width=100,
+        )
+
+        assert parsed["kind"] == "observed"
+        assert parsed["provider_version"] == "0.151.0-alpha.7.1"
+
+    def test_neighboring_prerelease_drift_is_panel_unparsed(self):
+        parsed = roc.parse_codex_route_panel(
+            codex_panel_rows(version="0.151.0-alpha.7.1"),
+            pinned_version="codex-cli 0.151.0-alpha.7.2",
+            pane_width=100,
+        )
+
+        assert parsed["kind"] == "inconclusive"
+        assert parsed["reason"] == "panel-unparsed"
+
+    def test_observer_records_the_exact_prerelease_build(self, _db):
+        request = _request(provider_version="codex-cli 0.151.0-alpha.7.1")
+        surface = FakeCodexPaneSurface(rows=codex_panel_rows(version="0.151.0-alpha.7.1"))
+
+        outcome = roc.CodexRouteObserver(surface=surface).observe(request)
+
+        assert request.provider_version == "codex-cli 0.151.0-alpha.7.1"
+        assert outcome["result"] == ro.RESULT_OBSERVED_CLOSED
+        assert outcome["observation"]["provider_version"] == "0.151.0-alpha.7.1"
+
+
 # ---------------------------------------------------------------------------
 # the observation is correlated to the exact target
 # ---------------------------------------------------------------------------
