@@ -747,6 +747,58 @@ class TestCodexParser:
         with pytest.raises(nsr.PanelParseError):
             nsr.parse_codex_status(codex_panel_rows(brand=">_ OpenAI Codex (v0.146.0)"))
 
+    def test_accepts_the_exact_prerelease_brand_header(self):
+        # Installed Codex 0.151.0-alpha.7.1 renders a prerelease-bearing
+        # status brand header (cond-0811): the suffix is part of the exact
+        # build identity and is compared truthfully, never ranged over.
+        parsed = nsr.parse_codex_status(
+            codex_panel_rows(brand=">_ OpenAI Codex (v0.151.0-alpha.7.1)"),
+            pinned_version="0.151.0-alpha.7.1",
+        )
+        assert parsed["session_id"] == SESSION_ID
+        assert parsed["provider_version"] == "0.151.0-alpha.7.1"
+
+    @pytest.mark.parametrize(
+        "header,pinned",
+        [
+            # A neighboring prerelease panel never satisfies this expectation.
+            (">_ OpenAI Codex (v0.151.0-alpha.7.2)", "0.151.0-alpha.7.1"),
+            (">_ OpenAI Codex (v0.151.0-alpha.7.1)", "0.151.0-alpha.7.2"),
+            # An alpha and its final release are different build identities.
+            (">_ OpenAI Codex (v0.151.0)", "0.151.0-alpha.7.1"),
+            (">_ OpenAI Codex (v0.151.0-alpha.7.1)", "0.151.0"),
+        ],
+    )
+    def test_refuses_prerelease_version_mismatches(self, header, pinned):
+        with pytest.raises(nsr.PanelParseError):
+            nsr.parse_codex_status(codex_panel_rows(brand=header), pinned_version=pinned)
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            ">_ OpenAI Codex (v0.151.0-)",
+            ">_ OpenAI Codex (v0.151)",
+            ">_ OpenAI Codex (vlatest)",
+            ">_ OpenAI Codex (0.151.0-alpha.7.1",
+            ">_ OpenAI Codex v0.151.0-alpha.7.1",
+        ],
+    )
+    def test_refuses_malformed_prerelease_headers(self, header):
+        # No semver-shaped token, no brand header: arbitrary version text
+        # is never admitted, even when the expectation names a prerelease.
+        with pytest.raises(nsr.PanelParseError):
+            nsr.parse_codex_status(
+                codex_panel_rows(brand=header), pinned_version="0.151.0-alpha.7.1"
+            )
+
+    def test_refuses_duplicate_prerelease_brand_headers(self):
+        brand = ">_ OpenAI Codex (v0.151.0-alpha.7.1)"
+        with pytest.raises(nsr.PanelParseError):
+            nsr.parse_codex_status(
+                codex_panel_rows(brand=brand, extra=(brand,)),
+                pinned_version="0.151.0-alpha.7.1",
+            )
+
     def test_refuses_duplicate_sessions(self):
         with pytest.raises(nsr.PanelParseError):
             nsr.parse_codex_status(
