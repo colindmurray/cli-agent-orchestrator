@@ -920,11 +920,11 @@ _BRIDGE = "managed_provider_bridge._serve"
 # to either file will fail that test until these are re-pinned.  The
 # trailing comment on each entry names the helper the line must sit in, so
 # re-pinning is a search for the verb inside that helper, never a guess.
-_TS_DECLARE = f"{_TS}:962"  # registry.declare in _register_v2_terminal_resources
-_TS_MARK = f"{_TS}:1010"  # registry.register_created in _mark_v2_resource_created
-_TS_MONITOR = f"{_TS}:978"  # registry.monitor in _register_v2_terminal_resources
-_TS_REUSE_DELETE = f"{_TS}:1107"  # registry.delete in _retire_reused_tmux_observation
-_TS_DELETE = f"{_TS}:1347"  # registry.delete in _deregister_v2_terminal_resources
+_TS_DECLARE = f"{_TS}:963"  # registry.declare in _register_v2_terminal_resources
+_TS_MARK = f"{_TS}:1011"  # registry.register_created in _mark_v2_resource_created
+_TS_MONITOR = f"{_TS}:979"  # registry.monitor in _register_v2_terminal_resources
+_TS_REUSE_DELETE = f"{_TS}:1108"  # registry.delete in _retire_reused_tmux_observation
+_TS_DELETE = f"{_TS}:1348"  # registry.delete in _deregister_v2_terminal_resources
 _CS_RESOLVE = f"{_CS}:170"  # registry.resolve_fs_path in _legacy_file_delete_blocked
 _BR_DECLARE = f"{_BR}:3889"  # registry.declare in _declare_bridge_resources
 _BR_MARK = f"{_BR}:3933"  # registry.register_created in _mark_bridge_resource_created
