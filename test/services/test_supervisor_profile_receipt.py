@@ -554,6 +554,38 @@ class TestSealedRefusal:
         assert "B" in exc_info.value.reason
 
     @pytest.mark.asyncio
+    async def test_codex_named_profile_refuses_with_no_row(self, profile_store, isolated_memory_db):
+        """codexProfile B names the mutable native [profiles.B] block.
+
+        The sealed gate refuses before create_terminal owns any effect;
+        the rigged row write is a backstop (reaching it raises), and the
+        terminal table stays empty so no receipt exists to recover.
+        """
+        from cli_agent_orchestrator.clients.database import SessionLocal, TerminalModel
+        from cli_agent_orchestrator.services import terminal_service
+
+        _write_profile(profile_store, "sup", provider="codex")
+        path = profile_store / "sup.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("role: supervisor", "role: supervisor\ncodexProfile: B"))
+        context = load_supervisor_launch_context("sup")
+        with (
+            patch.object(terminal_service, "db_create_terminal", side_effect=AssertionError("row")),
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
+                await session_service.create_session(
+                    provider=None,
+                    agent_profile="sup",
+                    profile_contract=_contract_for(context),
+                )
+        assert exc_info.value.provider == "codex"
+        assert "B" in exc_info.value.reason
+        assert exc_info.value.recovery
+        with SessionLocal() as db:
+            assert db.query(TerminalModel).count() == 0
+
+    @pytest.mark.asyncio
     async def test_legacy_no_contract_unsupported_still_launches_without_receipt_claim(
         self, profile_store
     ):
@@ -1144,6 +1176,38 @@ class TestHttpMapping:
         assert detail["provider"] == "kiro_cli"
         assert detail["source_path"] == context.source_path
         assert "Kiro launches" in detail["reason"]
+        assert detail["recovery"]
+
+    @pytest.mark.asyncio
+    async def test_codex_named_profile_refusal_maps_to_422(self, profile_store):
+        """The codex codexProfile refusal reaches the operator as HTTP 422.
+
+        Runs the real service (not a mocked side effect) through the real
+        endpoint mapping: the gate refuses, the endpoint reports provider,
+        source, reason, and recovery — with no launch behind it.
+        """
+        from fastapi import BackgroundTasks, HTTPException
+
+        from cli_agent_orchestrator.api import main
+
+        _write_profile(profile_store, "sup", provider="codex")
+        path = profile_store / "sup.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("role: supervisor", "role: supervisor\ncodexProfile: B"))
+        context = load_supervisor_launch_context("sup")
+        with patch.object(main, "get_plugin_registry", return_value=MagicMock()):
+            with pytest.raises(HTTPException) as exc_info:
+                await main.create_session(
+                    request=MagicMock(),
+                    background_tasks=BackgroundTasks(),
+                    agent_profile="sup",
+                    profile_contract=_contract_for(context),
+                )
+        assert exc_info.value.status_code == 422
+        detail = exc_info.value.detail
+        assert detail["provider"] == "codex"
+        assert detail["source_path"] == context.source_path
+        assert "B" in detail["reason"]
         assert detail["recovery"]
 
     @pytest.mark.asyncio

@@ -252,8 +252,17 @@ class TestAntigravity:
         provider = antigravity_cli.AntigravityCliProvider(
             "t1", "cao-s", "w", "sup", launch_profile=_sentinel(system_prompt="FROZEN-AGY")
         )
-        with _raises_loader(antigravity_cli):
+        with (
+            _raises_loader(antigravity_cli),
+            # Hermetic binary probe: the real shutil.which("agy") is None
+            # where agy is not installed, which must not fail the argv
+            # assertions. The stub proves the probe passed (the command —
+            # not the not-found error — was reached) and the launch path
+            # below is the frozen one.
+            patch("shutil.which", return_value="/usr/local/bin/agy"),
+        ):
             command = provider._build_agy_command()
         # Not model-only: the frozen system prompt rides inline via -i.
+        assert command.split()[0] == "agy"
         assert "--model" in command and _SENTINEL_MODEL in command
         assert "FROZEN-AGY" in command

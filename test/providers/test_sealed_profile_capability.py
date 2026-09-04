@@ -114,6 +114,41 @@ class TestRejectDecisions:
         assert decision.supported is False
         assert "native-wrapper-B" in decision.reason
 
+    def test_codex_named_profile_rejects_sealed(self):
+        """A set codexProfile forwards mutable native --profile <name>.
+
+        The composer emits ``--profile native-B`` from the same object the
+        capability query sees, so sealed support must refuse and name the
+        mutable ``~/.codex/config.toml`` block.
+        """
+        from cli_agent_orchestrator.providers.codex import CodexProvider
+
+        decision = CodexProvider.supports_sealed_profile(_profile(codexProfile="native-B"))
+        assert decision.supported is False
+        assert "native-B" in decision.reason
+        assert "config.toml" in decision.reason
+
+    def test_codex_without_named_profile_supports_sealed_without_native_flag(self):
+        """No codexProfile: sealed support holds and the shared composer
+        emits no native --profile (yolo/inline-material path)."""
+        from cli_agent_orchestrator.providers.codex import (
+            CodexProvider,
+            compose_codex_core_args,
+        )
+
+        decision = CodexProvider.supports_sealed_profile(_profile(codexProfile=None))
+        assert decision.supported is True
+        core = compose_codex_core_args(
+            codex_profile=None,
+            codex_config=None,
+            system_prompt="frozen prompt",
+            mcp_servers=[],
+            allowed_tools=[],
+            trusted_project_root=None,
+        )
+        assert "--profile" not in core
+        assert core[0] == "--yolo"
+
 
 class TestRouting:
     def test_unknown_provider_type_is_unsupported(self):

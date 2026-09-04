@@ -797,15 +797,29 @@ class CodexProvider(BaseProvider):
 
     @classmethod
     def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
-        """Frozen-profile launch is exact: the pre-task material (model,
-        effort, system prompt, MCP servers, sandbox/approvals) is composed
-        entirely from the frozen CAO profile."""
+        """Sealed support depends on the frozen profile: a set
+        ``codexProfile`` forwards ``--profile <name>`` to Codex, loading the
+        mutable ``[profiles.<name>]`` block from the operator's
+        ``~/.codex/config.toml`` — approval policy, sandbox mode, MCP
+        servers, model provider — outside the frozen contract (refused).
+        Without it the pre-task material (model, effort, system prompt,
+        MCP servers, inline ``codexConfig``) is composed entirely from the
+        frozen CAO profile (supported)."""
+        native = getattr(profile, "codexProfile", None) if profile is not None else None
+        if isinstance(native, str) and native:
+            return SealedProfileSupport(
+                False,
+                f"Codex forwards --profile {native!r} to the mutable native "
+                f"[profiles.{native}] block in ~/.codex/config.toml (approval "
+                "policy, sandbox mode, MCP servers, model provider); the "
+                "frozen CAO profile is not what the supervisor consumes",
+            )
         if profile is None:
             return SealedProfileSupport(False, "no frozen profile was supplied")
         return SealedProfileSupport(
             True,
-            "Codex pre-task material (model, effort, system prompt, MCP servers) "
-            "is composed entirely from the frozen CAO profile",
+            "Codex pre-task material (model, effort, system prompt, MCP servers, "
+            "inline codexConfig) is composed entirely from the frozen CAO profile",
         )
 
     async def initialize(self) -> bool:
