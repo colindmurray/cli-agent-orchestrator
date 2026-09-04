@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 import re
 import shlex
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
@@ -51,6 +51,9 @@ from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
 from cli_agent_orchestrator.utils.text import strip_terminal_escapes
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +91,16 @@ class MuseCliProvider(BaseProvider):
         skill_prompt: Optional[str] = None,
         expected_model: Optional[str] = None,
         expected_effort: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ) -> None:
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._agent_profile = agent_profile
         self._expected_model = expected_model
         self._expected_effort = expected_effort
+        # The launch's already-loaded profile (cond-0817): when set, the
+        # launch argv consumes this exact object and never reloads the
+        # profile by name. None keeps the legacy load.
+        self._launch_profile = launch_profile
         self._initialized = False
         self._has_received_input = False
         # Shell process running in the pane before muse launches; used to detect
@@ -110,6 +118,8 @@ class MuseCliProvider(BaseProvider):
     def _resolve_model(self) -> Optional[str]:
         if self._expected_model:
             return self._expected_model
+        if self._launch_profile is not None:
+            return self._launch_profile.model
         if self._agent_profile:
             try:
                 return load_agent_profile(self._agent_profile).model

@@ -34,7 +34,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
@@ -44,6 +44,9 @@ from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
 from cli_agent_orchestrator.utils.text import strip_terminal_escapes
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -210,13 +213,20 @@ class KimiCliProvider(BaseProvider):
         skill_prompt: Optional[str] = None,
         expected_model: Optional[str] = None,
         expected_effort: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ):
-        """Initialize provider state."""
+        """Initialize provider state.
+
+        ``launch_profile`` is the launch's already-loaded profile
+        (cond-0817): when set, the launch argv consumes this exact object
+        and never reloads the profile by name. None keeps the legacy load.
+        """
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
         self._agent_profile = agent_profile
         self._expected_model = expected_model
         self._expected_effort = expected_effort
+        self._launch_profile = launch_profile
         # Track temp directory for cleanup (created when agent profile needs temp files)
         self._temp_dir: Optional[str] = None
         # Latching flag: set True when user input box (╭─) is detected in ANY
@@ -266,6 +276,8 @@ class KimiCliProvider(BaseProvider):
         the real (error-raising) load in ``_build_kimi_command`` gets a chance
         to report the actual problem.
         """
+        if self._launch_profile is not None:
+            return self._launch_profile
         if self._agent_profile is None:
             return None
         try:
@@ -313,9 +325,12 @@ class KimiCliProvider(BaseProvider):
             self._temp_dir = tempfile.mkdtemp(prefix="cao_kimi_")
 
         profile_model: Optional[str] = None
-        if self._agent_profile is not None:
+        if self._launch_profile is not None or self._agent_profile is not None:
             try:
-                profile = load_agent_profile(self._agent_profile)
+                if self._launch_profile is not None:
+                    profile = self._launch_profile
+                else:
+                    profile = load_agent_profile(self._agent_profile)
                 profile_model = profile.model
 
                 # Build agent file from profile's system prompt.

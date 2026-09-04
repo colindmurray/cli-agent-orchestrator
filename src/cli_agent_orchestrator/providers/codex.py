@@ -7,7 +7,10 @@ import re
 import shlex
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
@@ -543,10 +546,18 @@ class CodexProvider(BaseProvider):
         native_session_id: Optional[str] = None,
         codex_profile_material: Optional[dict] = None,
         codex_executable: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ):
-        """Initialize provider state."""
+        """Initialize provider state.
+
+        ``launch_profile`` is the launch's already-loaded profile
+        (cond-0817): when set — and no precomposed ``codex_profile_material``
+        was supplied — the launch argv composes from this exact object and
+        never reloads the profile by name. None keeps the legacy load.
+        """
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
+        self._launch_profile = launch_profile
         # The pre-task bootstrap-minted thread id the launch argv must resume
         # (``codex ... resume <id>``); None keeps the legacy ambient launch.
         self._native_session_id = native_session_id
@@ -590,10 +601,13 @@ class CodexProvider(BaseProvider):
                 "system_prompt": self._apply_skill_prompt(""),
                 "mcp_servers": [],
             }
-        try:
-            profile = load_agent_profile(self._agent_profile)
-        except Exception as e:
-            raise ProviderError(f"Failed to load agent profile '{self._agent_profile}': {e}")
+        if self._launch_profile is not None:
+            profile = self._launch_profile
+        else:
+            try:
+                profile = load_agent_profile(self._agent_profile)
+            except Exception as e:
+                raise ProviderError(f"Failed to load agent profile '{self._agent_profile}': {e}")
         # Compose the developer instructions exactly as the resumed TUI always
         # has: the profile body, the runtime skill catalog supplied to this
         # provider, then the restricted-tool security prompt.

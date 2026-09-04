@@ -288,18 +288,27 @@ def parse_agent_profile_text(resolved_text: str, profile_name: str) -> AgentProf
     return AgentProfile(**meta)
 
 
-def _read_agent_profile_source(agent_name: str) -> str:
-    """Locate an agent profile across configured stores and return the raw text.
+def read_agent_profile_source_with_provenance(agent_name: str) -> "tuple[str, str, str]":
+    """Locate an agent profile and return its raw text exactly once, with provenance.
 
-    Search order:
+    Returns ``(text, source_path, provenance)`` where ``source_path`` is the
+    filesystem path (or ``built-in:<name>`` pseudo-path for the packaged
+    store) the bytes were read from, and ``provenance`` is the winning
+    store's label (``local``, a provider label such as ``installed`` for the
+    ``cao install`` agent-context store, ``custom``, or ``built-in``).
+
+    Search order (on-disk installed stores take precedence over the packaged
+    built-in store):
     1. Local store: ~/.aws/cli-agent-orchestrator/agent-store/{name}.md
     2. Provider-specific directories (flat {name}.md or {name}/agent.md)
     3. Extra user-added directories (flat {name}.md or {name}/agent.md)
     4. Built-in store (packaged with CAO)
 
-    Shared by ``load_agent_profile`` (which parses the text into an
-    ``AgentProfile``) and the install service (which writes the raw text to
-    the context file). Centralising the lookup keeps the two callers in sync.
+    Exactly one filesystem read is performed for the winning source: the
+    caller that needs both the parsed profile and the source bytes/digest
+    (the supervisor launch boundary) must use this rather than reading and
+    then calling ``load_agent_profile``, which would read a second, possibly
+    changed, copy.
     """
     _validate_agent_name(agent_name)
 
@@ -322,32 +331,41 @@ def _read_agent_profile_source(agent_name: str) -> str:
     if normalized_path(LOCAL_AGENT_STORE_DIR) not in disabled:
         local_profile = _safe_join(LOCAL_AGENT_STORE_DIR, f"{agent_name}.md")
         if local_profile is not None and local_profile.exists():
-            return local_profile.read_text(encoding="utf-8")
+            return (local_profile.read_text(encoding="utf-8"), str(local_profile), "local")
 
-    def _lookup_in_directory(directory: Path) -> str | None:
+    provider_source_labels = {
+        "kiro_cli": "kiro",
+        "claude_code": "claude_code",
+        "codex": "codex",
+        "cao_installed": "installed",
+    }
+
+    def _lookup_in_directory(directory: Path) -> "tuple[str, str] | None":
         if not directory.exists():
             return None
         flat = _safe_join(directory, f"{agent_name}.md")
         if flat is not None and flat.exists():
-            return flat.read_text(encoding="utf-8")
+            return (flat.read_text(encoding="utf-8"), str(flat))
         nested = _safe_join(directory, agent_name, "agent.md")
         if nested is not None and nested.exists():
-            return nested.read_text(encoding="utf-8")
+            return (nested.read_text(encoding="utf-8"), str(nested))
         return None
 
-    for dir_path in get_agent_dirs().values():
+    for provider_key, dir_path in get_agent_dirs().items():
         if normalized_path(dir_path) in disabled:
             continue
         found = _lookup_in_directory(Path(dir_path))
         if found is not None:
-            return found
+            text, source_path = found
+            return (text, source_path, provider_source_labels.get(provider_key, provider_key))
 
     for extra_dir in get_extra_agent_dirs():
         if normalized_path(extra_dir) in disabled:
             continue
         found = _lookup_in_directory(Path(extra_dir))
         if found is not None:
-            return found
+            text, source_path = found
+            return (text, source_path, "custom")
 
     # Built-in store is inside the installed package — the traversable API
     # still concatenates agent_name as a single segment, so validate the
@@ -355,9 +373,23 @@ def _read_agent_profile_source(agent_name: str) -> str:
     agent_store = resources.files("cli_agent_orchestrator.agent_store")
     built_in = agent_store / f"{agent_name}.md"
     if built_in.name == f"{agent_name}.md" and built_in.is_file():
-        return built_in.read_text(encoding="utf-8")
+        return (
+            built_in.read_text(encoding="utf-8"),
+            f"built-in:{agent_name}.md",
+            "built-in",
+        )
 
     raise FileNotFoundError(f"Agent profile not found: {agent_name}")
+
+
+def _read_agent_profile_source(agent_name: str) -> str:
+    """Locate an agent profile across configured stores and return the raw text.
+
+    Shared by ``load_agent_profile`` (which parses the text into an
+    ``AgentProfile``) and the install service (which writes the raw text to
+    the context file). Centralising the lookup keeps the two callers in sync.
+    """
+    return read_agent_profile_source_with_provenance(agent_name)[0]
 
 
 def load_agent_profile(agent_name: str) -> AgentProfile:

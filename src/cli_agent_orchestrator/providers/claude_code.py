@@ -216,11 +216,18 @@ class ClaudeCodeProvider(BaseProvider):
         skill_prompt: Optional[str] = None,
         native_session_id: Optional[str] = None,
         fork_from_session_id: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ):
-        """Initialize provider state."""
+        """Initialize provider state.
+
+        ``launch_profile`` is the launch's already-loaded profile
+        (cond-0817): when set, the launch argv consumes this exact object
+        and never reloads the profile by name. None keeps the legacy load.
+        """
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
         self._agent_profile = agent_profile
+        self._launch_profile = launch_profile
         # The pre-task minted harness-native id the launch argv
         # must consume (``--session-id <id>``); None keeps the legacy
         # ambient launch.
@@ -300,6 +307,8 @@ class ClaudeCodeProvider(BaseProvider):
 
         ``self._agent_profile`` is a profile *name string*, not an object.
         """
+        if self._launch_profile is not None:
+            return self._launch_profile
         if self._agent_profile is None:
             return None
         try:

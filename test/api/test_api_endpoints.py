@@ -299,6 +299,9 @@ class TestCreateSession:
             allowed_tools=None,
             registry=ANY,
             env_vars=None,
+            # cond-0817: the optional conductor-preflighted launch contract
+            # rides the same call; absent here, so None.
+            profile_contract=None,
         )
 
     def test_create_session_with_session_name(self, client):

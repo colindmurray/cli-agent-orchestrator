@@ -68,7 +68,7 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
@@ -78,6 +78,9 @@ from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
 from cli_agent_orchestrator.utils.text import strip_terminal_escapes
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +210,7 @@ class CursorCliProvider(BaseProvider):
         allowed_tools: Optional[list] = None,
         model: Optional[str] = None,
         skill_prompt: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ):
         """Initialize the Cursor CLI provider.
 
@@ -228,6 +232,10 @@ class CursorCliProvider(BaseProvider):
         self._initialized = False
         self._agent_profile = agent_profile
         self._model = model
+        # The launch's already-loaded profile (cond-0817): when set, the
+        # launch argv consumes this exact object and never reloads the
+        # profile by name. None keeps the legacy load.
+        self._launch_profile = launch_profile
         # Temp paths the provider has created under the CAO tmp dir.
         # ``cleanup()`` deletes every entry in this list so the
         # per-session files (system prompt + plugin dir) do not
@@ -292,8 +300,8 @@ class CursorCliProvider(BaseProvider):
         :func:`tmux_client.send_keys`. Uses :func:`shlex.join` to handle
         multiline strings and special characters correctly.
         """
-        profile = None
-        if self._agent_profile is not None:
+        profile = self._launch_profile
+        if profile is None and self._agent_profile is not None:
             try:
                 profile = load_agent_profile(self._agent_profile)
             except Exception as exc:

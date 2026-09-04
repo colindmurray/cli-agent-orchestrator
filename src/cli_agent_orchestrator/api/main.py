@@ -180,6 +180,7 @@ from cli_agent_orchestrator.services.install_service import InstallResult, insta
 from cli_agent_orchestrator.services.log_writer import log_writer
 from cli_agent_orchestrator.services.status_monitor import status_monitor
 from cli_agent_orchestrator.services.step_output_store import _validate_key_part
+from cli_agent_orchestrator.services.supervisor_profile_receipt import ProfileLaunchConflict
 from cli_agent_orchestrator.services.terminal_service import (
     OutputMode,
     TerminalGenerationMismatchError,
@@ -1762,6 +1763,7 @@ async def create_session(
     allowed_tools: Optional[str] = None,
     memory_manager: Optional[str] = None,
     env_vars: Optional[Dict[str, str]] = Body(default=None, embed=True),
+    profile_contract: Optional[Dict[str, Any]] = Body(default=None, embed=True),
     _scopes: List[str] = Depends(require_any_scope(SCOPE_WRITE, SCOPE_ADMIN)),
 ) -> Terminal:
     """Create a new session with exactly one terminal.
@@ -1777,6 +1779,16 @@ async def create_session(
     from ``cao launch --env``. It travels in the JSON body — not the query
     string — so values potentially containing secrets do not land in
     cao-server's HTTP access log. See issue #248.
+
+    ``profile_contract`` (request body, optional) is the conductor-preflighted
+    ``cao-profile-launch-contract-v1`` expectation for the supervisor profile.
+    It is validated against the profile source the runtime loads exactly once,
+    before any tmux/session/provider effect: a divergence answers 409 with
+    the divergent fields and a retry path (re-preflight, retry with the fresh
+    contract), and a malformed contract answers 400. An absent contract
+    launches normally — the contract is an expectation, not a second
+    authority — and the runtime-authored ``cao-profile-receipt-v1`` is
+    returned on the response either way.
     """
     try:
         if session_name is not None:
@@ -1804,6 +1816,7 @@ async def create_session(
             allowed_tools=allowed_tools_list,
             registry=get_plugin_registry(request),
             env_vars=env_vars,
+            profile_contract=profile_contract,
         )
 
         if memory_manager and str(memory_manager).lower() in ("true", "1", "yes"):
@@ -1829,6 +1842,20 @@ async def create_session(
 
         return result
 
+    except ProfileLaunchConflict as e:
+        # A pre-launch contract divergence: zero effects were produced, so
+        # the conductor re-preflights the current profile source and retries
+        # with the fresh contract. Retryable by construction.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": str(e).splitlines()[0],
+                "divergent_fields": e.divergent_fields,
+                "retry": e.retry,
+            },
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:

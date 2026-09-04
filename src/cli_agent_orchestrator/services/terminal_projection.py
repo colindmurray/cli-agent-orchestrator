@@ -84,6 +84,7 @@ PROJECTION_FIELDS = (
     "assigned_effort",
     "assigned_quota_provider",
     "assigned_route_state",
+    "profile_receipt",
     "lifecycle_state",
     "lifecycle_reason",
     "superseded_by_terminal_id",
@@ -549,6 +550,10 @@ def project_row(
         "assigned_effort": assigned_effort,
         "assigned_quota_provider": assigned_quota_provider,
         "assigned_route_state": assigned_route_state,
+        # The durable supervisor launch receipt (cond-0817), or None for
+        # legacy rows. Read from the row, never re-derived from the live
+        # profile: post-launch profile drift must not rewrite GET.
+        "profile_receipt": row.get("profile_receipt"),
         "lifecycle_state": state,
         "lifecycle_reason": reason,
         # Stated rather than left to be inferred from the status: a

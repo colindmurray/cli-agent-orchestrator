@@ -377,6 +377,7 @@ def _mint_antigravity_session(
     expected_effort: Optional[str],
     agent_profile: Optional[str],
     environment: Optional[Mapping[str, str]] = None,
+    launch_profile: Optional[Any] = None,
 ) -> dict[str, Any]:
     import json
 
@@ -416,8 +417,11 @@ def _mint_antigravity_session(
             f"executable {executable} refused the provider-version contract: {exc}"
         ) from exc
 
-    profile = None
-    if agent_profile:
+    # The launch's already-loaded profile (cond-0817): prefer it over a
+    # by-name reload so the bootstrap consumes the exact bytes the receipt
+    # was authored from.
+    profile = launch_profile
+    if profile is None and agent_profile:
         try:
             profile = load_agent_profile(agent_profile)
         except Exception as exc:
@@ -545,6 +549,7 @@ def resolve_pre_task_identity(
     agent_profile: Optional[str] = None,
     codex_profile_material: Optional[Mapping[str, Any]] = None,
     forwarded_environment: Optional[Mapping[str, str]] = None,
+    launch_profile: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Resolve the deterministic harness-native session id for an unmanaged
     new launch, BEFORE the provider starts.
@@ -604,6 +609,7 @@ def resolve_pre_task_identity(
             expected_effort=expected_effort,
             agent_profile=agent_profile,
             environment=forwarded_environment,
+            launch_profile=launch_profile,
         )
 
     # Codex: the zero-turn app-server bootstrap materializes a resumable

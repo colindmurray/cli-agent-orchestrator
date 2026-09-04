@@ -1,7 +1,7 @@
 """Provider manager as module singleton with direct terminal_id → provider mapping."""
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.exc import OperationalError
 
@@ -73,6 +73,11 @@ class ProviderManager:
         native_session_id: Optional[str] = None,
         codex_profile_material: Optional[dict] = None,
         codex_executable: Optional[str] = None,
+        # The launch's already-loaded profile (cond-0817). Forwarded to the
+        # adapter constructor so the launch argv/config consumes this exact
+        # object and never reloads the profile by name. ``None`` keeps the
+        # legacy per-adapter load for direct construction.
+        launch_profile: Optional[Any] = None,
     ) -> BaseProvider:
         """Create and store provider instance."""
         try:
@@ -86,6 +91,7 @@ class ProviderManager:
                     tmux_window,
                     agent_profile,
                     allowed_tools,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.CLAUDE_CODE.value:
                 provider = ClaudeCodeProvider(
@@ -96,6 +102,7 @@ class ProviderManager:
                     allowed_tools,
                     skill_prompt=skill_prompt,
                     native_session_id=native_session_id,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.CODEX.value:
                 provider = CodexProvider(
@@ -111,6 +118,7 @@ class ProviderManager:
                     native_session_id=native_session_id,
                     codex_profile_material=codex_profile_material,
                     codex_executable=codex_executable,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.COPILOT_CLI.value:
                 provider = CopilotCliProvider(
@@ -131,6 +139,7 @@ class ProviderManager:
                     skill_prompt=skill_prompt,
                     expected_model=expected_model,
                     expected_effort=expected_effort,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.MUSE_CLI.value:
                 provider = MuseCliProvider(
@@ -142,6 +151,7 @@ class ProviderManager:
                     skill_prompt=skill_prompt,
                     expected_model=expected_model,
                     expected_effort=expected_effort,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.OPENCODE_CLI.value:
                 provider = OpenCodeCliProvider(
@@ -160,6 +170,7 @@ class ProviderManager:
                     agent_profile,
                     allowed_tools,
                     skill_prompt=skill_prompt,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.CURSOR_CLI.value:
                 provider = CursorCliProvider(
@@ -170,6 +181,7 @@ class ProviderManager:
                     allowed_tools,
                     model=model,
                     skill_prompt=skill_prompt,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.ANTIGRAVITY_CLI.value:
                 provider = AntigravityCliProvider(
@@ -182,6 +194,7 @@ class ProviderManager:
                     skill_prompt=skill_prompt,
                     native_session_id=native_session_id,
                     effort=expected_effort,
+                    launch_profile=launch_profile,
                 )
             # --- Credentials-free mock provider (test/CI infrastructure) ---
             elif provider_type == ProviderType.MOCK_CLI.value:

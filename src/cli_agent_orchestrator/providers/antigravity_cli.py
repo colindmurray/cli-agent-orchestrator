@@ -46,7 +46,10 @@ import shlex
 import shutil
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.constants import SECURITY_PROMPT
@@ -173,6 +176,7 @@ class AntigravityCliProvider(BaseProvider):
         skill_prompt: Optional[str] = None,
         native_session_id: Optional[str] = None,
         effort: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ):
         """Initialize the Antigravity CLI provider.
 
@@ -196,6 +200,10 @@ class AntigravityCliProvider(BaseProvider):
         self._agent_profile = agent_profile
         self._model = model
         self._effort = effort
+        # The launch's already-loaded profile (cond-0817): when set, the
+        # launch argv consumes this exact object and never reloads the
+        # profile by name. None keeps the legacy load.
+        self._launch_profile = launch_profile
         self._native_session_id = native_session_id
         # MCP server names registered into ~/.gemini/config/mcp_config.json,
         # removed on cleanup().
@@ -237,6 +245,8 @@ class AntigravityCliProvider(BaseProvider):
         the real (error-raising) load in ``_build_agy_command`` gets a chance
         to report the actual problem.
         """
+        if self._launch_profile is not None:
+            return self._launch_profile
         if self._agent_profile is None:
             return None
         try:
@@ -280,8 +290,8 @@ class AntigravityCliProvider(BaseProvider):
         if self._native_session_id:
             command_parts.extend(["--conversation", self._native_session_id])
 
-        profile = None
-        if self._agent_profile is not None:
+        profile = self._launch_profile
+        if profile is None and self._agent_profile is not None:
             try:
                 profile = load_agent_profile(self._agent_profile)
             except Exception as exc:

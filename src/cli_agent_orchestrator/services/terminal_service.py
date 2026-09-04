@@ -90,6 +90,10 @@ from cli_agent_orchestrator.services.session_env import (
     set_session_env,
 )
 from cli_agent_orchestrator.services.status_monitor import status_monitor
+from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+    ProfileLaunchContext,
+    build_profile_receipt,
+)
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.skills import build_skill_catalog
 from cli_agent_orchestrator.utils.terminal import (
@@ -1769,6 +1773,7 @@ def _pre_task_bind_and_resolve(
     expected_effort: Optional[str],
     codex_profile_material: Optional[dict],
     forwarded_environment: Optional[dict],
+    launch_profile: Optional[Any] = None,
 ) -> Optional[dict]:
     """ONE cancellation-owned operation: resolve the pre-task harness-native
     identity, durably persist it on the terminal row, and bind the roster —
@@ -1820,6 +1825,9 @@ def _pre_task_bind_and_resolve(
         terminal_id=terminal_id,
         session_name=session_name,
         agent_profile=agent_profile,
+        # The launch's already-loaded profile: the bootstrap consumes this
+        # rather than reloading the store by name mid-launch.
+        launch_profile=launch_profile,
     )
     if not isinstance(identity, dict) or not identity.get("native_session_id"):
         raise unmanaged_native_identity.UnmanagedIdentityUnavailable(
@@ -1951,6 +1959,13 @@ async def create_terminal(
     #: explicitly says otherwise.  ``None`` means worker.
     stable_agent_role: Optional[str] = None,
     assigned_quota_provider: Optional[str] = None,
+    #: The supervisor launch context session creation built from its single
+    #: profile read. When present, every stage of this launch — allowed-tools
+    #: resolution, the skill catalog, the pre-task bootstrap, provider
+    #: construction, and the persisted receipt — consumes the context's
+    #: already-loaded profile and never reloads the profile by name.
+    #: ``None`` keeps the legacy per-stage load for non-supervisor launches.
+    profile_launch_context: Optional[ProfileLaunchContext] = None,
 ) -> Terminal:
     """Create a new terminal with an initialized CLI agent.
 
@@ -2246,10 +2261,20 @@ async def create_terminal(
         # Step 3: Load the profile once for allowed tool resolution before
         # provider initialization. The skill catalog is computed only for
         # providers that consume it at launch time (see RUNTIME_SKILL_PROMPT_PROVIDERS).
-        try:
-            profile = load_agent_profile(agent_profile)
-        except FileNotFoundError:
-            profile = None
+        #
+        # A supervisor launch arrives with its context already built from the
+        # single launch-boundary read: consume that exact profile (and persist
+        # its runtime-authored receipt with the row below) rather than reading
+        # the store a second time and possibly observing changed bytes.
+        profile_receipt: Optional[Dict[str, Any]] = None
+        if profile_launch_context is not None:
+            profile = profile_launch_context.profile
+            profile_receipt = build_profile_receipt(profile_launch_context)
+        else:
+            try:
+                profile = load_agent_profile(agent_profile)
+            except FileNotFoundError:
+                profile = None
         skill_prompt = (
             build_skill_catalog(profile.skills if profile else None)
             if provider in RUNTIME_SKILL_PROMPT_PROVIDERS
@@ -2392,6 +2417,13 @@ async def create_terminal(
                     if activated_unmanaged
                     else None
                 ),
+                # The runtime-authored receipt for a supervisor launch,
+                # written atomically with the row before provider
+                # initialization. Legacy/direct launches carry None and
+                # stay missing. A persistence failure here raises into the
+                # existing launch cleanup below, so no launch succeeds
+                # without its durable receipt.
+                profile_receipt=profile_receipt,
             )
 
             _register_incarnation(terminal_id, terminal_generation, identity)
@@ -2466,6 +2498,13 @@ async def create_terminal(
                     expected_effort=expected_effort,
                     codex_profile_material=codex_profile_material,
                     forwarded_environment=forwarded_environment,
+                    # The supervisor launch context's already-loaded profile:
+                    # the pre-task bootstrap must not reload it by name.
+                    launch_profile=(
+                        profile_launch_context.profile
+                        if profile_launch_context is not None
+                        else None
+                    ),
                 )
             )
             # The worker is SHIELDED from the very first await: Python
@@ -2601,6 +2640,7 @@ async def create_terminal(
                 assigned_quota_provider=assigned_quota_provider,
                 status=TerminalStatus.UNKNOWN,
                 last_active=datetime.now(),
+                profile_receipt=profile_receipt,
             )
             dispatch_plugin_event(
                 registry,
@@ -2655,6 +2695,13 @@ async def create_terminal(
             ),
             codex_profile_material=codex_profile_material,
             codex_executable=(pre_task_identity.get("binary_path") if pre_task_identity else None),
+            # The launch's already-loaded profile: provider construction
+            # consumes this exact object and never reloads it by name, so
+            # the argv/config the provider builds is the profile the
+            # receipt was authored from.
+            launch_profile=(
+                profile_launch_context.profile if profile_launch_context is not None else None
+            ),
         )
 
         # Deferred-init path: return fast so callers (e.g. MCP assign) do not
@@ -2716,6 +2763,7 @@ async def create_terminal(
             assigned_quota_provider=assigned_quota_provider,
             status=initial_status,
             last_active=datetime.now(),
+            profile_receipt=profile_receipt,
         )
 
         logger.info(
@@ -3223,6 +3271,10 @@ def get_terminal(terminal_id: str) -> Dict:
             "status": status,
             "last_active": metadata["last_active"],
             "assigned_quota_provider": assigned_quota_provider,
+            # The durable launch receipt, or None for legacy rows — never
+            # re-derived from the live profile, so post-launch drift cannot
+            # rewrite what the launch observed.
+            "profile_receipt": metadata.get("profile_receipt"),
         }
 
     except Exception as e:

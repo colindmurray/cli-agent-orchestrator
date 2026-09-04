@@ -4,7 +4,10 @@ import logging
 import os
 import re
 import shlex
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
@@ -120,10 +123,15 @@ class HermesProvider(BaseProvider):
         agent_profile: Optional[str] = None,
         allowed_tools: Optional[list] = None,
         skill_prompt: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ):
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
         self._agent_profile = agent_profile
+        # The launch's already-loaded profile (cond-0817): when set, the
+        # launch argv consumes this exact object and never reloads the
+        # profile by name. None keeps the legacy load.
+        self._launch_profile = launch_profile
         self._last_idle_timer: Optional[str] = None
         self._stable_idle_timer_count = 0
 
@@ -139,8 +147,8 @@ class HermesProvider(BaseProvider):
 
     def _build_hermes_command(self) -> str:
         """Build the Hermes launch command from the CAO agent profile."""
-        profile = None
-        if self._agent_profile is not None:
+        profile = self._launch_profile
+        if profile is None and self._agent_profile is not None:
             try:
                 profile = load_agent_profile(self._agent_profile)
             except Exception as e:

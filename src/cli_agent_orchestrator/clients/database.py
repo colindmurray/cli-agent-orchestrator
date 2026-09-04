@@ -111,6 +111,15 @@ class TerminalModel(Base):
     assigned_model = Column(Text, nullable=True)
     assigned_effort = Column(Text, nullable=True)
     assigned_quota_provider = Column(Text, nullable=True)
+    # Runtime-authored supervisor profile receipt (cond-0817), canonical JSON
+    # shaped ``cao-profile-receipt-v1``. Written atomically with the terminal
+    # row at launch, before provider initialization, from the exact profile
+    # bytes the runtime loaded — never echoed from the request. Nullable:
+    # legacy rows and non-supervisor launches predate it and stay NULL, which
+    # projections surface as absent rather than backfilled. Never backfilled
+    # by migration; a NULL receipt reads as "no launch receipt", which the
+    # conductor types as unknown.
+    profile_receipt = Column(Text, nullable=True)
     # The pre-task identity launch state of an activated ordinary launch:
     # a closed vocabulary (``pending`` / ``captured`` / ``ready`` from
     # ``provider_contracts.PRE_TASK_IDENTITY_*``) that marks the row as
@@ -5035,6 +5044,14 @@ def _migrate_terminals_schema() -> None:
                 "assigned_quota_provider",
                 "ALTER TABLE terminals ADD COLUMN assigned_quota_provider TEXT",
             ),
+            # cond-0817: lands NULL on every existing row and is never
+            # backfilled — a legacy row keeps a missing receipt, which the
+            # projections surface as absent (conductor: unknown) rather
+            # than inventing launch facts the runtime never observed.
+            (
+                "profile_receipt",
+                "ALTER TABLE terminals ADD COLUMN profile_receipt TEXT",
+            ),
             (
                 "pre_task_identity_state",
                 "ALTER TABLE terminals ADD COLUMN pre_task_identity_state TEXT",
@@ -5359,6 +5376,26 @@ def _migrate_callback_recovery_schema(*, inbox_schema_ready: Optional[bool] = No
         logger.warning("callback recovery migration failed: %s", exc)
 
 
+def _parse_profile_receipt(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse a stored supervisor profile receipt, or ``None`` when absent.
+
+    Legacy rows (and rows written before the receipt column existed) carry
+    NULL and stay missing — never defaulted — so readers can type them as
+    unknown. A stored value that no longer parses is surfaced as missing
+    rather than trusted: the receipt is an observation, and an unreadable
+    observation is not evidence of any launch route.
+    """
+    if not raw:
+        return None
+    import json as _json
+
+    try:
+        parsed = _json.loads(raw)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def create_terminal(
     terminal_id: str,
     tmux_session: str,
@@ -5380,6 +5417,7 @@ def create_terminal(
     assigned_effort: Optional[str] = None,
     assigned_quota_provider: Optional[str] = None,
     pre_task_identity_state: Optional[str] = None,
+    profile_receipt: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create terminal metadata record."""
     import json as _json
@@ -5407,6 +5445,9 @@ def create_terminal(
             assigned_effort=assigned_effort,
             assigned_quota_provider=assigned_quota_provider,
             pre_task_identity_state=pre_task_identity_state,
+            profile_receipt=(
+                _json.dumps(profile_receipt, sort_keys=True) if profile_receipt else None
+            ),
         )
         db.add(terminal)
         db.commit()
@@ -5431,6 +5472,7 @@ def create_terminal(
             "assigned_effort": terminal.assigned_effort,
             "assigned_quota_provider": terminal.assigned_quota_provider,
             "pre_task_identity_state": terminal.pre_task_identity_state,
+            "profile_receipt": _parse_profile_receipt(terminal.profile_receipt),
         }
 
 
@@ -5762,6 +5804,7 @@ def get_terminal_metadata(
             "assigned_effort": terminal.assigned_effort,
             "assigned_quota_provider": terminal.assigned_quota_provider,
             "pre_task_identity_state": terminal.pre_task_identity_state,
+            "profile_receipt": _parse_profile_receipt(getattr(terminal, "profile_receipt", None)),
             "lifecycle_state": terminal.lifecycle_state,
             "lifecycle_reason": terminal.lifecycle_reason,
             "liveness_checked_at": terminal.liveness_checked_at,

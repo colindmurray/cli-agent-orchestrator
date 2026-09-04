@@ -23,36 +23,57 @@ class TestCreateSession:
     @pytest.mark.asyncio
     @patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event")
     @patch("cli_agent_orchestrator.services.session_service.create_terminal")
-    @patch("cli_agent_orchestrator.services.session_service.resolve_provider")
+    @patch("cli_agent_orchestrator.services.session_service.load_supervisor_launch_context")
     async def test_create_session_resolves_provider_when_omitted(
-        self, mock_resolve, mock_create_terminal, mock_dispatch
+        self, mock_load, mock_create_terminal, mock_dispatch
     ):
-        """When provider is None, resolve_provider is called and its result forwarded."""
-        mock_resolve.return_value = "claude_code"
+        """When provider is None, the launch context resolves it and forwards everything.
+
+        cond-0817: the profile is read exactly once at the launch boundary;
+        the resolved provider/model/effort and the context itself flow into
+        create_terminal — no second by-name load anywhere below.
+        """
+        mock_context = MagicMock()
+        mock_context.provider = "claude_code"
+        mock_context.model = "model-x"
+        mock_context.effort = None
+        mock_load.return_value = mock_context
         mock_terminal = MagicMock()
         mock_terminal.session_name = "cao-test"
         mock_create_terminal.return_value = mock_terminal
 
         await create_session(provider=None, agent_profile="my_agent")
 
-        mock_resolve.assert_called_once_with("my_agent", fallback_provider="kiro_cli")
+        mock_load.assert_called_once_with(
+            "my_agent", explicit_provider=None, fallback_provider="kiro_cli"
+        )
         assert mock_create_terminal.call_args.kwargs["provider"] == "claude_code"
+        assert mock_create_terminal.call_args.kwargs["profile_launch_context"] is mock_context
+        assert mock_create_terminal.call_args.kwargs["expected_model"] == "model-x"
+        assert mock_create_terminal.call_args.kwargs["expected_effort"] is None
 
     @pytest.mark.asyncio
     @patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event")
     @patch("cli_agent_orchestrator.services.session_service.create_terminal")
-    @patch("cli_agent_orchestrator.services.session_service.resolve_provider")
+    @patch("cli_agent_orchestrator.services.session_service.load_supervisor_launch_context")
     async def test_create_session_uses_explicit_provider(
-        self, mock_resolve, mock_create_terminal, mock_dispatch
+        self, mock_load, mock_create_terminal, mock_dispatch
     ):
-        """When provider is explicitly passed, resolve_provider is NOT called."""
+        """An explicit provider reaches the context loader and the terminal."""
+        mock_context = MagicMock()
+        mock_context.provider = "kiro_cli"
+        mock_context.model = None
+        mock_context.effort = None
+        mock_load.return_value = mock_context
         mock_terminal = MagicMock()
         mock_terminal.session_name = "cao-test"
         mock_create_terminal.return_value = mock_terminal
 
         await create_session(provider="kiro_cli", agent_profile="my_agent")
 
-        mock_resolve.assert_not_called()
+        mock_load.assert_called_once_with(
+            "my_agent", explicit_provider="kiro_cli", fallback_provider="kiro_cli"
+        )
         assert mock_create_terminal.call_args.kwargs["provider"] == "kiro_cli"
 
 
@@ -773,17 +794,19 @@ class TestStopSession:
         erase the preserved env or create a physical session under a stopped row.
 
         The create path runs for real. It passes its early stopped-check, then
-        blocks before acquiring the physical claim (here at ``resolve_provider``).
-        While it waits, ``stop_session`` wins the claim: writes ``stopped``,
-        preserves the forwarded env, collects the panes, and releases. The create
-        then resumes and must re-check ``stopped`` *under the claim* and refuse —
-        zero physical session/window, the preserved env untouched, the lifecycle
-        row ``stopped`` with its original ``restore_to``. On the pre-fix code the
+        blocks before acquiring the physical claim (here at the single
+        launch-boundary profile load). While it waits, ``stop_session`` wins
+        the claim: writes ``stopped``, preserves the forwarded env, collects
+        the panes, and releases. The create then resumes and must re-check
+        ``stopped`` *under the claim* and refuse — zero physical
+        session/window, the preserved env untouched, the lifecycle row
+        ``stopped`` with its original ``restore_to``. On the pre-fix code the
         create instead clears the env and creates a physical session under the
         still-``stopped`` row.
         """
         import asyncio
         import threading
+        from types import SimpleNamespace
         from unittest.mock import AsyncMock
 
         from cli_agent_orchestrator.models.agent_profile import AgentProfile
@@ -797,14 +820,14 @@ class TestStopSession:
         release_create = threading.Event()
         physical_created: list = []
 
-        def _blocking_resolve(_profile, *, fallback_provider=None):
+        def _blocking_load(_profile, *, explicit_provider=None, fallback_provider=None):
             # Production seam between create_session's early stopped-check and
             # create_terminal's claim. stop wins the claim while create waits.
             create_past_early_check.set()
             release_create.wait(timeout=15)
-            return "mock_cli"
+            return SimpleNamespace(provider="mock_cli", model=None, effort=None)
 
-        monkeypatch.setattr(session_service, "resolve_provider", _blocking_resolve)
+        monkeypatch.setattr(session_service, "load_supervisor_launch_context", _blocking_load)
 
         backend = MagicMock()
         backend.session_exists.return_value = False

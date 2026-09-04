@@ -34,8 +34,11 @@ from cli_agent_orchestrator.plugins import (
 from cli_agent_orchestrator.services.plugin_dispatch import dispatch_plugin_event
 from cli_agent_orchestrator.services.session_env import clear_session_env
 from cli_agent_orchestrator.services.stable_agent_roster import ROLE_SUPERVISOR
+from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+    load_supervisor_launch_context,
+    validate_profile_contract,
+)
 from cli_agent_orchestrator.services.terminal_service import create_terminal
-from cli_agent_orchestrator.utils.agent_profiles import resolve_provider
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +81,22 @@ async def create_session(
     allowed_tools: list[str] | None = None,
     registry: PluginRegistry | None = None,
     env_vars: dict[str, str] | None = None,
+    profile_contract: dict | None = None,
 ) -> Terminal:
     """Create a new session by creating its initial terminal.
 
     ``env_vars`` are operator-forwarded env vars from ``cao launch --env``.
     They are persisted on the session record so every worker spawned later
     in the same session inherits them. See issue #248.
+
+    ``profile_contract`` is the optional ``cao-profile-launch-contract-v1``
+    expectation the conductor preflighted. It is validated against the
+    profile source the runtime loads exactly once, before any tmux, session,
+    or provider effect: a divergence raises :class:`ProfileLaunchConflict`
+    with zero effects and a retry path, and a malformed contract raises
+    ``ValueError``. An absent contract launches normally — the contract is
+    an expectation, not a second authority — and a receipt is recorded
+    either way.
 
     A **stopped** name is refused. Stopping records what the session would
     restore to and, in time, what to relaunch; a new campaign taking that
@@ -103,13 +116,22 @@ async def create_session(
                 "name, or pick another"
             )
 
-    if provider is None:
-        resolved_provider = resolve_provider(agent_profile, fallback_provider="kiro_cli")
-    else:
-        resolved_provider = provider
+    # The ONE profile read for this launch: the parsed profile, its source
+    # metadata/digest, and the resolved provider/model/effort every
+    # downstream stage consumes. Nothing below reloads the profile by name,
+    # so the bytes validated here are the bytes the provider launches with.
+    # Raises before any tmux/session/provider effect: FileNotFoundError for
+    # a missing profile, ProfileLaunchConflict for a diverged contract.
+    launch_context = load_supervisor_launch_context(
+        agent_profile,
+        explicit_provider=provider,
+        fallback_provider="kiro_cli",
+    )
+    if profile_contract is not None:
+        validate_profile_contract(profile_contract, launch_context)
 
     terminal = await create_terminal(
-        provider=resolved_provider,
+        provider=launch_context.provider,
         agent_profile=agent_profile,
         session_name=session_name,
         new_session=True,
@@ -121,6 +143,13 @@ async def create_session(
         # passes it explicitly — role is launch truth, never a
         # profile-name heuristic.
         stable_agent_role=ROLE_SUPERVISOR,
+        # The same loaded profile/context flows through terminal creation,
+        # the terminal row (receipt), the pre-task bootstrap, and provider
+        # construction — including the exact expected model/effort the
+        # provider argv pins.
+        profile_launch_context=launch_context,
+        expected_model=launch_context.model,
+        expected_effort=launch_context.effort,
     )
     dispatch_plugin_event(
         registry,
