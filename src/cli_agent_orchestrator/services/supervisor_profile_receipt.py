@@ -39,9 +39,12 @@ from typing import Any, Dict, Mapping, Optional
 
 from cli_agent_orchestrator.constants import PROVIDERS
 from cli_agent_orchestrator.models.agent_profile import AgentProfile
+from cli_agent_orchestrator.utils import agent_profiles
 from cli_agent_orchestrator.utils.agent_profiles import (
+    INSTALLED_AGENT_STORE_PROVENANCE,
+    LEGACY_INSTALLED_STORE_PROVENANCE,
     parse_agent_profile_text,
-    read_agent_profile_source_with_provenance,
+    read_agent_profile_bytes_with_provenance,
 )
 from cli_agent_orchestrator.utils.env import resolve_env_vars
 
@@ -242,19 +245,28 @@ def load_supervisor_launch_context(
 ) -> ProfileLaunchContext:
     """Read the profile source exactly once and freeze the launch context.
 
-    The single read supplies the parsed profile, the source path/provenance,
-    and the digest — so no later stage of the same launch may read the
-    profile by name again and observe different bytes.
+    The single binary read supplies the exact source bytes; those bytes are
+    decoded once (strict UTF-8), parsed, and hashed — so the parsed profile,
+    the resolved route, and the digest all describe the same snapshot, and
+    no later stage of the same launch may read the profile by name again
+    and observe different bytes.
 
     Raises :class:`ProfileNotFoundError` when the name resolves to no
     configured store, and :class:`ProfileInvalidError` when the source
-    bytes do not parse — both before any tmux/session/provider effect.
+    bytes are not valid UTF-8 or do not parse — both before any
+    tmux/session/provider effect.
     """
     try:
-        raw_text, source_path, provenance = read_agent_profile_source_with_provenance(profile_name)
+        raw, source_path, provenance = read_agent_profile_bytes_with_provenance(profile_name)
     except FileNotFoundError as exc:
         raise ProfileNotFoundError(str(exc)) from exc
-    sha256 = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+    sha256 = hashlib.sha256(raw).hexdigest()
+    try:
+        raw_text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProfileInvalidError(
+            f"agent profile '{profile_name}' from {source_path} is not valid UTF-8: {exc}"
+        ) from exc
     try:
         profile = parse_agent_profile_text(resolve_env_vars(raw_text), profile_name)
     except Exception as exc:
@@ -278,6 +290,38 @@ def load_supervisor_launch_context(
     )
 
 
+def _provenance_matches(request_value: str, context: ProfileLaunchContext) -> bool:
+    """Compare the contract's provenance against the loaded context.
+
+    Exact match is the rule. One compatibility is allowed: an older
+    conductor-era contract may still carry ``"local"`` for the installed
+    agent store. It is accepted only when the runtime source really is the
+    installed store (canonical path within it) reporting the canonical
+    ``installed-agent-store`` label — the ``sha256`` field is compared
+    independently, so both must still agree. Any other source, including
+    ``custom`` and provider-specific directories, never aliases: a
+    ``"local"`` claim over those bytes is a divergence, not a spelling.
+    """
+    if request_value == context.provenance:
+        return True
+    return (
+        request_value == LEGACY_INSTALLED_STORE_PROVENANCE
+        and context.provenance == INSTALLED_AGENT_STORE_PROVENANCE
+        and _is_within_installed_store(context.source_path)
+    )
+
+
+def _is_within_installed_store(canonical_source: str) -> bool:
+    """Whether a canonical source path lives in the installed agent store."""
+    if canonical_source.startswith("built-in:"):
+        return False
+    store = os.path.realpath(agent_profiles.LOCAL_AGENT_STORE_DIR)
+    try:
+        return os.path.commonpath([canonical_source, store]) == store
+    except (ValueError, OSError):
+        return False
+
+
 def validate_profile_contract(contract: Mapping[str, Any], context: ProfileLaunchContext) -> None:
     """Validate an optional launch contract against the loaded context.
 
@@ -289,7 +333,9 @@ def validate_profile_contract(contract: Mapping[str, Any], context: ProfileLaunc
     ``source_path`` compares in canonical form on both sides, so an aliased
     or symlinked spelling of the same physical profile agrees — while a
     genuinely different canonical path still diverges even when the bytes
-    (and therefore ``sha256``) are identical.
+    (and therefore ``sha256``) are identical. ``provenance`` compares
+    exactly, except that a legacy ``"local"`` claim is accepted for a
+    source inside the installed agent store (see :func:`_provenance_matches`).
     """
     if not isinstance(contract, Mapping):
         raise ValueError("profile_contract must be an object")
@@ -327,6 +373,8 @@ def validate_profile_contract(contract: Mapping[str, Any], context: ProfileLaunc
     for field in _CONTRACT_FIELDS:
         if field == "source_path":
             same = canonical_source_path(request_path) == canonical_source_path(context.source_path)
+        elif field == "provenance":
+            same = _provenance_matches(contract[field], context)
         else:
             same = contract[field] == expected[field]
         if not same:

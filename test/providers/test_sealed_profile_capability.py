@@ -128,6 +128,34 @@ class TestRejectDecisions:
         assert "native-B" in decision.reason
         assert "config.toml" in decision.reason
 
+    def test_antigravity_mcp_servers_reject_sealed(self):
+        """Nonempty mcpServers merge into the shared mcp_config.json.
+
+        There is no per-launch config path, so a sealed launch cannot pin
+        what the supervisor consumes: refuse, naming the shared file.
+        """
+        from cli_agent_orchestrator.providers.antigravity_cli import AntigravityCliProvider
+
+        decision = AntigravityCliProvider.supports_sealed_profile(
+            _profile(mcpServers={"cao-mcp-server": {"command": "cao-mcp-server"}})
+        )
+        assert decision.supported is False
+        assert "mcp_config.json" in decision.reason
+        assert "cao-mcp-server" in decision.reason
+
+    def test_antigravity_without_mcp_supports_sealed_with_ambient_scope(self):
+        """No MCP material: supported, with the ambient scope stated.
+
+        The reason pins the narrowed contract — CAO contributes no MCP
+        material while ambient Antigravity configuration stays outside
+        the receipt — so a future full-sealing policy flips this test.
+        """
+        from cli_agent_orchestrator.providers.antigravity_cli import AntigravityCliProvider
+
+        decision = AntigravityCliProvider.supports_sealed_profile(_profile())
+        assert decision.supported is True
+        assert "ambient" in decision.reason
+
     def test_codex_without_named_profile_supports_sealed_without_native_flag(self):
         """No codexProfile: sealed support holds and the shared composer
         emits no native --profile (yolo/inline-material path)."""

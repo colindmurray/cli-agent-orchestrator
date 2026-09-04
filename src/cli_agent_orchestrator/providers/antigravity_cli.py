@@ -514,16 +514,37 @@ class AntigravityCliProvider(BaseProvider):
 
     @classmethod
     def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
-        """Frozen-profile launch is exact: profile model wins over the
-        override, and the system prompt, MCP map, and native session shape
-        resolve from the frozen CAO profile with no provider-native
-        named-profile lookup."""
+        """Sealed support depends on the frozen profile's MCP material: a
+        nonempty ``mcpServers`` is merged into the shared
+        ``~/.gemini/config/mcp_config.json``, which has no per-launch
+        config path — a concurrent launch can overwrite it before ``agy``
+        consumes it (refused). With no MCP material the launch argv
+        (profile model, system prompt) is built from the frozen CAO
+        profile (supported), while ambient Antigravity MCP configuration
+        stays outside the CAO profile receipt and authority."""
         if profile is None:
             return SealedProfileSupport(False, "no frozen profile was supplied")
+        mcp_servers = getattr(profile, "mcpServers", None)
+        if mcp_servers:
+            names = (
+                ", ".join(sorted(mcp_servers))
+                if isinstance(mcp_servers, dict)
+                else "configured servers"
+            )
+            return SealedProfileSupport(
+                False,
+                f"Antigravity writes the frozen profile's MCP servers ({names}) into "
+                "the shared ~/.gemini/config/mcp_config.json, which has no "
+                "per-launch config path; the supervisor would consume whatever "
+                "the shared file holds at launch, not the frozen CAO profile",
+            )
         return SealedProfileSupport(
             True,
-            "Antigravity launch argv (profile model, system prompt, MCP map) "
-            "is built entirely from the frozen CAO profile",
+            "Antigravity launch argv (profile model, system prompt) is built "
+            "from the frozen CAO profile and the profile contributes no MCP "
+            "material; ambient Antigravity MCP configuration "
+            "(~/.gemini/config/mcp_config.json) is outside the CAO profile "
+            "receipt and authority",
         )
 
     async def initialize(self) -> bool:

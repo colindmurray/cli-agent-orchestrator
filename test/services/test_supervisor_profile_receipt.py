@@ -135,21 +135,34 @@ def _contract_for(context) -> dict:
 class TestLaunchContext:
     def test_single_read_supplies_profile_source_and_digest(self, profile_store):
         path = _write_profile(profile_store, "sup")
-        reads = []
+        byte_reads = []
+        text_reads = []
+        real_read_bytes = Path.read_bytes
         real_read_text = Path.read_text
 
-        def _counting(self, *args, **kwargs):
+        def _counting_bytes(self, *args, **kwargs):
             if self == path:
-                reads.append(self)
+                byte_reads.append(self)
+            return real_read_bytes(self, *args, **kwargs)
+
+        def _counting_text(self, *args, **kwargs):
+            if self == path:
+                text_reads.append(self)
             return real_read_text(self, *args, **kwargs)
 
-        with patch.object(Path, "read_text", _counting):
+        with (
+            patch.object(Path, "read_bytes", _counting_bytes),
+            patch.object(Path, "read_text", _counting_text),
+        ):
             context = load_supervisor_launch_context("sup")
 
-        assert reads == [path]
+        # Exactly one binary content read; no text-mode (newline-normalising)
+        # read of the profile — the digest is over the exact source bytes.
+        assert byte_reads == [path]
+        assert text_reads == []
         assert context.profile_name == "sup"
         assert context.source_path == str(path)
-        assert context.provenance == "local"
+        assert context.provenance == "installed-agent-store"
         assert context.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
         assert isinstance(context.profile, AgentProfile)
         assert context.profile.system_prompt == "Do supervision."
@@ -160,7 +173,7 @@ class TestLaunchContext:
     def test_installed_store_takes_precedence_over_builtin(self, profile_store):
         _write_profile(profile_store, "developer", model="shadow-model")
         context = load_supervisor_launch_context("developer")
-        assert context.provenance == "local"
+        assert context.provenance == "installed-agent-store"
         assert context.model == "shadow-model"
 
     def test_builtin_resolves_with_builtin_provenance(self, profile_store):
@@ -231,7 +244,7 @@ class TestLaunchContext:
             "provider": "mock_cli",
             "model": "test-model-1",
             "effort": None,
-            "provenance": "local",
+            "provenance": "installed-agent-store",
             "source_path": context.source_path,
             "sha256": context.sha256,
         }
@@ -298,6 +311,117 @@ class TestContractValidation:
     def test_malformed_contracts_are_refused(self, context, contract):
         with pytest.raises(ValueError):
             validate_profile_contract(contract, context)
+
+
+def _write_bytes_profile(store: Path, name: str, raw: bytes) -> Path:
+    """Write exact profile bytes (line endings preserved) into a store."""
+    path = store / f"{name}.md"
+    path.write_bytes(raw)
+    return path
+
+
+def _write_mcp_profile(store: Path, name: str) -> Path:
+    """Write an Antigravity profile carrying one MCP server entry."""
+    return _write_bytes_profile(
+        store,
+        name,
+        b"---\nname: sup\ndescription: mcp profile\nprovider: antigravity_cli\n"
+        b"role: supervisor\nmodel: test-model-1\nmcpServers:\n"
+        b"  cao-mcp-server:\n    command: cao-mcp-server\n---\nDo supervision.\n",
+    )
+
+
+class TestExactByteLoading:
+    _CRLF = (
+        b"---\r\nname: sup\r\ndescription: crlf profile\r\nprovider: codex\r\n"
+        b"role: supervisor\r\nmodel: frozen-model\r\ncodexConfig:\r\n"
+        b"  model_reasoning_effort: xhigh\r\n---\r\nDo supervision.\r\n"
+    )
+
+    def test_crlf_sha_matches_raw_bytes_and_contract_validates(self, profile_store):
+        """A CRLF profile hashes as read: no newline normalisation.
+
+        The runtime digest must equal sha256 of the exact file bytes (what
+        the conductor preflighted), and the conductor-style contract built
+        from the context validates — the round-5 text-mode read hashed the
+        LF-normalised copy and could never agree here.
+        """
+        path = _write_bytes_profile(profile_store, "sup", self._CRLF)
+        context = load_supervisor_launch_context("sup")
+        assert context.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert context.sha256 == hashlib.sha256(self._CRLF).hexdigest()
+        validate_profile_contract(_contract_for(context), context)
+        receipt = build_profile_receipt(context)
+        assert receipt["sha256"] == hashlib.sha256(self._CRLF).hexdigest()
+
+    def test_crlf_parsed_fields_come_from_the_same_snapshot(self, profile_store):
+        """Model, provider, effort, and prompt parse from the decoded bytes."""
+        _write_bytes_profile(profile_store, "sup", self._CRLF)
+        context = load_supervisor_launch_context("sup")
+        assert context.provider == "codex"
+        assert context.model == "frozen-model"
+        assert context.effort == "xhigh"
+        assert context.profile.system_prompt == "Do supervision."
+
+    def test_crlf_to_lf_rewrite_conflicts_on_sha(self, profile_store):
+        """Changing only line endings changes the digest: the old contract
+        becomes a typed 409 naming sha256, not a silent agreement."""
+        _write_bytes_profile(profile_store, "sup", self._CRLF)
+        context = load_supervisor_launch_context("sup")
+        stale_contract = _contract_for(context)
+        _write_bytes_profile(profile_store, "sup", self._CRLF.replace(b"\r\n", b"\n"))
+        fresh = load_supervisor_launch_context("sup")
+        assert fresh.sha256 != context.sha256
+        with pytest.raises(ProfileLaunchConflict) as exc_info:
+            validate_profile_contract(stale_contract, fresh)
+        assert "sha256" in [entry["field"] for entry in exc_info.value.divergent_fields]
+        assert exc_info.value.retry
+
+
+class TestCanonicalProvenance:
+    def test_installed_store_emits_canonical_provenance(self, profile_store):
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        assert context.provenance == "installed-agent-store"
+        assert build_profile_receipt(context)["provenance"] == "installed-agent-store"
+
+    def test_legacy_local_contract_accepted_within_installed_store(self, profile_store):
+        """An older conductor-era contract carrying "local" converges when
+        the runtime source really is the installed store and the digest
+        matches — compatibility without a second alias table."""
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        contract = _contract_for(context)
+        contract["provenance"] = "local"
+        validate_profile_contract(contract, context)
+
+    def test_legacy_local_contract_refused_for_builtin_source(self, profile_store):
+        """ "local" over packaged bytes is a divergence, not a spelling."""
+        context = load_supervisor_launch_context("developer")
+        assert context.provenance == "built-in"
+        contract = _contract_for(context)
+        contract["provenance"] = "local"
+        with pytest.raises(ProfileLaunchConflict) as exc_info:
+            validate_profile_contract(contract, context)
+        assert "provenance" in [entry["field"] for entry in exc_info.value.divergent_fields]
+
+    def test_legacy_local_contract_refused_for_custom_store(
+        self, profile_store, tmp_path, monkeypatch
+    ):
+        """Custom directories are never aliased to the installed store."""
+        from cli_agent_orchestrator.services import settings_service
+
+        custom = tmp_path / "custom"
+        custom.mkdir()
+        _write_profile(custom, "ext")
+        monkeypatch.setattr(settings_service, "get_extra_agent_dirs", lambda: [str(custom)])
+        context = load_supervisor_launch_context("ext")
+        assert context.provenance == "custom"
+        contract = _contract_for(context)
+        contract["provenance"] = "local"
+        with pytest.raises(ProfileLaunchConflict) as exc_info:
+            validate_profile_contract(contract, context)
+        assert "provenance" in [entry["field"] for entry in exc_info.value.divergent_fields]
 
 
 class TestCanonicalSourcePath:
@@ -586,6 +710,85 @@ class TestSealedRefusal:
             assert db.query(TerminalModel).count() == 0
 
     @pytest.mark.asyncio
+    async def test_antigravity_mcp_profile_refuses_before_any_effect(
+        self, profile_store, isolated_memory_db
+    ):
+        """Nonempty mcpServers refuse: the shared file is unwritable-sealed.
+
+        The gate fires before create_terminal owns any effect and before
+        any provider exists to merge into ~/.gemini/config/mcp_config.json;
+        the terminal table stays empty so no receipt exists to recover.
+        """
+        from cli_agent_orchestrator.clients.database import SessionLocal, TerminalModel
+        from cli_agent_orchestrator.providers.antigravity_cli import AntigravityCliProvider
+        from cli_agent_orchestrator.services import terminal_service
+
+        _write_mcp_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        assert context.provider == "antigravity_cli"
+        assert context.profile.mcpServers == {"cao-mcp-server": {"command": "cao-mcp-server"}}
+        with (
+            patch.object(terminal_service, "db_create_terminal", side_effect=AssertionError("row")),
+            patch.object(
+                AntigravityCliProvider,
+                "_register_mcp_servers",
+                side_effect=AssertionError("mcp-write"),
+            ),
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
+                await session_service.create_session(
+                    provider=None,
+                    agent_profile="sup",
+                    profile_contract=_contract_for(context),
+                )
+        assert exc_info.value.provider == "antigravity_cli"
+        assert "mcp_config.json" in exc_info.value.reason
+        assert exc_info.value.recovery
+        with SessionLocal() as db:
+            assert db.query(TerminalModel).count() == 0
+
+    @pytest.mark.asyncio
+    async def test_antigravity_ab_refusal_writes_no_shared_state(
+        self, profile_store, tmp_path, monkeypatch
+    ):
+        """Composed A/B reproduction: the sealed A request refuses before
+        the shared MCP file — currently holding B's content — is touched."""
+        import json
+
+        from cli_agent_orchestrator.providers.antigravity_cli import AntigravityCliProvider
+
+        fake_home = tmp_path / "home"
+        shared = fake_home / ".gemini" / "config" / "mcp_config.json"
+        shared.parent.mkdir(parents=True)
+        shared.write_text(
+            json.dumps({"mcpServers": {"server-B": {"command": "server-B"}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+        _write_mcp_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        with (
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch.object(AntigravityCliProvider, "_register_mcp_servers") as mock_register,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            with pytest.raises(spr.ProfileLaunchUnsupported):
+                await session_service.create_session(
+                    provider=None,
+                    agent_profile="sup",
+                    profile_contract=_contract_for(context),
+                )
+        mock_create.assert_not_called()
+        mock_register.assert_not_called()
+        assert json.loads(shared.read_text(encoding="utf-8")) == {
+            "mcpServers": {"server-B": {"command": "server-B"}}
+        }
+
+    @pytest.mark.asyncio
     async def test_legacy_no_contract_unsupported_still_launches_without_receipt_claim(
         self, profile_store
     ):
@@ -779,6 +982,122 @@ class TestTerminalReceiptWiring:
             return_value=_hermetic_backend(),
         ):
             assert terminal_projection.project_terminal("abcd1236")["profile_receipt"] is None
+
+    @pytest.mark.asyncio
+    async def test_stored_legacy_receipt_echoed_unchanged(
+        self, profile_store, isolated_memory_db, launched_provider
+    ):
+        """A row written by an older runtime keeps its receipt verbatim.
+
+        The stored "local"-provenance receipt is echoed exactly — never
+        rewritten to the canonical label, never re-derived from the live
+        profile — so pre-upgrade launches stay auditable as recorded.
+        """
+        import json
+
+        from cli_agent_orchestrator.clients.database import SessionLocal, TerminalModel
+        from cli_agent_orchestrator.services import terminal_projection
+        from cli_agent_orchestrator.services.terminal_service import create_terminal
+
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        service_provider_manager = MagicMock()
+        with _HermeticLaunch(
+            provider_manager=service_provider_manager,
+            launched_provider=launched_provider,
+            terminal_id="abcd1237",
+            session="cao-legacy-echo",
+        ):
+            await create_terminal(
+                provider="mock_cli",
+                agent_profile="sup",
+                new_session=True,
+                profile_launch_context=context,
+                expected_model=context.model,
+                expected_effort=context.effort,
+            )
+
+        legacy = dict(build_profile_receipt(context))
+        legacy["provenance"] = "local"
+        with SessionLocal() as db:
+            row = db.query(TerminalModel).filter_by(id="abcd1237").one()
+            row.profile_receipt = json.dumps(legacy, sort_keys=True)
+            db.commit()
+        with patch(
+            "cli_agent_orchestrator.services.terminal_projection.get_backend",
+            return_value=_hermetic_backend(),
+        ):
+            projected = terminal_projection.project_terminal("abcd1237")["profile_receipt"]
+        assert projected == legacy
+
+    @pytest.mark.asyncio
+    async def test_empty_antigravity_sealed_launch_persists_receipt_without_shared_write(
+        self, profile_store, isolated_memory_db, launched_provider, tmp_path, monkeypatch
+    ):
+        """An MCP-free Antigravity profile stays sealed-capable end to end.
+
+        The ambient shared MCP file is present (another launch's content),
+        yet the sealed launch persists an exact receipt carrying no MCP
+        material and leaves the shared file untouched: ambient Antigravity
+        configuration is outside the CAO receipt, by explicit decision.
+        """
+        import json
+
+        from cli_agent_orchestrator.services import native_attachment, unmanaged_native_identity
+        from cli_agent_orchestrator.services.terminal_service import create_terminal
+
+        fake_home = tmp_path / "home"
+        shared = fake_home / ".gemini" / "config" / "mcp_config.json"
+        shared.parent.mkdir(parents=True)
+        shared.write_text(
+            json.dumps({"mcpServers": {"ambient": {"command": "ambient"}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+        _write_profile(profile_store, "sup", provider="antigravity_cli")
+        context = load_supervisor_launch_context("sup")
+        assert context.profile.mcpServers is None
+        validate_profile_contract(_contract_for(context), context)
+
+        def _frozen_agy_identity(**kwargs):
+            # The bootstrap consumes the frozen snapshot, never the store.
+            assert kwargs["launch_profile"] is context.profile
+            assert kwargs["expected_model"] == "test-model-1"
+            return {
+                "native_session_id": "agy-frozen-native",
+                "acquisition_method": (native_attachment.ACQUISITION_ZERO_TURN_BOOTSTRAP),
+                "model": "test-model-1",
+                "effort": None,
+                "binary_path": None,
+            }
+
+        service_provider_manager = MagicMock()
+        with (
+            _HermeticLaunch(
+                provider_manager=service_provider_manager,
+                launched_provider=launched_provider,
+                terminal_id="abcd1239",
+                session="cao-agy-empty",
+            ),
+            patch.object(
+                unmanaged_native_identity,
+                "resolve_pre_task_identity",
+                side_effect=_frozen_agy_identity,
+            ),
+        ):
+            terminal = await create_terminal(
+                provider="antigravity_cli",
+                agent_profile="sup",
+                new_session=True,
+                profile_launch_context=context,
+                expected_model=context.model,
+                expected_effort=context.effort,
+            )
+        assert terminal.profile_receipt == build_profile_receipt(context)
+        assert "mcpServers" not in terminal.profile_receipt
+        assert json.loads(shared.read_text(encoding="utf-8")) == {
+            "mcpServers": {"ambient": {"command": "ambient"}}
+        }
 
     @pytest.mark.asyncio
     async def test_persistence_failure_leaves_no_successful_launch(
