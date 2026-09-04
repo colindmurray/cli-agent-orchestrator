@@ -11,7 +11,17 @@ if TYPE_CHECKING:
 
 from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    SealedLaunchMaterial,
+    SealedProfileSupport,
+    container_maps_set,
+    custom_permission_mode_set,
+    custom_timeout_set,
+    dropped_q_fields,
+    foreign_native_fields,
+    policy_restricted,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
@@ -183,13 +193,24 @@ class HermesProvider(BaseProvider):
         return shlex.join(command_parts)
 
     @classmethod
-    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
-        """Sealed support depends on the frozen profile: a set
-        ``hermesProfile`` launches that named Hermes profile wrapper, whose
-        persona and tools resolve from the mutable Hermes-native store
-        (refused). Without it the argv is fully determined by the frozen
-        CAO profile (supported)."""
-        wrapper = getattr(profile, "hermesProfile", None) if profile is not None else None
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support covers the model-only default path.
+
+        A set ``hermesProfile`` launches that named Hermes profile
+        wrapper, whose persona and tools resolve from the mutable
+        Hermes-native store (refused). Without it the argv is the fixed
+        default command (``chat --yolo --accept-hooks --source cao``) plus
+        the frozen ``--model`` — prompt, skills, and policy have no Hermes
+        flags (the builder only logs about them), so any nonempty
+        behavior-bearing field beyond the model is refused rather than
+        recorded as launched.
+        """
+        if material is None or material.profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        profile = material.profile
+        wrapper = getattr(profile, "hermesProfile", None)
         if isinstance(wrapper, str) and wrapper:
             return SealedProfileSupport(
                 False,
@@ -197,12 +218,38 @@ class HermesProvider(BaseProvider):
                 "tools resolve from the mutable Hermes-native store, not the "
                 "frozen CAO profile",
             )
-        if profile is None:
-            return SealedProfileSupport(False, "no frozen profile was supplied")
+        dropped = []
+        if material.system_prompt:
+            dropped.append("system_prompt")
+        if material.skill_text:
+            dropped.append("skills")
+        if policy_restricted(material.allowed_tools):
+            dropped.append("allowedTools")
+        if getattr(profile, "mcpServers", None):
+            dropped.append("mcpServers")
+        dropped.extend(dropped_q_fields(profile))
+        dropped.extend(foreign_native_fields(profile, own="hermesProfile"))
+        for extra in ("codexConfig",):
+            if getattr(profile, extra, None):
+                dropped.append(extra)
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if custom_timeout_set(profile):
+            dropped.append("provider_init_timeout")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Hermes default launch argv carries only the frozen --model; "
+                f"{', '.join(sorted(dropped))} would be silently dropped from "
+                "the launch",
+            )
         return SealedProfileSupport(
             True,
-            "Hermes launch argv (default chat command, frozen --model) is fully "
-            "determined by the frozen CAO profile",
+            "Hermes default launch argv (fixed chat command, frozen --model) "
+            "uses only the frozen material; prompt, skills, and policy inputs "
+            "are empty",
         )
 
     async def initialize(self) -> bool:

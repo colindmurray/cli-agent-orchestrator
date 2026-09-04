@@ -78,6 +78,7 @@ from cli_agent_orchestrator.plugins import (
     PostKillTerminalEvent,
     PostSendMessageEvent,
 )
+from cli_agent_orchestrator.providers.base import SealedLaunchMaterial
 from cli_agent_orchestrator.providers.manager import provider_manager
 from cli_agent_orchestrator.services import restore_contract, unmanaged_native_identity
 from cli_agent_orchestrator.services.fifo_reader import fifo_manager
@@ -1966,6 +1967,12 @@ async def create_terminal(
     #: already-loaded profile and never reloads the profile by name.
     #: ``None`` keeps the legacy per-stage load for non-supervisor launches.
     profile_launch_context: Optional[ProfileLaunchContext] = None,
+    #: The sealed launch material the session gate froze from the same
+    #: context and decided on. When present alongside the context, the
+    #: skill catalog and effective policy below come from this object —
+    #: the gate and the launch agree by construction. ``None`` keeps the
+    #: legacy recompute for non-supervisor launches.
+    sealed_launch_material: Optional[SealedLaunchMaterial] = None,
 ) -> Terminal:
     """Create a new terminal with an initialized CLI agent.
 
@@ -2275,11 +2282,21 @@ async def create_terminal(
                 profile = load_agent_profile(agent_profile)
             except FileNotFoundError:
                 profile = None
-        skill_prompt = (
-            build_skill_catalog(profile.skills if profile else None)
-            if provider in RUNTIME_SKILL_PROMPT_PROVIDERS
-            else None
-        )
+        if sealed_launch_material is not None and profile_launch_context is not None:
+            # The gate already froze these from the same context: reuse them
+            # verbatim instead of recomputing from (possibly drifted) inputs.
+            skill_prompt = (
+                sealed_launch_material.skill_text
+                if provider in RUNTIME_SKILL_PROMPT_PROVIDERS
+                else None
+            )
+            allowed_tools = list(sealed_launch_material.allowed_tools)
+        else:
+            skill_prompt = (
+                build_skill_catalog(profile.skills if profile else None)
+                if provider in RUNTIME_SKILL_PROMPT_PROVIDERS
+                else None
+            )
 
         # Step 3b: Resolve allowed_tools from profile if not explicitly provided
         if allowed_tools is None and profile is not None:

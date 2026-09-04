@@ -23,34 +23,57 @@ class TestCreateSession:
     @pytest.mark.asyncio
     @patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event")
     @patch("cli_agent_orchestrator.services.session_service.create_terminal")
+    @patch("cli_agent_orchestrator.services.session_service.build_sealed_launch_material")
     @patch("cli_agent_orchestrator.services.session_service.load_supervisor_launch_context")
     async def test_create_session_resolves_provider_when_omitted(
-        self, mock_load, mock_create_terminal, mock_dispatch
+        self, mock_load, mock_build, mock_create_terminal, mock_dispatch
     ):
         """When provider is None, the launch context resolves it and forwards everything.
 
         cond-0817: the profile is read exactly once at the launch boundary;
-        the resolved provider/model/effort and the context itself flow into
-        create_terminal — no second by-name load anywhere below.
+        the resolved provider/model/effort, the context, and the sealed
+        material frozen from it flow into create_terminal — no second
+        by-name load anywhere below.
         """
+        from cli_agent_orchestrator.models.agent_profile import AgentProfile
+        from cli_agent_orchestrator.providers.base import SealedLaunchMaterial
+
         mock_context = MagicMock()
         mock_context.provider = "claude_code"
         mock_context.model = "model-x"
         mock_context.effort = None
         mock_load.return_value = mock_context
+        frozen_profile = AgentProfile(
+            name="my_agent",
+            description="x",
+            provider="claude_code",
+            model="model-x",
+            system_prompt="Do work.",
+        )
+        material = SealedLaunchMaterial(
+            profile=frozen_profile,
+            model="model-x",
+            effort=None,
+            system_prompt="Do work.",
+            skill_text="",
+            allowed_tools=("*",),
+        )
+        mock_build.return_value = material
         mock_terminal = MagicMock()
         mock_terminal.session_name = "cao-test"
         mock_create_terminal.return_value = mock_terminal
 
         # The real capability gate admits claude_code (full CAO-profile
-        # decomposition), so the frozen context threads through.
+        # decomposition), so the frozen context and material thread through.
         await create_session(provider=None, agent_profile="my_agent")
 
         mock_load.assert_called_once_with(
             "my_agent", explicit_provider=None, fallback_provider="kiro_cli"
         )
+        mock_build.assert_called_once_with(mock_context, allowed_tools=None)
         assert mock_create_terminal.call_args.kwargs["provider"] == "claude_code"
         assert mock_create_terminal.call_args.kwargs["profile_launch_context"] is mock_context
+        assert mock_create_terminal.call_args.kwargs["sealed_launch_material"] is material
         assert mock_create_terminal.call_args.kwargs["expected_model"] == "model-x"
         assert mock_create_terminal.call_args.kwargs["expected_effort"] is None
 
@@ -81,6 +104,7 @@ class TestCreateSession:
         # launch keeps the ordinary legacy path and records no exact
         # receipt — the frozen context is not threaded through.
         assert "profile_launch_context" not in mock_create_terminal.call_args.kwargs
+        assert "sealed_launch_material" not in mock_create_terminal.call_args.kwargs
         assert "expected_model" not in mock_create_terminal.call_args.kwargs
 
 
@@ -832,7 +856,12 @@ class TestStopSession:
             # create_terminal's claim. stop wins the claim while create waits.
             create_past_early_check.set()
             release_create.wait(timeout=15)
-            return SimpleNamespace(provider="mock_cli", model=None, effort=None, profile=None)
+            return SimpleNamespace(
+                provider="mock_cli",
+                model=None,
+                effort=None,
+                profile=AgentProfile(name="stop-probe", description="x"),
+            )
 
         monkeypatch.setattr(session_service, "load_supervisor_launch_context", _blocking_load)
 

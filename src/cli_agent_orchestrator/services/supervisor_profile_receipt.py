@@ -39,6 +39,7 @@ from typing import Any, Dict, Mapping, Optional
 
 from cli_agent_orchestrator.constants import PROVIDERS
 from cli_agent_orchestrator.models.agent_profile import AgentProfile
+from cli_agent_orchestrator.providers.base import SealedLaunchMaterial
 from cli_agent_orchestrator.utils import agent_profiles
 from cli_agent_orchestrator.utils.agent_profiles import (
     INSTALLED_AGENT_STORE_PROVENANCE,
@@ -47,6 +48,8 @@ from cli_agent_orchestrator.utils.agent_profiles import (
     read_agent_profile_bytes_with_provenance,
 )
 from cli_agent_orchestrator.utils.env import resolve_env_vars
+from cli_agent_orchestrator.utils.skills import build_skill_catalog
+from cli_agent_orchestrator.utils.tool_mapping import resolve_allowed_tools
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +290,38 @@ def load_supervisor_launch_context(
         provider=provider,
         model=model,
         effort=effort,
+    )
+
+
+def build_sealed_launch_material(
+    context: ProfileLaunchContext,
+    *,
+    allowed_tools: Optional[list] = None,
+) -> SealedLaunchMaterial:
+    """Freeze the capability-gate inputs from an already-loaded context.
+
+    Pure function of the context plus the launch's explicit tool override:
+    the resolved route the context carries, the profile's system prompt,
+    the composed skill catalog for the profile's skill scope, and the
+    effective allowed-tools policy (the explicit launch list when given,
+    else exactly what terminal creation would resolve from
+    ``allowedTools``/``role``/MCP names). No store read, no tmux, no DB —
+    safe to evaluate before any launch effect, and the same object threads
+    into provider construction so the gate and the launch cannot disagree.
+    """
+    profile = context.profile
+    mcp_names = list(profile.mcpServers) if profile.mcpServers else None
+    if allowed_tools is not None:
+        effective_tools = list(allowed_tools)
+    else:
+        effective_tools = resolve_allowed_tools(profile.allowedTools, profile.role, mcp_names)
+    return SealedLaunchMaterial(
+        profile=profile,
+        model=context.model,
+        effort=context.effort,
+        system_prompt=profile.system_prompt or "",
+        skill_text=build_skill_catalog(profile.skills),
+        allowed_tools=tuple(effective_tools),
     )
 
 

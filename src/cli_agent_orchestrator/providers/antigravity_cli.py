@@ -54,7 +54,15 @@ if TYPE_CHECKING:
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.constants import SECURITY_PROMPT
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    SealedLaunchMaterial,
+    SealedProfileSupport,
+    container_maps_set,
+    custom_permission_mode_set,
+    dropped_q_fields,
+    foreign_native_fields,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_cao_mcp_command
@@ -513,15 +521,22 @@ class AntigravityCliProvider(BaseProvider):
             time.sleep(1.0)
 
     @classmethod
-    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
-        """Sealed support depends on the frozen profile's MCP material: a
-        nonempty ``mcpServers`` is merged into the shared
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support needs frozen argv inputs with nothing dropped.
+
+        A nonempty ``mcpServers`` is merged into the shared
         ``~/.gemini/config/mcp_config.json``, which has no per-launch
         config path — a concurrent launch can overwrite it before ``agy``
         consumes it (refused). With no MCP material the launch argv
-        (profile model, system prompt) is built from the frozen CAO
-        profile (supported), while ambient Antigravity MCP configuration
-        stays outside the CAO profile receipt and authority."""
+        (model, effort, system prompt plus skills, effective policy as
+        advisory text, init timeout) is built from the frozen material
+        (supported), while ambient Antigravity MCP configuration stays
+        outside the CAO profile receipt and authority — any other nonempty
+        behavior-bearing field the CLI never receives is refused.
+        """
+        profile = material.profile if material is not None else None
         if profile is None:
             return SealedProfileSupport(False, "no frozen profile was supplied")
         mcp_servers = getattr(profile, "mcpServers", None)
@@ -538,13 +553,29 @@ class AntigravityCliProvider(BaseProvider):
                 "per-launch config path; the supervisor would consume whatever "
                 "the shared file holds at launch, not the frozen CAO profile",
             )
+        dropped = dropped_q_fields(profile)
+        dropped.extend(foreign_native_fields(profile, own=""))
+        for extra in ("codexConfig",):
+            if getattr(profile, extra, None):
+                dropped.append(extra)
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Antigravity frozen argv does not consume "
+                f"{', '.join(sorted(dropped))}; the frozen material would be "
+                "silently dropped from the launch",
+            )
         return SealedProfileSupport(
             True,
-            "Antigravity launch argv (profile model, system prompt) is built "
-            "from the frozen CAO profile and the profile contributes no MCP "
-            "material; ambient Antigravity MCP configuration "
-            "(~/.gemini/config/mcp_config.json) is outside the CAO profile "
-            "receipt and authority",
+            "Antigravity frozen argv (model, effort, system prompt, advisory "
+            "policy text, init timeout) uses only the frozen material and the "
+            "profile contributes no MCP material; ambient Antigravity MCP "
+            "configuration (~/.gemini/config/mcp_config.json) is outside the "
+            "CAO profile receipt and authority",
         )
 
     async def initialize(self) -> bool:

@@ -72,7 +72,17 @@ from typing import TYPE_CHECKING, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    SealedLaunchMaterial,
+    SealedProfileSupport,
+    container_maps_set,
+    custom_permission_mode_set,
+    custom_timeout_set,
+    dropped_q_fields,
+    foreign_native_fields,
+    policy_restricted,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
@@ -566,16 +576,52 @@ class CursorCliProvider(BaseProvider):
         self._tmp_paths.append(path)
 
     @classmethod
-    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
-        """Frozen-profile launch is exact: the model override, the
-        system-prompt file, and the MCP plugin dir are all built from the
-        frozen CAO profile with no provider-native named-profile lookup."""
-        if profile is None:
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support covers model plus per-launch MCP only.
+
+        The CLI receives the model override and a per-session MCP plugin
+        dir synthesized from ``mcpServers`` — and nothing else: the
+        backend rejects ``--system-prompt`` (see the builder), skills have
+        no injection path, and tool restrictions have no enforcement flag.
+        Support therefore requires every dropped field to be empty or
+        default — a nonempty system prompt, skill catalog, effective
+        policy, or any other behavior-bearing field is refused rather than
+        recorded as launched.
+        """
+        if material is None or material.profile is None:
             return SealedProfileSupport(False, "no frozen profile was supplied")
+        profile = material.profile
+        dropped = []
+        if material.system_prompt:
+            dropped.append("system_prompt")
+        if material.skill_text:
+            dropped.append("skills")
+        if policy_restricted(material.allowed_tools):
+            dropped.append("allowedTools")
+        dropped.extend(dropped_q_fields(profile))
+        dropped.extend(foreign_native_fields(profile, own=""))
+        for extra in ("codexConfig",):
+            if getattr(profile, extra, None):
+                dropped.append(extra)
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if custom_timeout_set(profile):
+            dropped.append("provider_init_timeout")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Cursor launch argv carries only model and the per-launch MCP "
+                f"plugin dir; {', '.join(sorted(dropped))} would be silently "
+                "dropped from the launch",
+            )
         return SealedProfileSupport(
             True,
-            "Cursor launch argv (profile-model override, system-prompt file, "
-            "MCP plugin dir) is built entirely from the frozen CAO profile",
+            "Cursor launch argv (model, per-launch MCP plugin dir) uses only "
+            "the frozen material; prompt, skills, and policy inputs are empty",
         )
 
     async def initialize(self) -> bool:

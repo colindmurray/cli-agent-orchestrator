@@ -37,6 +37,7 @@ from cli_agent_orchestrator.services.session_env import clear_session_env
 from cli_agent_orchestrator.services.stable_agent_roster import ROLE_SUPERVISOR
 from cli_agent_orchestrator.services.supervisor_profile_receipt import (
     ProfileLaunchUnsupported,
+    build_sealed_launch_material,
     load_supervisor_launch_context,
     validate_profile_contract,
 )
@@ -133,18 +134,19 @@ async def create_session(
     if profile_contract is not None:
         validate_profile_contract(profile_contract, launch_context)
 
-    # Sealed-profile capability gate: evaluated after the single read and
-    # any contract validation, but before create_terminal owns any tmux,
-    # session, DB, provider, or sidecar effect. The query itself constructs
-    # nothing. A sealed contract on an adapter that would launch
-    # provider-native named artifacts (or resolve prompt/tools from a
-    # mutable native store) is refused outright — validating or persisting
-    # CAO profile A while the supervisor consumes native profile B is
-    # worse than refusing. Without a contract the same adapter keeps its
-    # ordinary legacy launch path, but records no exact receipt.
-    sealed = provider_manager.sealed_profile_support(
-        launch_context.provider, launch_context.profile
-    )
+    # Sealed-launch capability gate: the immutable launch material is built
+    # from the already-frozen context (no second store read), evaluated
+    # after any contract validation but before create_terminal owns any
+    # tmux, session, DB, provider, or sidecar effect. The query itself
+    # constructs nothing. A sealed contract on an adapter that would drop
+    # nonempty frozen material (prompt/skills/policy it never forwards) or
+    # launch provider-native named artifacts is refused outright —
+    # validating or persisting CAO profile A while the supervisor consumes
+    # something else is worse than refusing. Without a contract the same
+    # adapter keeps its ordinary legacy launch path, but records no exact
+    # receipt.
+    sealed_material = build_sealed_launch_material(launch_context, allowed_tools=allowed_tools)
+    sealed = provider_manager.sealed_launch_support(launch_context.provider, sealed_material)
     if not sealed.supported and profile_contract is not None:
         raise ProfileLaunchUnsupported(
             f"provider {launch_context.provider!r} cannot launch exactly from the "
@@ -175,11 +177,13 @@ async def create_session(
         "stable_agent_role": ROLE_SUPERVISOR,
     }
     if sealed.supported:
-        # The same loaded profile/context flows through terminal creation,
-        # the terminal row (receipt), the pre-task bootstrap, and provider
-        # construction — including the exact expected model/effort the
-        # provider argv pins.
+        # The same loaded profile/context/material flows through terminal
+        # creation, the terminal row (receipt), the pre-task bootstrap, and
+        # provider construction — including the exact expected model/effort
+        # the provider argv pins and the skill/policy inputs the gate
+        # decided on, so the launch cannot disagree with the decision.
         create_kwargs["profile_launch_context"] = launch_context
+        create_kwargs["sealed_launch_material"] = sealed_material
         create_kwargs["expected_model"] = launch_context.model
         create_kwargs["expected_effort"] = launch_context.effort
     terminal = await create_terminal(**create_kwargs)

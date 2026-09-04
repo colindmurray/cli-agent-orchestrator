@@ -24,7 +24,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 
@@ -36,18 +36,99 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SealedProfileSupport:
-    """Whether an adapter can launch exactly from a frozen CAO profile.
+    """Whether an adapter can launch exactly from frozen launch material.
 
-    ``supported`` is True only when every launch input the adapter consumes
-    — model, prompt, tools/MCP config, effort, native session shape — is
-    derived from the supplied frozen ``AgentProfile`` (plus the launch's
-    expected route), with no lookup of a mutable provider-native named
-    profile at launch time. ``reason`` names the deciding mechanism either
-    way, so a refusal can tell the operator what to change.
+    ``supported`` is True only when every nonempty behavior-bearing field
+    of the frozen material is actually consumed from immutable per-launch
+    argv/env/file material — model, prompt, skills, tools/MCP config,
+    effort, and any native session shape — with no lookup of a mutable
+    provider-native named profile at launch time. ``reason`` names the
+    deciding mechanism either way, so a refusal can tell the operator what
+    to change.
     """
 
     supported: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class SealedLaunchMaterial:
+    """The immutable launch inputs a sealed-capability predicate may see.
+
+    Built once per supervisor launch from the already-frozen launch
+    context, before any tmux/session/DB/provider effect, and threaded
+    unchanged into provider construction: the parsed profile, the resolved
+    route (model/effort), the profile's system prompt, the composed skill
+    catalog text, and the effective allowed-tools policy. Predicates must
+    decide from this object alone — never by reloading profile state —
+    and may return supported only when every nonempty behavior-bearing
+    field is consumed from immutable per-launch material.
+
+    ``name``/``description``/``capabilities``/``tags`` are discovery and
+    install metadata, not launch inputs: they never trigger a refusal.
+    ``provider`` was consumed by CAO routing before the adapter runs, and
+    ``role`` was consumed resolving the effective policy; neither is
+    re-checked here.
+    """
+
+    profile: Optional["AgentProfile"]
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    system_prompt: str = ""
+    skill_text: str = ""
+    allowed_tools: Tuple[str, ...] = ()
+
+
+#: Q-CLI passthrough fields no sealed-capable adapter forwards to its CLI:
+#: set on a profile, they would be silently dropped from the launch, so
+#: every sealed-capable predicate refuses them via :func:`dropped_q_fields`.
+_Q_PASSTHROUGH_FIELDS = (
+    "prompt",
+    "tools",
+    "toolAliases",
+    "toolsSettings",
+    "resources",
+    "hooks",
+    "useLegacyMcpJson",
+)
+
+#: Provider-native named-configuration fields: a set value resolves prompt,
+#: tools, or permissions from a mutable native store outside the frozen
+#: contract. Each adapter refuses its own explicitly (with the name in the
+#: reason); :func:`foreign_native_fields` covers the other two, which the
+#: adapter would silently ignore.
+_NATIVE_FIELDS = ("native_agent", "codexProfile", "hermesProfile")
+
+
+def dropped_q_fields(profile: Any) -> List[str]:
+    """Names of set Q-passthrough fields the adapter would drop."""
+    return [name for name in _Q_PASSTHROUGH_FIELDS if getattr(profile, name, None)]
+
+
+def foreign_native_fields(profile: Any, *, own: str) -> List[str]:
+    """Names of set provider-native fields other than the adapter's own."""
+    return [name for name in _NATIVE_FIELDS if name != own and getattr(profile, name, None)]
+
+
+def container_maps_set(profile: Any) -> bool:
+    """Whether the profile declares container path maps (guest translation)."""
+    container = getattr(profile, "container", None)
+    return bool(container is not None and getattr(container, "path_maps", None))
+
+
+def custom_permission_mode_set(profile: Any) -> bool:
+    """Whether a non-default permissionMode is declared."""
+    return getattr(profile, "permissionMode", None) not in (None, "default")
+
+
+def custom_timeout_set(profile: Any) -> bool:
+    """Whether a per-profile provider_init_timeout override is declared."""
+    return getattr(profile, "provider_init_timeout", None) is not None
+
+
+def policy_restricted(allowed_tools: Tuple[str, ...]) -> bool:
+    """Whether the effective allowed-tools policy is anything but wildcard."""
+    return tuple(allowed_tools or ()) != ("*",)
 
 
 class ProviderPreflightBlocked(RuntimeError):
@@ -128,16 +209,19 @@ class BaseProvider(ABC):
         self._shell_baseline = value
 
     @classmethod
-    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
         """Decide whether a sealed launch contract is admissible (cond-0817).
 
         The conservative default is **unsupported**: an adapter opts in by
         overriding this classmethod, so future or unmarked adapters never
-        silently become supported. The decision may depend on the parsed
-        frozen profile (e.g. a native-name passthrough field versus full
-        CAO-profile decomposition). This is a pure class-level query — it
-        constructs nothing and causes no launch effect — so the session
-        boundary can evaluate it before any tmux/session/DB/provider work.
+        silently become supported. The decision sees only the immutable
+        launch material (frozen profile, resolved route, composed prompt
+        and skills, effective policy) — never reloaded profile state. This
+        is a pure class-level query — it constructs nothing and causes no
+        launch effect — so the session boundary can evaluate it before any
+        tmux/session/DB/provider work.
         """
         return SealedProfileSupport(
             supported=False,

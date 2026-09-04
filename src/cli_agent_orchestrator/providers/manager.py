@@ -8,7 +8,11 @@ from sqlalchemy.exc import OperationalError
 from cli_agent_orchestrator.clients.database import get_terminal_metadata, get_terminal_metadata_v2
 from cli_agent_orchestrator.models.provider import ProviderType
 from cli_agent_orchestrator.providers.antigravity_cli import AntigravityCliProvider
-from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    SealedLaunchMaterial,
+    SealedProfileSupport,
+)
 from cli_agent_orchestrator.providers.claude_code import ClaudeCodeProvider
 from cli_agent_orchestrator.providers.codex import CodexProvider
 from cli_agent_orchestrator.providers.copilot_cli import CopilotCliProvider
@@ -79,13 +83,15 @@ class ProviderManager:
         # entries against the durable row before returning them.
         self._provider_identities: Dict[str, tuple] = {}
 
-    def sealed_profile_support(
-        self, provider_type: str, profile: Optional[Any]
+    def sealed_launch_support(
+        self, provider_type: str, material: Optional[SealedLaunchMaterial]
     ) -> SealedProfileSupport:
         """Evaluate sealed-launch capability without constructing anything.
 
-        Pure class-level query: no provider instance, no tmux, no DB, no
-        side effects. Unknown or unmapped provider types are unsupported.
+        Pure class-level dispatch to the adapter's own predicate: no
+        provider instance, no tmux, no DB, no side effects. This table is a
+        lookup, not a supported-provider allowlist — the decision lives per
+        adapter. Unknown or unmapped provider types are unsupported.
         """
         adapter = _ADAPTER_CLASS_BY_TYPE.get(provider_type)
         if adapter is None:
@@ -93,10 +99,10 @@ class ProviderManager:
                 supported=False,
                 reason=(
                     f"unknown provider type {provider_type!r}: no adapter declares "
-                    "frozen-profile launch support"
+                    "frozen-launch-material support"
                 ),
             )
-        return adapter.supports_sealed_profile(profile)
+        return adapter.supports_sealed_launch(material)
 
     def create_provider(
         self,

@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING, List, Optional
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.constants import OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_FILE
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    SealedLaunchMaterial,
+    SealedProfileSupport,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
 
@@ -127,7 +131,9 @@ class OpenCodeCliProvider(BaseProvider):
         return 2000
 
     @classmethod
-    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
         """Sealed launch is refused: OpenCode passes ``--agent <name>`` to
         the provider-native agent store, so the runtime cannot guarantee the
         supervisor consumes the frozen CAO profile."""

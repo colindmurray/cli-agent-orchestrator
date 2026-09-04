@@ -17,6 +17,7 @@ import pytest
 
 from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.models.agent_profile import AgentProfile
+from cli_agent_orchestrator.providers.base import SealedLaunchMaterial
 from cli_agent_orchestrator.services import session_service
 from cli_agent_orchestrator.services import supervisor_profile_receipt as spr
 from cli_agent_orchestrator.services.supervisor_profile_receipt import (
@@ -28,6 +29,7 @@ from cli_agent_orchestrator.services.supervisor_profile_receipt import (
     validate_profile_contract,
 )
 from cli_agent_orchestrator.utils import agent_profiles
+from cli_agent_orchestrator.utils.skills import build_skill_catalog
 
 _SERVICE = "cli_agent_orchestrator.services.terminal_service"
 
@@ -41,8 +43,14 @@ def _write_profile(
     effort: str | None = None,
     role: str = "supervisor",
     body: str = "Do supervision.",
+    extra: tuple = (),
 ) -> Path:
-    """Write one flat ``<name>.md`` profile into a store directory."""
+    """Write one flat ``<name>.md`` profile into a store directory.
+
+    ``extra`` appends verbatim frontmatter lines (e.g.
+    ``('allowedTools: ["*"]', "skills: []")``) for fields without a
+    dedicated knob.
+    """
     lines = ["---", f"name: {name}", f"description: {name} profile"]
     if provider is not None:
         lines.append(f"provider: {provider}")
@@ -52,6 +60,7 @@ def _write_profile(
         lines.append(f"model: {model}")
     if effort is not None:
         lines.extend(["codexConfig:", f"  model_reasoning_effort: {effort}"])
+    lines.extend(extra)
     lines.append("---")
     lines.append(body)
     path = store / f"{name}.md"
@@ -530,6 +539,15 @@ class TestSessionWiring:
         context = kwargs["profile_launch_context"]
         assert isinstance(context, spr.ProfileLaunchContext)
         assert context.profile.system_prompt == "Do supervision."
+        # The same frozen material the gate decided on threads through.
+        material = kwargs["sealed_launch_material"]
+        assert isinstance(material, SealedLaunchMaterial)
+        assert material.profile is context.profile
+        assert material.model == context.model
+        assert material.effort == context.effort
+        assert material.system_prompt == "Do supervision."
+        assert material.skill_text == build_skill_catalog(None)
+        assert material.allowed_tools == ("@cao-mcp-server", "fs_read", "fs_list")
 
     @pytest.mark.asyncio
     async def test_conflict_has_zero_effects(self, profile_store):
@@ -789,6 +807,128 @@ class TestSealedRefusal:
         }
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["cursor_cli", "muse_cli", "hermes"])
+    async def test_dropped_prompt_refuses_with_zero_effects(self, profile_store, provider):
+        """Cursor/Muse/Hermes never receive the frozen prompt: a nonempty
+        system prompt refuses pre-effect even under a wildcard policy with
+        no skills — the receipt must not claim a role the process lacks."""
+        _write_profile(
+            profile_store,
+            "sup",
+            provider=provider,
+            extra=('allowedTools: ["*"]', "skills: []"),
+        )
+        context = load_supervisor_launch_context("sup")
+        assert context.profile.system_prompt == "Do supervision."
+        with (
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
+                await session_service.create_session(
+                    provider=None, agent_profile="sup", profile_contract=_contract_for(context)
+                )
+        mock_create.assert_not_called()
+        assert exc_info.value.provider == provider
+        assert "system_prompt" in exc_info.value.reason
+
+    @pytest.mark.asyncio
+    async def test_hermes_model_only_content_free_launch_passes_gate(self, profile_store):
+        """The Hermes default path stays sealed-capable when empty: model
+        only, wildcard policy, no skills, no prompt — the gate threads the
+        material instead of refusing."""
+        _write_profile(
+            profile_store,
+            "sup",
+            provider="hermes",
+            body="",
+            extra=('allowedTools: ["*"]', "skills: []"),
+        )
+        context = load_supervisor_launch_context("sup")
+        assert context.profile.system_prompt == ""
+        with (
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            mock_create.return_value = MagicMock(session_name="cao-hermes-empty")
+            await session_service.create_session(
+                provider=None, agent_profile="sup", profile_contract=_contract_for(context)
+            )
+        kwargs = mock_create.call_args.kwargs
+        material = kwargs["sealed_launch_material"]
+        # Intra-launch identity: the threaded context and material share the
+        # one frozen profile object (a second test-side load would compare
+        # equal but never identical — reads are per-load snapshots).
+        assert kwargs["profile_launch_context"].profile is material.profile
+        assert material.profile == context.profile
+        assert material.system_prompt == ""
+        assert material.allowed_tools == ("*",)
+
+    @pytest.mark.asyncio
+    async def test_cursor_mcp_only_launch_passes_gate(self, profile_store):
+        """Cursor stays sealed-capable for model plus per-launch MCP with
+        every dropped field empty: the gate threads the material."""
+        _write_bytes_profile(
+            profile_store,
+            "sup",
+            b"---\nname: sup\ndescription: x\nprovider: cursor_cli\n"
+            b"role: supervisor\nmodel: test-model-1\n"
+            b"mcpServers:\n  frozen-srv:\n    command: frozen-srv\n"
+            b'allowedTools: ["*"]\nskills: []\n---\n',
+        )
+        context = load_supervisor_launch_context("sup")
+        assert context.profile.system_prompt == ""
+        assert context.profile.mcpServers == {"frozen-srv": {"command": "frozen-srv"}}
+        with (
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            mock_create.return_value = MagicMock(session_name="cao-cursor-mcp")
+            await session_service.create_session(
+                provider=None, agent_profile="sup", profile_contract=_contract_for(context)
+            )
+        kwargs = mock_create.call_args.kwargs
+        material = kwargs["sealed_launch_material"]
+        assert kwargs["profile_launch_context"].profile is material.profile
+        assert material.profile == context.profile
+        assert material.profile.mcpServers == {"frozen-srv": {"command": "frozen-srv"}}
+
+    @pytest.mark.asyncio
+    async def test_material_frozen_across_store_mutation(self, profile_store):
+        """Mutating the store after the context read cannot move the gate.
+
+        The material holds the frozen object and decided values; with every
+        content read rigged to raise, the gate still decides identically —
+        it performs no IO of its own.
+        """
+        from cli_agent_orchestrator.providers.manager import ProviderManager
+
+        _write_profile(profile_store, "sup", provider="kimi_cli", model="model-A", body="PROMPT-A")
+        context = load_supervisor_launch_context("sup")
+        material = spr.build_sealed_launch_material(context)
+        assert material.profile is context.profile
+        assert material.model == "model-A"
+        assert material.system_prompt == "PROMPT-A"
+        before = ProviderManager().sealed_launch_support("kimi_cli", material)
+        assert before.supported is True
+
+        _write_profile(profile_store, "sup", provider="kimi_cli", model="model-B", body="PROMPT-B")
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("reread")):
+            after = ProviderManager().sealed_launch_support("kimi_cli", material)
+        assert after == before
+        assert material.model == "model-A"
+        assert material.system_prompt == "PROMPT-A"
+
+    @pytest.mark.asyncio
     async def test_legacy_no_contract_unsupported_still_launches_without_receipt_claim(
         self, profile_store
     ):
@@ -809,6 +949,7 @@ class TestSealedRefusal:
             await session_service.create_session(provider=None, agent_profile="sup")
         kwargs = mock_create.call_args.kwargs
         assert "profile_launch_context" not in kwargs
+        assert "sealed_launch_material" not in kwargs
         assert "expected_model" not in kwargs
         assert "expected_effort" not in kwargs
 

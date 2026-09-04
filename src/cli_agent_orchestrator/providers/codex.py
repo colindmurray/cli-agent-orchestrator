@@ -17,7 +17,13 @@ from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
     BaseProvider,
     ProviderPreflightBlocked,
+    SealedLaunchMaterial,
     SealedProfileSupport,
+    container_maps_set,
+    custom_permission_mode_set,
+    custom_timeout_set,
+    dropped_q_fields,
+    foreign_native_fields,
 )
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -796,16 +802,23 @@ class CodexProvider(BaseProvider):
         )
 
     @classmethod
-    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
-        """Sealed support depends on the frozen profile: a set
-        ``codexProfile`` forwards ``--profile <name>`` to Codex, loading the
-        mutable ``[profiles.<name>]`` block from the operator's
-        ``~/.codex/config.toml`` — approval policy, sandbox mode, MCP
-        servers, model provider — outside the frozen contract (refused).
-        Without it the pre-task material (model, effort, system prompt,
-        MCP servers, inline ``codexConfig``) is composed entirely from the
-        frozen CAO profile (supported)."""
-        native = getattr(profile, "codexProfile", None) if profile is not None else None
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support needs the frozen composer path with nothing dropped.
+
+        A set ``codexProfile`` forwards ``--profile <name>`` to Codex,
+        loading the mutable ``[profiles.<name>]`` block from the operator's
+        ``~/.codex/config.toml`` (refused). Without it the composer emits
+        model, effort, system prompt plus skills, MCP inline config,
+        ``codexConfig`` overrides, and the effective policy from the frozen
+        material (supported) — any other nonempty behavior-bearing field
+        the CLI never receives is refused.
+        """
+        profile = material.profile if material is not None else None
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        native = getattr(profile, "codexProfile", None)
         if isinstance(native, str) and native:
             return SealedProfileSupport(
                 False,
@@ -814,12 +827,25 @@ class CodexProvider(BaseProvider):
                 "policy, sandbox mode, MCP servers, model provider); the "
                 "frozen CAO profile is not what the supervisor consumes",
             )
-        if profile is None:
-            return SealedProfileSupport(False, "no frozen profile was supplied")
+        dropped = dropped_q_fields(profile)
+        dropped.extend(foreign_native_fields(profile, own="codexProfile"))
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if custom_timeout_set(profile):
+            dropped.append("provider_init_timeout")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Codex frozen composer does not consume "
+                f"{', '.join(sorted(dropped))}; the frozen material would be "
+                "silently dropped from the launch",
+            )
         return SealedProfileSupport(
             True,
-            "Codex pre-task material (model, effort, system prompt, MCP servers, "
-            "inline codexConfig) is composed entirely from the frozen CAO profile",
+            "Codex frozen composer (model, effort, system prompt, MCP servers, "
+            "inline codexConfig, effective policy) uses only the frozen material",
         )
 
     async def initialize(self) -> bool:

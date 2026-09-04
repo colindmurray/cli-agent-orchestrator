@@ -17,7 +17,13 @@ if TYPE_CHECKING:
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.constants import CAO_HOME_DIR
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    SealedLaunchMaterial,
+    SealedProfileSupport,
+    dropped_q_fields,
+    foreign_native_fields,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
@@ -615,12 +621,23 @@ class ClaudeCodeProvider(BaseProvider):
             time.sleep(1.0)
 
     @classmethod
-    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
-        """Sealed support depends on the frozen profile's routing: a set
-        ``native_agent`` is a thin wrapper passing ``--agent <native>`` to
-        Claude Code's mutable native agent store (refused), while an unset
-        one decomposes the full CAO profile into CLI flags (supported)."""
-        native = getattr(profile, "native_agent", None) if profile is not None else None
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support needs full decomposition with nothing dropped.
+
+        A set ``native_agent`` is a thin wrapper passing ``--agent
+        <native>`` to Claude Code's mutable native agent store (refused).
+        Otherwise the adapter decomposes model, permissionMode, system
+        prompt plus skills, MCP via a per-launch strict file, effective
+        allowed tools, init timeout, and container path maps from the
+        frozen material (supported) — any other nonempty behavior-bearing
+        field the CLI never receives is refused.
+        """
+        profile = material.profile if material is not None else None
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        native = getattr(profile, "native_agent", None)
         if isinstance(native, str) and native:
             return SealedProfileSupport(
                 False,
@@ -628,12 +645,23 @@ class ClaudeCodeProvider(BaseProvider):
                 "Claude Code native agent store; the frozen CAO profile is not "
                 "what the supervisor consumes",
             )
-        if profile is None:
-            return SealedProfileSupport(False, "no frozen profile was supplied")
+        dropped = dropped_q_fields(profile)
+        dropped.extend(foreign_native_fields(profile, own="native_agent"))
+        for extra in ("codexConfig",):
+            if getattr(profile, extra, None):
+                dropped.append(extra)
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Claude full decomposition does not consume "
+                f"{', '.join(sorted(dropped))}; the frozen material would be "
+                "silently dropped from the launch",
+            )
         return SealedProfileSupport(
             True,
-            "Claude full CAO-profile decomposition into CLI flags (model, prompt "
-            "file, MCP, permissions) uses only the frozen CAO profile",
+            "Claude full launch-material decomposition into CLI flags (model, "
+            "permission mode, prompt file, MCP file, permissions, timeout, "
+            "container maps) uses only the frozen material",
         )
 
     async def initialize(self) -> bool:

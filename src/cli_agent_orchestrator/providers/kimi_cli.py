@@ -41,7 +41,12 @@ from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
     BaseProvider,
     ProviderPreflightBlocked,
+    SealedLaunchMaterial,
     SealedProfileSupport,
+    container_maps_set,
+    custom_permission_mode_set,
+    dropped_q_fields,
+    foreign_native_fields,
 )
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -576,16 +581,44 @@ class KimiCliProvider(BaseProvider):
         return False
 
     @classmethod
-    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
-        """Frozen-profile launch is exact: model, effort, the system-prompt
-        agent file, and the MCP plugin dir are all composed from the frozen
-        CAO profile with no provider-native named-profile lookup."""
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support needs the frozen per-launch material path.
+
+        The adapter renders model, effort, the system prompt plus skills
+        into a per-launch agent file, MCP servers into inline
+        ``--mcp-config``, the effective policy into advisory prompt text
+        (soft enforcement: Kimi has no native tool-blocking mechanism, so
+        a restricted policy is delivered, not enforced — documented here,
+        not refused), and the init timeout from the frozen material
+        (supported) — any other nonempty behavior-bearing field the CLI
+        never receives is refused.
+        """
+        profile = material.profile if material is not None else None
         if profile is None:
             return SealedProfileSupport(False, "no frozen profile was supplied")
+        dropped = dropped_q_fields(profile)
+        dropped.extend(foreign_native_fields(profile, own=""))
+        for extra in ("codexConfig",):
+            if getattr(profile, extra, None):
+                dropped.append(extra)
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Kimi frozen per-launch material does not consume "
+                f"{', '.join(sorted(dropped))}; the frozen material would be "
+                "silently dropped from the launch",
+            )
         return SealedProfileSupport(
             True,
-            "Kimi launch argv (model, effort, agent-file prompt, MCP plugin dir) "
-            "is composed entirely from the frozen CAO profile",
+            "Kimi frozen per-launch material (model, effort, agent-file prompt, "
+            "inline MCP config, advisory policy text, init timeout) uses only "
+            "the frozen material",
         )
 
     async def initialize(self) -> bool:

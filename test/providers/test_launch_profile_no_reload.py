@@ -180,9 +180,24 @@ class TestMuse:
         assert "--model" in command and "override-model" in command
         assert "--reasoning-effort" in command and "xhigh" in command
 
+    def test_argv_drops_frozen_prompt_without_store_read(self):
+        """The v1 argv has no prompt channel: a nonempty frozen prompt is
+        dropped, which is exactly what the sealed gate refuses."""
+        from cli_agent_orchestrator.providers import muse_cli
+
+        provider = muse_cli.MuseCliProvider(
+            "t1", "cao-s", "w", "sup", launch_profile=_sentinel(system_prompt="FROZEN-PROMPT")
+        )
+        with _raises_loader(muse_cli):
+            command = provider._build_command()
+        assert "--model" in command and _SENTINEL_MODEL in command
+        assert "FROZEN-PROMPT" not in command
+
 
 class TestCursor:
     def test_command_from_launch_profile_without_store_read(self, tmp_path, monkeypatch):
+        import json
+
         from cli_agent_orchestrator.providers import cursor_cli
 
         # Redirect the CAO tmp dir into scratch (see test_cursor_cli_unit).
@@ -204,6 +219,32 @@ class TestCursor:
         # Not model-only: the frozen MCP map is synthesized into --plugin-dir.
         assert "--model" in command and _SENTINEL_MODEL in command
         assert "--plugin-dir" in command and "--approve-mcps" in command
+        # The sentinel server reaches the per-session manifest on disk.
+        manifests = list(tmp_path.rglob("plugin.json"))
+        assert len(manifests) == 1
+        assert (
+            json.loads(manifests[0].read_text(encoding="utf-8"))["mcpServers"]["frozen-srv"][
+                "command"
+            ]
+            == "frozen-srv"
+        )
+
+    def test_command_drops_frozen_prompt_without_store_read(self, tmp_path, monkeypatch):
+        """Cursor has no prompt channel (backend rejects --system-prompt):
+        a nonempty frozen prompt is dropped, which the sealed gate refuses."""
+        from cli_agent_orchestrator.providers import cursor_cli
+
+        monkeypatch.setenv("CAO_TMP_DIR", str(tmp_path))
+        provider = cursor_cli.CursorCliProvider(
+            "t1", "cao-s", "w", "sup", launch_profile=_sentinel(system_prompt="FROZEN-PROMPT")
+        )
+        with (
+            _raises_loader(cursor_cli),
+            patch.object(cursor_cli.shutil, "which", return_value="/usr/local/bin/cursor-agent"),
+        ):
+            command = provider._build_cursor_command()
+        assert "--model" in command and _SENTINEL_MODEL in command
+        assert "FROZEN-PROMPT" not in command
 
     def test_legacy_path_still_loads_by_name(self):
         from cli_agent_orchestrator.providers import cursor_cli
@@ -225,6 +266,25 @@ class TestHermes:
         with _raises_loader(hermes):
             command = provider._build_hermes_command()
         assert "--model" in command and _SENTINEL_MODEL in command
+
+    def test_command_drops_frozen_prompt_and_policy_without_store_read(self):
+        """The default Hermes argv has no prompt/policy channel: both are
+        merely logged, so the sealed gate refuses them."""
+        from cli_agent_orchestrator.providers import hermes
+
+        provider = hermes.HermesProvider(
+            "t1",
+            "cao-s",
+            "w",
+            "sup",
+            allowed_tools=["fs_read"],
+            launch_profile=_sentinel(system_prompt="FROZEN-PROMPT"),
+        )
+        with _raises_loader(hermes):
+            command = provider._build_hermes_command()
+        assert "--model" in command and _SENTINEL_MODEL in command
+        assert "FROZEN-PROMPT" not in command
+        assert "fs_read" not in command
 
     def test_legacy_path_still_loads_by_name(self):
         from cli_agent_orchestrator.providers import hermes
