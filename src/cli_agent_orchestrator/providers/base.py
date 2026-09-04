@@ -23,6 +23,7 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from cli_agent_orchestrator.models.terminal import TerminalStatus
@@ -31,6 +32,22 @@ if TYPE_CHECKING:
     from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SealedProfileSupport:
+    """Whether an adapter can launch exactly from a frozen CAO profile.
+
+    ``supported`` is True only when every launch input the adapter consumes
+    — model, prompt, tools/MCP config, effort, native session shape — is
+    derived from the supplied frozen ``AgentProfile`` (plus the launch's
+    expected route), with no lookup of a mutable provider-native named
+    profile at launch time. ``reason`` names the deciding mechanism either
+    way, so a refusal can tell the operator what to change.
+    """
+
+    supported: bool
+    reason: str
 
 
 class ProviderPreflightBlocked(RuntimeError):
@@ -109,6 +126,26 @@ class BaseProvider(ABC):
     @shell_baseline.setter
     def shell_baseline(self, value: Optional[str]) -> None:
         self._shell_baseline = value
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Decide whether a sealed launch contract is admissible (cond-0817).
+
+        The conservative default is **unsupported**: an adapter opts in by
+        overriding this classmethod, so future or unmarked adapters never
+        silently become supported. The decision may depend on the parsed
+        frozen profile (e.g. a native-name passthrough field versus full
+        CAO-profile decomposition). This is a pure class-level query — it
+        constructs nothing and causes no launch effect — so the session
+        boundary can evaluate it before any tmux/session/DB/provider work.
+        """
+        return SealedProfileSupport(
+            supported=False,
+            reason=(
+                f"{cls.__name__} does not declare frozen-profile launch support; "
+                "it resolves launch inputs from the mutable provider-native store"
+            ),
+        )
 
     @property
     def status(self) -> TerminalStatus:

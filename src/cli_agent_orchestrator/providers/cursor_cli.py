@@ -72,7 +72,7 @@ from typing import TYPE_CHECKING, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
@@ -564,6 +564,19 @@ class CursorCliProvider(BaseProvider):
         if path in self._tmp_paths:
             return
         self._tmp_paths.append(path)
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Frozen-profile launch is exact: the model override, the
+        system-prompt file, and the MCP plugin dir are all built from the
+        frozen CAO profile with no provider-native named-profile lookup."""
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        return SealedProfileSupport(
+            True,
+            "Cursor launch argv (profile-model override, system-prompt file, "
+            "MCP plugin dir) is built entirely from the frozen CAO profile",
+        )
 
     async def initialize(self) -> bool:
         """Initialize the Cursor CLI provider by starting ``agent``.

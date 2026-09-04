@@ -182,6 +182,7 @@ from cli_agent_orchestrator.services.status_monitor import status_monitor
 from cli_agent_orchestrator.services.step_output_store import _validate_key_part
 from cli_agent_orchestrator.services.supervisor_profile_receipt import (
     ProfileLaunchConflict,
+    ProfileLaunchUnsupported,
     ProfileNotFoundError,
 )
 from cli_agent_orchestrator.services.terminal_service import (
@@ -1788,10 +1789,15 @@ async def create_session(
     It is validated against the profile source the runtime loads exactly once,
     before any tmux/session/provider effect: a divergence answers 409 with
     the divergent fields and a retry path (re-preflight, retry with the fresh
-    contract), and a malformed contract answers 400. An absent contract
-    launches normally — the contract is an expectation, not a second
-    authority — and the runtime-authored ``cao-profile-receipt-v1`` is
-    returned on the response either way.
+    contract), and a malformed contract answers 400. A contract naming a
+    provider/path whose adapter cannot consume the frozen profile exactly
+    (provider-native ``--agent`` artifacts, mutable native prompt/tool
+    stores) is refused with an operation-scoped 422 and zero effects — no
+    row, no provider, no receipt. An absent contract launches normally — the
+    contract is an expectation, not a second authority. A sealed-capable
+    launch returns the runtime-authored ``cao-profile-receipt-v1`` on the
+    response; a legacy launch (unsupported adapter, no contract) records no
+    exact receipt.
     """
     try:
         if session_name is not None:
@@ -1855,6 +1861,22 @@ async def create_session(
                 "error": str(e).splitlines()[0],
                 "divergent_fields": e.divergent_fields,
                 "retry": e.retry,
+            },
+        )
+    except ProfileLaunchUnsupported as e:
+        # A sealed contract names a provider/path that cannot consume the
+        # frozen profile exactly: no row, no provider, no receipt was
+        # produced, so there is nothing to recover server-side. The
+        # operation-scoped 422 names the provider, the canonical source,
+        # the adapter's reason, and the recovery action.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error": str(e).splitlines()[0],
+                "provider": e.provider,
+                "source_path": e.source_path,
+                "reason": e.reason,
+                "recovery": e.recovery,
             },
         )
     # Narrowed to the launch-boundary typed error: only the profile

@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
@@ -181,6 +181,29 @@ class HermesProvider(BaseProvider):
             )
 
         return shlex.join(command_parts)
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Sealed support depends on the frozen profile: a set
+        ``hermesProfile`` launches that named Hermes profile wrapper, whose
+        persona and tools resolve from the mutable Hermes-native store
+        (refused). Without it the argv is fully determined by the frozen
+        CAO profile (supported)."""
+        wrapper = getattr(profile, "hermesProfile", None) if profile is not None else None
+        if isinstance(wrapper, str) and wrapper:
+            return SealedProfileSupport(
+                False,
+                f"Hermes launches the named profile wrapper {wrapper!r}; persona and "
+                "tools resolve from the mutable Hermes-native store, not the "
+                "frozen CAO profile",
+            )
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        return SealedProfileSupport(
+            True,
+            "Hermes launch argv (default chat command, frozen --model) is fully "
+            "determined by the frozen CAO profile",
+        )
 
     async def initialize(self) -> bool:
         """Initialize Hermes by starting the configured profile chat REPL."""

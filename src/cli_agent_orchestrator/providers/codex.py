@@ -14,7 +14,11 @@ if TYPE_CHECKING:
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider, ProviderPreflightBlocked
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    ProviderPreflightBlocked,
+    SealedProfileSupport,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
@@ -789,6 +793,19 @@ class CodexProvider(BaseProvider):
             "Codex trust prompt handler timed out — no trust dialog or welcome banner detected. "
             "Pane tail:\n%s",
             pane_tail,
+        )
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Frozen-profile launch is exact: the pre-task material (model,
+        effort, system prompt, MCP servers, sandbox/approvals) is composed
+        entirely from the frozen CAO profile."""
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        return SealedProfileSupport(
+            True,
+            "Codex pre-task material (model, effort, system prompt, MCP servers) "
+            "is composed entirely from the frozen CAO profile",
         )
 
     async def initialize(self) -> bool:

@@ -102,6 +102,35 @@ def canonical_source_path(source_path: str) -> str:
     return os.path.realpath(source_path)
 
 
+class ProfileLaunchUnsupported(RuntimeError):
+    """A sealed contract names a provider/path that cannot consume the frozen profile.
+
+    Raised after the single launch-boundary read and any contract validation
+    but before any tmux/session/DB/provider/sidecar effect: the adapter
+    would launch provider-native named artifacts (or resolve prompt/tools
+    from a mutable native store), so the runtime refuses to validate or
+    persist CAO profile A while the supervisor would consume native
+    profile B. Carries the deciding adapter reason and a recovery action;
+    the HTTP boundary maps it to an operation-scoped 422. No receipt
+    exists for a refused launch, and none is manufactured later.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        source_path: str,
+        reason: str,
+        recovery: str,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.source_path = source_path
+        self.reason = reason
+        self.recovery = recovery
+
+
 class ProfileLaunchConflict(RuntimeError):
     """A supervisor launch contract diverged from the runtime-loaded profile.
 

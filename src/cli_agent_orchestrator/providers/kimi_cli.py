@@ -38,7 +38,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider, ProviderPreflightBlocked
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    ProviderPreflightBlocked,
+    SealedProfileSupport,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
@@ -570,6 +574,19 @@ class KimiCliProvider(BaseProvider):
                     return True
             await asyncio.sleep(1.0)
         return False
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Frozen-profile launch is exact: model, effort, the system-prompt
+        agent file, and the MCP plugin dir are all composed from the frozen
+        CAO profile with no provider-native named-profile lookup."""
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        return SealedProfileSupport(
+            True,
+            "Kimi launch argv (model, effort, agent-file prompt, MCP plugin dir) "
+            "is composed entirely from the frozen CAO profile",
+        )
 
     async def initialize(self) -> bool:
         """Initialize Kimi CLI provider by starting the kimi command.

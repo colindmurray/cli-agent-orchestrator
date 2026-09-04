@@ -31,10 +31,12 @@ from cli_agent_orchestrator.plugins import (
     PostCreateSessionEvent,
     PostKillSessionEvent,
 )
+from cli_agent_orchestrator.providers.manager import provider_manager
 from cli_agent_orchestrator.services.plugin_dispatch import dispatch_plugin_event
 from cli_agent_orchestrator.services.session_env import clear_session_env
 from cli_agent_orchestrator.services.stable_agent_roster import ROLE_SUPERVISOR
 from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+    ProfileLaunchUnsupported,
     load_supervisor_launch_context,
     validate_profile_contract,
 )
@@ -131,27 +133,56 @@ async def create_session(
     if profile_contract is not None:
         validate_profile_contract(profile_contract, launch_context)
 
-    terminal = await create_terminal(
-        provider=launch_context.provider,
-        agent_profile=agent_profile,
-        session_name=session_name,
-        new_session=True,
-        working_directory=working_directory,
-        allowed_tools=allowed_tools,
-        registry=registry,
-        env_vars=env_vars,
+    # Sealed-profile capability gate: evaluated after the single read and
+    # any contract validation, but before create_terminal owns any tmux,
+    # session, DB, provider, or sidecar effect. The query itself constructs
+    # nothing. A sealed contract on an adapter that would launch
+    # provider-native named artifacts (or resolve prompt/tools from a
+    # mutable native store) is refused outright — validating or persisting
+    # CAO profile A while the supervisor consumes native profile B is
+    # worse than refusing. Without a contract the same adapter keeps its
+    # ordinary legacy launch path, but records no exact receipt.
+    sealed = provider_manager.sealed_profile_support(
+        launch_context.provider, launch_context.profile
+    )
+    if not sealed.supported and profile_contract is not None:
+        raise ProfileLaunchUnsupported(
+            f"provider {launch_context.provider!r} cannot launch exactly from the "
+            f"frozen profile {agent_profile!r}; no launch effect was produced",
+            provider=launch_context.provider,
+            source_path=launch_context.source_path,
+            reason=sealed.reason,
+            recovery=(
+                "use a provider whose adapter consumes the frozen CAO profile "
+                "exactly (see the adapter sealed-profile capability), or retry "
+                "without profile_contract for an ordinary legacy launch with "
+                "no exact receipt"
+            ),
+        )
+
+    create_kwargs: dict = {
+        "provider": launch_context.provider,
+        "agent_profile": agent_profile,
+        "session_name": session_name,
+        "new_session": True,
+        "working_directory": working_directory,
+        "allowed_tools": allowed_tools,
+        "registry": registry,
+        "env_vars": env_vars,
         # Session creation owns the initial supervisor role and
         # passes it explicitly — role is launch truth, never a
         # profile-name heuristic.
-        stable_agent_role=ROLE_SUPERVISOR,
+        "stable_agent_role": ROLE_SUPERVISOR,
+    }
+    if sealed.supported:
         # The same loaded profile/context flows through terminal creation,
         # the terminal row (receipt), the pre-task bootstrap, and provider
         # construction — including the exact expected model/effort the
         # provider argv pins.
-        profile_launch_context=launch_context,
-        expected_model=launch_context.model,
-        expected_effort=launch_context.effort,
-    )
+        create_kwargs["profile_launch_context"] = launch_context
+        create_kwargs["expected_model"] = launch_context.model
+        create_kwargs["expected_effort"] = launch_context.effort
+    terminal = await create_terminal(**create_kwargs)
     dispatch_plugin_event(
         registry,
         "post_create_session",

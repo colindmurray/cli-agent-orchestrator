@@ -384,7 +384,8 @@ class TestSessionWiring:
     @pytest.mark.asyncio
     async def test_context_threaded_and_no_second_read(self, profile_store):
         """Real boundary load; everything below consumes it without reloading."""
-        _write_profile(profile_store, "sup")
+        # kimi_cli is sealed-capable, so the frozen context threads through.
+        _write_profile(profile_store, "sup", provider="kimi_cli")
         with (
             patch.object(
                 agent_profiles, "load_agent_profile", side_effect=AssertionError("reload")
@@ -399,7 +400,7 @@ class TestSessionWiring:
             await session_service.create_session(provider=None, agent_profile="sup")
 
         kwargs = mock_create.call_args.kwargs
-        assert kwargs["provider"] == "mock_cli"
+        assert kwargs["provider"] == "kimi_cli"
         assert kwargs["expected_model"] == "test-model-1"
         assert kwargs["expected_effort"] is None
         context = kwargs["profile_launch_context"]
@@ -445,10 +446,10 @@ class TestSessionWiring:
 
     @pytest.mark.asyncio
     async def test_retry_with_fresh_contract_launches(self, profile_store):
-        _write_profile(profile_store, "sup", model="model-one")
+        _write_profile(profile_store, "sup", provider="kimi_cli", model="model-one")
         stale = _contract_for(load_supervisor_launch_context("sup"))
         # The profile bytes change between preflight and retry...
-        _write_profile(profile_store, "sup", model="model-two")
+        _write_profile(profile_store, "sup", provider="kimi_cli", model="model-two")
         with (
             patch(
                 "cli_agent_orchestrator.services.session_service.create_terminal",
@@ -467,6 +468,141 @@ class TestSessionWiring:
             )
         assert mock_create.call_count == 1
         assert mock_create.call_args.kwargs["expected_model"] == "model-two"
+
+
+class TestSealedRefusal:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["opencode_cli", "copilot_cli", "kiro_cli"])
+    async def test_sealed_contract_on_named_agent_adapter_refuses_with_zero_effects(
+        self, profile_store, provider
+    ):
+        """A sealed contract on OpenCode/Copilot/Kiro refuses pre-effect.
+
+        The runtime would otherwise validate/persist CAO profile A while
+        the supervisor consumes the mutable provider-native --agent <name>
+        (native profile B). create_terminal owns every effect (window, DB
+        row, provider), so never calling it proves zero effects.
+        """
+        _write_profile(profile_store, "sup", provider=provider)
+        context = load_supervisor_launch_context("sup")
+        contract = _contract_for(context)
+        with (
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
+                await session_service.create_session(
+                    provider=None, agent_profile="sup", profile_contract=contract
+                )
+        mock_create.assert_not_called()
+        assert exc_info.value.provider == provider
+        assert exc_info.value.source_path == context.source_path
+        assert exc_info.value.reason
+        assert exc_info.value.recovery
+
+    @pytest.mark.asyncio
+    async def test_claude_native_wrapper_refuses_even_with_native_profile(self, profile_store):
+        """native_agent B is named in the refusal; nothing native is invoked."""
+        _write_profile(
+            profile_store,
+            "sup",
+            provider="claude_code",
+            body="supervise",
+        )
+        path = profile_store / "sup.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("role: supervisor", "role: supervisor\nnative_agent: B"))
+        context = load_supervisor_launch_context("sup")
+        contract = _contract_for(context)
+        with (
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
+                await session_service.create_session(
+                    provider=None, agent_profile="sup", profile_contract=contract
+                )
+        mock_create.assert_not_called()
+        assert "B" in exc_info.value.reason
+
+    @pytest.mark.asyncio
+    async def test_hermes_wrapper_refuses_even_with_native_profile(self, profile_store):
+        _write_profile(profile_store, "sup", provider="hermes")
+        path = profile_store / "sup.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("role: supervisor", "role: supervisor\nhermesProfile: B"))
+        context = load_supervisor_launch_context("sup")
+        contract = _contract_for(context)
+        with (
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
+                await session_service.create_session(
+                    provider=None, agent_profile="sup", profile_contract=contract
+                )
+        mock_create.assert_not_called()
+        assert "B" in exc_info.value.reason
+
+    @pytest.mark.asyncio
+    async def test_legacy_no_contract_unsupported_still_launches_without_receipt_claim(
+        self, profile_store
+    ):
+        """No contract on an unsupported adapter: ordinary legacy launch.
+
+        The frozen context is not threaded and no exact receipt is
+        claimed — the response projects null/unknown, not profile A.
+        """
+        _write_profile(profile_store, "sup", provider="kiro_cli")
+        with (
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            mock_create.return_value = MagicMock(session_name="cao-sup")
+            await session_service.create_session(provider=None, agent_profile="sup")
+        kwargs = mock_create.call_args.kwargs
+        assert "profile_launch_context" not in kwargs
+        assert "expected_model" not in kwargs
+        assert "expected_effort" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_unsupported_refusal_writes_no_row(self, profile_store, isolated_memory_db):
+        """End-to-end refusal through real create_terminal mock boundary.
+
+        With create_terminal real but its effectful collaborators absent,
+        the refusal must fire before the terminal row exists. The DB stays
+        empty: GET recovery can only return stored receipts, and there is
+        none to invent.
+        """
+        from cli_agent_orchestrator.clients.database import SessionLocal, TerminalModel
+        from cli_agent_orchestrator.services import terminal_service
+
+        _write_profile(profile_store, "sup", provider="kiro_cli")
+        context = load_supervisor_launch_context("sup")
+        with (
+            patch.object(terminal_service, "db_create_terminal", side_effect=AssertionError("row")),
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            with pytest.raises(spr.ProfileLaunchUnsupported):
+                await session_service.create_session(
+                    provider=None,
+                    agent_profile="sup",
+                    profile_contract=_contract_for(context),
+                )
+        with SessionLocal() as db:
+            assert db.query(TerminalModel).count() == 0
 
 
 class TestTerminalReceiptWiring:
@@ -616,7 +752,12 @@ class TestTerminalReceiptWiring:
     async def test_persistence_failure_leaves_no_successful_launch(
         self, profile_store, isolated_memory_db, launched_provider
     ):
-        """A row write that cannot persist the receipt fails the launch."""
+        """A row write that cannot persist the receipt fails the launch.
+
+        The provider is never constructed or initialized afterwards: there
+        is no successful launch without its durable receipt, and no live
+        supervisor without a row.
+        """
         from cli_agent_orchestrator.services import terminal_service
         from cli_agent_orchestrator.services.terminal_service import create_terminal
 
@@ -645,6 +786,8 @@ class TestTerminalReceiptWiring:
                     profile_launch_context=context,
                 )
         assert database.get_terminal_metadata("abcd1237", warn_if_missing=False) is None
+        service_provider_manager.create_provider.assert_not_called()
+        launched_provider.initialize.assert_not_called()
 
     def test_migration_adds_nullable_receipt_to_legacy_table(self, tmp_path):
         """A pre-receipt terminals table gains the column; old rows read NULL."""
@@ -770,6 +913,168 @@ class TestComposedFrozenContextWiring:
         assert "--model" in command and "composed-model-7" in command
 
 
+class TestFrozenSurvivesStoreMutation:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "provider,terminal_id,session,effort",
+        [
+            ("kimi_cli", "abcd1241", "cao-frozen-kimi", None),
+            ("codex", "abcd1242", "cao-frozen-codex", "xhigh"),
+            ("claude_code", "abcd1243", "cao-frozen-claude", None),
+        ],
+    )
+    async def test_supported_adapter_launches_frozen_a_after_mutation_to_b(
+        self, profile_store, isolated_memory_db, provider, terminal_id, session, effort
+    ):
+        """The store mutates A->B between the frozen read and provider build.
+
+        Every launch input the adapter consumes — model, prompt/config,
+        effort — must still be A. Any reload observes B (or raises through
+        the rigged loader); only the frozen context yields A.
+        """
+        import shlex
+
+        from cli_agent_orchestrator.providers import claude_code, codex, kimi_cli
+        from cli_agent_orchestrator.providers.manager import ProviderManager
+        from cli_agent_orchestrator.services.terminal_service import create_terminal
+
+        adapter_modules = {
+            "kimi_cli": kimi_cli,
+            "codex": codex,
+            "claude_code": claude_code,
+        }
+        adapter_classes = {
+            "kimi_cli": kimi_cli.KimiCliProvider,
+            "codex": codex.CodexProvider,
+            "claude_code": claude_code.ClaudeCodeProvider,
+        }
+        module = adapter_modules[provider]
+
+        _write_profile(
+            profile_store,
+            "sup",
+            provider=provider,
+            model="frozen-model-A",
+            effort=effort,
+            body="FROZEN-PROMPT-A",
+        )
+        context = load_supervisor_launch_context("sup")
+        assert context.model == "frozen-model-A"
+        # Drift between the frozen read and provider construction.
+        _write_profile(
+            profile_store,
+            "sup",
+            provider=provider,
+            model="mutated-model-B",
+            effort="low" if effort else None,
+            body="MUTATED-PROMPT-B",
+        )
+
+        real_manager = ProviderManager()
+        built = []
+        real_create = real_manager.create_provider
+
+        def _capture(*args, **kwargs):
+            instance = real_create(*args, **kwargs)
+            built.append((instance, kwargs))
+            return instance
+
+        real_manager.create_provider = MagicMock(side_effect=_capture)
+        stack = ExitStack()
+        stack.enter_context(
+            _HermeticLaunch(
+                provider_manager=real_manager,
+                terminal_id=terminal_id,
+                session=session,
+            )
+        )
+        stack.enter_context(
+            patch.object(adapter_classes[provider], "initialize", new=AsyncMock(return_value=True))
+        )
+        stack.enter_context(
+            patch(
+                f"{_SERVICE}.load_agent_profile",
+                side_effect=AssertionError("terminal reloaded by name"),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                module, "load_agent_profile", side_effect=AssertionError("adapter reloaded")
+            )
+        )
+        if provider == "codex":
+            # The codex pre-task bootstrap needs its native binary; stub
+            # only that exchange with the frozen route. Everything else —
+            # material composition, adapter construction, argv build —
+            # still runs for real against the frozen context.
+            from cli_agent_orchestrator.services import unmanaged_native_identity
+            from cli_agent_orchestrator.services import native_attachment
+
+            def _frozen_codex_identity(**kwargs):
+                assert kwargs["launch_profile"] is context.profile
+                assert kwargs["expected_model"] == "frozen-model-A"
+                assert kwargs["expected_effort"] == "xhigh"
+                return {
+                    "native_session_id": "codex-frozen-native",
+                    "acquisition_method": (native_attachment.ACQUISITION_ZERO_TURN_BOOTSTRAP),
+                    "model": "frozen-model-A",
+                    "effort": "xhigh",
+                    "binary_path": None,
+                }
+
+            stack.enter_context(
+                patch.object(
+                    unmanaged_native_identity,
+                    "resolve_pre_task_identity",
+                    side_effect=_frozen_codex_identity,
+                )
+            )
+        with stack:
+            terminal = await create_terminal(
+                provider=provider,
+                agent_profile="sup",
+                new_session=True,
+                profile_launch_context=context,
+                expected_model=context.model,
+                expected_effort=context.effort,
+            )
+
+        receipt = build_profile_receipt(context)
+        assert receipt["model"] == "frozen-model-A"
+        assert terminal.profile_receipt == receipt
+        assert database.get_terminal_metadata(terminal_id)["profile_receipt"] == receipt
+
+        assert len(built) == 1
+        instance, create_kwargs = built[0]
+        assert create_kwargs["launch_profile"] is context.profile
+        assert create_kwargs["expected_model"] == "frozen-model-A"
+        if effort:
+            assert create_kwargs["expected_effort"] == effort
+
+        if provider == "kimi_cli":
+            command = instance._build_kimi_command()
+            assert "frozen-model-A" in command
+            assert "mutated-model-B" not in command
+            prompt_file = Path(instance._temp_dir) / "system.md"
+            content = prompt_file.read_text(encoding="utf-8")
+            assert "FROZEN-PROMPT-A" in content
+            assert "MUTATED-PROMPT-B" not in content
+        elif provider == "codex":
+            material = instance._resolve_codex_profile_material()
+            assert material["profile"] is context.profile
+            assert "FROZEN-PROMPT-A" in material["system_prompt"]
+            assert "MUTATED-PROMPT-B" not in material["system_prompt"]
+        elif provider == "claude_code":
+            command = instance._build_claude_command()
+            assert "frozen-model-A" in command
+            assert "mutated-model-B" not in command
+            parts = shlex.split(command)
+            prompt_path = parts[parts.index("--append-system-prompt-file") + 1]
+            content = Path(prompt_path).read_text(encoding="utf-8")
+            assert "FROZEN-PROMPT-A" in content
+            assert "MUTATED-PROMPT-B" not in content
+
+
 class TestHttpMapping:
     @pytest.mark.asyncio
     async def test_conflict_maps_to_409_with_retry(self, profile_store):
@@ -801,6 +1106,46 @@ class TestHttpMapping:
         assert exc_info.value.status_code == 409
         assert exc_info.value.detail["retry"] == "re-preflight"
         assert exc_info.value.detail["divergent_fields"] == ["provider"]
+
+    @pytest.mark.asyncio
+    async def test_unsupported_contract_maps_to_422(self, profile_store):
+        """A sealed refusal is an operation-scoped 422 with recovery."""
+        from fastapi import BackgroundTasks, HTTPException
+
+        from cli_agent_orchestrator.api import main
+        from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+            ProfileLaunchUnsupported,
+        )
+
+        _write_profile(profile_store, "sup", provider="kiro_cli")
+        context = load_supervisor_launch_context("sup")
+        with (
+            patch.object(
+                main.session_service,
+                "create_session",
+                side_effect=ProfileLaunchUnsupported(
+                    "provider 'kiro_cli' cannot launch exactly",
+                    provider="kiro_cli",
+                    source_path=context.source_path,
+                    reason="Kiro launches kiro --agent <name>",
+                    recovery="use a sealed-capable provider or drop the contract",
+                ),
+            ),
+            patch.object(main, "get_plugin_registry", return_value=MagicMock()),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await main.create_session(
+                    request=MagicMock(),
+                    background_tasks=BackgroundTasks(),
+                    agent_profile="sup",
+                    profile_contract=_contract_for(context),
+                )
+        assert exc_info.value.status_code == 422
+        detail = exc_info.value.detail
+        assert detail["provider"] == "kiro_cli"
+        assert detail["source_path"] == context.source_path
+        assert "Kiro launches" in detail["reason"]
+        assert detail["recovery"]
 
     @pytest.mark.asyncio
     async def test_malformed_contract_maps_to_400(self, profile_store):

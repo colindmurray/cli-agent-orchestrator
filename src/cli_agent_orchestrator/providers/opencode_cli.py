@@ -20,14 +20,17 @@ The provider detects the following terminal states:
 import logging
 import re
 import shlex
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.constants import OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_FILE
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +125,17 @@ class OpenCodeCliProvider(BaseProvider):
         providing the extra scrollback the extraction loop originally expected).
         """
         return 2000
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Sealed launch is refused: OpenCode passes ``--agent <name>`` to
+        the provider-native agent store, so the runtime cannot guarantee the
+        supervisor consumes the frozen CAO profile."""
+        return SealedProfileSupport(
+            False,
+            "OpenCode passes --agent <name> to the provider-native agent store; "
+            "the frozen CAO profile is not what the supervisor consumes",
+        )
 
     async def initialize(self) -> bool:
         """Start the OpenCode TUI and wait for the idle splash frame.

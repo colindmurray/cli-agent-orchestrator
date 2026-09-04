@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
 from cli_agent_orchestrator.utils.text import strip_terminal_escapes
@@ -136,6 +136,19 @@ class MuseCliProvider(BaseProvider):
         if self._expected_effort:
             parts.extend(["--reasoning-effort", self._expected_effort])
         return shlex.join(parts)
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Frozen-profile launch is exact: the v1 argv pins the frozen model
+        (and expected effort) with no provider-native named-profile lookup;
+        base instructions compose from the frozen system prompt."""
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        return SealedProfileSupport(
+            True,
+            "Muse launch argv (frozen model, expected effort) with base "
+            "instructions from the frozen CAO profile",
+        )
 
     async def initialize(self) -> bool:
         """Launch ``muse --yolo`` inside the tmux window (cwd = the worktree)."""

@@ -1,14 +1,14 @@
 """Provider manager as module singleton with direct terminal_id → provider mapping."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 
 from sqlalchemy.exc import OperationalError
 
 from cli_agent_orchestrator.clients.database import get_terminal_metadata, get_terminal_metadata_v2
 from cli_agent_orchestrator.models.provider import ProviderType
 from cli_agent_orchestrator.providers.antigravity_cli import AntigravityCliProvider
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
 from cli_agent_orchestrator.providers.claude_code import ClaudeCodeProvider
 from cli_agent_orchestrator.providers.codex import CodexProvider
 from cli_agent_orchestrator.providers.copilot_cli import CopilotCliProvider
@@ -21,6 +21,28 @@ from cli_agent_orchestrator.providers.muse_cli import MuseCliProvider
 from cli_agent_orchestrator.providers.opencode_cli import OpenCodeCliProvider
 
 logger = logging.getLogger(__name__)
+
+# Sealed-profile capability routing (cond-0817). Maps each constructed
+# provider type to its adapter class WITHOUT constructing it, so the
+# session boundary can refuse a sealed contract before any effect. This
+# mirrors the create_provider construction chain below — it is a class
+# lookup, not a supported-provider allowlist: the decision itself lives on
+# each adapter (conservative base default unsupported), and the capability
+# matrix test pins the two together so a new branch cannot drift. Unknown
+# or unmapped types are unsupported, never silently supported.
+_ADAPTER_CLASS_BY_TYPE: Dict[str, Type[BaseProvider]] = {
+    ProviderType.KIRO_CLI.value: KiroCliProvider,
+    ProviderType.CLAUDE_CODE.value: ClaudeCodeProvider,
+    ProviderType.CODEX.value: CodexProvider,
+    ProviderType.COPILOT_CLI.value: CopilotCliProvider,
+    ProviderType.KIMI_CLI.value: KimiCliProvider,
+    ProviderType.MUSE_CLI.value: MuseCliProvider,
+    ProviderType.OPENCODE_CLI.value: OpenCodeCliProvider,
+    ProviderType.HERMES.value: HermesProvider,
+    ProviderType.CURSOR_CLI.value: CursorCliProvider,
+    ProviderType.ANTIGRAVITY_CLI.value: AntigravityCliProvider,
+    ProviderType.MOCK_CLI.value: MockCliProvider,
+}
 
 
 class TerminalAssignedRouteIncompleteError(Exception):
@@ -56,6 +78,25 @@ class ProviderManager:
         # intentionally left untagged; the managed-v2 path revalidates those
         # entries against the durable row before returning them.
         self._provider_identities: Dict[str, tuple] = {}
+
+    def sealed_profile_support(
+        self, provider_type: str, profile: Optional[Any]
+    ) -> SealedProfileSupport:
+        """Evaluate sealed-launch capability without constructing anything.
+
+        Pure class-level query: no provider instance, no tmux, no DB, no
+        side effects. Unknown or unmapped provider types are unsupported.
+        """
+        adapter = _ADAPTER_CLASS_BY_TYPE.get(provider_type)
+        if adapter is None:
+            return SealedProfileSupport(
+                supported=False,
+                reason=(
+                    f"unknown provider type {provider_type!r}: no adapter declares "
+                    "frozen-profile launch support"
+                ),
+            )
+        return adapter.supports_sealed_profile(profile)
 
     def create_provider(
         self,

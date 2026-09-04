@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
@@ -245,6 +245,18 @@ class KiroCliProvider(BaseProvider):
             )
             return None
         return profile.model or None
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Sealed launch is refused: Kiro launches ``kiro --agent <name>``
+        and prompt/tool content resolves from the mutable Kiro-native agent
+        store, so the runtime cannot guarantee the supervisor consumes the
+        frozen CAO profile."""
+        return SealedProfileSupport(
+            False,
+            "Kiro launches kiro --agent <name>; prompt and tool content resolve "
+            "from the mutable Kiro-native agent store, not the frozen CAO profile",
+        )
 
     async def initialize(self) -> bool:
         """Initialize Kiro CLI provider by starting kiro-cli chat command.

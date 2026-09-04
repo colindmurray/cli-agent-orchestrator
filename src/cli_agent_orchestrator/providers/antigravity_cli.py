@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.constants import SECURITY_PROMPT
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_cao_mcp_command
@@ -511,6 +511,20 @@ class AntigravityCliProvider(BaseProvider):
                 if re.search(IDLE_FOOTER_PATTERN, clean):
                     return
             time.sleep(1.0)
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Frozen-profile launch is exact: profile model wins over the
+        override, and the system prompt, MCP map, and native session shape
+        resolve from the frozen CAO profile with no provider-native
+        named-profile lookup."""
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        return SealedProfileSupport(
+            True,
+            "Antigravity launch argv (profile model, system prompt, MCP map) "
+            "is built entirely from the frozen CAO profile",
+        )
 
     async def initialize(self) -> bool:
         """Initialize the Antigravity CLI provider by starting ``agy``.

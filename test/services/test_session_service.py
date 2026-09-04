@@ -42,6 +42,8 @@ class TestCreateSession:
         mock_terminal.session_name = "cao-test"
         mock_create_terminal.return_value = mock_terminal
 
+        # The real capability gate admits claude_code (full CAO-profile
+        # decomposition), so the frozen context threads through.
         await create_session(provider=None, agent_profile="my_agent")
 
         mock_load.assert_called_once_with(
@@ -75,6 +77,11 @@ class TestCreateSession:
             "my_agent", explicit_provider="kiro_cli", fallback_provider="kiro_cli"
         )
         assert mock_create_terminal.call_args.kwargs["provider"] == "kiro_cli"
+        # kiro_cli cannot consume a frozen profile: with no contract the
+        # launch keeps the ordinary legacy path and records no exact
+        # receipt — the frozen context is not threaded through.
+        assert "profile_launch_context" not in mock_create_terminal.call_args.kwargs
+        assert "expected_model" not in mock_create_terminal.call_args.kwargs
 
 
 class TestListSessions:
@@ -825,7 +832,7 @@ class TestStopSession:
             # create_terminal's claim. stop wins the claim while create waits.
             create_past_early_check.set()
             release_create.wait(timeout=15)
-            return SimpleNamespace(provider="mock_cli", model=None, effort=None)
+            return SimpleNamespace(provider="mock_cli", model=None, effort=None, profile=None)
 
         monkeypatch.setattr(session_service, "load_supervisor_launch_context", _blocking_load)
 

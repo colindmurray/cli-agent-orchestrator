@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.constants import CAO_HOME_DIR
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import BaseProvider, SealedProfileSupport
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
@@ -613,6 +613,28 @@ class ClaudeCodeProvider(BaseProvider):
                 return
 
             time.sleep(1.0)
+
+    @classmethod
+    def supports_sealed_profile(cls, profile: Optional["AgentProfile"]) -> SealedProfileSupport:
+        """Sealed support depends on the frozen profile's routing: a set
+        ``native_agent`` is a thin wrapper passing ``--agent <native>`` to
+        Claude Code's mutable native agent store (refused), while an unset
+        one decomposes the full CAO profile into CLI flags (supported)."""
+        native = getattr(profile, "native_agent", None) if profile is not None else None
+        if isinstance(native, str) and native:
+            return SealedProfileSupport(
+                False,
+                f"Claude thin-wrapper mode passes --agent {native!r} to the mutable "
+                "Claude Code native agent store; the frozen CAO profile is not "
+                "what the supervisor consumes",
+            )
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        return SealedProfileSupport(
+            True,
+            "Claude full CAO-profile decomposition into CLI flags (model, prompt "
+            "file, MCP, permissions) uses only the frozen CAO profile",
+        )
 
     async def initialize(self) -> bool:
         """Initialize Claude Code provider by starting claude command."""

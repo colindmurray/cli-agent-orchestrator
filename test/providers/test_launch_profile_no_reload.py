@@ -81,16 +81,23 @@ class TestKiro:
 
 class TestClaude:
     def test_load_and_argv_from_launch_profile_without_store_read(self):
+        import shlex
+        from pathlib import Path
+
         from cli_agent_orchestrator.providers import claude_code
 
-        sentinel = _sentinel()
+        sentinel = _sentinel(system_prompt="FROZEN-CLAUDE")
         provider = claude_code.ClaudeCodeProvider(
             "t1", "cao-s", "w", "sup", launch_profile=sentinel
         )
         with _raises_loader(claude_code):
             assert provider._load_profile() is sentinel
             command = provider._build_claude_command()
+        # Not model-only: the frozen prompt is composed into the prompt file.
         assert "--model" in command and _SENTINEL_MODEL in command
+        parts = shlex.split(command)
+        prompt_path = parts[parts.index("--append-system-prompt-file") + 1]
+        assert "FROZEN-CLAUDE" in Path(prompt_path).read_text(encoding="utf-8")
 
     def test_legacy_path_still_loads_by_name(self):
         from cli_agent_orchestrator.providers import claude_code
@@ -105,11 +112,13 @@ class TestCodex:
     def test_material_from_launch_profile_without_store_read(self):
         from cli_agent_orchestrator.providers import codex
 
-        sentinel = _sentinel()
+        sentinel = _sentinel(system_prompt="FROZEN-CODEX")
         provider = codex.CodexProvider("t1", "cao-s", "w", "sup", launch_profile=sentinel)
         with _raises_loader(codex):
             material = provider._resolve_codex_profile_material()
         assert material["profile"] is sentinel
+        # Not model-only: the frozen system prompt composes the material.
+        assert "FROZEN-CODEX" in material["system_prompt"]
 
     def test_legacy_path_still_loads_by_name(self):
         from cli_agent_orchestrator.providers import codex
@@ -122,14 +131,19 @@ class TestCodex:
 
 class TestKimi:
     def test_command_from_launch_profile_without_store_read(self):
+        from pathlib import Path
+
         from cli_agent_orchestrator.providers import kimi_cli
 
-        sentinel = _sentinel()
+        sentinel = _sentinel(system_prompt="FROZEN-KIMI")
         provider = kimi_cli.KimiCliProvider("t1", "cao-s", "w", "sup", launch_profile=sentinel)
         with _raises_loader(kimi_cli):
             assert provider._try_load_profile() is sentinel
             command = provider._build_kimi_command()
+        # Not model-only: the frozen prompt is composed into the agent file.
         assert "--model" in command and _SENTINEL_MODEL in command
+        system_md = Path(provider._temp_dir) / "system.md"
+        assert "FROZEN-KIMI" in system_md.read_text(encoding="utf-8")
 
     def test_legacy_path_still_loads_by_name(self):
         from cli_agent_orchestrator.providers import kimi_cli
@@ -148,20 +162,48 @@ class TestMuse:
         with _raises_loader(muse_cli):
             assert provider._resolve_model() == _SENTINEL_MODEL
 
+    def test_argv_pins_frozen_model_and_effort_without_store_read(self):
+        from cli_agent_orchestrator.providers import muse_cli
+
+        provider = muse_cli.MuseCliProvider(
+            "t1",
+            "cao-s",
+            "w",
+            "sup",
+            expected_model="override-model",
+            expected_effort="xhigh",
+            launch_profile=_sentinel(),
+        )
+        with _raises_loader(muse_cli):
+            command = provider._build_command()
+        # Not model-only: the pinned route carries the frozen effort flag too.
+        assert "--model" in command and "override-model" in command
+        assert "--reasoning-effort" in command and "xhigh" in command
+
 
 class TestCursor:
-    def test_command_from_launch_profile_without_store_read(self):
+    def test_command_from_launch_profile_without_store_read(self, tmp_path, monkeypatch):
         from cli_agent_orchestrator.providers import cursor_cli
 
+        # Redirect the CAO tmp dir into scratch (see test_cursor_cli_unit).
+        monkeypatch.setenv("CAO_TMP_DIR", str(tmp_path))
         provider = cursor_cli.CursorCliProvider(
-            "t1", "cao-s", "w", "sup", launch_profile=_sentinel()
+            "t1",
+            "cao-s",
+            "w",
+            "sup",
+            launch_profile=_sentinel(
+                mcpServers={"frozen-srv": {"command": "frozen-srv", "args": []}}
+            ),
         )
         with (
             _raises_loader(cursor_cli),
             patch.object(cursor_cli.shutil, "which", return_value="/usr/local/bin/cursor-agent"),
         ):
             command = provider._build_cursor_command()
+        # Not model-only: the frozen MCP map is synthesized into --plugin-dir.
         assert "--model" in command and _SENTINEL_MODEL in command
+        assert "--plugin-dir" in command and "--approve-mcps" in command
 
     def test_legacy_path_still_loads_by_name(self):
         from cli_agent_orchestrator.providers import cursor_cli
@@ -203,3 +245,15 @@ class TestAntigravity:
         )
         with _raises_loader(antigravity_cli):
             assert provider._try_load_profile() is sentinel
+
+    def test_argv_renders_frozen_prompt_and_model_without_store_read(self):
+        from cli_agent_orchestrator.providers import antigravity_cli
+
+        provider = antigravity_cli.AntigravityCliProvider(
+            "t1", "cao-s", "w", "sup", launch_profile=_sentinel(system_prompt="FROZEN-AGY")
+        )
+        with _raises_loader(antigravity_cli):
+            command = provider._build_agy_command()
+        # Not model-only: the frozen system prompt rides inline via -i.
+        assert "--model" in command and _SENTINEL_MODEL in command
+        assert "FROZEN-AGY" in command
