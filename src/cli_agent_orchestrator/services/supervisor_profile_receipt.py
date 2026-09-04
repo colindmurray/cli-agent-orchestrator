@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
@@ -61,6 +62,44 @@ _CONTRACT_FIELDS = (
     "source_path",
     "sha256",
 )
+
+
+class ProfileNotFoundError(FileNotFoundError):
+    """The named profile is unavailable to CAO's configured stores.
+
+    A launch-boundary error raised before any tmux/session/provider effect:
+    the supervisor launch refuses the name rather than degrading to a
+    fallback provider with no profile. Subclasses ``FileNotFoundError`` so
+    existing handlers keep classifying it as a missing profile, while the
+    HTTP boundary narrows on this type so a late, unrelated
+    ``FileNotFoundError`` (tmux, FIFO, store) is never misreported as a
+    client error.
+    """
+
+
+class ProfileInvalidError(ValueError):
+    """The profile source exists but does not parse into an ``AgentProfile``.
+
+    A launch-boundary client error (``ValueError`` maps to 400 at the HTTP
+    boundary): the profile bytes are present but unusable, so the operator
+    fixes the profile rather than retrying an identical launch.
+    """
+
+
+def canonical_source_path(source_path: str) -> str:
+    """Normalize a profile source path into its canonical comparison form.
+
+    Filesystem paths resolve through ``os.path.realpath``, so an
+    aliased or symlinked spelling of the same physical profile compares
+    equal to the runtime-resolved path. The ``built-in:<name>`` pseudo-path
+    for the packaged store is already canonical and compares exactly.
+    Canonicalization never weakens identity: both ``source_path`` and
+    ``sha256`` must match, so identical bytes at a genuinely different
+    canonical path still diverge (no sha-only identity).
+    """
+    if source_path.startswith("built-in:"):
+        return source_path
+    return os.path.realpath(source_path)
 
 
 class ProfileLaunchConflict(RuntimeError):
@@ -177,20 +216,31 @@ def load_supervisor_launch_context(
     The single read supplies the parsed profile, the source path/provenance,
     and the digest — so no later stage of the same launch may read the
     profile by name again and observe different bytes.
+
+    Raises :class:`ProfileNotFoundError` when the name resolves to no
+    configured store, and :class:`ProfileInvalidError` when the source
+    bytes do not parse — both before any tmux/session/provider effect.
     """
-    raw_text, source_path, provenance = read_agent_profile_source_with_provenance(profile_name)
+    try:
+        raw_text, source_path, provenance = read_agent_profile_source_with_provenance(profile_name)
+    except FileNotFoundError as exc:
+        raise ProfileNotFoundError(str(exc)) from exc
     sha256 = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
     try:
         profile = parse_agent_profile_text(resolve_env_vars(raw_text), profile_name)
     except Exception as exc:
-        raise RuntimeError(f"Failed to load agent profile '{profile_name}': {exc}") from exc
+        raise ProfileInvalidError(
+            f"agent profile '{profile_name}' from {source_path} does not parse: {exc}"
+        ) from exc
     provider, model, effort = resolve_launch_route(
         profile, explicit_provider=explicit_provider, fallback_provider=fallback_provider
     )
     return ProfileLaunchContext(
         profile_name=profile_name,
         profile=profile,
-        source_path=source_path,
+        # The receipt records the canonical form, matching what validation
+        # compares the request path against.
+        source_path=canonical_source_path(source_path),
         provenance=provenance,
         sha256=sha256,
         provider=provider,
@@ -206,6 +256,11 @@ def validate_profile_contract(contract: Mapping[str, Any], context: ProfileLaunc
     missing keys, wrong types) and :class:`ProfileLaunchConflict` for a
     well-formed contract whose expected values diverge from what the runtime
     loaded. Either raises before any launch effect.
+
+    ``source_path`` compares in canonical form on both sides, so an aliased
+    or symlinked spelling of the same physical profile agrees — while a
+    genuinely different canonical path still diverges even when the bytes
+    (and therefore ``sha256``) are identical.
     """
     if not isinstance(contract, Mapping):
         raise ValueError("profile_contract must be an object")
@@ -236,15 +291,24 @@ def validate_profile_contract(contract: Mapping[str, Any], context: ProfileLaunc
         "source_path": context.source_path,
         "sha256": context.sha256,
     }
-    divergent = [
-        {
-            "field": field,
-            "expected": contract[field],
-            "observed": expected[field],
-        }
-        for field in _CONTRACT_FIELDS
-        if contract[field] != expected[field]
-    ]
+    divergences = []
+    # The shape loop above already proved source_path is a non-empty string.
+    request_path = contract["source_path"]
+    assert isinstance(request_path, str)
+    for field in _CONTRACT_FIELDS:
+        if field == "source_path":
+            same = canonical_source_path(request_path) == canonical_source_path(context.source_path)
+        else:
+            same = contract[field] == expected[field]
+        if not same:
+            divergences.append(
+                {
+                    "field": field,
+                    "expected": contract[field],
+                    "observed": expected[field],
+                }
+            )
+    divergent = divergences
     if divergent:
         fields = sorted(entry["field"] for entry in divergent)
         raise ProfileLaunchConflict(

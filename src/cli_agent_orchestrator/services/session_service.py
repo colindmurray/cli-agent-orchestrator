@@ -120,8 +120,9 @@ async def create_session(
     # metadata/digest, and the resolved provider/model/effort every
     # downstream stage consumes. Nothing below reloads the profile by name,
     # so the bytes validated here are the bytes the provider launches with.
-    # Raises before any tmux/session/provider effect: FileNotFoundError for
-    # a missing profile, ProfileLaunchConflict for a diverged contract.
+    # Raises before any tmux/session/provider effect: ProfileNotFoundError
+    # for a missing profile, ProfileInvalidError for unparseable bytes,
+    # ProfileLaunchConflict for a diverged contract.
     launch_context = load_supervisor_launch_context(
         agent_profile,
         explicit_provider=provider,

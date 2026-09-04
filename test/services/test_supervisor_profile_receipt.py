@@ -99,7 +99,7 @@ def _hermetic_backend():
 class _HermeticLaunch(ExitStack):
     """Backend + FIFO + status patches for a hermetic create_terminal run."""
 
-    def __init__(self, *, provider_manager, launched_provider, terminal_id, session):
+    def __init__(self, *, provider_manager, launched_provider=None, terminal_id, session):
         super().__init__()
         backend = _hermetic_backend()
         self.enter_context(patch("cli_agent_orchestrator.backends.registry._backend", backend))
@@ -111,7 +111,11 @@ class _HermeticLaunch(ExitStack):
         self.enter_context(patch(f"{_SERVICE}.generate_terminal_id", return_value=terminal_id))
         self.enter_context(patch(f"{_SERVICE}.generate_session_name", return_value=session))
         self.enter_context(patch(f"{_SERVICE}.generate_window_name", return_value="w-sup"))
-        provider_manager.create_provider.return_value = launched_provider
+        # A None launched_provider leaves construction alone, so a test can
+        # run the real ProviderManager (wrapping create_provider itself to
+        # observe the call) instead of a stubbed instance.
+        if launched_provider is not None:
+            provider_manager.create_provider.return_value = launched_provider
 
 
 def _contract_for(context) -> dict:
@@ -198,8 +202,23 @@ class TestLaunchContext:
         assert load_supervisor_launch_context("odd").provider == "kiro_cli"
 
     def test_missing_profile_raises_before_any_effect(self, profile_store):
+        with pytest.raises(spr.ProfileNotFoundError):
+            load_supervisor_launch_context("ghost")
+
+    def test_missing_profile_error_stays_a_filenotfound(self, profile_store):
+        """The typed error remains a FileNotFoundError for existing handlers."""
         with pytest.raises(FileNotFoundError):
             load_supervisor_launch_context("ghost")
+
+    def test_unparseable_profile_raises_typed_invalid(self, profile_store):
+        (profile_store / "bad.md").write_text("---\nfoo: [unclosed\n---\nbody\n", encoding="utf-8")
+        with pytest.raises(spr.ProfileInvalidError):
+            load_supervisor_launch_context("bad")
+
+    def test_unparseable_profile_error_stays_a_valueerror(self, profile_store):
+        (profile_store / "bad.md").write_text("---\nfoo: [unclosed\n---\nbody\n", encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_supervisor_launch_context("bad")
 
     def test_receipt_is_runtime_authored_not_request_echo(self, profile_store):
         _write_profile(profile_store, "sup")
@@ -279,6 +298,86 @@ class TestContractValidation:
     def test_malformed_contracts_are_refused(self, context, contract):
         with pytest.raises(ValueError):
             validate_profile_contract(contract, context)
+
+
+class TestCanonicalSourcePath:
+    def test_aliased_spelling_of_same_profile_agrees(self, profile_store, tmp_path):
+        """A symlinked spelling of the same physical file validates.
+
+        The conductor may preflight through an aliased path while the
+        runtime resolves the canonical one; with matching bytes the
+        contract must agree rather than diverge forever.
+        """
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        alias_dir = tmp_path / "alias-store"
+        alias_dir.symlink_to(profile_store, target_is_directory=True)
+        contract = _contract_for(context)
+        contract["source_path"] = str(alias_dir / "sup.md")
+        validate_profile_contract(contract, context)
+
+    def test_distinct_canonical_path_diverges_despite_matching_sha(self, profile_store, tmp_path):
+        """Same bytes at a genuinely different path still conflict.
+
+        Path identity is not advisory and sha alone is not identity: the
+        receipt must name the source the runtime actually loaded.
+        """
+        path = _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "sup.md").write_bytes(path.read_bytes())
+        contract = _contract_for(context)
+        contract["source_path"] = str(elsewhere / "sup.md")
+        with pytest.raises(ProfileLaunchConflict) as exc_info:
+            validate_profile_contract(contract, context)
+        assert "source_path" in [entry["field"] for entry in exc_info.value.divergent_fields]
+
+    def test_builtin_pseudo_path_compares_exactly(self, profile_store):
+        context = load_supervisor_launch_context("developer")
+        assert context.source_path == "built-in:developer.md"
+        validate_profile_contract(_contract_for(context), context)
+        contract = _contract_for(context)
+        contract["source_path"] = "built-in:other.md"
+        with pytest.raises(ProfileLaunchConflict):
+            validate_profile_contract(contract, context)
+
+
+class TestProviderStoreProvenance:
+    def test_provider_and_custom_store_branches(self, tmp_path, monkeypatch):
+        """Each on-disk store branch reports its documented provenance."""
+        from cli_agent_orchestrator.services import settings_service
+
+        installed = tmp_path / "agent-context"
+        kiro = tmp_path / "kiro-agents"
+        custom = tmp_path / "custom"
+        for directory in (installed, kiro, custom):
+            directory.mkdir()
+        _write_profile(installed, "sup")
+        nested = kiro / "sup"
+        nested.mkdir()
+        (nested / "agent.md").write_text(
+            "---\nname: sup\ndescription: nested\nprovider: mock_cli\n---\nbody\n",
+            encoding="utf-8",
+        )
+        _write_profile(custom, "sup")
+
+        from cli_agent_orchestrator.utils import agent_profiles as ap
+
+        monkeypatch.setattr(ap, "LOCAL_AGENT_STORE_DIR", tmp_path / "empty-store")
+        monkeypatch.setattr(
+            settings_service,
+            "get_agent_dirs",
+            lambda: {"cao_installed": str(installed), "kiro_cli": str(kiro)},
+        )
+        monkeypatch.setattr(settings_service, "get_extra_agent_dirs", lambda: [str(custom)])
+        monkeypatch.setattr(settings_service, "get_disabled_agent_dirs", lambda: [])
+
+        assert load_supervisor_launch_context("sup").provenance == "installed"
+        (installed / "sup.md").unlink()
+        assert load_supervisor_launch_context("sup").provenance == "kiro"
+        (nested / "agent.md").unlink()
+        assert load_supervisor_launch_context("sup").provenance == "custom"
 
 
 class TestSessionWiring:
@@ -411,10 +510,7 @@ class TestTerminalReceiptWiring:
         assert terminal.profile_receipt == expected_receipt
         from cli_agent_orchestrator.models.terminal import Terminal
 
-        assert (
-            Terminal.model_validate(terminal.model_dump()).profile_receipt
-            == expected_receipt
-        )
+        assert Terminal.model_validate(terminal.model_dump()).profile_receipt == expected_receipt
         # Provider construction consumed the exact context object.
         create_kwargs = service_provider_manager.create_provider.call_args.kwargs
         assert create_kwargs["launch_profile"] is context.profile
@@ -585,6 +681,95 @@ class TestTerminalReceiptWiring:
             conn.close()
 
 
+class TestComposedFrozenContextWiring:
+    @pytest.mark.asyncio
+    async def test_same_context_drives_contract_receipt_response_and_argv(
+        self, profile_store, isolated_memory_db
+    ):
+        """One frozen context end to end, with a real adapter underneath.
+
+        The context is loaded once from the store; the contract is built
+        from that live context (never a fixture-encoded receipt); the
+        launch runs through the real ``ProviderManager`` into a real Kimi
+        adapter whose ``initialize`` is stubbed but whose argv builder runs
+        for real — with every by-name store load rigged to raise. If any
+        downstream stage ignores or reloads the frozen context instead of
+        consuming it, this fails: at Step 3, in the bootstrap, or in the
+        argv builder.
+        """
+        from cli_agent_orchestrator.models.terminal import Terminal
+        from cli_agent_orchestrator.providers import kimi_cli
+        from cli_agent_orchestrator.providers.manager import ProviderManager
+        from cli_agent_orchestrator.services.terminal_service import create_terminal
+
+        _write_profile(profile_store, "sup", provider="kimi_cli", model="composed-model-7")
+        context = load_supervisor_launch_context("sup")
+        assert context.provider == "kimi_cli"
+
+        # The contract the conductor would preflight, derived from the live
+        # context rather than encoded expectations.
+        validate_profile_contract(_contract_for(context), context)
+
+        real_manager = ProviderManager()
+        built = []
+        real_create = real_manager.create_provider
+
+        def _capture(*args, **kwargs):
+            instance = real_create(*args, **kwargs)
+            built.append((instance, kwargs))
+            return instance
+
+        real_manager.create_provider = MagicMock(side_effect=_capture)
+        with (
+            _HermeticLaunch(
+                provider_manager=real_manager,
+                terminal_id="abcd1238",
+                session="cao-composed",
+            ),
+            patch.object(
+                kimi_cli.KimiCliProvider,
+                "initialize",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                f"{_SERVICE}.load_agent_profile",
+                side_effect=AssertionError("terminal reloaded by name"),
+            ),
+            patch.object(
+                kimi_cli, "load_agent_profile", side_effect=AssertionError("adapter reloaded")
+            ),
+        ):
+            terminal = await create_terminal(
+                provider="kimi_cli",
+                agent_profile="sup",
+                new_session=True,
+                profile_launch_context=context,
+                expected_model=context.model,
+                expected_effort=context.effort,
+            )
+
+        # The receipt is authored from the live context, not a fixture.
+        receipt = build_profile_receipt(context)
+        assert receipt["model"] == "composed-model-7"
+        assert terminal.profile_receipt == receipt
+        assert Terminal.model_validate(terminal.model_dump()).profile_receipt == receipt
+        assert database.get_terminal_metadata("abcd1238")["profile_receipt"] == receipt
+
+        # Provider construction consumed the exact frozen object...
+        assert len(built) == 1
+        instance, create_kwargs = built[0]
+        assert create_kwargs["launch_profile"] is context.profile
+        assert create_kwargs["expected_model"] == "composed-model-7"
+        # ...and the real argv builder renders the frozen route with the
+        # store loader still rigged to raise.
+        assert instance._launch_profile is context.profile
+        with patch.object(
+            kimi_cli, "load_agent_profile", side_effect=AssertionError("argv reloaded")
+        ):
+            command = instance._build_kimi_command()
+        assert "--model" in command and "composed-model-7" in command
+
+
 class TestHttpMapping:
     @pytest.mark.asyncio
     async def test_conflict_maps_to_409_with_retry(self, profile_store):
@@ -640,3 +825,84 @@ class TestHttpMapping:
                     profile_contract={"schema": "nope"},
                 )
         assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_missing_profile_maps_to_400(self, profile_store):
+        """The launch-boundary typed lookup error is a client error."""
+        from fastapi import BackgroundTasks, HTTPException
+
+        from cli_agent_orchestrator.api import main
+        from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+            ProfileNotFoundError,
+        )
+
+        with (
+            patch.object(
+                main.session_service,
+                "create_session",
+                side_effect=ProfileNotFoundError("Agent profile not found: ghost"),
+            ),
+            patch.object(main, "get_plugin_registry", return_value=MagicMock()),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await main.create_session(
+                    request=MagicMock(),
+                    background_tasks=BackgroundTasks(),
+                    agent_profile="ghost",
+                )
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_unparseable_profile_maps_to_400(self, profile_store):
+        """Present-but-unparseable content is client-fixable, not a 500."""
+        from fastapi import BackgroundTasks, HTTPException
+
+        from cli_agent_orchestrator.api import main
+        from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+            ProfileInvalidError,
+        )
+
+        with (
+            patch.object(
+                main.session_service,
+                "create_session",
+                side_effect=ProfileInvalidError("agent profile 'bad' does not parse"),
+            ),
+            patch.object(main, "get_plugin_registry", return_value=MagicMock()),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await main.create_session(
+                    request=MagicMock(),
+                    background_tasks=BackgroundTasks(),
+                    agent_profile="bad",
+                )
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_late_filenotfound_stays_500(self, profile_store):
+        """A late tmux/FIFO/store FileNotFoundError is not a client error.
+
+        The boundary catch is narrowed to the typed launch-context error,
+        so an unrelated FileNotFoundError raised mid-launch keeps its 500
+        classification instead of masquerading as a bad profile name.
+        """
+        from fastapi import BackgroundTasks, HTTPException
+
+        from cli_agent_orchestrator.api import main
+
+        _write_profile(profile_store, "sup")
+        with (
+            patch.object(
+                main.session_service,
+                "create_session",
+                side_effect=FileNotFoundError("tmux pipe gone mid-launch"),
+            ),
+            patch.object(main, "get_plugin_registry", return_value=MagicMock()),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await main.create_session(
+                    request=MagicMock(),
+                    background_tasks=BackgroundTasks(),
+                    agent_profile="sup",
+                )
+        assert exc_info.value.status_code == 500

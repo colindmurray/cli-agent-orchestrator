@@ -180,7 +180,10 @@ from cli_agent_orchestrator.services.install_service import InstallResult, insta
 from cli_agent_orchestrator.services.log_writer import log_writer
 from cli_agent_orchestrator.services.status_monitor import status_monitor
 from cli_agent_orchestrator.services.step_output_store import _validate_key_part
-from cli_agent_orchestrator.services.supervisor_profile_receipt import ProfileLaunchConflict
+from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+    ProfileLaunchConflict,
+    ProfileNotFoundError,
+)
 from cli_agent_orchestrator.services.terminal_service import (
     OutputMode,
     TerminalGenerationMismatchError,
@@ -1854,7 +1857,11 @@ async def create_session(
                 "retry": e.retry,
             },
         )
-    except FileNotFoundError as e:
+    # Narrowed to the launch-boundary typed error: only the profile
+    # lookup itself is a client error. A late, unrelated FileNotFoundError
+    # (tmux, FIFO, store mid-launch) must keep its 500 classification
+    # rather than being misreported as a bad profile name.
+    except ProfileNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

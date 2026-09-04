@@ -115,7 +115,12 @@ Create a new session with one terminal.
 - `session_name` (string, optional): Custom session name
 - `working_directory` (string, optional): Working directory for the agent session
 
-**Response:** Terminal object (201 Created)
+**Request body (optional, JSON):**
+- `profile_contract` (object, optional): The conductor-preflighted `cao-profile-launch-contract-v1` expectation (`profile`, `role: supervisor`, `provider`, `model`, `effort`, `provenance`, `source_path`, `sha256`). It is validated against the profile source the runtime loads exactly once, before any tmux/session/provider effect: a divergence answers 409 with the divergent fields and a retry path (re-preflight, retry with the fresh contract); a malformed contract answers 400. An absent contract launches normally. `source_path` compares in canonical form, so an aliased/symlinked spelling of the same physical profile agrees — but path and digest must both match, so identical bytes at a different canonical path still diverge.
+
+**Response:** Terminal object (201 Created), carrying the runtime-authored `cao-profile-receipt-v1` in `profile_receipt` — the profile, route, provenance, source path, and digest the runtime actually launched with.
+
+**Note:** A named profile that is unavailable to CAO's configured stores refuses the launch with 400 instead of starting a fallback-provider terminal with no profile. A launch that cannot record what it launched with is not a launch.
 
 ### GET /sessions
 List all sessions.
