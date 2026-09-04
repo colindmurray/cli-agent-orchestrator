@@ -1007,8 +1007,7 @@ class TestFrozenSurvivesStoreMutation:
             # only that exchange with the frozen route. Everything else —
             # material composition, adapter construction, argv build —
             # still runs for real against the frozen context.
-            from cli_agent_orchestrator.services import unmanaged_native_identity
-            from cli_agent_orchestrator.services import native_attachment
+            from cli_agent_orchestrator.services import native_attachment, unmanaged_native_identity
 
             def _frozen_codex_identity(**kwargs):
                 assert kwargs["launch_profile"] is context.profile
