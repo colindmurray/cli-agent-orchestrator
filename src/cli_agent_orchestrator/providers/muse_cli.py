@@ -49,7 +49,9 @@ from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
     BaseProvider,
+    PreparedSealedLaunch,
     SealedLaunchMaterial,
+    SealedPreparationUnsupported,
     SealedProfileSupport,
     container_maps_set,
     custom_permission_mode_set,
@@ -195,6 +197,23 @@ class MuseCliProvider(BaseProvider):
             "Muse launch argv (model, effort) uses only the frozen material; "
             "the profile is content-free under a wildcard policy",
         )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Carry the content-free wildcard shape, pre-effect.
+
+        The argv pins only the frozen model and effort — already-typed
+        material fields needing no serialization — so there is nothing
+        to validate and no payload to carry: preparation is the choke
+        point, not a second gate (the capability decision stays in
+        :meth:`supports_sealed_launch`). A missing frozen profile is
+        still refused outright.
+        """
+        if material is None or material.profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        return PreparedSealedLaunch(provider="muse_cli")
 
     async def initialize(self) -> bool:
         """Launch ``muse --yolo`` inside the tmux window (cwd = the worktree)."""

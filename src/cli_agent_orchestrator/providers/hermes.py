@@ -13,7 +13,9 @@ from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
     BaseProvider,
+    PreparedSealedLaunch,
     SealedLaunchMaterial,
+    SealedPreparationUnsupported,
     SealedProfileSupport,
     container_maps_set,
     custom_permission_mode_set,
@@ -251,6 +253,31 @@ class HermesProvider(BaseProvider):
             "uses only the frozen material; prompt, skills, and policy inputs "
             "are empty",
         )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Carry the model-only default path, pre-effect.
+
+        The argv is the fixed default command plus the frozen
+        ``--model`` — already-typed material needing no serialization —
+        so preparation carries no payload. A set ``hermesProfile`` is
+        unconsumable on the frozen path (it launches the named wrapper
+        from the mutable Hermes-native store) and is refused outright;
+        every other dropped field is the capability gate's decision,
+        not preparation's.
+        """
+        if material is None or material.profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        wrapper = getattr(material.profile, "hermesProfile", None)
+        if isinstance(wrapper, str) and wrapper:
+            raise SealedPreparationUnsupported(
+                f"Hermes launches the named profile wrapper {wrapper!r}; persona and "
+                "tools resolve from the mutable Hermes-native store, not the "
+                "frozen CAO profile"
+            )
+        return PreparedSealedLaunch(provider="hermes")
 
     async def initialize(self) -> bool:
         """Initialize Hermes by starting the configured profile chat REPL."""

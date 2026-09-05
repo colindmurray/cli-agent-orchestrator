@@ -1575,16 +1575,17 @@ class TestComposedFrozenContextWiring:
     async def test_sealed_codex_composes_skill_and_policy_exactly_once(
         self, profile_store, isolated_memory_db, launched_provider
     ):
-        """Gate, bootstrap, and TUI share one skill/policy composition.
+        """Gate, prepare, bootstrap, and TUI share one skill/policy composition.
 
         The catalog builder answers CATALOG-A on its first call and raises
-        on any second: with the frozen skill threaded through, the bridge
-        builder never rescans, so the bootstrap observes CATALOG-A and the
-        launch performs exactly one skill composition and one policy
-        resolution. A rebuild (second call) errors the launch instead of
-        silently swapping in CATALOG-B.
+        on any second: with the frozen skill threaded through, preparation
+        and the bridge builder never rescan, so the bootstrap observes
+        CATALOG-A and the launch performs exactly one skill composition
+        and one policy resolution. A rebuild (second call) errors the
+        launch instead of silently swapping in CATALOG-B.
         """
         import cli_agent_orchestrator.services.managed_provider_bridge as bridge
+        from cli_agent_orchestrator.providers.manager import ProviderManager
         from cli_agent_orchestrator.services import terminal_service, unmanaged_native_identity
         from cli_agent_orchestrator.services.terminal_service import create_terminal
 
@@ -1649,12 +1650,18 @@ class TestComposedFrozenContextWiring:
             # The gate-equivalent composition: the single counted build.
             material = spr.build_sealed_launch_material(context)
             assert material.skill_text == "CATALOG-A"
+            # The session-boundary preparation: validates and serializes
+            # without recomposing (a second catalog/policy build would
+            # raise through the rigged builders).
+            prepared = ProviderManager().prepare_sealed_launch("codex", material)
+            assert prepared.codex_material["system_prompt"].count("CATALOG-A") == 1
             terminal = await create_terminal(
                 provider="codex",
                 agent_profile="sup",
                 new_session=True,
                 profile_launch_context=context,
                 sealed_launch_material=material,
+                prepared_sealed_launch=prepared,
                 expected_model=context.model,
                 expected_effort=context.effort,
             )

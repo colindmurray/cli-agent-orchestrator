@@ -59,7 +59,12 @@ PROFILE_RECEIPT_SCHEMA = "cao-profile-receipt-v1"
 
 SUPERVISOR_ROLE = "supervisor"
 
+#: The exact required contract set, shared by the missing-field and
+#: extra-field checks and the drift comparison: omitting ``schema`` here
+#: once turned a missing schema into a ``KeyError``/HTTP 500 instead of
+#: a typed malformed 400.
 _CONTRACT_FIELDS = (
+    "schema",
     "profile",
     "role",
     "provider",
@@ -402,10 +407,13 @@ def parse_profile_contract(raw: Any) -> Dict[str, Any]:
     """
     if not isinstance(raw, Mapping):
         raise ProfileContractMalformed("profile_contract must be an object")
+    # The missing and extra checks share the one exact required set, so
+    # no field can be required-but-unlisted (KeyError/500) or
+    # listed-but-unrequired.
     missing = [field for field in _CONTRACT_FIELDS if field not in raw]
     if missing:
         raise ProfileContractMalformed(f"profile_contract is missing fields: {sorted(missing)}")
-    extra = sorted(key for key in raw if key not in _CONTRACT_FIELDS and key != "schema")
+    extra = sorted(key for key in raw if key not in _CONTRACT_FIELDS)
     if extra:
         raise ProfileContractMalformed(f"profile_contract has unknown fields: {extra}")
     if raw["schema"] != PROFILE_LAUNCH_CONTRACT_SCHEMA:
@@ -475,6 +483,7 @@ def validate_profile_contract(contract: Mapping[str, Any], context: ProfileLaunc
             raise ValueError(f"profile_contract field {field!r} must be a string or null")
 
     expected = {
+        "schema": PROFILE_LAUNCH_CONTRACT_SCHEMA,
         "profile": context.profile_name,
         "role": SUPERVISOR_ROLE,
         "provider": context.provider,

@@ -19,10 +19,14 @@ from cli_agent_orchestrator.constants import CAO_HOME_DIR
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
     BaseProvider,
+    PreparedSealedLaunch,
     SealedLaunchMaterial,
+    SealedPreparationUnsupported,
     SealedProfileSupport,
+    bind_sealed_terminal_id,
     dropped_q_fields,
     foreign_native_fields,
+    resolve_sealed_mcp_configs,
 )
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -223,17 +227,24 @@ class ClaudeCodeProvider(BaseProvider):
         native_session_id: Optional[str] = None,
         fork_from_session_id: Optional[str] = None,
         launch_profile: Optional["AgentProfile"] = None,
+        prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
     ):
         """Initialize provider state.
 
         ``launch_profile`` is the launch's already-loaded profile
         (cond-0817): when set, the launch argv consumes this exact object
         and never reloads the profile by name. None keeps the legacy load.
+
+        ``prepared_sealed_launch`` is the one pre-effect prepared value:
+        when set, the MCP strict-file content comes from its bound
+        configs instead of being re-resolved. None keeps the legacy
+        inline resolution.
         """
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
         self._agent_profile = agent_profile
         self._launch_profile = launch_profile
+        self._prepared_sealed_launch = prepared_sealed_launch
         # The pre-task minted harness-native id the launch argv
         # must consume (``--session-id <id>``); None keeps the legacy
         # ambient launch.
@@ -406,9 +417,14 @@ class ClaudeCodeProvider(BaseProvider):
             # can identify the current terminal for handoff/assign operations.
             # Claude Code does not automatically forward parent shell env vars
             # to MCP subprocesses, so we inject it explicitly via the env field.
-            if profile.mcpServers:
+            prepared = self._prepared_sealed_launch
+            if prepared is not None and prepared.mcp_configs is not None:
+                # Sealed: consume the pre-effect validated artifact bound
+                # to this terminal — never re-resolved inline.
+                mcp_config = bind_sealed_terminal_id(prepared.mcp_configs, self.terminal_id)
+            else:
                 mcp_config = {}
-                for server_name, server_config in profile.mcpServers.items():
+                for server_name, server_config in (profile.mcpServers or {}).items():
                     if isinstance(server_config, dict):
                         mcp_config[server_name] = dict(server_config)
                     else:
@@ -423,6 +439,7 @@ class ClaudeCodeProvider(BaseProvider):
                         env["CAO_TERMINAL_ID"] = self.terminal_id
                         mcp_config[server_name]["env"] = env
 
+            if mcp_config:
                 tmp_dir = CAO_HOME_DIR / "tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 mcp_file = tmp_dir / f"{self.terminal_id}.mcp.json"
@@ -662,6 +679,39 @@ class ClaudeCodeProvider(BaseProvider):
             "Claude full launch-material decomposition into CLI flags (model, "
             "permission mode, prompt file, MCP file, permissions, timeout, "
             "container maps) uses only the frozen material",
+        )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Resolve and validate the frozen MCP file content, pre-effect.
+
+        The strict MCP file is the one launch input whose shape the
+        profile parse leaves unvalidated: a transport-less entry would
+        otherwise reach the CLI only after launch effects exist.
+        ``resolve_sealed_mcp_configs`` enforces the one-transport rule
+        here, so malformed MCP raises
+        :class:`SealedPreparationUnsupported` before any clear, tmux,
+        DB, file, or provider effect. A set ``native_agent`` is
+        unconsumable on the frozen path (thin wrapper over the mutable
+        native store) and is refused outright. Model, permission mode,
+        timeout, and container maps ride the already-typed profile
+        fields and need no serialization validation. Returns the
+        placeholder-bound configs the launch binds and emits verbatim.
+        """
+        profile = material.profile if material is not None else None
+        if profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        native = getattr(profile, "native_agent", None)
+        if isinstance(native, str) and native:
+            raise SealedPreparationUnsupported(
+                f"Claude thin-wrapper mode passes --agent {native!r} to the mutable "
+                "Claude Code native agent store; the frozen CAO profile is not "
+                "what the supervisor consumes"
+            )
+        return PreparedSealedLaunch(
+            provider="claude_code", mcp_configs=resolve_sealed_mcp_configs(profile)
         )
 
     async def initialize(self) -> bool:

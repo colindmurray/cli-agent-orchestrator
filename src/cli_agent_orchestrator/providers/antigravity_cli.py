@@ -56,7 +56,9 @@ from cli_agent_orchestrator.constants import SECURITY_PROMPT
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
     BaseProvider,
+    PreparedSealedLaunch,
     SealedLaunchMaterial,
+    SealedPreparationUnsupported,
     SealedProfileSupport,
     container_maps_set,
     custom_permission_mode_set,
@@ -590,6 +592,39 @@ class AntigravityCliProvider(BaseProvider):
             "configuration (~/.gemini/config/mcp_config.json) is outside the "
             "CAO profile receipt and authority",
         )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Confirm there is no MCP material to merge, pre-effect.
+
+        Any nonempty ``mcpServers`` — well-formed or malformed — would
+        merge into the shared ``~/.gemini/config/mcp_config.json``,
+        which has no per-launch config path; it is refused here,
+        before any shared-file access and before any clear, tmux, DB,
+        or provider effect. With no MCP material the frozen argv
+        (model, effort, prompt, advisory policy) rides already-typed
+        fields and needs no serialization, so preparation carries no
+        payload: it is the choke point, not a composer.
+        """
+        profile = material.profile if material is not None else None
+        if profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        mcp_servers = getattr(profile, "mcpServers", None)
+        if mcp_servers:
+            names = (
+                ", ".join(sorted(mcp_servers))
+                if isinstance(mcp_servers, dict)
+                else "configured servers"
+            )
+            raise SealedPreparationUnsupported(
+                f"Antigravity writes the frozen profile's MCP servers ({names}) into "
+                "the shared ~/.gemini/config/mcp_config.json, which has no "
+                "per-launch config path; the supervisor would consume whatever "
+                "the shared file holds at launch, not the frozen CAO profile"
+            )
+        return PreparedSealedLaunch(provider="antigravity_cli")
 
     async def initialize(self) -> bool:
         """Initialize the Antigravity CLI provider by starting ``agy``.

@@ -78,7 +78,7 @@ from cli_agent_orchestrator.plugins import (
     PostKillTerminalEvent,
     PostSendMessageEvent,
 )
-from cli_agent_orchestrator.providers.base import SealedLaunchMaterial
+from cli_agent_orchestrator.providers.base import PreparedSealedLaunch, SealedLaunchMaterial
 from cli_agent_orchestrator.providers.manager import provider_manager
 from cli_agent_orchestrator.services import restore_contract, unmanaged_native_identity
 from cli_agent_orchestrator.services.fifo_reader import fifo_manager
@@ -1977,6 +1977,13 @@ async def create_terminal(
     #: the gate and the launch agree by construction. ``None`` keeps the
     #: legacy recompute for non-supervisor launches.
     sealed_launch_material: Optional[SealedLaunchMaterial] = None,
+    #: The one prepared sealed-launch value the session boundary built
+    #: pre-effect (cond-0817 repair). When present, the Codex profile
+    #: material below is bound from it by pure terminal-id substitution
+    #: and consumed by identity — the launch never reloads the profile
+    #: or re-runs provider composition/validation. ``None`` keeps the
+    #: legacy per-stage composition for direct construction.
+    prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
 ) -> Terminal:
     """Create a new terminal with an initialized CLI agent.
 
@@ -2215,37 +2222,28 @@ async def create_terminal(
                 raise ValueError("CODEX_HOME must be an absolute path for exact resume")
             forwarded_environment["CODEX_HOME"] = os.path.realpath(codex_home)
 
-        # Sealed Codex material is composed BEFORE any tmux/session effect
-        # from the already-frozen launch material: the skill catalog and
-        # tool policy the gate decided on are reused verbatim, so a
-        # malformed composition fails here with the typed refusal instead
-        # of after the window exists — and the bootstrap and resumed TUI
-        # below consume this exact object. Direct/legacy construction
-        # (no sealed material) keeps the builder fallback at its later
-        # site, unchanged.
+        # Sealed Codex material is bound BEFORE any tmux/session effect
+        # from the one prepared value the session boundary validated
+        # pre-effect: the terminal-id placeholder is substituted purely
+        # (no validation, no composition), and the bootstrap and resumed
+        # TUI below consume this exact object by identity. Preparation
+        # already refused malformed material with the typed refusal
+        # before the persisted session env was cleared, so nothing here
+        # can fail on provider input. Direct/legacy construction (no
+        # prepared value) keeps the builder fallback at its later site,
+        # unchanged.
         codex_profile_material: Optional[dict] = None
         if (
             managed_native_command is None
             and provider == ProviderType.CODEX.value
-            and sealed_launch_material is not None
-            and profile_launch_context is not None
+            and prepared_sealed_launch is not None
+            and prepared_sealed_launch.codex_material is not None
         ):
-            from cli_agent_orchestrator.services.managed_provider_bridge import (
-                _profile_material_from_profile,
-            )
+            from cli_agent_orchestrator.providers.codex import bind_codex_material_terminal_id
 
-            try:
-                codex_profile_material = _profile_material_from_profile(
-                    profile_launch_context.profile,
-                    terminal_id,
-                    allowed_tools=list(sealed_launch_material.allowed_tools),
-                    skill_prompt=sealed_launch_material.skill_text,
-                )
-            except Exception as exc:  # noqa: BLE001 - record the concrete blocker
-                raise unmanaged_native_identity.UnmanagedIdentityUnavailable(
-                    f"the codex profile material was refused by the pre-task identity "
-                    f"contract: {exc}"
-                ) from exc
+            codex_profile_material = bind_codex_material_terminal_id(
+                prepared_sealed_launch.codex_material, terminal_id
+            )
 
         # Step 2: Create tmux session or window
         if new_session:
@@ -2511,8 +2509,9 @@ async def create_terminal(
         # native launches run the provider bridge as the pane's own argv and
         # never reach provider creation, so they neither need nor consult
         # this material.
-        # A sealed launch already composed this before Step 2 (pre-effect);
-        # only direct/legacy construction reaches the builder fallback here.
+        # A session-boundary launch already prepared this pre-effect and
+        # bound it above; only direct/legacy construction (no prepared
+        # value) reaches the builder fallback here.
         if (
             codex_profile_material is None
             and managed_native_command is None
@@ -2764,6 +2763,10 @@ async def create_terminal(
             # resolve model/effort/skill/policy/profile from it verbatim,
             # so bootstrap, argv, and resumed launch share one authority.
             sealed_launch_material=sealed_launch_material,
+            # The one prepared value: Codex/Claude/Kimi/Cursor
+            # constructors consume its bound artifact instead of
+            # re-resolving provider material.
+            prepared_sealed_launch=prepared_sealed_launch,
         )
 
         # Deferred-init path: return fast so callers (e.g. MCP assign) do not

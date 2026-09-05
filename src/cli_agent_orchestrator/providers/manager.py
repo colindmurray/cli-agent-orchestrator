@@ -10,7 +10,9 @@ from cli_agent_orchestrator.models.provider import ProviderType
 from cli_agent_orchestrator.providers.antigravity_cli import AntigravityCliProvider
 from cli_agent_orchestrator.providers.base import (
     BaseProvider,
+    PreparedSealedLaunch,
     SealedLaunchMaterial,
+    SealedPreparationUnsupported,
     SealedProfileSupport,
 )
 from cli_agent_orchestrator.providers.claude_code import ClaudeCodeProvider
@@ -104,6 +106,28 @@ class ProviderManager:
             )
         return adapter.supports_sealed_launch(material)
 
+    def prepare_sealed_launch(
+        self, provider_type: str, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Validate + serialize the frozen material without any effect.
+
+        Pure class-level dispatch to the adapter's own preparation: no
+        provider instance, no tmux, no DB, no files. The session
+        boundary runs this exactly once after the capability gate and
+        before any effect; malformed material raises
+        :class:`SealedPreparationUnsupported` (mapped to 422 with zero
+        effects), unexpected failures propagate (still pre-effect).
+        Unknown or unmapped provider types are unpreparable, never
+        silently preparable.
+        """
+        adapter = _ADAPTER_CLASS_BY_TYPE.get(provider_type)
+        if adapter is None:
+            raise SealedPreparationUnsupported(
+                f"unknown provider type {provider_type!r}: no adapter prepares "
+                "frozen-launch-material"
+            )
+        return adapter.prepare_sealed_launch(material)
+
     def create_provider(
         self,
         provider_type: str,
@@ -130,6 +154,12 @@ class ProviderManager:
         # Antigravity) so both consume the admitted inputs verbatim.
         # ``None`` keeps legacy per-adapter resolution.
         sealed_launch_material: Optional[SealedLaunchMaterial] = None,
+        # The one prepared sealed-launch value (cond-0817 repair).
+        # Forwarded to the adapters whose launch serializes MCP material
+        # (Codex, Claude, Kimi, Cursor) so they consume the pre-effect
+        # validated artifact instead of re-resolving. ``None`` keeps
+        # legacy per-adapter resolution.
+        prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
     ) -> BaseProvider:
         """Create and store provider instance."""
         try:
@@ -155,6 +185,7 @@ class ProviderManager:
                     skill_prompt=skill_prompt,
                     native_session_id=native_session_id,
                     launch_profile=launch_profile,
+                    prepared_sealed_launch=prepared_sealed_launch,
                 )
             elif provider_type == ProviderType.CODEX.value:
                 provider = CodexProvider(
@@ -193,6 +224,7 @@ class ProviderManager:
                     expected_model=expected_model,
                     expected_effort=expected_effort,
                     launch_profile=launch_profile,
+                    prepared_sealed_launch=prepared_sealed_launch,
                 )
             elif provider_type == ProviderType.MUSE_CLI.value:
                 provider = MuseCliProvider(
@@ -235,6 +267,7 @@ class ProviderManager:
                     model=model,
                     skill_prompt=skill_prompt,
                     launch_profile=launch_profile,
+                    prepared_sealed_launch=prepared_sealed_launch,
                 )
             elif provider_type == ProviderType.ANTIGRAVITY_CLI.value:
                 provider = AntigravityCliProvider(

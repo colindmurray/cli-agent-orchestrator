@@ -24,7 +24,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple
 
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 
@@ -114,6 +114,130 @@ def container_maps_set(profile: Any) -> bool:
     """Whether the profile declares container path maps (guest translation)."""
     container = getattr(profile, "container", None)
     return bool(container is not None and getattr(container, "path_maps", None))
+
+
+#: Placeholder terminal id carried by a prepared sealed-launch value
+#: (cond-0817 repair). Provider material that names the terminal (the
+#: ``CAO_TERMINAL_ID`` env default injected into MCP server configs) is
+#: prepared before the terminal id exists; ``create_terminal`` binds the
+#: real id by pure string substitution over the already-validated
+#: structures — never by re-running validation or composition.
+SEALED_TERMINAL_ID_PLACEHOLDER = "__CAO_SEALED_TERMINAL_ID__"
+
+
+@dataclass(frozen=True)
+class PreparedSealedLaunch:
+    """One immutable in-memory prepared sealed-launch value.
+
+    Owned by the provider adapter/manager seam: each sealed-capable
+    adapter validates and serializes every field it actually consumes
+    into this value exactly once, pre-effect, in
+    :meth:`BaseProvider.prepare_sealed_launch`. The session boundary
+    runs preparation after contract validation/material construction
+    and before any launch effect; ``create_terminal`` binds the
+    terminal-id placeholder by pure substitution and consumes the
+    artifact — never reloading the profile or re-running composition.
+
+    Payload slots are per-adapter: ``codex_material`` carries the Codex
+    profile-material dict (placeholder-bound); ``mcp_configs`` carries
+    the resolved MCP server configs (placeholder-bound
+    ``CAO_TERMINAL_ID``) for the file/inline/plugin emitters
+    (Claude/Kimi/Cursor). Validation-only adapters (Antigravity, Muse,
+    Hermes) carry no payload: preparation is their choke point.
+    """
+
+    provider: str
+    codex_material: Optional[Mapping[str, Any]] = None
+    mcp_configs: Optional[Mapping[str, Mapping[str, Any]]] = None
+
+
+class SealedPreparationUnsupported(RuntimeError):
+    """Frozen launch material an adapter cannot consume exactly.
+
+    Raised by adapter preparation (pre-effect) when provider-specific
+    validation or pure serialization of the frozen material fails: a
+    malformed MCP/config shape, an unserializable value, or a nonempty
+    field the adapter never forwards. The session boundary maps it to
+    the operation-scoped 422 with zero effects. Any other preparation
+    exception is unexpected and propagates (still pre-effect) as a 500.
+
+    Deliberately a ``RuntimeError``, not a ``ValueError``: the HTTP
+    boundary maps ``ValueError`` to 400, which would misreport a
+    provider-material refusal as a malformed request shape.
+    """
+
+
+def resolve_sealed_mcp_configs(profile: Any) -> Dict[str, Dict[str, Any]]:
+    """Resolve and validate every MCP entry an adapter consumes.
+
+    Pure shared validation for the file/inline/plugin emitters
+    (Claude/Kimi/Cursor): each entry must be a mapping carrying exactly
+    one usable transport (a non-empty ``command`` or a non-empty
+    ``url``) — the same one-transport rule the Codex composer enforces
+    — with a mapping ``env``. The bundled command resolves through the
+    existing resolver, and the ``CAO_TERMINAL_ID`` default is the
+    terminal-id placeholder the launch binds later. Malformed entries
+    raise :class:`SealedPreparationUnsupported`, never a late
+    serializer error or a silent coercion. Never mutates the profile.
+    """
+    from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
+
+    raw_servers = getattr(profile, "mcpServers", None) or {}
+    if not isinstance(raw_servers, Mapping):
+        raise SealedPreparationUnsupported(
+            f"mcpServers must be a mapping of server configs, got {type(raw_servers).__name__}"
+        )
+    configs: Dict[str, Dict[str, Any]] = {}
+    for name, value in raw_servers.items():
+        if isinstance(value, dict):
+            config = dict(value)
+        elif hasattr(value, "model_dump"):
+            config = value.model_dump(exclude_none=True)
+        else:
+            raise SealedPreparationUnsupported(
+                f"mcpServers {name!r} must be a mapping, got {type(value).__name__}"
+            )
+        config = resolve_mcp_server_config(config)
+        command = config.get("command")
+        url = config.get("url")
+        usable_command = isinstance(command, str) and bool(command)
+        usable_url = isinstance(url, str) and bool(url)
+        if usable_command == usable_url:
+            raise SealedPreparationUnsupported(
+                f"mcpServers {name!r} must configure exactly one usable transport: "
+                f"got command={command!r} and url={url!r}"
+            )
+        env = config.get("env", {})
+        if not isinstance(env, Mapping):
+            raise SealedPreparationUnsupported(
+                f"mcpServers {name!r} env must be a mapping, got {type(env).__name__}"
+            )
+        env = dict(env)
+        env.setdefault("CAO_TERMINAL_ID", SEALED_TERMINAL_ID_PLACEHOLDER)
+        config["env"] = env
+        configs[name] = config
+    return configs
+
+
+def bind_sealed_terminal_id(
+    configs: Mapping[str, Mapping[str, Any]], terminal_id: str
+) -> Dict[str, Dict[str, Any]]:
+    """Bind the real terminal id into prepared MCP configs.
+
+    Pure non-validating substitution: every exact placeholder value
+    becomes the terminal id. Returns new dicts — the prepared value
+    stays immutable.
+    """
+    bound: Dict[str, Dict[str, Any]] = {}
+    for name, config in configs.items():
+        config = dict(config)
+        env = {
+            key: (terminal_id if value == SEALED_TERMINAL_ID_PLACEHOLDER else value)
+            for key, value in dict(config.get("env", {})).items()
+        }
+        config["env"] = env
+        bound[name] = config
+    return bound
 
 
 def custom_permission_mode_set(profile: Any) -> bool:
@@ -229,6 +353,33 @@ class BaseProvider(ABC):
                 f"{cls.__name__} does not declare frozen-profile launch support; "
                 "it resolves launch inputs from the mutable provider-native store"
             ),
+        )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Validate and serialize every consumed field, pre-effect (cond-0817).
+
+        The conservative default is **refusal**: an adapter opts in by
+        overriding this classmethod alongside
+        :meth:`supports_sealed_launch`, so future or unmarked adapters
+        never silently become preparable. The override runs the
+        adapter's own provider-specific validation and pure
+        serialization over the frozen material — the same composer and
+        serializers the launch consumes — and returns the one immutable
+        prepared value the launch binds and consumes. Malformed or
+        unconsumable material raises :class:`SealedPreparationUnsupported`
+        (the session boundary maps it to 422 with zero effects); any
+        other exception is unexpected and propagates (still pre-effect).
+
+        This is a pure class-level operation — it constructs no
+        provider, touches no tmux/session/DB, and writes no files — so
+        the session boundary runs it exactly once before any effect.
+        """
+        raise SealedPreparationUnsupported(
+            f"{cls.__name__} does not prepare frozen-profile launches; "
+            "it resolves launch inputs from the mutable provider-native store"
         )
 
     @property

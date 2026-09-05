@@ -31,6 +31,7 @@ from cli_agent_orchestrator.plugins import (
     PostCreateSessionEvent,
     PostKillSessionEvent,
 )
+from cli_agent_orchestrator.providers.base import SealedPreparationUnsupported
 from cli_agent_orchestrator.providers.manager import provider_manager
 from cli_agent_orchestrator.services.plugin_dispatch import dispatch_plugin_event
 from cli_agent_orchestrator.services.session_env import clear_session_env
@@ -166,6 +167,44 @@ async def create_session(
             ),
         )
 
+    # Sealed-launch preparation (cond-0817 repair): the adapter validates
+    # and serializes every field it actually consumes — the same composer
+    # and serializers the launch runs — exactly once, after contract
+    # validation/material construction and before ANY effect. A malformed
+    # provider shape (e.g. a transport-less MCP entry) is refused here as
+    # an operation-scoped 422 with zero mutation; previously it failed
+    # late inside create_terminal, after the persisted session env had
+    # already been cleared. An unexpected preparation failure propagates
+    # (still pre-effect) and keeps its 500 classification.
+    prepared_sealed_launch = None
+    if sealed.supported:
+        try:
+            prepared_sealed_launch = provider_manager.prepare_sealed_launch(
+                launch_context.provider, sealed_material
+            )
+        except SealedPreparationUnsupported as exc:
+            if profile_contract is not None:
+                recovery = (
+                    "use a provider whose adapter consumes the frozen CAO profile "
+                    "exactly (see the adapter sealed-profile capability), or retry "
+                    "without profile_contract for an ordinary legacy launch with "
+                    "no exact receipt"
+                )
+            else:
+                recovery = (
+                    "repair the frozen profile fields the adapter cannot consume "
+                    "exactly (see the adapter reason), or switch to a provider "
+                    "whose adapter consumes them"
+                )
+            raise ProfileLaunchUnsupported(
+                f"provider {launch_context.provider!r} cannot launch exactly from the "
+                f"frozen profile {agent_profile!r}; no launch effect was produced",
+                provider=launch_context.provider,
+                source_path=launch_context.source_path,
+                reason=str(exc),
+                recovery=recovery,
+            ) from exc
+
     create_kwargs: dict = {
         "provider": launch_context.provider,
         "agent_profile": agent_profile,
@@ -186,8 +225,12 @@ async def create_session(
         # provider construction — including the exact expected model/effort
         # the provider argv pins and the skill/policy inputs the gate
         # decided on, so the launch cannot disagree with the decision.
+        # The prepared value is the one pre-effect validation artifact:
+        # create_terminal binds its terminal-id placeholder by pure
+        # substitution and consumes it, never re-running composition.
         create_kwargs["profile_launch_context"] = launch_context
         create_kwargs["sealed_launch_material"] = sealed_material
+        create_kwargs["prepared_sealed_launch"] = prepared_sealed_launch
         create_kwargs["expected_model"] = launch_context.model
         create_kwargs["expected_effort"] = launch_context.effort
     terminal = await create_terminal(**create_kwargs)

@@ -74,14 +74,18 @@ from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
     BaseProvider,
+    PreparedSealedLaunch,
     SealedLaunchMaterial,
+    SealedPreparationUnsupported,
     SealedProfileSupport,
+    bind_sealed_terminal_id,
     container_maps_set,
     custom_permission_mode_set,
     custom_timeout_set,
     dropped_q_fields,
     foreign_native_fields,
     policy_restricted,
+    resolve_sealed_mcp_configs,
 )
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -221,6 +225,7 @@ class CursorCliProvider(BaseProvider):
         model: Optional[str] = None,
         skill_prompt: Optional[str] = None,
         launch_profile: Optional["AgentProfile"] = None,
+        prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
     ):
         """Initialize the Cursor CLI provider.
 
@@ -246,6 +251,10 @@ class CursorCliProvider(BaseProvider):
         # launch argv consumes this exact object and never reloads the
         # profile by name. None keeps the legacy load.
         self._launch_profile = launch_profile
+        # The one pre-effect prepared value (cond-0817 repair): when
+        # set, the plugin-dir manifest comes from its bound configs
+        # instead of being re-resolved. None keeps legacy resolution.
+        self._prepared_sealed_launch = prepared_sealed_launch
         # Temp paths the provider has created under the CAO tmp dir.
         # ``cleanup()`` deletes every entry in this list so the
         # per-session files (system prompt + plugin dir) do not
@@ -443,7 +452,18 @@ class CursorCliProvider(BaseProvider):
         # identify the current terminal for handoff / assign
         # operations, and keep the layout under the CAO tmp dir so
         # it is removed with the session.
-        if profile is not None and profile.mcpServers:
+        prepared = self._prepared_sealed_launch
+        if prepared is not None and prepared.mcp_configs is not None:
+            # Sealed: the pre-effect validated artifact bound to this
+            # terminal — never re-resolved inline.
+            sealed_servers = bind_sealed_terminal_id(prepared.mcp_configs, self.terminal_id)
+            if sealed_servers:
+                plugin_dir = self._write_plugin_dir(sealed_servers)
+                command_parts.extend(["--plugin-dir", plugin_dir])
+                # --approve-mcps is required to skip per-server approval
+                # dialogs on first run; otherwise the REPL blocks.
+                command_parts.append("--approve-mcps")
+        elif profile is not None and profile.mcpServers:
             plugin_dir = self._write_plugin_dir(profile.mcpServers)
             command_parts.extend(["--plugin-dir", plugin_dir])
             # --approve-mcps is required to skip per-server approval
@@ -622,6 +642,29 @@ class CursorCliProvider(BaseProvider):
             True,
             "Cursor launch argv (model, per-launch MCP plugin dir) uses only "
             "the frozen material; prompt, skills, and policy inputs are empty",
+        )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Resolve and validate the frozen plugin-dir manifest, pre-effect.
+
+        The per-session MCP plugin dir is the one launch input whose
+        shape the profile parse leaves unvalidated: a transport-less
+        entry would otherwise be written into the manifest only after
+        launch effects exist. ``resolve_sealed_mcp_configs`` enforces
+        the one-transport rule here, so malformed MCP raises
+        :class:`SealedPreparationUnsupported` before any clear, tmux,
+        DB, file, or provider effect. Model rides the already-typed
+        material field. Returns the placeholder-bound configs the
+        launch binds and materialises verbatim.
+        """
+        if material is None or material.profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        return PreparedSealedLaunch(
+            provider="cursor_cli",
+            mcp_configs=resolve_sealed_mcp_configs(material.profile),
         )
 
     async def initialize(self) -> bool:
