@@ -87,6 +87,11 @@ search = [
 "cao-server" = "cli_agent_orchestrator.api.main:main"
 "cao-mcp-server" = "cli_agent_orchestrator.mcp_server.server:main"
 "cao-ops-mcp-server" = "cli_agent_orchestrator.ops_mcp_server.server:main"
+# Ops-only, invoked by an operator on the target host against an isolated
+# disposable state root. Deliberately a separate entry point rather than a `cao`
+# subcommand: it must be reachable from no running server, no API path, and no
+# channel verb, and keeping it out of the main CLI tree keeps that visible.
+"cao-gate2-proof-run" = "cli_agent_orchestrator.cli.commands.gate2_proof_run:main"
 
 [project.entry-points."cao.plugins"]
 claude_code_memory = "cli_agent_orchestrator.plugins.builtin.claude_code_memory:ClaudeCodeMemoryPlugin"
