@@ -28,7 +28,7 @@ import time
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, NamedTuple, Optional
+from typing import Any, Dict, Mapping, NamedTuple, Optional
 
 from sqlalchemy.exc import OperationalError
 
@@ -49,6 +49,7 @@ from cli_agent_orchestrator.clients.database import (
 )
 from cli_agent_orchestrator.clients.database import (
     find_terminal_by_pane_identity,
+    get_terminal_adoption_row,
     get_terminal_metadata,
     get_terminal_metadata_v2,
     record_terminal_lifecycle,
@@ -78,7 +79,11 @@ from cli_agent_orchestrator.plugins import (
     PostKillTerminalEvent,
     PostSendMessageEvent,
 )
-from cli_agent_orchestrator.providers.base import PreparedSealedLaunch, SealedLaunchMaterial
+from cli_agent_orchestrator.providers.base import (
+    PreparedSealedLaunch,
+    SealedLaunchMaterial,
+    SealedPreparationUnsupported,
+)
 from cli_agent_orchestrator.providers.manager import provider_manager
 from cli_agent_orchestrator.services import restore_contract, unmanaged_native_identity
 from cli_agent_orchestrator.services.fifo_reader import fifo_manager
@@ -92,8 +97,12 @@ from cli_agent_orchestrator.services.session_env import (
 )
 from cli_agent_orchestrator.services.status_monitor import status_monitor
 from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+    PROFILE_RECEIPT_SCHEMA,
+    ProfileAdoptionMismatch,
     ProfileLaunchContext,
+    ProfileLaunchUnsupported,
     build_profile_receipt,
+    stored_receipt_divergences,
 )
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.skills import build_skill_catalog
@@ -1448,6 +1457,323 @@ def _reservation_launch_facts(row: Any) -> Dict[str, Any]:
     return facts
 
 
+def _adoption_mismatch(
+    session_name: str, candidate_id: Optional[str], reason: str, *, in_flight: bool = False
+) -> ProfileAdoptionMismatch:
+    """Build the typed 409 for a refused contract-bearing retry."""
+    if in_flight:
+        recovery = (
+            "the matching launch is still in flight; retry the same request "
+            "after it completes, or delete the session and retry with a "
+            "fresh session name"
+        )
+    else:
+        recovery = (
+            "delete the session and retry, or retry with a fresh session "
+            "name; a retry of the same request converges once the duplicate "
+            "state is removed"
+        )
+    detail = f" for terminal {candidate_id}" if candidate_id else ""
+    return ProfileAdoptionMismatch(
+        f"session {session_name!r} holds terminal state that does not exactly "
+        f"match the submitted profile contract{detail}; no launch effect was "
+        "produced",
+        session_name=session_name,
+        reason=reason,
+        recovery=recovery,
+    )
+
+
+def find_supervisor_adoption_candidate(
+    *,
+    session_name: str,
+    contract: Mapping[str, Any],
+    expected_receipt: Optional[Mapping[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Read-only create-or-adopt scan for a contract-bearing supervisor retry.
+
+    Returns the one adoptable rowinfo, ``None`` when the session holds
+    no terminal rows at all (the caller proceeds to first creation),
+    and raises :class:`ProfileAdoptionMismatch` when a live duplicate
+    exists but is not an exact adoptable match. Pure reads — no profile
+    reload, no preparation, no clear, no tmux/DB/roster writes, no
+    shared-file access, no receipt rewrite. Callers hold the session
+    lifecycle claim for the authoritative verdict; without it the
+    result is optimistic (a concurrent creator may still be mid-flight,
+    in which case the verdict is re-checked under the claim).
+
+    A row adopts only when every one of these holds: its stored
+    profile receipt parses and matches every submitted contract field
+    (same canonical provenance equivalence as launch validation); its
+    provider/profile/assigned model/effort agree; its lifecycle is
+    live; its tmux window identity is live and unreplaced; the
+    stable-agent roster resolves the same incarnation with supervisor
+    role and a live disposition; and the provider launch is ready
+    rather than pending/captured. Anything else — corrupt, partial,
+    historical, dead, superseded, ambiguous, missing-receipt, or
+    different-candidate state — refuses.
+    """
+    from cli_agent_orchestrator.clients.database import list_terminals_by_session
+    from cli_agent_orchestrator.services import stable_agent_roster
+
+    thin_rows = list_terminals_by_session(session_name) or []
+    row_ids: list[str] = []
+    for entry in thin_rows:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("protocol_vintage") == "v2-managed":
+            continue
+        terminal_id = entry.get("terminal_id") or entry.get("id")
+        if terminal_id:
+            row_ids.append(terminal_id)
+    candidate_rows = [get_terminal_adoption_row(terminal_id) for terminal_id in row_ids]
+    rows = [row for row in candidate_rows if row is not None]
+    if not rows:
+        return None
+
+    full_matches: list[Dict[str, Any]] = []
+    evidence: list[str] = []
+    for row in rows:
+        verdict = _adoption_row_verdict(row, contract=contract, expected_receipt=expected_receipt)
+        if verdict is None:
+            full_matches.append(row)
+        else:
+            evidence.append(f"{row['terminal_id']}: {verdict}")
+    if len(full_matches) > 1:
+        ids = ", ".join(row["terminal_id"] for row in full_matches)
+        raise _adoption_mismatch(
+            session_name,
+            None,
+            f"ambiguous duplicate: {len(full_matches)} terminals ({ids}) fully "
+            "match the submitted contract; refusing to select one",
+        )
+    if not full_matches:
+        raise _adoption_mismatch(
+            session_name,
+            rows[0]["terminal_id"] if len(rows) == 1 else None,
+            "no terminal exactly matches the submitted contract: " + "; ".join(evidence),
+        )
+    row = full_matches[0]
+    refusal = _adoption_liveness_verdict(row, stable_agent_roster=stable_agent_roster)
+    if refusal is not None:
+        reason, in_flight = refusal
+        raise _adoption_mismatch(session_name, row["terminal_id"], reason, in_flight=in_flight)
+    return row
+
+
+def _adoption_row_verdict(
+    row: Dict[str, Any],
+    *,
+    contract: Mapping[str, Any],
+    expected_receipt: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    """Durable-exactness verdict for one row: None when it fully matches."""
+    stored = row.get("profile_receipt")
+    if row.get("receipt_unparseable") or not isinstance(stored, dict):
+        return "stored profile receipt is missing or corrupt"
+    if stored.get("schema") != PROFILE_RECEIPT_SCHEMA:
+        return (
+            f"stored profile receipt schema {stored.get('schema')!r} is not "
+            f"{PROFILE_RECEIPT_SCHEMA!r}"
+        )
+    divergences = stored_receipt_divergences(contract, stored)
+    if divergences:
+        fields = ", ".join(
+            f"{entry['field']} (contract {entry['expected']!r} != " f"stored {entry['actual']!r})"
+            for entry in divergences
+        )
+        return f"stored receipt diverges: {fields}"
+    if expected_receipt is not None:
+        expected_divergences = stored_receipt_divergences(expected_receipt, stored)
+        if expected_divergences:
+            fields = ", ".join(entry["field"] for entry in expected_divergences)
+            return f"stored receipt diverges from this launch's expectation: {fields}"
+    for pin in ("model", "effort"):
+        if (row.get(f"assigned_{pin}") or None) != (contract.get(pin) or None):
+            return (
+                f"terminal assigned_{pin} {row.get(f'assigned_{pin}')!r} != "
+                f"contract {contract.get(pin)!r}"
+            )
+    if (row.get("provider") or None) != (contract.get("provider") or None):
+        return (
+            f"terminal provider {row.get('provider')!r} != "
+            f"contract {contract.get('provider')!r}"
+        )
+    if (row.get("agent_profile") or None) != (contract.get("profile") or None):
+        return (
+            f"terminal profile {row.get('agent_profile')!r} != "
+            f"contract {contract.get('profile')!r}"
+        )
+    return None
+
+
+def _adoption_liveness_verdict(
+    row: Dict[str, Any], *, stable_agent_roster: Any
+) -> Optional[tuple[str, bool]]:
+    """Liveness verdict for the one exactly-matching row.
+
+    Returns None when the row is live and ready, else (reason,
+    in_flight). Every refusal is durable truth, never a guess: a
+    partial row (never registered live), a dead or replaced tmux
+    identity, a retired/superseded roster incarnation, a roster agent
+    that moved on or holds the wrong role, or a provider launch that
+    never reached ready.
+    """
+    terminal_id = row["terminal_id"]
+    if row.get("superseded_by_terminal_id"):
+        return (
+            f"terminal is superseded by {row['superseded_by_terminal_id']!r}",
+            False,
+        )
+    if row.get("lifecycle_state") != "live":
+        return (
+            f"terminal lifecycle is {row.get('lifecycle_state')!r}, not live "
+            "(the launch never registered, or the terminal was retired)",
+            False,
+        )
+    backend = get_backend()
+    try:
+        session_live = backend.session_exists(row["tmux_session"])
+    except Exception:
+        session_live = False
+    if not session_live:
+        return (f"tmux session {row['tmux_session']!r} is gone", False)
+    try:
+        identity = backend.window_identity(row["tmux_session"], row["tmux_window"])
+    except Exception:
+        identity = None
+    if not isinstance(identity, dict) or not identity.get("window_id"):
+        return (
+            f"tmux window {row['tmux_window']!r} has no live identity",
+            False,
+        )
+    if (
+        row.get("window_id")
+        and identity.get("window_id")
+        and row["window_id"] != identity["window_id"]
+    ):
+        return ("tmux window identity was replaced since launch", False)
+    if row.get("pane_id") and identity.get("pane_id") and row["pane_id"] != identity["pane_id"]:
+        return ("tmux pane identity was replaced since launch", False)
+    try:
+        incarnation = stable_agent_roster.get_incarnation_by_terminal(
+            terminal_id, row.get("generation")
+        )
+    except stable_agent_roster.StableAgentConflict:
+        return ("stable-agent roster holds an ambiguous incarnation", False)
+    if incarnation is None:
+        return (
+            "stable-agent roster has no live incarnation for this terminal " "(missing or retired)",
+            False,
+        )
+    if incarnation.get("disposition") not in stable_agent_roster.LIVE_INCARNATION_DISPOSITIONS:
+        return (
+            f"stable-agent incarnation is {incarnation.get('disposition')!r}, "
+            "not live (retired or superseded)",
+            False,
+        )
+    try:
+        agent = stable_agent_roster.get_agent(incarnation.get("agent_id"))
+    except stable_agent_roster.StableAgentNotFound:
+        return ("stable-agent roster has no agent for this incarnation", False)
+    if agent.get("role") != stable_agent_roster.ROLE_SUPERVISOR:
+        return (
+            f"stable-agent role is {agent.get('role')!r}, not supervisor",
+            False,
+        )
+    if agent.get("current_incarnation_id") != incarnation.get("incarnation_id"):
+        return (
+            "stable-agent moved on to a newer incarnation (this one is superseded)",
+            False,
+        )
+    marker = row.get("pre_task_identity_state")
+    if marker is not None:
+        # An activated provider launch (Codex/Claude/Antigravity) is
+        # adoptable only once its bootstrap reached ready; pending or
+        # captured means the first launch is still in flight.
+        if marker != unmanaged_native_identity.PRE_TASK_IDENTITY_READY:
+            return (f"provider launch is {marker!r}, not ready", True)
+        if agent.get("disposition") != stable_agent_roster.DISPOSITION_LIVE:
+            return (
+                f"stable-agent disposition is {agent.get('disposition')!r}, "
+                "not live, for a ready provider launch",
+                False,
+            )
+    elif agent.get("disposition") not in (
+        stable_agent_roster.DISPOSITION_LIVE,
+        stable_agent_roster.DISPOSITION_IDENTITY_MISSING,
+    ):
+        # Non-activated launches (Kimi/Cursor/Muse/Hermes) truthfully
+        # carry no native identity; anything beyond live-or-missing is a
+        # retired/dormant agent that must not be adopted.
+        return (
+            f"stable-agent disposition is {agent.get('disposition')!r}",
+            False,
+        )
+    return None
+
+
+def _prepare_sealed_launch_under_claim(
+    provider: str, sealed_launch_material: SealedLaunchMaterial
+) -> PreparedSealedLaunch:
+    """Prepare the frozen material under the session claim, pre-effect.
+
+    Fallback for the lost-race retry: the session-level optimistic scan
+    found a winner (so preparation was skipped), but the winner is gone
+    under the claim and the launch must be created after all. Pure —
+    no provider instance, no tmux, no DB, no files — so the
+    prepare < clear < tmux < DB < provider order still holds. A
+    malformed shape maps to the operation-scoped 422 exactly as if the
+    session boundary had prepared it.
+    """
+    try:
+        return provider_manager.prepare_sealed_launch(provider, sealed_launch_material)
+    except SealedPreparationUnsupported as exc:
+        profile = sealed_launch_material.profile
+        source_path = getattr(profile, "source_path", None)
+        raise ProfileLaunchUnsupported(
+            f"provider {provider!r} cannot launch exactly from the frozen "
+            f"profile; no launch effect was produced",
+            provider=provider,
+            source_path=source_path if isinstance(source_path, str) else "",
+            reason=str(exc),
+            recovery=(
+                "repair the frozen profile fields the adapter cannot consume "
+                "exactly (see the adapter reason), or switch to a provider "
+                "whose adapter consumes them"
+            ),
+        ) from exc
+
+
+def _terminal_from_adoption_row(row: Dict[str, Any], stored_receipt: Dict[str, Any]) -> Terminal:
+    """Build the adopted Terminal response from durable state.
+
+    The stored receipt rides verbatim — never rewritten from the live
+    profile — and no launch fact is invented: status is the monitor's
+    current observation (UNKNOWN when unobserved), activity is now.
+    """
+    try:
+        status = status_monitor.get_status(row["terminal_id"])
+    except Exception:
+        status = TerminalStatus.UNKNOWN
+    if not isinstance(status, TerminalStatus):
+        status = TerminalStatus.UNKNOWN
+    return Terminal(  # type: ignore[call-arg]
+        id=row["terminal_id"],
+        name=row["tmux_window"],
+        provider=ProviderType(row["provider"]),
+        session_name=row["tmux_session"],
+        agent_profile=row["agent_profile"],
+        caller_id=row["caller_id"],
+        allowed_tools=row["allowed_tools"],
+        shell_command=row["shell_command"],
+        assigned_quota_provider=row["assigned_quota_provider"],
+        status=status,
+        last_active=datetime.now(),
+        profile_receipt=stored_receipt,
+    )
+
+
 def _successor_launch_facts(row: Any) -> Optional[Dict[str, Any]]:
     """The launch facts one exact-executor operation row supplies to a teardown.
 
@@ -1984,6 +2310,13 @@ async def create_terminal(
     #: or re-runs provider composition/validation. ``None`` keeps the
     #: legacy per-stage composition for direct construction.
     prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
+    #: The already-parsed profile contract and this launch's expected
+    #: receipt (cond-0817 create-or-adopt). When both ride alongside a
+    #: sealed context, a retry re-checked under the session claim adopts
+    #: the one exactly-matching live winner with zero effects, or
+    #: refuses with the typed 409. ``None`` keeps legacy behavior.
+    profile_contract: Optional[Mapping[str, Any]] = None,
+    expected_receipt: Optional[Dict[str, Any]] = None,
 ) -> Terminal:
     """Create a new terminal with an initialized CLI agent.
 
@@ -2060,6 +2393,38 @@ async def create_terminal(
             # silently recreated; an unreadable store cannot be trusted. The
             # same policy is applied to the add-to-existing path below.
             session_name = _admit_session_creation(session_name)
+            # Create-or-adopt (cond-0817): a contract-bearing sealed retry
+            # re-checked under the claim adopts the one exactly-matching
+            # live winner (returning its stored receipt with zero
+            # effects) or raises the typed 409 — never a racy pre-query
+            # outside the claim, never a second creation. Anything else
+            # falls through to the ordinary duplicate/clear path below.
+            if (
+                profile_contract is not None
+                and profile_launch_context is not None
+                and sealed_launch_material is not None
+            ):
+                candidate = find_supervisor_adoption_candidate(
+                    session_name=session_name,
+                    contract=profile_contract,
+                    expected_receipt=expected_receipt,
+                )
+                if candidate is not None:
+                    stored_receipt = candidate["profile_receipt"]
+                    assert isinstance(stored_receipt, dict)
+                    adopted = _terminal_from_adoption_row(candidate, stored_receipt)
+                    if session_claim is not None:
+                        await session_claim.__aexit__(None, None, None)
+                        session_claim = None
+                    return adopted
+                # The optimistic session-level scan found a winner that is
+                # gone under the claim: the launch still needs its
+                # prepared value, so prepare here — pure, pre-effect,
+                # exactly once for this launch.
+                if prepared_sealed_launch is None and managed_native_command is None:
+                    prepared_sealed_launch = _prepare_sealed_launch_under_claim(
+                        provider, sealed_launch_material
+                    )
             # Prevent duplicate sessions (re-checked under the claim).
             if get_backend().session_exists(session_name):
                 raise ValueError(f"Session '{session_name}' already exists")
@@ -2071,8 +2436,9 @@ async def create_terminal(
             # reused over an unconfirmed stale row.
             clear_session_env(session_name)
         except BaseException:
-            await session_claim.__aexit__(None, None, None)
-            session_claim = None
+            if session_claim is not None:
+                await session_claim.__aexit__(None, None, None)
+                session_claim = None
             raise
 
     session_created = False  # tracks whether THIS call created the tmux session
@@ -2223,26 +2589,26 @@ async def create_terminal(
             forwarded_environment["CODEX_HOME"] = os.path.realpath(codex_home)
 
         # Sealed Codex material is bound BEFORE any tmux/session effect
-        # from the one prepared value the session boundary validated
-        # pre-effect: the terminal-id placeholder is substituted purely
-        # (no validation, no composition), and the bootstrap and resumed
-        # TUI below consume this exact object by identity. Preparation
-        # already refused malformed material with the typed refusal
-        # before the persisted session env was cleared, so nothing here
-        # can fail on provider input. Direct/legacy construction (no
-        # prepared value) keeps the builder fallback at its later site,
-        # unchanged.
+        # from the one prepared value the session boundary validated and
+        # serialized pre-effect: the terminal-id placeholder is
+        # substituted purely over the final JSON (no validation, no
+        # composition), and the bootstrap and resumed TUI below consume
+        # this exact parsed object by identity. Preparation already
+        # refused malformed material with the typed refusal before the
+        # persisted session env was cleared, so nothing here can fail on
+        # provider input. Direct/legacy construction (no prepared value)
+        # keeps the builder fallback at its later site, unchanged.
         codex_profile_material: Optional[dict] = None
         if (
             managed_native_command is None
             and provider == ProviderType.CODEX.value
             and prepared_sealed_launch is not None
-            and prepared_sealed_launch.codex_material is not None
+            and prepared_sealed_launch.codex_material_json is not None
         ):
-            from cli_agent_orchestrator.providers.codex import bind_codex_material_terminal_id
+            from cli_agent_orchestrator.providers.codex import bind_codex_material_json
 
-            codex_profile_material = bind_codex_material_terminal_id(
-                prepared_sealed_launch.codex_material, terminal_id
+            codex_profile_material = bind_codex_material_json(
+                prepared_sealed_launch.codex_material_json, terminal_id
             )
 
         # Step 2: Create tmux session or window

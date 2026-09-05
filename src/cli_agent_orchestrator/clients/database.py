@@ -5741,6 +5741,58 @@ def report_terminal_missing_from_every_store(terminal_id: str) -> None:
         )
 
 
+def get_terminal_adoption_row(terminal_id: str) -> Optional[Dict[str, Any]]:
+    """Read-only full row for supervisor create-or-adopt matching.
+
+    Returns the durable launch facts an adoption check needs — row
+    identity, provider/profile, assigned pins, launch-readiness marker,
+    lifecycle state, tmux binding, roster generation, and the parsed
+    stored receipt — or ``None`` when the row is gone. Unlike
+    :func:`get_terminal_metadata` this performs no backfill write, so a
+    refused adoption leaves zero mutation behind. Corrupt JSON reads as
+    ``None`` (missing), never a crash: the caller refuses what it
+    cannot parse.
+    """
+    import json as _json
+
+    with SessionLocal() as db:
+        terminal = db.query(TerminalModel).filter(TerminalModel.id == terminal_id).first()
+        if terminal is None:
+            return None
+
+        def _parsed(raw: Any) -> Optional[Any]:
+            if raw is None:
+                return None
+            try:
+                return _json.loads(raw)
+            except (ValueError, TypeError):
+                return None
+
+        receipt = _parsed(terminal.profile_receipt)
+        return {
+            "terminal_id": terminal.id,
+            "tmux_session": terminal.tmux_session,
+            "tmux_window": terminal.tmux_window,
+            "provider": terminal.provider,
+            "agent_profile": terminal.agent_profile,
+            "generation": terminal.generation,
+            "pane_id": terminal.pane_id,
+            "window_id": terminal.window_id,
+            "native_session_id": terminal.native_session_id,
+            "assigned_model": terminal.assigned_model,
+            "assigned_effort": terminal.assigned_effort,
+            "pre_task_identity_state": terminal.pre_task_identity_state,
+            "lifecycle_state": terminal.lifecycle_state,
+            "superseded_by_terminal_id": terminal.superseded_by_terminal_id,
+            "allowed_tools": _parsed(terminal.allowed_tools),
+            "shell_command": terminal.shell_command,
+            "caller_id": terminal.caller_id,
+            "assigned_quota_provider": terminal.assigned_quota_provider,
+            "profile_receipt": receipt if isinstance(receipt, dict) else None,
+            "receipt_unparseable": receipt is not None and not isinstance(receipt, dict),
+        }
+
+
 def get_terminal_metadata(
     terminal_id: str, *, warn_if_missing: bool = True
 ) -> Optional[Dict[str, Any]]:

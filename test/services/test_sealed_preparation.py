@@ -22,6 +22,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from cli_agent_orchestrator.clients import database
+from cli_agent_orchestrator.providers.base import (
+    SEALED_TERMINAL_ID_PLACEHOLDER,
+    SealedPreparationUnsupported,
+    bind_sealed_bytes,
+)
+from cli_agent_orchestrator.providers.codex import bind_codex_material_json
+from cli_agent_orchestrator.providers.manager import ProviderManager
 from cli_agent_orchestrator.services import session_service
 from cli_agent_orchestrator.services import supervisor_profile_receipt as spr
 from cli_agent_orchestrator.services.supervisor_profile_receipt import (
@@ -411,11 +418,14 @@ class TestPreparedArtifactIdentity:
             return real_compose(*args, **kwargs)
 
         prepare_calls: list = []
+        prepared_values: list = []
         real_prepare = ProviderManager.prepare_sealed_launch
 
         def _counting_prepare(self, provider_type, material):
             prepare_calls.append(1)
-            return real_prepare(self, provider_type, material)
+            prepared = real_prepare(self, provider_type, material)
+            prepared_values.append(prepared)
+            return prepared
 
         seen: dict = {}
 
@@ -506,12 +516,24 @@ class TestPreparedArtifactIdentity:
         # performs its own single boundary read, so profile equality —
         # not identity with the test object — is the correct pin here.
         # Object identity is pinned between bootstrap and provider above.)
-        assert bootstrap_material["profile"] == context.profile
+        assert "profile" not in bootstrap_material
+        assert set(bootstrap_material) == {
+            "system_prompt",
+            "allowed_tools",
+            "mcp_servers",
+            "codex_config",
+        }
         env_values = [
             item["value"] for entry in bootstrap_material["mcp_servers"] for item in entry["env"]
         ]
         assert "abcd4242" in env_values
         assert SEALED_TERMINAL_ID_PLACEHOLDER not in env_values
+        # The prepared value itself keeps the placeholder (immutability
+        # pin): binding produced a new bound object, not a mutation.
+        assert prepared_values[0].codex_material_json is not None
+        assert SEALED_TERMINAL_ID_PLACEHOLDER.encode("ascii") in (
+            prepared_values[0].codex_material_json
+        )
         # The resumed TUI consumes the same object, never a reload: the
         # provider's material resolver returns it by identity.
         assert instance._resolve_codex_profile_material() is bootstrap_material
@@ -676,9 +698,347 @@ class TestLegacyBehavior:
         assert kwargs["provider"] == "kimi_cli"
         prepared = kwargs["prepared_sealed_launch"]
         assert prepared.provider == "kimi_cli"
-        assert prepared.codex_material is None
-        assert dict(prepared.mcp_configs or {}) == {}
+        assert prepared.codex_material_json is None
+        assert prepared.mcp_servers_json == b"{}"
+        assert prepared.mcp_document_json == b'{"mcpServers":{}}'
         assert kwargs["sealed_launch_material"].profile is kwargs["profile_launch_context"].profile
+
+
+class TestNonJsonMcpShapes:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["claude_code", "kimi_cli", "cursor_cli"])
+    @pytest.mark.parametrize(
+        "case,extra",
+        [
+            (
+                "unquoted-date-env",
+                (
+                    "mcpServers:",
+                    "  srv:",
+                    "    command: /bin/true",
+                    "    env:",
+                    "      START: 2024-01-01",
+                ),
+            ),
+            (
+                "nested-list-env",
+                (
+                    "mcpServers:",
+                    "  srv:",
+                    "    command: /bin/true",
+                    "    env:",
+                    "      LIMITS: [1, 2]",
+                ),
+            ),
+            (
+                "int-args",
+                (
+                    "mcpServers:",
+                    "  srv:",
+                    "    command: /bin/true",
+                    "    args: [8080]",
+                ),
+            ),
+            (
+                "nan-timeout",
+                (
+                    "mcpServers:",
+                    "  srv:",
+                    "    command: /bin/true",
+                    "    tool_timeout_sec: .nan",
+                ),
+            ),
+            (
+                "string-timeout",
+                (
+                    "mcpServers:",
+                    "  srv:",
+                    "    command: /bin/true",
+                    "    tool_timeout_sec: fast",
+                ),
+            ),
+            (
+                "date-headers",
+                (
+                    "mcpServers:",
+                    "  srv:",
+                    "    url: https://example.invalid/mcp",
+                    "    headers:",
+                    "      X-On: 2024-01-01",
+                ),
+            ),
+        ],
+    )
+    async def test_non_json_mcp_shapes_refuse_pre_effect(
+        self, profile_store, isolated_memory_db, tmp_path, monkeypatch, provider, case, extra
+    ):
+        """Unquoted YAML dates and non-JSON nested values yield 422.
+
+        The refusal happens in preparation — before create_terminal,
+        so the Claude tmp dir and the Cursor plugin dir stay untouched
+        (no strict file, no manifest, no shared-file access).
+        """
+        from cli_agent_orchestrator.services import terminal_service
+
+        monkeypatch.setenv("CAO_TMP_DIR", str(tmp_path / "cao-tmp"))
+        if provider == "cursor_cli":
+            _write_profile(
+                profile_store,
+                "sup",
+                provider=provider,
+                body="",
+                extra=extra + ('allowedTools: ["*"]',),
+            )
+        else:
+            _write_profile(profile_store, "sup", provider=provider, extra=extra)
+        context = load_supervisor_launch_context("sup")
+
+        manager = ProviderManager()
+        material = spr.build_sealed_launch_material(context)
+        assert manager.sealed_launch_support(provider, material).supported is True
+        with pytest.raises(SealedPreparationUnsupported):
+            manager.prepare_sealed_launch(provider, material)
+
+        with (
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch.object(terminal_service, "clear_session_env") as mock_clear,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            with pytest.raises(spr.ProfileLaunchUnsupported):
+                await session_service.create_session(
+                    provider=None,
+                    agent_profile="sup",
+                    profile_contract=_contract_for(context),
+                )
+        mock_create.assert_not_called()
+        mock_clear.assert_not_called()
+        assert (
+            list((tmp_path / "cao-tmp").glob("**/*")) == []
+            if (tmp_path / "cao-tmp").exists()
+            else True
+        )
+
+    def test_never_str_coerces(self):
+        """The sealed path has no str() fallback: audit the seam source.
+
+        Docstrings may name the forbidden pattern; the executable body
+        may not contain it.
+        """
+        import ast
+        import inspect
+
+        from cli_agent_orchestrator.providers import base as base_module
+
+        for name in (
+            "require_json_safe",
+            "_require_string_map",
+            "sealed_mcp_server_config",
+            "prepare_sealed_mcp_documents",
+            "dump_sealed_json",
+            "bind_sealed_bytes",
+        ):
+            (node,) = ast.parse(inspect.getsource(getattr(base_module, name))).body
+            assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)), name
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                body = body[1:]
+            executable = "\n".join(ast.unparse(part) for part in body)
+            assert "str(value)" not in executable, name
+            assert "str(item)" not in executable, name
+
+
+class TestFinalBytesIdentity:
+    @pytest.fixture
+    def mcp_profile(self, profile_store):
+        _write_profile(
+            profile_store,
+            "sup",
+            provider="claude_code",
+            extra=(
+                "mcpServers:",
+                "  srv:",
+                "    command: /bin/true",
+                "    args: [--flag]",
+                "    env:",
+                "      FOO: bar",
+            ),
+        )
+        return load_supervisor_launch_context("sup")
+
+    def test_claude_file_bytes_equal_prepared(self, mcp_profile, tmp_path, monkeypatch):
+        """The strict file is the prepared bytes, serialized once."""
+        import json as _json
+
+        import cli_agent_orchestrator.providers.claude_code as claude_module
+        from cli_agent_orchestrator.providers import base as base_module
+        from cli_agent_orchestrator.providers.claude_code import ClaudeCodeProvider
+
+        monkeypatch.setattr(claude_module, "CAO_HOME_DIR", tmp_path)
+        dumps_calls: list = []
+        real_dumps = base_module.dump_sealed_json
+
+        def _counting_dumps(value, *, source):
+            dumps_calls.append(source)
+            return real_dumps(value, source=source)
+
+        monkeypatch.setattr(base_module, "dump_sealed_json", _counting_dumps)
+        prepared = ProviderManager().prepare_sealed_launch(
+            "claude_code", spr.build_sealed_launch_material(mcp_profile)
+        )
+        assert dumps_calls == ["sealed MCP servers"]
+        bound = bind_sealed_bytes(prepared.mcp_document_json, "tid9")
+        provider = ClaudeCodeProvider(
+            "tid9",
+            "s",
+            "w",
+            "sup",
+            ["*"],
+            launch_profile=mcp_profile.profile,
+            prepared_sealed_launch=prepared,
+        )
+        command = provider._build_claude_command(mcp_profile.profile)
+        assert "--strict-mcp-config" in command
+        written = (tmp_path / "tmp" / "tid9.mcp.json").read_bytes()
+        assert written == bound
+        assert _json.loads(written)["mcpServers"]["srv"]["env"]["CAO_TERMINAL_ID"] == "tid9"
+
+    def test_kimi_argv_text_equals_prepared(self, mcp_profile, tmp_path, monkeypatch):
+        """The --mcp-config text is the prepared text, serialized once."""
+        import shlex
+
+        from cli_agent_orchestrator.providers import base as base_module
+        from cli_agent_orchestrator.providers.kimi_cli import KimiCliProvider
+
+        monkeypatch.setenv("CAO_TMP_DIR", str(tmp_path / "cao-tmp"))
+        monkeypatch.setattr(KimiCliProvider, "_ensure_mcp_timeout", classmethod(lambda cls: None))
+        dumps_calls: list = []
+        real_dumps = base_module.dump_sealed_json
+
+        def _counting_dumps(value, *, source):
+            dumps_calls.append(source)
+            return real_dumps(value, source=source)
+
+        monkeypatch.setattr(base_module, "dump_sealed_json", _counting_dumps)
+        material = spr.build_sealed_launch_material(mcp_profile)
+        prepared = ProviderManager().prepare_sealed_launch("kimi_cli", material)
+        assert dumps_calls == ["sealed MCP servers"]
+        expected_text = bind_sealed_bytes(prepared.mcp_servers_json, "tid9").decode("utf-8")
+        provider = KimiCliProvider(
+            "tid9",
+            "s",
+            "w",
+            "sup",
+            ["*"],
+            expected_model="m",
+            launch_profile=mcp_profile.profile,
+            prepared_sealed_launch=prepared,
+        )
+        command = provider._build_kimi_command()
+        parts = shlex.split(command)
+        assert expected_text in parts
+        assert parts[parts.index("--mcp-config") + 1] == expected_text
+
+    def test_cursor_manifest_bytes_equal_prepared(self, profile_store, tmp_path, monkeypatch):
+        """The plugin manifest is the prepared bytes, serialized once."""
+        import json as _json
+
+        _write_profile(
+            profile_store,
+            "cur",
+            provider="cursor_cli",
+            body="",
+            extra=(
+                "mcpServers:",
+                "  srv:",
+                "    command: /bin/true",
+                "    env:",
+                "      FOO: bar",
+                'allowedTools: ["*"]',
+            ),
+        )
+        context = load_supervisor_launch_context("cur")
+        from cli_agent_orchestrator.providers import base as base_module
+        from cli_agent_orchestrator.providers import cursor_cli as cursor_module
+        from cli_agent_orchestrator.providers.cursor_cli import CursorCliProvider
+
+        monkeypatch.setenv("CAO_TMP_DIR", str(tmp_path / "cao-tmp"))
+        monkeypatch.setattr(cursor_module.shutil, "which", lambda name: "/usr/bin/agent")
+        dumps_calls: list = []
+        real_dumps = base_module.dump_sealed_json
+
+        def _counting_dumps(value, *, source):
+            dumps_calls.append(source)
+            return real_dumps(value, source=source)
+
+        monkeypatch.setattr(base_module, "dump_sealed_json", _counting_dumps)
+        prepared = ProviderManager().prepare_sealed_launch(
+            "cursor_cli", spr.build_sealed_launch_material(context)
+        )
+        assert dumps_calls == ["sealed MCP servers"]
+        bound = bind_sealed_bytes(prepared.mcp_document_json, "tid9")
+        provider = CursorCliProvider(
+            "tid9",
+            "s",
+            "w",
+            "cur",
+            ["*"],
+            launch_profile=context.profile,
+            prepared_sealed_launch=prepared,
+        )
+        command = provider._build_cursor_command()
+        assert "--approve-mcps" in command
+        written = (tmp_path / "cao-tmp" / "tid9-cursor-plugins" / "plugin.json").read_bytes()
+        assert written == bound
+        assert _json.loads(written)["mcpServers"]["srv"]["env"]["CAO_TERMINAL_ID"] == "tid9"
+
+    def test_codex_material_final_and_counted_once(self, profile_store):
+        """Codex preparation serializes the final material exactly once."""
+        import json as _json
+
+        _write_profile(
+            profile_store,
+            "sup",
+            provider="codex",
+            extra=(
+                "mcpServers:",
+                "  srv:",
+                "    command: /bin/true",
+            ),
+        )
+        context = load_supervisor_launch_context("sup")
+        from cli_agent_orchestrator.providers import codex as codex_module
+
+        dumps_calls: list = []
+        real_dumps = codex_module.dump_sealed_json
+
+        def _counting_dumps(value, *, source):
+            dumps_calls.append(source)
+            return real_dumps(value, source=source)
+
+        codex_module.dump_sealed_json = _counting_dumps
+        try:
+            prepared = ProviderManager().prepare_sealed_launch(
+                "codex", spr.build_sealed_launch_material(context)
+            )
+        finally:
+            codex_module.dump_sealed_json = real_dumps
+        assert dumps_calls == ["sealed Codex material"]
+        final = _json.loads(prepared.codex_material_json)
+        assert set(final) == {"system_prompt", "allowed_tools", "mcp_servers", "codex_config"}
+        assert "profile" not in final
+        # The emitter input is byte-identical to the prepared content.
+        bound = bind_codex_material_json(prepared.codex_material_json, "tid9")
+        assert (
+            _json.loads(
+                prepared.codex_material_json.replace(
+                    SEALED_TERMINAL_ID_PLACEHOLDER.encode("ascii"), b"tid9"
+                )
+            )
+            == bound
+        )
 
 
 class TestHttpPreparationMapping:

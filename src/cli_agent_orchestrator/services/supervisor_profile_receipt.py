@@ -143,6 +143,106 @@ class ProfileLaunchUnsupported(RuntimeError):
         self.recovery = recovery
 
 
+#: The receipt data fields compared verbatim against a submitted
+#: contract during adoption (the ``schema`` values differ by design:
+#: receipts carry the receipt schema, contracts the contract schema).
+RECEIPT_DATA_FIELDS = (
+    "profile",
+    "role",
+    "provider",
+    "model",
+    "effort",
+    "provenance",
+    "source_path",
+    "sha256",
+)
+
+
+class ProfileAdoptionMismatch(RuntimeError):
+    """A contract-bearing retry names a live duplicate that cannot be adopted.
+
+    Raised with zero mutation when the session already holds terminal
+    state but no single live winner matches the submitted contract
+    exactly: a divergent field, a missing/corrupt receipt, a
+    pending/partial/dead/superseded/stale/ambiguous row, a dead tmux
+    identity, a roster incarnation that is not this supervisor's live
+    one, or a provider launch that is not ready. The HTTP boundary maps
+    it to 409. Deliberately a ``RuntimeError``, not a ``ValueError``:
+    the boundary maps ``ValueError`` to 400, which is reserved for the
+    ordinary no-contract duplicate.
+
+    Recovery is proportionate: delete the session and retry, retry with
+    a fresh session name — or, for an in-flight launch, retry the same
+    request after it completes.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        session_name: str,
+        reason: str,
+        recovery: str,
+    ) -> None:
+        super().__init__(message)
+        self.session_name = session_name
+        self.reason = reason
+        self.recovery = recovery
+
+
+def receipt_provenance_matches(
+    contract_value: Any, stored_value: Any, stored_source_path: Any
+) -> bool:
+    """Whether a stored receipt provenance satisfies a contract provenance.
+
+    The same canonical installed-store/legacy equivalence as launch
+    validation: an exact match, or a ``local`` contract satisfied by an
+    ``installed-agent-store`` receipt whose source path still lives
+    under the installed store.
+    """
+    if contract_value == stored_value:
+        return True
+    return (
+        contract_value == LEGACY_INSTALLED_STORE_PROVENANCE
+        and stored_value == INSTALLED_AGENT_STORE_PROVENANCE
+        and isinstance(stored_source_path, str)
+        and _is_within_installed_store(stored_source_path)
+    )
+
+
+def stored_receipt_divergences(
+    contract: Mapping[str, Any], stored: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Field-by-field divergences between a contract and a stored receipt.
+
+    Compares every :data:`RECEIPT_DATA_FIELDS` entry: provenance uses
+    the canonical equivalence, ``source_path`` compares canonical
+    forms, everything else compares exact values (both sides are
+    canonical at this point — the parser normalizes the contract, the
+    writer canonicalizes the receipt). Returns the divergent fields in
+    contract order; empty means an exact match.
+    """
+    divergent: list[dict[str, Any]] = []
+    for field in RECEIPT_DATA_FIELDS:
+        expected = contract.get(field)
+        actual = stored.get(field)
+        if field == "provenance":
+            same = receipt_provenance_matches(expected, actual, stored.get("source_path"))
+        elif field == "source_path":
+            # A corrupt stored receipt may carry a non-string path: that
+            # is a divergence, never a canonicalization crash.
+            same = (
+                isinstance(expected, str)
+                and isinstance(actual, str)
+                and canonical_source_path(expected) == canonical_source_path(actual)
+            )
+        else:
+            same = expected == actual
+        if not same:
+            divergent.append({"field": field, "expected": expected, "actual": actual})
+    return divergent
+
+
 class ProfileLaunchConflict(RuntimeError):
     """A supervisor launch contract diverged from the runtime-loaded profile.
 

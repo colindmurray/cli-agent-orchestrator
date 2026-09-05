@@ -657,8 +657,20 @@ def resolve_pre_task_identity(
         raise UnmanagedIdentityUnavailable(
             "codex pre-task identity requires the resolved profile material"
         )
-    profile = codex_profile_material["profile"]
-    effective_route = _effective_codex_route(profile, expected_model, expected_effort)
+    # Sealed prepared material carries no live profile object — only the
+    # final validated inputs (system prompt, policy, MCP entries,
+    # codexConfig). The resolved route arrives via the expected pins the
+    # session boundary sealed (they already applied the config seam), and
+    # a set codexProfile was refused at preparation, so the composer runs
+    # with ``codex_profile=None``. Legacy material keeps the
+    # profile-object path, unchanged.
+    sealed_material = "profile" not in codex_profile_material
+    if sealed_material:
+        profile = None
+        effective_route = CodexRoute(model=expected_model or "", effort=expected_effort or "")
+    else:
+        profile = codex_profile_material["profile"]
+        effective_route = _effective_codex_route(profile, expected_model, expected_effort)
     executable = _resolve_executable(provider)
     digest = _binary_sha256(executable)
     env = _bootstrap_environment(
@@ -676,8 +688,12 @@ def resolve_pre_task_identity(
     # serializer error leaking out of the pre-task seam.
     try:
         core_args = compose_codex_core_args(
-            codex_profile=getattr(profile, "codexProfile", None),
-            codex_config=getattr(profile, "codexConfig", None),
+            codex_profile=None if sealed_material else getattr(profile, "codexProfile", None),
+            codex_config=(
+                codex_profile_material.get("codex_config") or {}
+                if sealed_material
+                else getattr(profile, "codexConfig", None)
+            ),
             system_prompt=codex_profile_material.get("system_prompt") or "",
             mcp_servers=codex_profile_material.get("mcp_servers") or [],
             allowed_tools=codex_profile_material.get("allowed_tools") or [],

@@ -73,19 +73,20 @@ from typing import TYPE_CHECKING, Optional
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
+    EMPTY_MCP_DOCUMENT_JSON,
     BaseProvider,
     PreparedSealedLaunch,
     SealedLaunchMaterial,
     SealedPreparationUnsupported,
     SealedProfileSupport,
-    bind_sealed_terminal_id,
+    bind_sealed_bytes,
     container_maps_set,
     custom_permission_mode_set,
     custom_timeout_set,
     dropped_q_fields,
     foreign_native_fields,
     policy_restricted,
-    resolve_sealed_mcp_configs,
+    prepare_sealed_mcp_documents,
 )
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -453,12 +454,14 @@ class CursorCliProvider(BaseProvider):
         # operations, and keep the layout under the CAO tmp dir so
         # it is removed with the session.
         prepared = self._prepared_sealed_launch
-        if prepared is not None and prepared.mcp_configs is not None:
-            # Sealed: the pre-effect validated artifact bound to this
-            # terminal — never re-resolved inline.
-            sealed_servers = bind_sealed_terminal_id(prepared.mcp_configs, self.terminal_id)
-            if sealed_servers:
-                plugin_dir = self._write_plugin_dir(sealed_servers)
+        if prepared is not None and prepared.mcp_document_json is not None:
+            # Sealed: write the prepared manifest bytes verbatim — bound
+            # to this terminal by pure substitution, never re-serialized
+            # (no json.dumps), re-resolved, or coerced inline. The
+            # manifest write is the only plugin/shared effect.
+            sealed_manifest = bind_sealed_bytes(prepared.mcp_document_json, self.terminal_id)
+            if sealed_manifest != EMPTY_MCP_DOCUMENT_JSON:
+                plugin_dir = self._write_plugin_manifest_bytes(sealed_manifest)
                 command_parts.extend(["--plugin-dir", plugin_dir])
                 # --approve-mcps is required to skip per-server approval
                 # dialogs on first run; otherwise the REPL blocks.
@@ -503,6 +506,20 @@ class CursorCliProvider(BaseProvider):
         prompt_path.write_text(system_prompt, encoding="utf-8")
         self._register_tmp_path(prompt_path)
         return str(prompt_path)
+
+    def _write_plugin_manifest_bytes(self, manifest: bytes) -> str:
+        """Materialise the Cursor plugin dir from prepared manifest bytes.
+
+        The sealed path: ``manifest`` is the exact prepared
+        ``{"mcpServers": ...}`` document bound to this terminal —
+        written verbatim, never re-serialized or rebuilt — under the
+        per-session plugin dir registered for cleanup with the session.
+        """
+        plugin_dir = self._cao_tmp_dir() / f"{self.terminal_id}-cursor-plugins"
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        (plugin_dir / "plugin.json").write_bytes(manifest)
+        self._register_tmp_path(plugin_dir)
+        return str(plugin_dir)
 
     def _write_plugin_dir(self, mcp_servers) -> str:
         """Materialise a Cursor plugin directory for the session's MCP servers.
@@ -648,23 +665,25 @@ class CursorCliProvider(BaseProvider):
     def prepare_sealed_launch(
         cls, material: Optional[SealedLaunchMaterial]
     ) -> PreparedSealedLaunch:
-        """Resolve and validate the frozen plugin-dir manifest, pre-effect.
+        """Resolve, validate, and finally serialize the manifest, pre-effect.
 
         The per-session MCP plugin dir is the one launch input whose
         shape the profile parse leaves unvalidated: a transport-less
-        entry would otherwise be written into the manifest only after
-        launch effects exist. ``resolve_sealed_mcp_configs`` enforces
-        the one-transport rule here, so malformed MCP raises
-        :class:`SealedPreparationUnsupported` before any clear, tmux,
-        DB, file, or provider effect. Model rides the already-typed
-        material field. Returns the placeholder-bound configs the
-        launch binds and materialises verbatim.
+        entry — or an unquoted YAML date hiding in ``env`` — would
+        otherwise be written into the manifest only after launch
+        effects exist. Preparation validates every entry and serializes
+        the manifest content exactly once to immutable bytes, so
+        malformed MCP raises :class:`SealedPreparationUnsupported`
+        before any clear, tmux, DB, file, or provider effect. Model
+        rides the already-typed material field.
         """
         if material is None or material.profile is None:
             raise SealedPreparationUnsupported("no frozen profile was supplied")
+        servers_json, document_json = prepare_sealed_mcp_documents(material.profile)
         return PreparedSealedLaunch(
             provider="cursor_cli",
-            mcp_configs=resolve_sealed_mcp_configs(material.profile),
+            mcp_servers_json=servers_json,
+            mcp_document_json=document_json,
         )
 
     async def initialize(self) -> bool:

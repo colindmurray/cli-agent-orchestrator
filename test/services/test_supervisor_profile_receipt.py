@@ -1654,7 +1654,11 @@ class TestComposedFrozenContextWiring:
             # without recomposing (a second catalog/policy build would
             # raise through the rigged builders).
             prepared = ProviderManager().prepare_sealed_launch("codex", material)
-            assert prepared.codex_material["system_prompt"].count("CATALOG-A") == 1
+            import json as _json
+
+            assert (
+                _json.loads(prepared.codex_material_json)["system_prompt"].count("CATALOG-A") == 1
+            )
             terminal = await create_terminal(
                 provider="codex",
                 agent_profile="sup",

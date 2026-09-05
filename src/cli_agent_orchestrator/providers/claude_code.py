@@ -18,15 +18,16 @@ from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.constants import CAO_HOME_DIR
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
+    EMPTY_MCP_DOCUMENT_JSON,
     BaseProvider,
     PreparedSealedLaunch,
     SealedLaunchMaterial,
     SealedPreparationUnsupported,
     SealedProfileSupport,
-    bind_sealed_terminal_id,
+    bind_sealed_bytes,
     dropped_q_fields,
     foreign_native_fields,
-    resolve_sealed_mcp_configs,
+    prepare_sealed_mcp_documents,
 )
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -418,11 +419,14 @@ class ClaudeCodeProvider(BaseProvider):
             # Claude Code does not automatically forward parent shell env vars
             # to MCP subprocesses, so we inject it explicitly via the env field.
             prepared = self._prepared_sealed_launch
-            if prepared is not None and prepared.mcp_configs is not None:
-                # Sealed: consume the pre-effect validated artifact bound
-                # to this terminal — never re-resolved inline.
-                mcp_config = bind_sealed_terminal_id(prepared.mcp_configs, self.terminal_id)
+            if prepared is not None and prepared.mcp_document_json is not None:
+                # Sealed: write the prepared bytes verbatim — bound to
+                # this terminal by pure substitution, never re-serialized
+                # (no json.dumps), re-resolved, or coerced inline.
+                bound = bind_sealed_bytes(prepared.mcp_document_json, self.terminal_id)
+                mcp_config = None
             else:
+                bound = None
                 mcp_config = {}
                 for server_name, server_config in (profile.mcpServers or {}).items():
                     if isinstance(server_config, dict):
@@ -439,11 +443,22 @@ class ClaudeCodeProvider(BaseProvider):
                         env["CAO_TERMINAL_ID"] = self.terminal_id
                         mcp_config[server_name]["env"] = env
 
-            if mcp_config:
+            if bound is not None:
+                if bound == EMPTY_MCP_DOCUMENT_JSON:
+                    mcp_file = None
+                else:
+                    tmp_dir = CAO_HOME_DIR / "tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    mcp_file = tmp_dir / f"{self.terminal_id}.mcp.json"
+                    mcp_file.write_bytes(bound)
+            elif mcp_config:
                 tmp_dir = CAO_HOME_DIR / "tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 mcp_file = tmp_dir / f"{self.terminal_id}.mcp.json"
                 mcp_file.write_text(json.dumps({"mcpServers": mcp_config}), encoding="utf-8")
+            else:
+                mcp_file = None
+            if mcp_file is not None:
                 try:
                     mcp_file.chmod(0o600)
                 except OSError:
@@ -685,20 +700,20 @@ class ClaudeCodeProvider(BaseProvider):
     def prepare_sealed_launch(
         cls, material: Optional[SealedLaunchMaterial]
     ) -> PreparedSealedLaunch:
-        """Resolve and validate the frozen MCP file content, pre-effect.
+        """Resolve, validate, and finally serialize the MCP file, pre-effect.
 
         The strict MCP file is the one launch input whose shape the
-        profile parse leaves unvalidated: a transport-less entry would
-        otherwise reach the CLI only after launch effects exist.
-        ``resolve_sealed_mcp_configs`` enforces the one-transport rule
-        here, so malformed MCP raises
+        profile parse leaves unvalidated: a transport-less entry — or an
+        unquoted YAML date hiding in ``env`` — would otherwise reach the
+        CLI only after launch effects exist. Preparation validates every
+        entry and serializes the file content exactly once to immutable
+        bytes, so malformed MCP raises
         :class:`SealedPreparationUnsupported` before any clear, tmux,
         DB, file, or provider effect. A set ``native_agent`` is
         unconsumable on the frozen path (thin wrapper over the mutable
         native store) and is refused outright. Model, permission mode,
         timeout, and container maps ride the already-typed profile
-        fields and need no serialization validation. Returns the
-        placeholder-bound configs the launch binds and emits verbatim.
+        fields and need no serialization validation.
         """
         profile = material.profile if material is not None else None
         if profile is None:
@@ -710,8 +725,11 @@ class ClaudeCodeProvider(BaseProvider):
                 "Claude Code native agent store; the frozen CAO profile is not "
                 "what the supervisor consumes"
             )
+        servers_json, document_json = prepare_sealed_mcp_documents(profile)
         return PreparedSealedLaunch(
-            provider="claude_code", mcp_configs=resolve_sealed_mcp_configs(profile)
+            provider="claude_code",
+            mcp_servers_json=servers_json,
+            mcp_document_json=document_json,
         )
 
     async def initialize(self) -> bool:

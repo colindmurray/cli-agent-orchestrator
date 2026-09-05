@@ -181,6 +181,7 @@ from cli_agent_orchestrator.services.log_writer import log_writer
 from cli_agent_orchestrator.services.status_monitor import status_monitor
 from cli_agent_orchestrator.services.step_output_store import _validate_key_part
 from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+    ProfileAdoptionMismatch,
     ProfileLaunchConflict,
     ProfileLaunchUnsupported,
     ProfileNotFoundError,
@@ -1880,6 +1881,21 @@ async def create_session(
                 "error": str(e).splitlines()[0],
                 "provider": e.provider,
                 "source_path": e.source_path,
+                "reason": e.reason,
+                "recovery": e.recovery,
+            },
+        )
+    except ProfileAdoptionMismatch as e:
+        # A contract-bearing retry names a live duplicate that is not an
+        # exact adoptable match: zero effects were produced, so the
+        # conductor deletes the session (or retries a fresh name) and
+        # retries — or, for an in-flight launch, retries the same
+        # request after it completes. Retryable by construction.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": str(e).splitlines()[0],
+                "session_name": e.session_name,
                 "reason": e.reason,
                 "recovery": e.recovery,
             },

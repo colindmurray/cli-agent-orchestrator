@@ -19,7 +19,9 @@ Each provider must implement pattern matching for its specific CLI's prompt
 and output format to reliably detect status changes.
 """
 
+import json
 import logging
+import math
 import re
 import time
 from abc import ABC, abstractmethod
@@ -120,9 +122,18 @@ def container_maps_set(profile: Any) -> bool:
 #: (cond-0817 repair). Provider material that names the terminal (the
 #: ``CAO_TERMINAL_ID`` env default injected into MCP server configs) is
 #: prepared before the terminal id exists; ``create_terminal`` binds the
-#: real id by pure string substitution over the already-validated
-#: structures — never by re-running validation or composition.
+#: real id by pure byte substitution over the already-serialized
+#: documents — never by re-running validation or composition.
 SEALED_TERMINAL_ID_PLACEHOLDER = "__CAO_SEALED_TERMINAL_ID__"
+
+#: The placeholder as bytes, for pure substitution over final documents.
+SEALED_TERMINAL_ID_PLACEHOLDER_BYTES = SEALED_TERMINAL_ID_PLACEHOLDER.encode("ascii")
+
+#: Final empty MCP payloads (deterministic compact JSON): emitters skip
+#: their file/flag when the bound document equals these exact bytes, so
+#: an MCP-free sealed launch emits no config surface at all.
+EMPTY_MCP_SERVERS_JSON = b"{}"
+EMPTY_MCP_DOCUMENT_JSON = b'{"mcpServers":{}}'
 
 
 @dataclass(frozen=True)
@@ -138,17 +149,22 @@ class PreparedSealedLaunch:
     terminal-id placeholder by pure substitution and consumes the
     artifact — never reloading the profile or re-running composition.
 
-    Payload slots are per-adapter: ``codex_material`` carries the Codex
-    profile-material dict (placeholder-bound); ``mcp_configs`` carries
-    the resolved MCP server configs (placeholder-bound
-    ``CAO_TERMINAL_ID``) for the file/inline/plugin emitters
-    (Claude/Kimi/Cursor). Validation-only adapters (Antigravity, Muse,
-    Hermes) carry no payload: preparation is their choke point.
+    The payload carries no arbitrary nested mappings — only immutable
+    final bytes (deterministic JSON) and final-string tuples. Per
+    adapter: ``codex_material_json`` carries the final Codex launch
+    material (system prompt, policy, validated MCP entries, validated
+    codexConfig — no live profile object); ``mcp_servers_json`` carries
+    the final servers mapping text (Kimi ``--mcp-config``);
+    ``mcp_document_json`` carries the final ``{"mcpServers": ...}``
+    document bytes (Claude strict file, Cursor plugin manifest).
+    Validation-only adapters (Antigravity, Muse, Hermes) carry no
+    payload: preparation is their choke point.
     """
 
     provider: str
-    codex_material: Optional[Mapping[str, Any]] = None
-    mcp_configs: Optional[Mapping[str, Mapping[str, Any]]] = None
+    codex_material_json: Optional[bytes] = None
+    mcp_servers_json: Optional[bytes] = None
+    mcp_document_json: Optional[bytes] = None
 
 
 class SealedPreparationUnsupported(RuntimeError):
@@ -167,77 +183,193 @@ class SealedPreparationUnsupported(RuntimeError):
     """
 
 
-def resolve_sealed_mcp_configs(profile: Any) -> Dict[str, Dict[str, Any]]:
-    """Resolve and validate every MCP entry an adapter consumes.
+def require_json_safe(value: Any, *, source: str, _path: str = "$") -> None:
+    """Recursively reject values with no exact JSON representation.
 
-    Pure shared validation for the file/inline/plugin emitters
-    (Claude/Kimi/Cursor): each entry must be a mapping carrying exactly
-    one usable transport (a non-empty ``command`` or a non-empty
-    ``url``) — the same one-transport rule the Codex composer enforces
-    — with a mapping ``env``. The bundled command resolves through the
-    existing resolver, and the ``CAO_TERMINAL_ID`` default is the
-    terminal-id placeholder the launch binds later. Malformed entries
-    raise :class:`SealedPreparationUnsupported`, never a late
-    serializer error or a silent coercion. Never mutates the profile.
+    Mappings must have string keys; scalars are limited to None, bool,
+    finite numbers, and strings; sequences are limited to lists and
+    tuples of safe values. Anything else — sets, bytes, dates, YAML
+    timestamps, arbitrary objects, NaN/infinity — raises
+    :class:`SealedPreparationUnsupported` naming the offending path, so
+    sealed preparation never silently coerces (``str(value)``) or
+    crashes a late serializer. Pure; never mutates its input.
+    """
+    if value is None or isinstance(value, (bool, str)):
+        return
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise SealedPreparationUnsupported(
+                f"{source} at {_path} is not JSON-safe: non-finite number {value!r}"
+            )
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise SealedPreparationUnsupported(
+                    f"{source} at {_path} is not JSON-safe: " f"non-string mapping key {key!r}"
+                )
+            require_json_safe(item, source=source, _path=f"{_path}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            require_json_safe(item, source=source, _path=f"{_path}[{index}]")
+        return
+    raise SealedPreparationUnsupported(
+        f"{source} at {_path} is not JSON-safe: {type(value).__name__} {value!r}"
+    )
+
+
+def dump_sealed_json(value: Any, *, source: str) -> bytes:
+    """Serialize a validated value to deterministic compact JSON bytes.
+
+    ``sort_keys`` plus compact separators make the output canonical, so
+    a prepared document is byte-identical to what the emitter consumes;
+    ``allow_nan=False`` keeps non-finite numbers a loud failure. The
+    ``ValueError``/``TypeError`` a hostile value would raise is mapped
+    to :class:`SealedPreparationUnsupported` — preparation input is
+    always pre-validated, so reaching this is a bug, never a 500.
+    """
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+            "utf-8"
+        )
+    except (ValueError, TypeError) as exc:
+        raise SealedPreparationUnsupported(
+            f"{source} cannot be represented as sealed JSON: {exc}"
+        ) from exc
+
+
+def bind_sealed_bytes(raw: bytes, terminal_id: str) -> bytes:
+    """Bind the real terminal id into a prepared document.
+
+    Pure non-validating byte substitution of the placeholder: the
+    document was already validated and serialized, so binding neither
+    parses nor checks anything. The terminal id is lowercase hex and
+    therefore JSON-string-safe. Returns new bytes — the prepared value
+    stays immutable.
+    """
+    return raw.replace(SEALED_TERMINAL_ID_PLACEHOLDER_BYTES, terminal_id.encode("ascii"))
+
+
+def _require_string_map(value: Any, *, source: str) -> Dict[str, str]:
+    """A mapping with string keys and string values, else refusal.
+
+    Sealed preparation never coerces: an unquoted YAML date, number, or
+    nested value in MCP ``env``/``headers`` is malformed (422), not
+    ``str(value)``.
+    """
+    if not isinstance(value, Mapping):
+        raise SealedPreparationUnsupported(
+            f"{source} must be a mapping, got {type(value).__name__}"
+        )
+    result: Dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise SealedPreparationUnsupported(f"{source} has non-string key {key!r}")
+        if not isinstance(item, str):
+            raise SealedPreparationUnsupported(
+                f"{source} key {key!r} must be a string, got {type(item).__name__}"
+            )
+        result[key] = item
+    return result
+
+
+def sealed_mcp_server_config(name: Any, value: Any) -> Dict[str, Any]:
+    """Normalize one raw MCP entry to its resolved, strictly-validated config.
+
+    Pure shared validation for every sealed emitter: the server name
+    must be a string; the entry must be a mapping carrying exactly one
+    usable transport (a non-empty ``command`` or a non-empty ``url`` —
+    the same one-transport rule the Codex composer enforces);
+    ``env``/``headers`` must be string maps, ``args``/``env_vars`` lists
+    of strings, ``bearer_token_env_var`` a non-empty string when
+    present, and ``tool_timeout_sec`` a finite non-boolean number when
+    present. The bundled command resolves through the existing
+    resolver, and the ``CAO_TERMINAL_ID`` default is the terminal-id
+    placeholder the launch binds later. Malformed entries raise
+    :class:`SealedPreparationUnsupported` — never a late serializer
+    error, a silent coercion, or a ``str(value)`` fallback. Never
+    mutates its inputs.
     """
     from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
 
+    if not isinstance(name, str) or not name:
+        raise SealedPreparationUnsupported(
+            f"mcpServers has invalid server name {name!r}: must be a non-empty string"
+        )
+    if isinstance(value, dict):
+        config = dict(value)
+    elif hasattr(value, "model_dump"):
+        config = value.model_dump(exclude_none=True)
+    else:
+        raise SealedPreparationUnsupported(
+            f"mcpServers {name!r} must be a mapping, got {type(value).__name__}"
+        )
+    require_json_safe(config, source=f"mcpServers {name!r}")
+    config = resolve_mcp_server_config(config)
+    command = config.get("command")
+    url = config.get("url")
+    usable_command = isinstance(command, str) and bool(command)
+    usable_url = isinstance(url, str) and bool(url)
+    if usable_command == usable_url:
+        raise SealedPreparationUnsupported(
+            f"mcpServers {name!r} must configure exactly one usable transport: "
+            f"got command={command!r} and url={url!r}"
+        )
+    config["env"] = _require_string_map(config.get("env", {}), source=f"mcpServers {name!r} env")
+    config["env"].setdefault("CAO_TERMINAL_ID", SEALED_TERMINAL_ID_PLACEHOLDER)
+    if "headers" in config:
+        config["headers"] = _require_string_map(
+            config["headers"], source=f"mcpServers {name!r} headers"
+        )
+    for field in ("args", "env_vars"):
+        if field in config:
+            items = config[field]
+            if not isinstance(items, (list, tuple)) or not all(
+                isinstance(item, str) for item in items
+            ):
+                raise SealedPreparationUnsupported(
+                    f"mcpServers {name!r} {field} must be a list of strings, " f"got {items!r}"
+                )
+            config[field] = list(items)
+    token = config.get("bearer_token_env_var")
+    if token is not None and (not isinstance(token, str) or not token):
+        raise SealedPreparationUnsupported(
+            f"mcpServers {name!r} bearer_token_env_var must be a non-empty string, "
+            f"got {token!r}"
+        )
+    timeout = config.get("tool_timeout_sec")
+    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))):
+        raise SealedPreparationUnsupported(
+            f"mcpServers {name!r} tool_timeout_sec must be a number, got {timeout!r}"
+        )
+    if isinstance(timeout, float) and not math.isfinite(timeout):
+        raise SealedPreparationUnsupported(
+            f"mcpServers {name!r} tool_timeout_sec must be finite, got {timeout!r}"
+        )
+    return config
+
+
+def prepare_sealed_mcp_documents(profile: Any) -> tuple[bytes, bytes]:
+    """Resolve, validate, and finally serialize every consumed MCP entry.
+
+    Returns ``(servers_json, document_json)``: the deterministic JSON
+    text of the ``{name: config}`` mapping (Kimi ``--mcp-config``) and
+    the deterministic JSON bytes of the ``{"mcpServers": ...}`` document
+    (Claude strict file, Cursor plugin manifest) — each serialized
+    exactly once here, with the terminal-id placeholder, so emitters
+    bind and emit verbatim without ``json.dumps``, rebuilds, or
+    coercion. Never mutates the profile.
+    """
     raw_servers = getattr(profile, "mcpServers", None) or {}
     if not isinstance(raw_servers, Mapping):
         raise SealedPreparationUnsupported(
             f"mcpServers must be a mapping of server configs, got {type(raw_servers).__name__}"
         )
-    configs: Dict[str, Dict[str, Any]] = {}
-    for name, value in raw_servers.items():
-        if isinstance(value, dict):
-            config = dict(value)
-        elif hasattr(value, "model_dump"):
-            config = value.model_dump(exclude_none=True)
-        else:
-            raise SealedPreparationUnsupported(
-                f"mcpServers {name!r} must be a mapping, got {type(value).__name__}"
-            )
-        config = resolve_mcp_server_config(config)
-        command = config.get("command")
-        url = config.get("url")
-        usable_command = isinstance(command, str) and bool(command)
-        usable_url = isinstance(url, str) and bool(url)
-        if usable_command == usable_url:
-            raise SealedPreparationUnsupported(
-                f"mcpServers {name!r} must configure exactly one usable transport: "
-                f"got command={command!r} and url={url!r}"
-            )
-        env = config.get("env", {})
-        if not isinstance(env, Mapping):
-            raise SealedPreparationUnsupported(
-                f"mcpServers {name!r} env must be a mapping, got {type(env).__name__}"
-            )
-        env = dict(env)
-        env.setdefault("CAO_TERMINAL_ID", SEALED_TERMINAL_ID_PLACEHOLDER)
-        config["env"] = env
-        configs[name] = config
-    return configs
-
-
-def bind_sealed_terminal_id(
-    configs: Mapping[str, Mapping[str, Any]], terminal_id: str
-) -> Dict[str, Dict[str, Any]]:
-    """Bind the real terminal id into prepared MCP configs.
-
-    Pure non-validating substitution: every exact placeholder value
-    becomes the terminal id. Returns new dicts — the prepared value
-    stays immutable.
-    """
-    bound: Dict[str, Dict[str, Any]] = {}
-    for name, config in configs.items():
-        config = dict(config)
-        env = {
-            key: (terminal_id if value == SEALED_TERMINAL_ID_PLACEHOLDER else value)
-            for key, value in dict(config.get("env", {})).items()
-        }
-        config["env"] = env
-        bound[name] = config
-    return bound
+    configs = {name: sealed_mcp_server_config(name, value) for name, value in raw_servers.items()}
+    servers_json = dump_sealed_json(configs, source="sealed MCP servers")
+    document_json = b'{"mcpServers":' + servers_json + b"}"
+    return servers_json, document_json
 
 
 def custom_permission_mode_set(profile: Any) -> bool:

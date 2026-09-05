@@ -20,7 +20,7 @@ Session Lifecycle:
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.clients.database import list_terminals_by_session
@@ -38,12 +38,16 @@ from cli_agent_orchestrator.services.session_env import clear_session_env
 from cli_agent_orchestrator.services.stable_agent_roster import ROLE_SUPERVISOR
 from cli_agent_orchestrator.services.supervisor_profile_receipt import (
     ProfileLaunchUnsupported,
+    build_profile_receipt,
     build_sealed_launch_material,
     load_supervisor_launch_context,
     parse_profile_contract,
     validate_profile_contract,
 )
-from cli_agent_orchestrator.services.terminal_service import create_terminal
+from cli_agent_orchestrator.services.terminal_service import (
+    create_terminal,
+    find_supervisor_adoption_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +140,12 @@ async def create_session(
     # A sealed contract arrives as the raw request value: strict-parse it
     # once (malformed shape is a typed 400), then validate the well-formed
     # expectation against the single loaded profile before any launch effect.
+    # The parsed contract is kept: the create-or-adopt seam below matches a
+    # retried request against the stored receipt field by field.
+    parsed_contract = None
     if profile_contract is not None:
-        validate_profile_contract(parse_profile_contract(profile_contract), launch_context)
+        parsed_contract = parse_profile_contract(profile_contract)
+        validate_profile_contract(parsed_contract, launch_context)
 
     # Sealed-launch capability gate: the immutable launch material is built
     # from the already-frozen context (no second store read), evaluated
@@ -167,6 +175,34 @@ async def create_session(
             ),
         )
 
+    # Create-or-adopt optimistic scan (cond-0817): for a contract-bearing
+    # sealed retry on a fixed name, a read-only scan may already find the
+    # live winner the lost response never reported. When it does,
+    # preparation is skipped — adoption runs no preparation or effect —
+    # and create_terminal re-verifies authoritatively under the session
+    # claim (adopting, refusing with the typed 409, or — if the winner
+    # vanished — preparing under the claim and creating). The scan is
+    # best-effort: any failure here just means "prepare normally", and
+    # the claim-time verdict decides. Without a contract, or with an
+    # auto-generated name no prior launch can match, this never runs.
+    optimistic_adoption: Optional[Dict[str, Any]] = None
+    if sealed.supported and parsed_contract is not None and session_name is not None:
+        try:
+            # The rows live under the admitted (canonical) name, so the
+            # scan normalizes exactly like creation admission does. Any
+            # failure here just means "prepare normally".
+            from cli_agent_orchestrator.services.session_lifecycle import (
+                normalise_session_name,
+            )
+
+            optimistic_adoption = find_supervisor_adoption_candidate(
+                session_name=normalise_session_name(session_name),
+                contract=parsed_contract,
+                expected_receipt=build_profile_receipt(launch_context),
+            )
+        except Exception:  # best-effort read; the claim-time verdict decides
+            optimistic_adoption = None
+
     # Sealed-launch preparation (cond-0817 repair): the adapter validates
     # and serializes every field it actually consumes — the same composer
     # and serializers the launch runs — exactly once, after contract
@@ -175,9 +211,10 @@ async def create_session(
     # an operation-scoped 422 with zero mutation; previously it failed
     # late inside create_terminal, after the persisted session env had
     # already been cleared. An unexpected preparation failure propagates
-    # (still pre-effect) and keeps its 500 classification.
+    # (still pre-effect) and keeps its 500 classification. Skipped only
+    # when the optimistic scan already found the adoption winner.
     prepared_sealed_launch = None
-    if sealed.supported:
+    if sealed.supported and optimistic_adoption is None:
         try:
             prepared_sealed_launch = provider_manager.prepare_sealed_launch(
                 launch_context.provider, sealed_material
@@ -228,12 +265,21 @@ async def create_session(
         # The prepared value is the one pre-effect validation artifact:
         # create_terminal binds its terminal-id placeholder by pure
         # substitution and consumes it, never re-running composition.
+        # The parsed contract and expected receipt ride along so a retry
+        # re-checked under the session claim can adopt the live winner.
         create_kwargs["profile_launch_context"] = launch_context
         create_kwargs["sealed_launch_material"] = sealed_material
         create_kwargs["prepared_sealed_launch"] = prepared_sealed_launch
         create_kwargs["expected_model"] = launch_context.model
         create_kwargs["expected_effort"] = launch_context.effort
+        create_kwargs["profile_contract"] = parsed_contract
+        create_kwargs["expected_receipt"] = build_profile_receipt(launch_context)
     terminal = await create_terminal(**create_kwargs)
+    # An adopted retry returns the pre-existing session: no creation
+    # occurred, so no creation event fires. The optimistic winner id
+    # pins adoption — any other terminal id means the launch created.
+    if optimistic_adoption is not None and terminal.id == optimistic_adoption["terminal_id"]:
+        return terminal
     dispatch_plugin_event(
         registry,
         "post_create_session",

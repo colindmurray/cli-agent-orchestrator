@@ -39,18 +39,19 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
+    EMPTY_MCP_SERVERS_JSON,
     BaseProvider,
     PreparedSealedLaunch,
     ProviderPreflightBlocked,
     SealedLaunchMaterial,
     SealedPreparationUnsupported,
     SealedProfileSupport,
-    bind_sealed_terminal_id,
+    bind_sealed_bytes,
     container_maps_set,
     custom_permission_mode_set,
     dropped_q_fields,
     foreign_native_fields,
-    resolve_sealed_mcp_configs,
+    prepare_sealed_mcp_documents,
 )
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -393,13 +394,15 @@ class KimiCliProvider(BaseProvider):
                 # Add MCP server configuration if present in the agent profile.
                 # Kimi accepts --mcp-config as a JSON string (repeatable flag).
                 prepared = self._prepared_sealed_launch
-                if prepared is not None and prepared.mcp_configs is not None:
-                    # Sealed: consume the pre-effect validated artifact
-                    # bound to this terminal — never re-resolved inline.
-                    sealed_mcp = bind_sealed_terminal_id(prepared.mcp_configs, self.terminal_id)
-                    if sealed_mcp:
+                if prepared is not None and prepared.mcp_servers_json is not None:
+                    # Sealed: consume the prepared text verbatim — bound
+                    # to this terminal by pure substitution, never
+                    # re-serialized (no json.dumps), re-resolved, or
+                    # coerced inline.
+                    sealed_bound = bind_sealed_bytes(prepared.mcp_servers_json, self.terminal_id)
+                    if sealed_bound != EMPTY_MCP_SERVERS_JSON:
                         self._ensure_mcp_timeout()
-                        command_parts.extend(["--mcp-config", json.dumps(sealed_mcp)])
+                        command_parts.extend(["--mcp-config", sealed_bound.decode("utf-8")])
                 elif profile.mcpServers:
                     # Set MCP tool call timeout to 600s by modifying ~/.kimi/config.toml
                     # directly. We cannot use --config flag because it causes Kimi CLI
@@ -644,24 +647,27 @@ class KimiCliProvider(BaseProvider):
     def prepare_sealed_launch(
         cls, material: Optional[SealedLaunchMaterial]
     ) -> PreparedSealedLaunch:
-        """Resolve and validate the frozen inline MCP config, pre-effect.
+        """Resolve, validate, and finally serialize the MCP text, pre-effect.
 
         The ``--mcp-config`` JSON is the one launch input whose shape
-        the profile parse leaves unvalidated: a transport-less entry
-        would otherwise reach the CLI only after launch effects exist.
-        ``resolve_sealed_mcp_configs`` enforces the one-transport rule
-        here, so malformed MCP raises
+        the profile parse leaves unvalidated: a transport-less entry —
+        or an unquoted YAML date hiding in ``env`` — would otherwise
+        reach the CLI only after launch effects exist. Preparation
+        validates every entry and serializes the flag text exactly once
+        to immutable bytes, so malformed MCP raises
         :class:`SealedPreparationUnsupported` before any clear, tmux,
         DB, file, or provider effect. Model, effort, prompt, and
         timeout ride the already-typed material fields and need no
-        serialization validation. Returns the placeholder-bound
-        configs the launch binds and emits verbatim.
+        serialization validation.
         """
         profile = material.profile if material is not None else None
         if profile is None:
             raise SealedPreparationUnsupported("no frozen profile was supplied")
+        servers_json, document_json = prepare_sealed_mcp_documents(profile)
         return PreparedSealedLaunch(
-            provider="kimi_cli", mcp_configs=resolve_sealed_mcp_configs(profile)
+            provider="kimi_cli",
+            mcp_servers_json=servers_json,
+            mcp_document_json=document_json,
         )
 
     async def initialize(self) -> bool:
