@@ -12,6 +12,12 @@ from fastapi.testclient import TestClient
 
 from cli_agent_orchestrator.api.main import app
 from cli_agent_orchestrator.models.terminal import Terminal
+from cli_agent_orchestrator.services.session_service import CreateOrAdoptResult
+
+
+def _fresh_result(**terminal_kwargs):
+    """Model production create_session: a fresh (non-adopted) result."""
+    return CreateOrAdoptResult(terminal=Terminal(**terminal_kwargs), adopted=False)
 
 
 class TestWorkingDirectoryEndpoint:
@@ -77,7 +83,7 @@ class TestSessionCreationWithWorkingDirectory:
         """Test that working_directory parameter is passed to service."""
         with patch("cli_agent_orchestrator.api.main.session_service") as mock_svc:
             mock_svc.create_session = AsyncMock(
-                return_value=Terminal(
+                return_value=_fresh_result(
                     id="abcd1234",
                     name="test-window",
                     session_name="test-session",
@@ -105,7 +111,7 @@ class TestSessionCreationWithWorkingDirectory:
         """Test POST /sessions with working_directory parameter."""
         with patch("cli_agent_orchestrator.api.main.session_service") as mock_svc:
             mock_svc.create_session = AsyncMock(
-                return_value=Terminal(
+                return_value=_fresh_result(
                     id="abcd1234",
                     name="test-window",
                     session_name="test-session",
@@ -1021,7 +1027,7 @@ class TestCrossProviderResolution:
             patch("cli_agent_orchestrator.api.main.session_service") as mock_svc,
         ):
             mock_svc.create_session = AsyncMock(
-                return_value=Terminal(
+                return_value=_fresh_result(
                     id="abcd1234",
                     name="test-window",
                     session_name="test-session",
