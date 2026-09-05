@@ -660,7 +660,7 @@ class TestSessionWiring:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             mock_create.return_value = MagicMock(session_name="cao-sup")
-            await session_service.create_session(provider=None, agent_profile="sup")
+            (await session_service.create_session(provider=None, agent_profile="sup")).terminal
 
         kwargs = mock_create.call_args.kwargs
         assert kwargs["provider"] == "kimi_cli"
@@ -693,9 +693,11 @@ class TestSessionWiring:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(ProfileLaunchConflict):
-                await session_service.create_session(
-                    provider=None, agent_profile="sup", profile_contract=contract
-                )
+                (
+                    await session_service.create_session(
+                        provider=None, agent_profile="sup", profile_contract=contract
+                    )
+                ).terminal
         mock_create.assert_not_called()
 
     @pytest.mark.asyncio
@@ -709,11 +711,13 @@ class TestSessionWiring:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(ValueError):
-                await session_service.create_session(
-                    provider=None,
-                    agent_profile="sup",
-                    profile_contract={"schema": "nope"},
-                )
+                (
+                    await session_service.create_session(
+                        provider=None,
+                        agent_profile="sup",
+                        profile_contract={"schema": "nope"},
+                    )
+                ).terminal
         mock_create.assert_not_called()
 
     @pytest.mark.asyncio
@@ -731,13 +735,17 @@ class TestSessionWiring:
         ):
             mock_create.return_value = MagicMock(session_name="cao-sup")
             with pytest.raises(ProfileLaunchConflict):
-                await session_service.create_session(
-                    provider=None, agent_profile="sup", profile_contract=stale
-                )
+                (
+                    await session_service.create_session(
+                        provider=None, agent_profile="sup", profile_contract=stale
+                    )
+                ).terminal
             fresh = _contract_for(load_supervisor_launch_context("sup"))
-            await session_service.create_session(
-                provider=None, agent_profile="sup", profile_contract=fresh
-            )
+            (
+                await session_service.create_session(
+                    provider=None, agent_profile="sup", profile_contract=fresh
+                )
+            ).terminal
         assert mock_create.call_count == 1
         assert mock_create.call_args.kwargs["expected_model"] == "model-two"
 
@@ -766,9 +774,11 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
-                await session_service.create_session(
-                    provider=None, agent_profile="sup", profile_contract=contract
-                )
+                (
+                    await session_service.create_session(
+                        provider=None, agent_profile="sup", profile_contract=contract
+                    )
+                ).terminal
         mock_create.assert_not_called()
         assert exc_info.value.provider == provider
         assert exc_info.value.source_path == context.source_path
@@ -797,9 +807,11 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
-                await session_service.create_session(
-                    provider=None, agent_profile="sup", profile_contract=contract
-                )
+                (
+                    await session_service.create_session(
+                        provider=None, agent_profile="sup", profile_contract=contract
+                    )
+                ).terminal
         mock_create.assert_not_called()
         assert "B" in exc_info.value.reason
 
@@ -819,9 +831,11 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
-                await session_service.create_session(
-                    provider=None, agent_profile="sup", profile_contract=contract
-                )
+                (
+                    await session_service.create_session(
+                        provider=None, agent_profile="sup", profile_contract=contract
+                    )
+                ).terminal
         mock_create.assert_not_called()
         assert "B" in exc_info.value.reason
 
@@ -846,11 +860,13 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
-                await session_service.create_session(
-                    provider=None,
-                    agent_profile="sup",
-                    profile_contract=_contract_for(context),
-                )
+                (
+                    await session_service.create_session(
+                        provider=None,
+                        agent_profile="sup",
+                        profile_contract=_contract_for(context),
+                    )
+                ).terminal
         assert exc_info.value.provider == "codex"
         assert "B" in exc_info.value.reason
         assert exc_info.value.recovery
@@ -885,11 +901,13 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
-                await session_service.create_session(
-                    provider=None,
-                    agent_profile="sup",
-                    profile_contract=_contract_for(context),
-                )
+                (
+                    await session_service.create_session(
+                        provider=None,
+                        agent_profile="sup",
+                        profile_contract=_contract_for(context),
+                    )
+                ).terminal
         assert exc_info.value.provider == "antigravity_cli"
         assert "mcp_config.json" in exc_info.value.reason
         assert exc_info.value.recovery
@@ -925,11 +943,13 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported):
-                await session_service.create_session(
-                    provider=None,
-                    agent_profile="sup",
-                    profile_contract=_contract_for(context),
-                )
+                (
+                    await session_service.create_session(
+                        provider=None,
+                        agent_profile="sup",
+                        profile_contract=_contract_for(context),
+                    )
+                ).terminal
         mock_create.assert_not_called()
         mock_register.assert_not_called()
         assert json.loads(shared.read_text(encoding="utf-8")) == {
@@ -958,9 +978,11 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
-                await session_service.create_session(
-                    provider=None, agent_profile="sup", profile_contract=_contract_for(context)
-                )
+                (
+                    await session_service.create_session(
+                        provider=None, agent_profile="sup", profile_contract=_contract_for(context)
+                    )
+                ).terminal
         mock_create.assert_not_called()
         assert exc_info.value.provider == provider
         assert "system_prompt" in exc_info.value.reason
@@ -987,9 +1009,11 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             mock_create.return_value = MagicMock(session_name="cao-hermes-empty")
-            await session_service.create_session(
-                provider=None, agent_profile="sup", profile_contract=_contract_for(context)
-            )
+            (
+                await session_service.create_session(
+                    provider=None, agent_profile="sup", profile_contract=_contract_for(context)
+                )
+            ).terminal
         kwargs = mock_create.call_args.kwargs
         material = kwargs["sealed_launch_material"]
         # Intra-launch identity: the threaded context and material share the
@@ -1023,9 +1047,11 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             mock_create.return_value = MagicMock(session_name="cao-cursor-mcp")
-            await session_service.create_session(
-                provider=None, agent_profile="sup", profile_contract=_contract_for(context)
-            )
+            (
+                await session_service.create_session(
+                    provider=None, agent_profile="sup", profile_contract=_contract_for(context)
+                )
+            ).terminal
         kwargs = mock_create.call_args.kwargs
         material = kwargs["sealed_launch_material"]
         assert kwargs["profile_launch_context"].profile is material.profile
@@ -1113,7 +1139,7 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             mock_create.return_value = MagicMock(session_name="cao-sup")
-            await session_service.create_session(provider=None, agent_profile="sup")
+            (await session_service.create_session(provider=None, agent_profile="sup")).terminal
         kwargs = mock_create.call_args.kwargs
         assert "profile_launch_context" not in kwargs
         assert "sealed_launch_material" not in kwargs
@@ -1139,11 +1165,13 @@ class TestSealedRefusal:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported):
-                await session_service.create_session(
-                    provider=None,
-                    agent_profile="sup",
-                    profile_contract=_contract_for(context),
-                )
+                (
+                    await session_service.create_session(
+                        provider=None,
+                        agent_profile="sup",
+                        profile_contract=_contract_for(context),
+                    )
+                ).terminal
         with SessionLocal() as db:
             assert db.query(TerminalModel).count() == 0
 
@@ -1838,7 +1866,7 @@ class TestFrozenSurvivesStoreMutation:
 class TestHttpMapping:
     @pytest.mark.asyncio
     async def test_conflict_maps_to_409_with_retry(self, profile_store):
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
 
@@ -1859,6 +1887,7 @@ class TestHttpMapping:
             with pytest.raises(HTTPException) as exc_info:
                 await main.create_session(
                     request=MagicMock(),
+                    response=Response(),
                     background_tasks=BackgroundTasks(),
                     agent_profile="sup",
                     profile_contract=contract,
@@ -1870,7 +1899,7 @@ class TestHttpMapping:
     @pytest.mark.asyncio
     async def test_unsupported_contract_maps_to_422(self, profile_store):
         """A sealed refusal is an operation-scoped 422 with recovery."""
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
         from cli_agent_orchestrator.services.supervisor_profile_receipt import (
@@ -1896,6 +1925,7 @@ class TestHttpMapping:
             with pytest.raises(HTTPException) as exc_info:
                 await main.create_session(
                     request=MagicMock(),
+                    response=Response(),
                     background_tasks=BackgroundTasks(),
                     agent_profile="sup",
                     profile_contract=_contract_for(context),
@@ -1915,7 +1945,7 @@ class TestHttpMapping:
         endpoint mapping: the gate refuses, the endpoint reports provider,
         source, reason, and recovery — with no launch behind it.
         """
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
 
@@ -1928,6 +1958,7 @@ class TestHttpMapping:
             with pytest.raises(HTTPException) as exc_info:
                 await main.create_session(
                     request=MagicMock(),
+                    response=Response(),
                     background_tasks=BackgroundTasks(),
                     agent_profile="sup",
                     profile_contract=_contract_for(context),
@@ -1945,7 +1976,7 @@ class TestHttpMapping:
         """A JSON list/string (or unknown shape) reaches the endpoint as
         ``Optional[Any]`` instead of dying in FastAPI's generic 422: the
         strict parser classifies it as a typed 400."""
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
 
@@ -1954,6 +1985,7 @@ class TestHttpMapping:
             with pytest.raises(HTTPException) as exc_info:
                 await main.create_session(
                     request=MagicMock(),
+                    response=Response(),
                     background_tasks=BackgroundTasks(),
                     agent_profile="sup",
                     profile_contract=raw,
@@ -1964,7 +1996,7 @@ class TestHttpMapping:
     async def test_uppercase_sha_contract_passes_boundary_lowercase(self, profile_store):
         """An uppercase digest is accepted, normalized for comparison, and
         the launch proceeds on the lowercase receipt digest."""
-        from fastapi import BackgroundTasks
+        from fastapi import BackgroundTasks, Response
 
         from cli_agent_orchestrator.api import main
 
@@ -1983,6 +2015,7 @@ class TestHttpMapping:
             mock_create.return_value = MagicMock(session_name="cao-upper-sha")
             await main.create_session(
                 request=MagicMock(),
+                response=Response(),
                 background_tasks=BackgroundTasks(),
                 agent_profile="sup",
                 profile_contract=contract,
@@ -1998,7 +2031,7 @@ class TestHttpMapping:
 
     @pytest.mark.asyncio
     async def test_malformed_contract_maps_to_400(self, profile_store):
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
 
@@ -2014,6 +2047,7 @@ class TestHttpMapping:
             with pytest.raises(HTTPException) as exc_info:
                 await main.create_session(
                     request=MagicMock(),
+                    response=Response(),
                     background_tasks=BackgroundTasks(),
                     agent_profile="sup",
                     profile_contract={"schema": "nope"},
@@ -2023,7 +2057,7 @@ class TestHttpMapping:
     @pytest.mark.asyncio
     async def test_missing_profile_maps_to_400(self, profile_store):
         """The launch-boundary typed lookup error is a client error."""
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
         from cli_agent_orchestrator.services.supervisor_profile_receipt import (
@@ -2041,6 +2075,7 @@ class TestHttpMapping:
             with pytest.raises(HTTPException) as exc_info:
                 await main.create_session(
                     request=MagicMock(),
+                    response=Response(),
                     background_tasks=BackgroundTasks(),
                     agent_profile="ghost",
                 )
@@ -2049,7 +2084,7 @@ class TestHttpMapping:
     @pytest.mark.asyncio
     async def test_unparseable_profile_maps_to_400(self, profile_store):
         """Present-but-unparseable content is client-fixable, not a 500."""
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
         from cli_agent_orchestrator.services.supervisor_profile_receipt import (
@@ -2067,6 +2102,7 @@ class TestHttpMapping:
             with pytest.raises(HTTPException) as exc_info:
                 await main.create_session(
                     request=MagicMock(),
+                    response=Response(),
                     background_tasks=BackgroundTasks(),
                     agent_profile="bad",
                 )
@@ -2080,7 +2116,7 @@ class TestHttpMapping:
         so an unrelated FileNotFoundError raised mid-launch keeps its 500
         classification instead of masquerading as a bad profile name.
         """
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
 
@@ -2096,6 +2132,7 @@ class TestHttpMapping:
             with pytest.raises(HTTPException) as exc_info:
                 await main.create_session(
                     request=MagicMock(),
+                    response=Response(),
                     background_tasks=BackgroundTasks(),
                     agent_profile="sup",
                 )

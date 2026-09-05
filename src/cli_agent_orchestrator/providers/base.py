@@ -121,13 +121,18 @@ def container_maps_set(profile: Any) -> bool:
 #: Placeholder terminal id carried by a prepared sealed-launch value
 #: (cond-0817 repair). Provider material that names the terminal (the
 #: ``CAO_TERMINAL_ID`` env default injected into MCP server configs) is
-#: prepared before the terminal id exists; ``create_terminal`` binds the
-#: real id by pure byte substitution over the already-serialized
-#: documents — never by re-running validation or composition.
+#: prepared before the terminal id exists; binding substitutes the real
+#: id structurally, only at the injected ``env.CAO_TERMINAL_ID`` sites
+#: preparation records — never by global substitution, validation, or
+#: composition. A literal placeholder in user content (prompt, args,
+#: URL, headers, user MCP values) is never an injection site and is
+#: preserved verbatim.
 SEALED_TERMINAL_ID_PLACEHOLDER = "__CAO_SEALED_TERMINAL_ID__"
 
-#: The placeholder as bytes, for pure substitution over final documents.
-SEALED_TERMINAL_ID_PLACEHOLDER_BYTES = SEALED_TERMINAL_ID_PLACEHOLDER.encode("ascii")
+#: The injected terminal-id field name. Preparation injects this env
+#: default only when the raw server config does not already define it;
+#: binding touches exactly those servers.
+TERMINAL_ID_ENV_KEY = "CAO_TERMINAL_ID"
 
 #: Final empty MCP payloads (deterministic compact JSON): emitters skip
 #: their file/flag when the bound document equals these exact bytes, so
@@ -146,8 +151,9 @@ class PreparedSealedLaunch:
     :meth:`BaseProvider.prepare_sealed_launch`. The session boundary
     runs preparation after contract validation/material construction
     and before any launch effect; ``create_terminal`` binds the
-    terminal-id placeholder by pure substitution and consumes the
-    artifact — never reloading the profile or re-running composition.
+    terminal id structurally at the recorded injection sites and
+    consumes the artifact — never reloading the profile or re-running
+    composition.
 
     The payload carries no arbitrary nested mappings — only immutable
     final bytes (deterministic JSON) and final-string tuples. Per
@@ -165,6 +171,12 @@ class PreparedSealedLaunch:
     codex_material_json: Optional[bytes] = None
     mcp_servers_json: Optional[bytes] = None
     mcp_document_json: Optional[bytes] = None
+    #: MCP server names whose ``env.CAO_TERMINAL_ID`` is the injected
+    #: placeholder (the raw profile did not define the key). Binding
+    #: substitutes the real terminal id at exactly these servers'
+    #: env entries — every other placeholder-valued string in the
+    #: prepared bytes is user content and stays verbatim.
+    terminal_id_binding_sites: Tuple[str, ...] = ()
 
 
 class SealedPreparationUnsupported(RuntimeError):
@@ -239,16 +251,80 @@ def dump_sealed_json(value: Any, *, source: str) -> bytes:
         ) from exc
 
 
-def bind_sealed_bytes(raw: bytes, terminal_id: str) -> bytes:
-    """Bind the real terminal id into a prepared document.
+def bind_sealed_mcp_document(
+    raw: bytes, terminal_id: str, *, sites: Tuple[str, ...] = (), wrapped: bool = True
+) -> bytes:
+    """Bind the real terminal id into a prepared MCP document, structurally.
 
-    Pure non-validating byte substitution of the placeholder: the
-    document was already validated and serialized, so binding neither
-    parses nor checks anything. The terminal id is lowercase hex and
-    therefore JSON-string-safe. Returns new bytes — the prepared value
-    stays immutable.
+    Parses the already-validated final document and substitutes the
+    terminal id only at the injected ``env.CAO_TERMINAL_ID`` entries of
+    the named ``sites`` — servers whose placeholder preparation itself
+    injected. Any other placeholder-valued string (a literal in a user
+    MCP value, URL, header, or arg) is user content and is preserved
+    verbatim. Re-encodes deterministically (the same canonical JSON the
+    preparation used), so the output differs from the prepared bytes
+    only at the bound entries. Returns new bytes — the prepared value
+    stays immutable. ``wrapped`` selects the ``{"mcpServers": ...}``
+    document (Claude strict file, Cursor plugin manifest) versus the
+    bare servers mapping (Kimi ``--mcp-config``); the shape is explicit
+    so a server literally named ``mcpServers`` can never confuse it.
     """
-    return raw.replace(SEALED_TERMINAL_ID_PLACEHOLDER_BYTES, terminal_id.encode("ascii"))
+    try:
+        document = json.loads(raw)
+    except ValueError as exc:
+        raise SealedPreparationUnsupported(
+            f"prepared MCP document is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(document, dict):
+        raise SealedPreparationUnsupported("prepared MCP document must be a JSON object")
+    servers = document.get("mcpServers") if wrapped else document
+    if not isinstance(servers, dict):
+        raise SealedPreparationUnsupported("prepared MCP document has no servers mapping")
+    for name in sites:
+        config = servers.get(name)
+        if not isinstance(config, dict):
+            continue
+        env = config.get("env")
+        if not isinstance(env, dict):
+            continue
+        if env.get(TERMINAL_ID_ENV_KEY) == SEALED_TERMINAL_ID_PLACEHOLDER:
+            env[TERMINAL_ID_ENV_KEY] = terminal_id
+    return dump_sealed_json(document, source="bound MCP document")
+
+
+def bind_codex_material(
+    material: Dict[str, Any], terminal_id: str, *, sites: Tuple[str, ...] = ()
+) -> Dict[str, Any]:
+    """Bind the real terminal id into composed Codex material, structurally.
+
+    Walks the composed ``mcp_servers`` entries and substitutes the
+    terminal id only at the injected ``env`` items (``{"name":
+    "CAO_TERMINAL_ID", "value": <placeholder>}``) of the named
+    ``sites`` — servers whose placeholder preparation itself injected.
+    The system prompt, policy, codexConfig, and every other
+    placeholder-valued string (a literal in a prompt, arg, URL, header,
+    or user MCP value) are user content and stay verbatim. Mutates and
+    returns the passed material: pass the freshly parsed prepared
+    bytes, never a shared live object.
+    """
+    entries = material.get("mcp_servers")
+    if not isinstance(entries, list):
+        raise SealedPreparationUnsupported("prepared Codex material has no mcp_servers list")
+    wanted = set(sites)
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("name") not in wanted:
+            continue
+        env = entry.get("env")
+        if not isinstance(env, list):
+            continue
+        for item in env:
+            if (
+                isinstance(item, dict)
+                and item.get("name") == TERMINAL_ID_ENV_KEY
+                and item.get("value") == SEALED_TERMINAL_ID_PLACEHOLDER
+            ):
+                item["value"] = terminal_id
+    return material
 
 
 def _require_string_map(value: Any, *, source: str) -> Dict[str, str]:
@@ -274,7 +350,7 @@ def _require_string_map(value: Any, *, source: str) -> Dict[str, str]:
     return result
 
 
-def sealed_mcp_server_config(name: Any, value: Any) -> Dict[str, Any]:
+def sealed_mcp_server_config(name: Any, value: Any) -> Tuple[Dict[str, Any], bool]:
     """Normalize one raw MCP entry to its resolved, strictly-validated config.
 
     Pure shared validation for every sealed emitter: the server name
@@ -286,7 +362,10 @@ def sealed_mcp_server_config(name: Any, value: Any) -> Dict[str, Any]:
     present, and ``tool_timeout_sec`` a finite non-boolean number when
     present. The bundled command resolves through the existing
     resolver, and the ``CAO_TERMINAL_ID`` default is the terminal-id
-    placeholder the launch binds later. Malformed entries raise
+    placeholder the launch binds later. Returns the normalized config
+    plus whether this server received the injected placeholder (the raw
+    entry did not define the key) — that flag is the binding site the
+    emitter substitutes structurally. Malformed entries raise
     :class:`SealedPreparationUnsupported` — never a late serializer
     error, a silent coercion, or a ``str(value)`` fallback. Never
     mutates its inputs.
@@ -317,7 +396,8 @@ def sealed_mcp_server_config(name: Any, value: Any) -> Dict[str, Any]:
             f"got command={command!r} and url={url!r}"
         )
     config["env"] = _require_string_map(config.get("env", {}), source=f"mcpServers {name!r} env")
-    config["env"].setdefault("CAO_TERMINAL_ID", SEALED_TERMINAL_ID_PLACEHOLDER)
+    injected = TERMINAL_ID_ENV_KEY not in config["env"]
+    config["env"].setdefault(TERMINAL_ID_ENV_KEY, SEALED_TERMINAL_ID_PLACEHOLDER)
     if "headers" in config:
         config["headers"] = _require_string_map(
             config["headers"], source=f"mcpServers {name!r} headers"
@@ -347,29 +427,38 @@ def sealed_mcp_server_config(name: Any, value: Any) -> Dict[str, Any]:
         raise SealedPreparationUnsupported(
             f"mcpServers {name!r} tool_timeout_sec must be finite, got {timeout!r}"
         )
-    return config
+    return config, injected
 
 
-def prepare_sealed_mcp_documents(profile: Any) -> tuple[bytes, bytes]:
+def prepare_sealed_mcp_documents(profile: Any) -> tuple[bytes, bytes, Tuple[str, ...]]:
     """Resolve, validate, and finally serialize every consumed MCP entry.
 
-    Returns ``(servers_json, document_json)``: the deterministic JSON
-    text of the ``{name: config}`` mapping (Kimi ``--mcp-config``) and
-    the deterministic JSON bytes of the ``{"mcpServers": ...}`` document
-    (Claude strict file, Cursor plugin manifest) — each serialized
-    exactly once here, with the terminal-id placeholder, so emitters
-    bind and emit verbatim without ``json.dumps``, rebuilds, or
-    coercion. Never mutates the profile.
+    Returns ``(servers_json, document_json, binding_sites)``: the
+    deterministic JSON text of the ``{name: config}`` mapping (Kimi
+    ``--mcp-config``), the deterministic JSON bytes of the
+    ``{"mcpServers": ...}`` document (Claude strict file, Cursor plugin
+    manifest) — each serialized exactly once here, with the terminal-id
+    placeholder at the injected defaults — and the names of the servers
+    that received the injected ``env.CAO_TERMINAL_ID`` placeholder.
+    Emitters bind structurally at exactly those sites; every other
+    placeholder-valued string is user content and stays verbatim. Never
+    mutates the profile.
     """
     raw_servers = getattr(profile, "mcpServers", None) or {}
     if not isinstance(raw_servers, Mapping):
         raise SealedPreparationUnsupported(
             f"mcpServers must be a mapping of server configs, got {type(raw_servers).__name__}"
         )
-    configs = {name: sealed_mcp_server_config(name, value) for name, value in raw_servers.items()}
+    configs: Dict[str, Any] = {}
+    sites: list = []
+    for name, value in raw_servers.items():
+        config, injected = sealed_mcp_server_config(name, value)
+        configs[name] = config
+        if injected:
+            sites.append(name)
     servers_json = dump_sealed_json(configs, source="sealed MCP servers")
     document_json = b'{"mcpServers":' + servers_json + b"}"
-    return servers_json, document_json
+    return servers_json, document_json, tuple(sites)
 
 
 def custom_permission_mode_set(profile: Any) -> bool:

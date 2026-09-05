@@ -32,6 +32,7 @@ error before anything is read twice or launched.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -639,3 +640,105 @@ def build_profile_receipt(context: ProfileLaunchContext) -> Dict[str, Any]:
         "source_path": context.source_path,
         "sha256": context.sha256,
     }
+
+
+SUPERVISOR_CREATE_REQUEST_SCHEMA = "cao-supervisor-create-request-v1"
+
+#: Request values that spawn the memory-manager sidecar in the new
+#: session. Shared by the HTTP boundary and the request fingerprint so
+#: the fingerprinted decision and the spawned sidecar can never disagree.
+MEMORY_MANAGER_TRUTHY_VALUES = ("true", "1", "yes")
+
+
+def memory_manager_enabled(value: Any) -> bool:
+    """Whether a memory_manager request value spawns the sidecar."""
+    return value is not None and str(value).lower() in MEMORY_MANAGER_TRUTHY_VALUES
+
+
+def canonical_env_hash(env_vars: Any) -> str:
+    """SHA-256 over the canonical effective env map.
+
+    Keys sort, so ``{"B": "2", "A": "1"}`` and ``{"A": "1", "B": "2"}``
+    share an identity. ``None`` and ``{}`` share the empty-map identity.
+    Only the digest ever persists — raw env values (which may carry
+    secrets) are never written to a row. Non-string keys or values are
+    a malformed request (``ValueError`` maps to 400), never coerced.
+    """
+    mapping = dict(env_vars or {})
+    for key, item in mapping.items():
+        if not isinstance(key, str):
+            raise ValueError(f"env_vars has non-string key {key!r}")
+        if not isinstance(item, str):
+            raise ValueError(f"env_vars key {key!r} must be a string")
+    canonical = json.dumps(mapping, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def normalize_request_tools(allowed_tools: Any) -> Optional[list]:
+    """The request's explicit tool policy in fingerprint form.
+
+    ``None`` (resolve from the profile at load) stays ``None``: it is a
+    distinct request fact from an explicit list, even when resolution
+    would agree. Order is preserved — a reordered list is a different
+    request, refused rather than mis-adopted. Non-string entries are
+    malformed (``ValueError``), never coerced.
+    """
+    if allowed_tools is None:
+        return None
+    if not isinstance(allowed_tools, (list, tuple)):
+        raise ValueError("allowed_tools must be a list of strings or null")
+    tools = list(allowed_tools)
+    for item in tools:
+        if not isinstance(item, str):
+            raise ValueError(f"allowed_tools entries must be strings, got {item!r}")
+    return tools
+
+
+def build_supervisor_create_request(
+    *,
+    session_name: str,
+    agent_profile: str,
+    provider: Optional[str],
+    contract: Mapping[str, Any],
+    working_directory: Optional[str],
+    allowed_tools: Any,
+    env_vars: Any,
+    memory_manager: Any,
+) -> Dict[str, Any]:
+    """One canonical internal request document for a supervisor create.
+
+    Pure function of the request alone — no profile read, no store
+    access — so the claim-owned sequence computes it before inspecting
+    the durable row. ``session_name`` must already be normalized,
+    ``contract`` already strict-parsed. ``working_directory`` resolves
+    exactly like pane creation does for activated providers (``None``
+    becomes the canonical current directory, aliases resolve); for
+    other providers it is the same canonicalization of intent, so
+    byte-identical retries always agree. Only the env digest enters
+    the document — raw env values never persist.
+    """
+    return {
+        "schema": SUPERVISOR_CREATE_REQUEST_SCHEMA,
+        "session_name": session_name,
+        "role": SUPERVISOR_ROLE,
+        "agent_profile": agent_profile,
+        "provider": provider,
+        "profile_contract": dict(contract),
+        "working_directory": os.path.realpath(working_directory or os.getcwd()),
+        "allowed_tools": normalize_request_tools(allowed_tools),
+        "env_vars_sha256": canonical_env_hash(env_vars),
+        "memory_manager": memory_manager_enabled(memory_manager),
+    }
+
+
+def supervisor_create_request_fingerprint(request: Mapping[str, Any]) -> str:
+    """SHA-256 hex identity of a canonical create-request document.
+
+    Deterministic compact JSON (sorted keys): two byte-identical
+    requests share a fingerprint, and any request-only difference —
+    cwd, tools, env, provider, model/effort via the contract — changes
+    it. Persisted on the terminal row as the request identity the
+    adoption lookup compares exactly.
+    """
+    canonical = json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

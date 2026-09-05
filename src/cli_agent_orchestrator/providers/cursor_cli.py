@@ -79,7 +79,7 @@ from cli_agent_orchestrator.providers.base import (
     SealedLaunchMaterial,
     SealedPreparationUnsupported,
     SealedProfileSupport,
-    bind_sealed_bytes,
+    bind_sealed_mcp_document,
     container_maps_set,
     custom_permission_mode_set,
     custom_timeout_set,
@@ -455,11 +455,15 @@ class CursorCliProvider(BaseProvider):
         # it is removed with the session.
         prepared = self._prepared_sealed_launch
         if prepared is not None and prepared.mcp_document_json is not None:
-            # Sealed: write the prepared manifest bytes verbatim — bound
-            # to this terminal by pure substitution, never re-serialized
-            # (no json.dumps), re-resolved, or coerced inline. The
+            # Sealed: write the prepared manifest bound structurally
+            # at the injected terminal-id sites only — never globally
+            # substituted, re-resolved, or coerced inline. The
             # manifest write is the only plugin/shared effect.
-            sealed_manifest = bind_sealed_bytes(prepared.mcp_document_json, self.terminal_id)
+            sealed_manifest = bind_sealed_mcp_document(
+                prepared.mcp_document_json,
+                self.terminal_id,
+                sites=prepared.terminal_id_binding_sites,
+            )
             if sealed_manifest != EMPTY_MCP_DOCUMENT_JSON:
                 plugin_dir = self._write_plugin_manifest_bytes(sealed_manifest)
                 command_parts.extend(["--plugin-dir", plugin_dir])
@@ -679,11 +683,12 @@ class CursorCliProvider(BaseProvider):
         """
         if material is None or material.profile is None:
             raise SealedPreparationUnsupported("no frozen profile was supplied")
-        servers_json, document_json = prepare_sealed_mcp_documents(material.profile)
+        servers_json, document_json, sites = prepare_sealed_mcp_documents(material.profile)
         return PreparedSealedLaunch(
             provider="cursor_cli",
             mcp_servers_json=servers_json,
             mcp_document_json=document_json,
+            terminal_id_binding_sites=sites,
         )
 
     async def initialize(self) -> bool:

@@ -34,8 +34,12 @@ from sqlalchemy.exc import OperationalError
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.clients.database import (
+    PROVIDER_READINESS_FAILED,
+    PROVIDER_READINESS_PENDING,
+    PROVIDER_READINESS_READY,
     REGISTRATION_OK,
     backfill_terminal_identity_if_missing,
+    cas_terminal_provider_readiness,
     create_inbox_message,
 )
 from cli_agent_orchestrator.clients.database import create_terminal as db_create_terminal
@@ -1488,7 +1492,7 @@ def find_supervisor_adoption_candidate(
     *,
     session_name: str,
     contract: Mapping[str, Any],
-    expected_receipt: Optional[Mapping[str, Any]] = None,
+    request_fingerprint: str,
 ) -> Optional[Dict[str, Any]]:
     """Read-only create-or-adopt scan for a contract-bearing supervisor retry.
 
@@ -1505,13 +1509,15 @@ def find_supervisor_adoption_candidate(
     A row adopts only when every one of these holds: its stored
     profile receipt parses and matches every submitted contract field
     (same canonical provenance equivalence as launch validation); its
-    provider/profile/assigned model/effort agree; its lifecycle is
-    live; its tmux window identity is live and unreplaced; the
-    stable-agent roster resolves the same incarnation with supervisor
-    role and a live disposition; and the provider launch is ready
-    rather than pending/captured. Anything else — corrupt, partial,
-    historical, dead, superseded, ambiguous, missing-receipt, or
-    different-candidate state — refuses.
+    provider/profile/assigned model/effort agree; its durable
+    provider-readiness is ``ready``; its stored request fingerprint
+    exactly matches this request's; its lifecycle is live; its tmux
+    window identity is live and unreplaced; the stable-agent roster
+    resolves the same incarnation with supervisor role and a live
+    disposition; and the provider launch is ready rather than
+    pending/captured. Anything else — corrupt, partial, pending,
+    failed, historical, dead, superseded, ambiguous, missing-receipt,
+    request-mismatched, or different-candidate state — refuses.
     """
     from cli_agent_orchestrator.clients.database import list_terminals_by_session
     from cli_agent_orchestrator.services import stable_agent_roster
@@ -1534,7 +1540,9 @@ def find_supervisor_adoption_candidate(
     full_matches: list[Dict[str, Any]] = []
     evidence: list[str] = []
     for row in rows:
-        verdict = _adoption_row_verdict(row, contract=contract, expected_receipt=expected_receipt)
+        verdict = _adoption_row_verdict(
+            row, contract=contract, request_fingerprint=request_fingerprint
+        )
         if verdict is None:
             full_matches.append(row)
         else:
@@ -1565,7 +1573,7 @@ def _adoption_row_verdict(
     row: Dict[str, Any],
     *,
     contract: Mapping[str, Any],
-    expected_receipt: Optional[Mapping[str, Any]],
+    request_fingerprint: str,
 ) -> Optional[str]:
     """Durable-exactness verdict for one row: None when it fully matches."""
     stored = row.get("profile_receipt")
@@ -1583,11 +1591,6 @@ def _adoption_row_verdict(
             for entry in divergences
         )
         return f"stored receipt diverges: {fields}"
-    if expected_receipt is not None:
-        expected_divergences = stored_receipt_divergences(expected_receipt, stored)
-        if expected_divergences:
-            fields = ", ".join(entry["field"] for entry in expected_divergences)
-            return f"stored receipt diverges from this launch's expectation: {fields}"
     for pin in ("model", "effort"):
         if (row.get(f"assigned_{pin}") or None) != (contract.get(pin) or None):
             return (
@@ -1603,6 +1606,24 @@ def _adoption_row_verdict(
         return (
             f"terminal profile {row.get('agent_profile')!r} != "
             f"contract {contract.get('profile')!r}"
+        )
+    readiness = row.get("provider_readiness")
+    if readiness != PROVIDER_READINESS_READY:
+        if readiness is None:
+            return (
+                "terminal has no durable provider readiness (legacy row); "
+                "contract-bearing retries cannot adopt it"
+            )
+        return (
+            f"terminal provider readiness is {readiness!r}, not ready "
+            "(the launch never completed provider initialization)"
+        )
+    stored_fingerprint = row.get("create_request_fingerprint")
+    if not isinstance(stored_fingerprint, str) or stored_fingerprint != request_fingerprint:
+        return (
+            "terminal request fingerprint does not match this request "
+            "(working_directory, allowed_tools, env_vars, memory_manager, "
+            "or another request input differs)"
         )
     return None
 
@@ -2305,18 +2326,32 @@ async def create_terminal(
     sealed_launch_material: Optional[SealedLaunchMaterial] = None,
     #: The one prepared sealed-launch value the session boundary built
     #: pre-effect (cond-0817 repair). When present, the Codex profile
-    #: material below is bound from it by pure terminal-id substitution
-    #: and consumed by identity — the launch never reloads the profile
-    #: or re-runs provider composition/validation. ``None`` keeps the
-    #: legacy per-stage composition for direct construction.
+    #: material below is bound from it structurally at the recorded
+    #: injection sites and consumed by identity — the launch never
+    #: reloads the profile or re-runs provider composition/validation.
+    #: ``None`` keeps the legacy per-stage composition for direct
+    #: construction.
     prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
-    #: The already-parsed profile contract and this launch's expected
-    #: receipt (cond-0817 create-or-adopt). When both ride alongside a
-    #: sealed context, a retry re-checked under the session claim adopts
-    #: the one exactly-matching live winner with zero effects, or
+    #: The already-parsed profile contract (cond-0817 create-or-adopt).
+    #: When it rides alongside a sealed context and a request
+    #: fingerprint, a retry re-checked under the session claim adopts
+    #: the one exactly-matching ready winner with zero effects, or
     #: refuses with the typed 409. ``None`` keeps legacy behavior.
     profile_contract: Optional[Mapping[str, Any]] = None,
-    expected_receipt: Optional[Dict[str, Any]] = None,
+    #: SHA-256 fingerprint of the canonical supervisor create request
+    #: (session, role, profile, provider, contract, normalized cwd,
+    #: explicit tools, env digest, memory-manager input). Persisted with
+    #: the terminal row as ``pending``-readiness launch identity, and
+    #: compared exactly by the adoption lookup. ``None`` keeps legacy
+    #: rows without request identity (never adoptable by contract).
+    create_request_fingerprint: Optional[str] = None,
+    #: An already-entered session lifecycle claim owned by the caller
+    #: (the session boundary's claim-owned create-or-adopt sequence).
+    #: When given, the new-session preflight below neither acquires
+    #: nor releases it — the owner releases after the post-create hook
+    #: and the ready transition. ``None`` keeps the ordinary
+    #: acquire-owned-release preflight for direct construction.
+    held_session_claim: Any = None,
 ) -> Terminal:
     """Create a new terminal with an initialized CLI agent.
 
@@ -2365,7 +2400,12 @@ async def create_terminal(
     # FIFO stop/unlink, status clear, provider cleanup, and terminal-row
     # delete against the freshly generated — possibly 32-bit-colliding —
     # terminal ID, destroying an unrelated live terminal's state.)
-    session_claim = None
+    # The claim this preflight runs under: the caller's held claim when
+    # the session boundary owns the create-or-adopt sequence (it releases
+    # after the post-create hook and ready transition), else a claim this
+    # preflight acquires and owns. ``owns_session_claim`` decides release.
+    session_claim = held_session_claim
+    owns_session_claim = False
     if new_session:
         if not session_name:
             session_name = generate_session_name()
@@ -2383,10 +2423,12 @@ async def create_terminal(
         # releases the claim and aborts with zero resource effects.
         from cli_agent_orchestrator.services import callback_recovery, session_lifecycle
 
-        session_claim = callback_recovery.async_session_lifecycle_claim(
-            type(get_backend()).__name__, session_name
-        )
-        await session_claim.__aenter__()
+        if session_claim is None:
+            session_claim = callback_recovery.async_session_lifecycle_claim(
+                type(get_backend()).__name__, session_name
+            )
+            await session_claim.__aenter__()
+            owns_session_claim = True
         try:
             # Admission under the claim: a stopped name still holds what a
             # resume would restore to (and a collected fleet) and must not be
@@ -2395,32 +2437,36 @@ async def create_terminal(
             session_name = _admit_session_creation(session_name)
             # Create-or-adopt (cond-0817): a contract-bearing sealed retry
             # re-checked under the claim adopts the one exactly-matching
-            # live winner (returning its stored receipt with zero
+            # ready winner (returning its stored receipt with zero
             # effects) or raises the typed 409 — never a racy pre-query
             # outside the claim, never a second creation. Anything else
             # falls through to the ordinary duplicate/clear path below.
+            # The session boundary already ran this lookup under its own
+            # claim before deciding to create; this re-check covers direct
+            # construction, where the same verdict must hold.
             if (
                 profile_contract is not None
                 and profile_launch_context is not None
                 and sealed_launch_material is not None
+                and create_request_fingerprint is not None
             ):
                 candidate = find_supervisor_adoption_candidate(
                     session_name=session_name,
                     contract=profile_contract,
-                    expected_receipt=expected_receipt,
+                    request_fingerprint=create_request_fingerprint,
                 )
                 if candidate is not None:
                     stored_receipt = candidate["profile_receipt"]
                     assert isinstance(stored_receipt, dict)
                     adopted = _terminal_from_adoption_row(candidate, stored_receipt)
-                    if session_claim is not None:
+                    if owns_session_claim and session_claim is not None:
                         await session_claim.__aexit__(None, None, None)
                         session_claim = None
                     return adopted
-                # The optimistic session-level scan found a winner that is
-                # gone under the claim: the launch still needs its
-                # prepared value, so prepare here — pure, pre-effect,
-                # exactly once for this launch.
+                # The boundary-level scan found a winner that is gone
+                # under the claim: the launch still needs its prepared
+                # value, so prepare here — pure, pre-effect, exactly once
+                # for this launch.
                 if prepared_sealed_launch is None and managed_native_command is None:
                     prepared_sealed_launch = _prepare_sealed_launch_under_claim(
                         provider, sealed_launch_material
@@ -2436,7 +2482,7 @@ async def create_terminal(
             # reused over an unconfirmed stale row.
             clear_session_env(session_name)
         except BaseException:
-            if session_claim is not None:
+            if owns_session_claim and session_claim is not None:
                 await session_claim.__aexit__(None, None, None)
                 session_claim = None
             raise
@@ -2590,14 +2636,15 @@ async def create_terminal(
 
         # Sealed Codex material is bound BEFORE any tmux/session effect
         # from the one prepared value the session boundary validated and
-        # serialized pre-effect: the terminal-id placeholder is
-        # substituted purely over the final JSON (no validation, no
-        # composition), and the bootstrap and resumed TUI below consume
-        # this exact parsed object by identity. Preparation already
-        # refused malformed material with the typed refusal before the
-        # persisted session env was cleared, so nothing here can fail on
-        # provider input. Direct/legacy construction (no prepared value)
-        # keeps the builder fallback at its later site, unchanged.
+        # serialized pre-effect: the terminal id is substituted
+        # structurally at the recorded injection sites only (no global
+        # substitution, no validation, no composition), and the bootstrap
+        # and resumed TUI below consume this exact parsed object by
+        # identity. Preparation already refused malformed material with
+        # the typed refusal before the persisted session env was
+        # cleared, so nothing here can fail on provider input.
+        # Direct/legacy construction (no prepared value) keeps the
+        # builder fallback at its later site, unchanged.
         codex_profile_material: Optional[dict] = None
         if (
             managed_native_command is None
@@ -2608,7 +2655,9 @@ async def create_terminal(
             from cli_agent_orchestrator.providers.codex import bind_codex_material_json
 
             codex_profile_material = bind_codex_material_json(
-                prepared_sealed_launch.codex_material_json, terminal_id
+                prepared_sealed_launch.codex_material_json,
+                terminal_id,
+                sites=prepared_sealed_launch.terminal_id_binding_sites,
             )
 
         # Step 2: Create tmux session or window
@@ -2841,6 +2890,21 @@ async def create_terminal(
                 # existing launch cleanup below, so no launch succeeds
                 # without its durable receipt.
                 profile_receipt=profile_receipt,
+                # Provider-readiness and request identity for a sealed
+                # supervisor launch: the row is born ``pending`` with its
+                # request fingerprint, moves to ``ready`` only after
+                # provider construction, initialization, and the
+                # post-create hook all succeed, and is marked ``failed``
+                # when a post-effect failure leaves it behind. Only a
+                # ``ready`` row with an exactly-matching fingerprint is
+                # adoptable. Legacy/direct launches carry None and stay
+                # unadoptable by contract-bearing retries.
+                provider_readiness=(
+                    PROVIDER_READINESS_PENDING
+                    if profile_launch_context is not None and create_request_fingerprint is not None
+                    else None
+                ),
+                create_request_fingerprint=create_request_fingerprint,
             )
 
             _register_incarnation(terminal_id, terminal_generation, identity)
@@ -3288,6 +3352,26 @@ async def create_terminal(
             db_delete_terminal(terminal_id)
         except Exception:
             pass  # Ignore cleanup errors
+        # A sealed supervisor launch whose row survived cleanup (the
+        # delete above failed, or a partial failure left it behind) is
+        # marked ``failed`` — never silently adoptable, never silently
+        # retried into. The CAS only fires from ``pending``, so legacy
+        # rows and already-settled rows are untouched, and a row the
+        # cleanup did remove simply misses (read-only check, no backfill
+        # write). Best-effort: the primary exception below is preserved.
+        if profile_launch_context is not None and create_request_fingerprint is not None:
+            try:
+                surviving = get_terminal_adoption_row(terminal_id)
+                if surviving is not None and (
+                    surviving.get("provider_readiness") == PROVIDER_READINESS_PENDING
+                ):
+                    cas_terminal_provider_readiness(
+                        terminal_id,
+                        PROVIDER_READINESS_PENDING,
+                        PROVIDER_READINESS_FAILED,
+                    )
+            except Exception:
+                pass  # Ignore marking errors
         if session_created and session_name:
             try:
                 get_backend().kill_session(session_name)
@@ -3341,7 +3425,9 @@ async def create_terminal(
                 logger.warning("v2 registry rollback failed for %s", terminal_id, exc_info=True)
         raise
     finally:
-        if session_claim is not None:
+        # A caller-held claim stays open: the session boundary releases
+        # it after the post-create hook and the ready transition.
+        if owns_session_claim and session_claim is not None:
             await session_claim.__aexit__(None, None, None)
 
 

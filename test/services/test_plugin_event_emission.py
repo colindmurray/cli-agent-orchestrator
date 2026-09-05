@@ -63,7 +63,7 @@ class TestSessionPluginEvents:
         # before we assert it fired.
         await asyncio.sleep(0)
 
-        assert result.session_name == "cao-demo"
+        assert result.terminal.session_name == "cao-demo"
         registry.dispatch.assert_awaited_once()
         event_type, event = registry.dispatch.await_args.args
         assert event_type == "post_create_session"

@@ -25,7 +25,8 @@ from cli_agent_orchestrator.clients import database
 from cli_agent_orchestrator.providers.base import (
     SEALED_TERMINAL_ID_PLACEHOLDER,
     SealedPreparationUnsupported,
-    bind_sealed_bytes,
+    bind_codex_material,
+    bind_sealed_mcp_document,
 )
 from cli_agent_orchestrator.providers.codex import bind_codex_material_json
 from cli_agent_orchestrator.providers.manager import ProviderManager
@@ -275,12 +276,14 @@ class TestBrokenCodexMcpZeroMutation:
                 patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
             ):
                 with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
-                    await session_service.create_session(
-                        provider=None,
-                        agent_profile="sup",
-                        session_name="broken-codex",
-                        profile_contract=_contract_for(context),
-                    )
+                    (
+                        await session_service.create_session(
+                            provider=None,
+                            agent_profile="sup",
+                            session_name="broken-codex",
+                            profile_contract=_contract_for(context),
+                        )
+                    ).terminal
             assert exc_info.value.provider == "codex"
             assert "broken" in exc_info.value.reason
             mock_create.assert_not_called()
@@ -365,11 +368,13 @@ class TestPreparationOrdering:
             stack.enter_context(
                 patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event")
             )
-            terminal = await session_service.create_session(
-                provider=None,
-                agent_profile="sup",
-                profile_contract=_contract_for(context),
-            )
+            terminal = (
+                await session_service.create_session(
+                    provider=None,
+                    agent_profile="sup",
+                    profile_contract=_contract_for(context),
+                )
+            ).terminal
 
         assert terminal.profile_receipt == build_profile_receipt(context)
         assert events == ["prepare", "clear", "tmux", "db", "provider"], events
@@ -495,11 +500,13 @@ class TestPreparedArtifactIdentity:
             stack.enter_context(
                 patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event")
             )
-            terminal = await session_service.create_session(
-                provider=None,
-                agent_profile="sup",
-                profile_contract=_contract_for(context),
-            )
+            terminal = (
+                await session_service.create_session(
+                    provider=None,
+                    agent_profile="sup",
+                    profile_contract=_contract_for(context),
+                )
+            ).terminal
 
         assert terminal.profile_receipt == build_profile_receipt(context)
         # Exactly one preparation and one composer call across the flow.
@@ -511,11 +518,12 @@ class TestPreparedArtifactIdentity:
         instance, create_kwargs = built[0]
         assert isinstance(instance, CodexProvider)
         assert create_kwargs["codex_profile_material"] is bootstrap_material
-        # ...which is the prepared value bound by pure substitution. (The
-        # test context supplies the contract *values*; the session
-        # performs its own single boundary read, so profile equality —
-        # not identity with the test object — is the correct pin here.
-        # Object identity is pinned between bootstrap and provider above.)
+        # ...which is the prepared value bound structurally at the
+        # recorded injection sites. (The test context supplies the
+        # contract *values*; the session performs its own single
+        # boundary read, so profile equality — not identity with the
+        # test object — is the correct pin here. Object identity is
+        # pinned between bootstrap and provider above.)
         assert "profile" not in bootstrap_material
         assert set(bootstrap_material) == {
             "system_prompt",
@@ -578,11 +586,13 @@ class TestMalformedMcpMatrix:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
-                await session_service.create_session(
-                    provider=None,
-                    agent_profile="sup",
-                    profile_contract=_contract_for(context),
-                )
+                (
+                    await session_service.create_session(
+                        provider=None,
+                        agent_profile="sup",
+                        profile_contract=_contract_for(context),
+                    )
+                ).terminal
         assert exc_info.value.provider == provider
         assert "broken" in exc_info.value.reason
         assert "exactly one usable transport" in exc_info.value.reason
@@ -636,11 +646,13 @@ class TestAntigravityMalformedMcp:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported) as exc_info:
-                await session_service.create_session(
-                    provider=None,
-                    agent_profile="sup",
-                    profile_contract=_contract_for(context),
-                )
+                (
+                    await session_service.create_session(
+                        provider=None,
+                        agent_profile="sup",
+                        profile_contract=_contract_for(context),
+                    )
+                ).terminal
         assert "mcp_config.json" in exc_info.value.reason
         mock_create.assert_not_called()
         assert json.loads(shared.read_text(encoding="utf-8")) == ambient
@@ -808,11 +820,13 @@ class TestNonJsonMcpShapes:
             patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
         ):
             with pytest.raises(spr.ProfileLaunchUnsupported):
-                await session_service.create_session(
-                    provider=None,
-                    agent_profile="sup",
-                    profile_contract=_contract_for(context),
-                )
+                (
+                    await session_service.create_session(
+                        provider=None,
+                        agent_profile="sup",
+                        profile_contract=_contract_for(context),
+                    )
+                ).terminal
         mock_create.assert_not_called()
         mock_clear.assert_not_called()
         assert (
@@ -838,7 +852,8 @@ class TestNonJsonMcpShapes:
             "sealed_mcp_server_config",
             "prepare_sealed_mcp_documents",
             "dump_sealed_json",
-            "bind_sealed_bytes",
+            "bind_sealed_mcp_document",
+            "bind_codex_material",
         ):
             (node,) = ast.parse(inspect.getsource(getattr(base_module, name))).body
             assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)), name
@@ -869,7 +884,7 @@ class TestFinalBytesIdentity:
         return load_supervisor_launch_context("sup")
 
     def test_claude_file_bytes_equal_prepared(self, mcp_profile, tmp_path, monkeypatch):
-        """The strict file is the prepared bytes, serialized once."""
+        """The strict file is the prepared document, bound at its sites."""
         import json as _json
 
         import cli_agent_orchestrator.providers.claude_code as claude_module
@@ -889,7 +904,10 @@ class TestFinalBytesIdentity:
             "claude_code", spr.build_sealed_launch_material(mcp_profile)
         )
         assert dumps_calls == ["sealed MCP servers"]
-        bound = bind_sealed_bytes(prepared.mcp_document_json, "tid9")
+        assert prepared.terminal_id_binding_sites == ("srv",)
+        bound = bind_sealed_mcp_document(
+            prepared.mcp_document_json, "tid9", sites=prepared.terminal_id_binding_sites
+        )
         provider = ClaudeCodeProvider(
             "tid9",
             "s",
@@ -906,7 +924,7 @@ class TestFinalBytesIdentity:
         assert _json.loads(written)["mcpServers"]["srv"]["env"]["CAO_TERMINAL_ID"] == "tid9"
 
     def test_kimi_argv_text_equals_prepared(self, mcp_profile, tmp_path, monkeypatch):
-        """The --mcp-config text is the prepared text, serialized once."""
+        """The --mcp-config text is the prepared text, bound at its sites."""
         import shlex
 
         from cli_agent_orchestrator.providers import base as base_module
@@ -925,7 +943,13 @@ class TestFinalBytesIdentity:
         material = spr.build_sealed_launch_material(mcp_profile)
         prepared = ProviderManager().prepare_sealed_launch("kimi_cli", material)
         assert dumps_calls == ["sealed MCP servers"]
-        expected_text = bind_sealed_bytes(prepared.mcp_servers_json, "tid9").decode("utf-8")
+        assert prepared.terminal_id_binding_sites == ("srv",)
+        expected_text = bind_sealed_mcp_document(
+            prepared.mcp_servers_json,
+            "tid9",
+            sites=prepared.terminal_id_binding_sites,
+            wrapped=False,
+        ).decode("utf-8")
         provider = KimiCliProvider(
             "tid9",
             "s",
@@ -942,7 +966,7 @@ class TestFinalBytesIdentity:
         assert parts[parts.index("--mcp-config") + 1] == expected_text
 
     def test_cursor_manifest_bytes_equal_prepared(self, profile_store, tmp_path, monkeypatch):
-        """The plugin manifest is the prepared bytes, serialized once."""
+        """The plugin manifest is the prepared document, bound at its sites."""
         import json as _json
 
         _write_profile(
@@ -978,7 +1002,10 @@ class TestFinalBytesIdentity:
             "cursor_cli", spr.build_sealed_launch_material(context)
         )
         assert dumps_calls == ["sealed MCP servers"]
-        bound = bind_sealed_bytes(prepared.mcp_document_json, "tid9")
+        assert prepared.terminal_id_binding_sites == ("srv",)
+        bound = bind_sealed_mcp_document(
+            prepared.mcp_document_json, "tid9", sites=prepared.terminal_id_binding_sites
+        )
         provider = CursorCliProvider(
             "tid9",
             "s",
@@ -1026,19 +1053,108 @@ class TestFinalBytesIdentity:
         finally:
             codex_module.dump_sealed_json = real_dumps
         assert dumps_calls == ["sealed Codex material"]
+        assert prepared.terminal_id_binding_sites == ("srv",)
         final = _json.loads(prepared.codex_material_json)
         assert set(final) == {"system_prompt", "allowed_tools", "mcp_servers", "codex_config"}
         assert "profile" not in final
-        # The emitter input is byte-identical to the prepared content.
-        bound = bind_codex_material_json(prepared.codex_material_json, "tid9")
-        assert (
-            _json.loads(
-                prepared.codex_material_json.replace(
-                    SEALED_TERMINAL_ID_PLACEHOLDER.encode("ascii"), b"tid9"
-                )
-            )
-            == bound
+        # The emitter input is the prepared content bound structurally at
+        # the recorded sites — every other value byte-identical.
+        bound = bind_codex_material_json(
+            prepared.codex_material_json, "tid9", sites=prepared.terminal_id_binding_sites
         )
+        expected = _json.loads(prepared.codex_material_json)
+        for entry in expected["mcp_servers"]:
+            for item in entry["env"]:
+                if item["name"] == "CAO_TERMINAL_ID":
+                    item["value"] = "tid9"
+        assert bound == expected
+
+
+class TestSentinelLiteralPreservation:
+    @pytest.fixture
+    def sentinel_profile(self, profile_store):
+        from cli_agent_orchestrator.providers.base import SEALED_TERMINAL_ID_PLACEHOLDER as sentinel
+
+        _write_profile(
+            profile_store,
+            "sent",
+            provider="codex",
+            body=f"Direct the {sentinel} run.",
+            extra=(
+                "mcpServers:",
+                "  lit:",
+                "    command: /bin/true",
+                f"    args: [--id, {sentinel}]",
+                "    env:",
+                f"      NOTE: tok-{sentinel}-end",
+                "  own:",
+                "    command: /bin/true",
+                "    env:",
+                f"      CAO_TERMINAL_ID: {sentinel}",
+                "  web:",
+                f"    url: https://example.invalid/{sentinel}/hook",
+                "    headers:",
+                f"      X-Trace: {sentinel}",
+            ),
+        )
+        return load_supervisor_launch_context("sent")
+
+    def test_codex_material_keeps_user_literals(self, sentinel_profile):
+        """Only the injected env entries bind; user literals stay verbatim."""
+        import json as _json
+
+        from cli_agent_orchestrator.providers.base import SEALED_TERMINAL_ID_PLACEHOLDER as sentinel
+
+        prepared = ProviderManager().prepare_sealed_launch(
+            "codex", spr.build_sealed_launch_material(sentinel_profile)
+        )
+        assert prepared.terminal_id_binding_sites == ("lit", "web")
+        raw = prepared.codex_material_json.decode("utf-8")
+        # Six placeholders prepared: prompt, args, NOTE, own, url, and
+        # the injected lit env default (web is a URL entry: no env).
+        assert raw.count(sentinel) == 6
+        bound = bind_codex_material_json(
+            prepared.codex_material_json, "tid9", sites=prepared.terminal_id_binding_sites
+        )
+        assert f"Direct the {sentinel} run." in bound["system_prompt"]
+        lit = next(entry for entry in bound["mcp_servers"] if entry["name"] == "lit")
+        env = {item["name"]: item["value"] for item in lit["env"]}
+        assert env["CAO_TERMINAL_ID"] == "tid9"
+        assert env["NOTE"] == f"tok-{sentinel}-end"
+        assert lit["args"] == ["--id", sentinel]
+        own = next(entry for entry in bound["mcp_servers"] if entry["name"] == "own")
+        own_env = {item["name"]: item["value"] for item in own["env"]}
+        # Explicitly user-set, so not a site: the literal survives.
+        assert own_env["CAO_TERMINAL_ID"] == sentinel
+        web = next(entry for entry in bound["mcp_servers"] if entry["name"] == "web")
+        assert web["url"] == f"https://example.invalid/{sentinel}/hook"
+        rebound = _json.dumps(bound, sort_keys=True)
+        assert rebound.count(sentinel) == 5
+        assert rebound.count("tid9") == 1
+
+    def test_mcp_document_keeps_user_literals(self, sentinel_profile):
+        """The MCP document binds sites only; literals stay verbatim."""
+        import json as _json
+
+        from cli_agent_orchestrator.providers.base import SEALED_TERMINAL_ID_PLACEHOLDER as sentinel
+        from cli_agent_orchestrator.providers.base import (
+            prepare_sealed_mcp_documents,
+        )
+
+        servers_json, document_json, sites = prepare_sealed_mcp_documents(sentinel_profile.profile)
+        assert sites == ("lit", "web")
+        bound = bind_sealed_mcp_document(document_json, "tid9", sites=sites)
+        document = _json.loads(bound)
+        servers = document["mcpServers"]
+        assert servers["lit"]["env"]["CAO_TERMINAL_ID"] == "tid9"
+        assert servers["lit"]["env"]["NOTE"] == f"tok-{sentinel}-end"
+        assert servers["lit"]["args"] == ["--id", sentinel]
+        assert servers["own"]["env"]["CAO_TERMINAL_ID"] == sentinel
+        assert servers["web"]["env"]["CAO_TERMINAL_ID"] == "tid9"
+        assert servers["web"]["url"] == f"https://example.invalid/{sentinel}/hook"
+        assert servers["web"]["headers"] == {"X-Trace": sentinel}
+        assert bound.count(sentinel.encode()) == 5
+        assert bound.count(b"tid9") == 2
 
 
 class TestHttpPreparationMapping:
@@ -1050,7 +1166,7 @@ class TestHttpPreparationMapping:
         stubbed, and it is never reached): malformed provider material
         maps to the operation-scoped 422, never the late 500.
         """
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
 
@@ -1066,6 +1182,7 @@ class TestHttpPreparationMapping:
             with pytest.raises(HTTPException) as exc_info:
                 await main.create_session(
                     request=MagicMock(),
+                    response=Response(),
                     background_tasks=BackgroundTasks(),
                     agent_profile="sup",
                     profile_contract=_contract_for(context),

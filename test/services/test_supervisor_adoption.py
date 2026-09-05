@@ -107,6 +107,7 @@ class _LaunchRig:
         self.stack = ExitStack()
         self.prepare_calls: list = []
         self.events: list = []
+        self.last_result = None
 
     def __enter__(self):
         from cli_agent_orchestrator.providers.manager import ProviderManager
@@ -158,7 +159,9 @@ class _LaunchRig:
         return self.stack.__exit__(*exc)
 
     async def create(self, **kwargs):
-        return await session_service.create_session(**kwargs)
+        result = await session_service.create_session(**kwargs)
+        self.last_result = result
+        return result.terminal
 
     def row_count(self):
         from cli_agent_orchestrator.clients.database import SessionLocal, TerminalModel
@@ -197,12 +200,14 @@ class TestAdoptRetry:
                 profile_contract=contract,
             )
             assert first.profile_receipt == expected
+            assert rig.last_result.adopted is False
             retry = await rig.create(
                 provider=None,
                 agent_profile="sup",
                 session_name="adopt",
                 profile_contract=contract,
             )
+            assert rig.last_result.adopted is True
 
         assert retry.id == first.id
         assert retry.profile_receipt == first.profile_receipt == expected
@@ -215,33 +220,38 @@ class TestAdoptRetry:
     async def test_concurrent_callers_share_one_effect_sequence(
         self, profile_store, isolated_memory_db, launched_provider
     ):
-        """Two same-candidate callers converge on one winner, one sequence."""
+        """Two same-candidate callers converge on one winner, one sequence.
+
+        The claim serializes the pair: the winner prepares, effects,
+        and dispatches exactly once, while the loser blocks on the
+        claim and is surfaced as adopted without preparing or
+        dispatching.
+        """
         import asyncio
 
         _write_profile(profile_store, "sup")
         context = load_supervisor_launch_context("sup")
         contract = _contract_for(context)
 
-        with _LaunchRig(launched_provider) as rig:
-            first, second = await asyncio.gather(
-                rig.create(
-                    provider=None,
-                    agent_profile="sup",
-                    session_name="adopt-race",
-                    profile_contract=contract,
-                ),
-                rig.create(
-                    provider=None,
-                    agent_profile="sup",
-                    session_name="adopt-race",
-                    profile_contract=contract,
-                ),
+        def _call():
+            return session_service.create_session(
+                provider=None,
+                agent_profile="sup",
+                session_name="adopt-race",
+                profile_contract=contract,
             )
+
+        with _LaunchRig(launched_provider) as rig:
+            winner_result, loser_result = await asyncio.gather(_call(), _call())
+            first, second = winner_result.terminal, loser_result.terminal
 
         assert first.id == second.id
         assert first.profile_receipt == second.profile_receipt
         assert rig.row_count() == 1
         assert rig.backend.create_session.call_count == 1
+        assert rig.prepare_calls == ["kimi_cli"]
+        assert len(rig.post_create_events()) == 1
+        assert sorted([winner_result.adopted, loser_result.adopted]) == [False, True]
 
     @pytest.mark.asyncio
     async def test_adoption_runs_no_preparation_or_effect(
@@ -620,6 +630,214 @@ class TestAdoptMismatch:
             assert "ambiguous" in exc_info.value.reason
 
 
+class TestAdoptRequestMismatch:
+    async def _launched(self, rig, profile_store, session_name="adopt-req", **kwargs):
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        contract = _contract_for(context)
+        first = await rig.create(
+            provider=None,
+            agent_profile="sup",
+            session_name=session_name,
+            profile_contract=contract,
+            **kwargs,
+        )
+        return first, contract
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "field,first_value,second_value",
+        [
+            ("working_directory", "/tmp/first-cwd", "/tmp/second-cwd"),
+            ("allowed_tools", ["Read"], ["*"]),
+            ("env_vars", {"SHARED": "one"}, {"SHARED": "two"}),
+            ("memory_manager", None, "true"),
+        ],
+    )
+    async def test_request_only_difference_refuses(
+        self, profile_store, isolated_memory_db, launched_provider, field, first_value, second_value
+    ):
+        """Same contract, different request: 409 with zero new effects.
+
+        The stored receipt still matches the contract — only the
+        request identity (cwd, tools, env, sidecar input) differs — so
+        the retry must refuse rather than silently receive the first
+        request's working directory, policy, or environment.
+        """
+        with _LaunchRig(launched_provider) as rig:
+            first_kwargs = {field: first_value} if first_value is not None else {}
+            first, contract = await self._launched(rig, profile_store, **first_kwargs)
+            prepares_before_retry = list(rig.prepare_calls)
+            posts_before_retry = len(rig.post_create_events())
+            second_kwargs = {field: second_value} if second_value is not None else {}
+            with pytest.raises(spr.ProfileAdoptionMismatch) as exc_info:
+                await rig.create(
+                    provider=None,
+                    agent_profile="sup",
+                    session_name="adopt-req",
+                    profile_contract=contract,
+                    **second_kwargs,
+                )
+            assert "fingerprint" in exc_info.value.reason
+            assert rig.row_count() == 1
+            assert rig.backend.create_session.call_count == 1
+            assert rig.prepare_calls == prepares_before_retry
+            assert len(rig.post_create_events()) == posts_before_retry
+
+    @pytest.mark.asyncio
+    async def test_reordered_env_adopts(self, profile_store, isolated_memory_db, launched_provider):
+        """Key order is not identity: reordered env adopts the winner."""
+        with _LaunchRig(launched_provider) as rig:
+            first, contract = await self._launched(
+                rig, profile_store, env_vars={"B": "2", "A": "1"}
+            )
+            retry = await rig.create(
+                provider=None,
+                agent_profile="sup",
+                session_name="adopt-req",
+                profile_contract=contract,
+                env_vars={"A": "1", "B": "2"},
+            )
+            assert rig.last_result.adopted is True
+        assert retry.id == first.id
+        assert rig.row_count() == 1
+
+
+class TestAdoptReadinessGating:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("readiness", ["pending", "failed"])
+    async def test_unsettled_readiness_refuses(
+        self, profile_store, isolated_memory_db, launched_provider, readiness
+    ):
+        """A pending/failed row is never adopted, however exact the match."""
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        contract = _contract_for(context)
+        with _LaunchRig(launched_provider) as rig:
+            first = await rig.create(
+                provider=None,
+                agent_profile="sup",
+                session_name="adopt-ready",
+                profile_contract=contract,
+            )
+            _tweak_row(first.id, provider_readiness=readiness)
+            with pytest.raises(spr.ProfileAdoptionMismatch) as exc_info:
+                await rig.create(
+                    provider=None,
+                    agent_profile="sup",
+                    session_name="adopt-ready",
+                    profile_contract=contract,
+                )
+            assert "readiness" in exc_info.value.reason
+            assert rig.row_count() == 1
+            assert rig.backend.create_session.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_init_marks_row_and_refuses_retry(
+        self, profile_store, isolated_memory_db, launched_provider
+    ):
+        """A provider-init failure with failed cleanup refuses the retry.
+
+        The first call raises; its surviving row is marked failed; the
+        retry refuses instead of adopting a launch that never completed
+        provider initialization — with no second effect sequence.
+        """
+        from cli_agent_orchestrator.services import terminal_service
+
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        contract = _contract_for(context)
+        rig = _LaunchRig(launched_provider)
+        rig.launched_provider.initialize = AsyncMock(
+            side_effect=RuntimeError("provider init failed")
+        )
+        with rig:
+            # Cleanup fails too, so the dead row survives teardown —
+            # the failure the failed-marker exists for.
+            with patch.object(
+                terminal_service,
+                "db_delete_terminal",
+                side_effect=RuntimeError("db cleanup failed"),
+            ):
+                with pytest.raises(RuntimeError, match="provider init failed"):
+                    await rig.create(
+                        provider=None,
+                        agent_profile="sup",
+                        session_name="adopt-fail",
+                        profile_contract=contract,
+                    )
+            from cli_agent_orchestrator.clients import database
+
+            row = database.get_terminal_adoption_row("abcd4242")
+            assert row is not None
+            assert row["provider_readiness"] == "failed"
+            tmux_calls = rig.backend.create_session.call_count
+            with pytest.raises(spr.ProfileAdoptionMismatch) as exc_info:
+                await rig.create(
+                    provider=None,
+                    agent_profile="sup",
+                    session_name="adopt-fail",
+                    profile_contract=contract,
+                )
+            assert "readiness" in exc_info.value.reason
+            assert rig.backend.create_session.call_count == tmux_calls
+            assert len(rig.post_create_events()) == 0
+
+
+class TestAdoptSourceDrift:
+    @pytest.mark.asyncio
+    async def test_exact_winner_adopts_despite_source_drift(
+        self, profile_store, isolated_memory_db, launched_provider
+    ):
+        """The durable winner is validated before mutable source is read.
+
+        Launch profile A, overwrite the source with B, retry A's exact
+        contract: the retry adopts A's winner with A's stored receipt —
+        no Conflict, no B launch, no new effects, and the source is
+        never re-read for the verdict.
+        """
+        from cli_agent_orchestrator.services import terminal_service
+
+        _write_profile(profile_store, "sup")
+        context_a = load_supervisor_launch_context("sup")
+        contract_a = _contract_for(context_a)
+        expected_a = spr.build_profile_receipt(context_a)
+        with _LaunchRig(launched_provider) as rig:
+            first = await rig.create(
+                provider=None,
+                agent_profile="sup",
+                session_name="adopt-drift",
+                profile_contract=contract_a,
+            )
+            assert first.profile_receipt == expected_a
+            # The operator replaces the profile source after response loss.
+            path = profile_store / "sup.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "model: adopt-model-1", "model: adopt-model-2"
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(
+                terminal_service,
+                "load_agent_profile",
+                side_effect=AssertionError("mutable source re-read on adopt"),
+            ):
+                retry = await rig.create(
+                    provider=None,
+                    agent_profile="sup",
+                    session_name="adopt-drift",
+                    profile_contract=contract_a,
+                )
+            assert rig.last_result.adopted is True
+        assert retry.id == first.id
+        assert retry.profile_receipt == first.profile_receipt == expected_a
+        assert rig.row_count() == 1
+        assert rig.backend.create_session.call_count == 1
+        assert rig.prepare_calls == ["kimi_cli"]
+        assert len(rig.post_create_events()) == 1
+
+
 class TestAdoptBoundaries:
     @pytest.mark.asyncio
     async def test_no_contract_duplicate_remains_400(
@@ -635,30 +853,43 @@ class TestAdoptBoundaries:
             assert rig.row_count() == 1
 
     @pytest.mark.asyncio
-    async def test_rejected_candidate_never_adopts(
+    async def test_legacy_row_never_adopts(
         self, profile_store, isolated_memory_db, launched_provider
     ):
-        """An unsupported sealed candidate refuses outright — never adopts."""
-        _write_profile(profile_store, "sup", provider="kiro_cli")
+        """A contract retry over a legacy row refuses 409 — never adopts.
+
+        The first launch ran without a contract, so its row carries no
+        request fingerprint or readiness: the retry's receipt may agree,
+        but a contract-bearing retry cannot adopt a row with no durable
+        request identity. Zero new effects.
+        """
+        _write_profile(profile_store, "sup")
         context = load_supervisor_launch_context("sup")
         contract = _contract_for(context)
         with _LaunchRig(launched_provider) as rig:
             first = await rig.create(provider=None, agent_profile="sup", session_name="rej")
-            with pytest.raises(spr.ProfileLaunchUnsupported):
+            prepares_before_retry = list(rig.prepare_calls)
+            with pytest.raises(spr.ProfileAdoptionMismatch) as exc_info:
                 await rig.create(
                     provider=None,
                     agent_profile="sup",
                     session_name="rej",
                     profile_contract=contract,
                 )
+            # The legacy row records no readiness or request identity:
+            # the retry refuses with zero new effects.
+            assert "readiness" in exc_info.value.reason
             assert rig.row_count() == 1
+            assert rig.backend.create_session.call_count == 1
+            assert rig.prepare_calls == prepares_before_retry
+            assert len(rig.post_create_events()) == 1
 
     @pytest.mark.asyncio
     async def test_mismatch_maps_to_409_end_to_end(
         self, profile_store, isolated_memory_db, launched_provider
     ):
         """The typed mismatch surfaces as HTTP 409 with reason/recovery."""
-        from fastapi import BackgroundTasks, HTTPException
+        from fastapi import BackgroundTasks, HTTPException, Response
 
         from cli_agent_orchestrator.api import main
 
@@ -677,9 +908,11 @@ class TestAdoptBoundaries:
                 with pytest.raises(HTTPException) as exc_info:
                     await main.create_session(
                         request=MagicMock(),
+                        response=Response(),
                         background_tasks=BackgroundTasks(),
                         agent_profile="sup",
                         session_name="http409",
+                        env_vars=None,
                         profile_contract=contract,
                     )
         assert exc_info.value.status_code == 409
@@ -687,3 +920,47 @@ class TestAdoptBoundaries:
         assert "model" in exc_info.value.detail["reason"]
         assert exc_info.value.detail["recovery"]
         assert rig.row_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_adopted_retry_answers_200_with_indicator(
+        self, profile_store, isolated_memory_db, launched_provider
+    ):
+        """An adopted retry answers HTTP 200 with the adoption indicator.
+
+        The body is the stored terminal with its stored receipt — the
+        same terminal id, byte-identical receipt, no new effects.
+        """
+        from fastapi import BackgroundTasks, Response
+
+        from cli_agent_orchestrator.api import main
+
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        contract = _contract_for(context)
+        expected = spr.build_profile_receipt(context)
+        with _LaunchRig(launched_provider) as rig:
+            first = await rig.create(
+                provider=None,
+                agent_profile="sup",
+                session_name="http200",
+                profile_contract=contract,
+            )
+            with patch.object(main, "get_plugin_registry", return_value=MagicMock()):
+                response = Response()
+                second = await main.create_session(
+                    request=MagicMock(),
+                    response=response,
+                    background_tasks=BackgroundTasks(),
+                    agent_profile="sup",
+                    session_name="http200",
+                    env_vars=None,
+                    profile_contract=contract,
+                )
+        assert response.status_code == 200
+        assert response.headers["x-cao-adopted"] == "exact-ready"
+        assert second.id == first.id
+        assert second.profile_receipt == first.profile_receipt == expected
+        assert rig.row_count() == 1
+        assert rig.backend.create_session.call_count == 1
+        assert rig.prepare_calls == ["kimi_cli"]
+        assert len(rig.post_create_events()) == 1

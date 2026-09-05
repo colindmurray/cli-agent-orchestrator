@@ -185,6 +185,7 @@ from cli_agent_orchestrator.services.supervisor_profile_receipt import (
     ProfileLaunchConflict,
     ProfileLaunchUnsupported,
     ProfileNotFoundError,
+    memory_manager_enabled,
 )
 from cli_agent_orchestrator.services.terminal_service import (
     OutputMode,
@@ -1760,6 +1761,7 @@ async def list_annotations(
 @app.post("/sessions", response_model=Terminal, status_code=status.HTTP_201_CREATED)
 async def create_session(
     request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     agent_profile: str,
     provider: Optional[str] = None,
@@ -1792,18 +1794,25 @@ async def create_session(
 
     ``profile_contract`` (request body, optional) is the conductor-preflighted
     ``cao-profile-launch-contract-v1`` expectation for the supervisor profile.
-    It is validated against the profile source the runtime loads exactly once,
-    before any tmux/session/provider effect: a divergence answers 409 with
-    the divergent fields and a retry path (re-preflight, retry with the fresh
-    contract), and a malformed contract answers 400. A contract naming a
-    provider/path whose adapter cannot consume the frozen profile exactly
-    (provider-native ``--agent`` artifacts, mutable native prompt/tool
-    stores) is refused with an operation-scoped 422 and zero effects — no
-    row, no provider, no receipt. An absent contract launches normally — the
-    contract is an expectation, not a second authority. A sealed-capable
-    launch returns the runtime-authored ``cao-profile-receipt-v1`` on the
-    response; a legacy launch (unsupported adapter, no contract) records no
-    exact receipt.
+    A retry carrying the same contract on a fixed session name adopts the
+    exact durable ready winner with zero effects: HTTP 200, the stored
+    terminal with its stored receipt, and the ``x-cao-adopted`` indicator —
+    even when the profile source has since drifted, because the stored
+    winner is validated before the mutable source is consulted. A retry
+    whose request (cwd, tools, env, provider, model/effort) or stored
+    receipt differs, or whose winner is not ready, answers 409 with zero
+    effects. A first creation whose contract diverges from the loaded
+    profile answers 409 with the divergent fields and a retry path
+    (re-preflight, retry with the fresh contract), and a malformed
+    contract answers 400. A contract naming a provider/path whose
+    adapter cannot consume the frozen profile exactly (provider-native
+    ``--agent`` artifacts, mutable native prompt/tool stores) is refused
+    with an operation-scoped 422 and zero effects — no row, no provider,
+    no receipt. An absent contract launches normally — the contract is
+    an expectation, not a second authority. A sealed-capable launch
+    returns the runtime-authored ``cao-profile-receipt-v1`` on the
+    response; a legacy launch (unsupported adapter, no contract) records
+    no exact receipt.
     """
     try:
         if session_name is not None:
@@ -1832,12 +1841,14 @@ async def create_session(
             registry=get_plugin_registry(request),
             env_vars=env_vars,
             profile_contract=profile_contract,
+            memory_manager=memory_manager,
         )
+        terminal = result.terminal
 
-        if memory_manager and str(memory_manager).lower() in ("true", "1", "yes"):
+        if memory_manager_enabled(memory_manager):
             registry = get_plugin_registry(request)
             sidecar_provider = provider or DEFAULT_PROVIDER
-            sidecar_session = result.session_name
+            sidecar_session = terminal.session_name
 
             async def _spawn_sidecar() -> None:
                 try:
@@ -1855,7 +1866,14 @@ async def create_session(
 
             background_tasks.add_task(_spawn_sidecar)
 
-        return result
+        if result.adopted:
+            # The exact durable ready winner, zero effects: 200 plus
+            # the adoption indicator. The body is the stored terminal
+            # with its stored receipt — never relaunched, never
+            # rewritten. Fresh creations keep 201.
+            response.status_code = status.HTTP_200_OK
+            response.headers["x-cao-adopted"] = "exact-ready"
+        return terminal
 
     except ProfileLaunchConflict as e:
         # A pre-launch contract divergence: zero effects were produced, so

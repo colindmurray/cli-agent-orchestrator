@@ -19,6 +19,7 @@ from cli_agent_orchestrator.api.main import (
 )
 from cli_agent_orchestrator.models.terminal import Terminal
 from cli_agent_orchestrator.services.inbox_service import inbox_service
+from cli_agent_orchestrator.services.session_service import CreateOrAdoptResult
 from cli_agent_orchestrator.utils.skills import SkillNameError
 
 # ── Health endpoint ──────────────────────────────────────────────────
@@ -276,7 +277,9 @@ class TestCreateSession:
         with patch("cli_agent_orchestrator.api.main.session_service") as mock_svc:
             # The endpoint awaits session_service.create_session, so the patched
             # attribute must be an AsyncMock to return an awaitable.
-            mock_svc.create_session = AsyncMock(return_value=mock_terminal)
+            mock_svc.create_session = AsyncMock(
+                return_value=CreateOrAdoptResult(terminal=mock_terminal, adopted=False)
+            )
 
             response = client.post(
                 "/sessions",
@@ -302,6 +305,7 @@ class TestCreateSession:
             # cond-0817: the optional conductor-preflighted launch contract
             # rides the same call; absent here, so None.
             profile_contract=None,
+            memory_manager=None,
         )
 
     def test_create_session_with_session_name(self, client):
@@ -316,7 +320,9 @@ class TestCreateSession:
         with patch("cli_agent_orchestrator.api.main.session_service") as mock_svc:
             # The endpoint awaits session_service.create_session, so the patched
             # attribute must be an AsyncMock to return an awaitable.
-            mock_svc.create_session = AsyncMock(return_value=mock_terminal)
+            mock_svc.create_session = AsyncMock(
+                return_value=CreateOrAdoptResult(terminal=mock_terminal, adopted=False)
+            )
 
             response = client.post(
                 "/sessions",
@@ -439,12 +445,15 @@ class TestCreateSession:
             # The endpoint awaits session_service.create_session, so the patched
             # attribute must be an AsyncMock to return an awaitable.
             mock_svc.create_session = AsyncMock(
-                return_value=TerminalModel(
-                    id="abcd1234",
-                    name="w",
-                    session_name=prefixed,
-                    provider="kiro_cli",
-                    agent_profile="developer",
+                return_value=CreateOrAdoptResult(
+                    terminal=TerminalModel(
+                        id="abcd1234",
+                        name="w",
+                        session_name=prefixed,
+                        provider="kiro_cli",
+                        agent_profile="developer",
+                    ),
+                    adopted=False,
                 )
             )
             response = client.post(

@@ -24,7 +24,7 @@ from cli_agent_orchestrator.providers.base import (
     SealedLaunchMaterial,
     SealedPreparationUnsupported,
     SealedProfileSupport,
-    bind_sealed_bytes,
+    bind_sealed_mcp_document,
     dropped_q_fields,
     foreign_native_fields,
     prepare_sealed_mcp_documents,
@@ -420,10 +420,14 @@ class ClaudeCodeProvider(BaseProvider):
             # to MCP subprocesses, so we inject it explicitly via the env field.
             prepared = self._prepared_sealed_launch
             if prepared is not None and prepared.mcp_document_json is not None:
-                # Sealed: write the prepared bytes verbatim — bound to
-                # this terminal by pure substitution, never re-serialized
-                # (no json.dumps), re-resolved, or coerced inline.
-                bound = bind_sealed_bytes(prepared.mcp_document_json, self.terminal_id)
+                # Sealed: write the prepared document bound structurally
+                # at the injected terminal-id sites only — never globally
+                # substituted, re-resolved, or coerced inline.
+                bound = bind_sealed_mcp_document(
+                    prepared.mcp_document_json,
+                    self.terminal_id,
+                    sites=prepared.terminal_id_binding_sites,
+                )
                 mcp_config = None
             else:
                 bound = None
@@ -725,11 +729,12 @@ class ClaudeCodeProvider(BaseProvider):
                 "Claude Code native agent store; the frozen CAO profile is not "
                 "what the supervisor consumes"
             )
-        servers_json, document_json = prepare_sealed_mcp_documents(profile)
+        servers_json, document_json, sites = prepare_sealed_mcp_documents(profile)
         return PreparedSealedLaunch(
             provider="claude_code",
             mcp_servers_json=servers_json,
             mcp_document_json=document_json,
+            terminal_id_binding_sites=sites,
         )
 
     async def initialize(self) -> bool:

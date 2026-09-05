@@ -120,6 +120,26 @@ class TerminalModel(Base):
     # by migration; a NULL receipt reads as "no launch receipt", which the
     # conductor types as unknown.
     profile_receipt = Column(Text, nullable=True)
+    # Provider-readiness of a sealed supervisor launch (cond-0817 repair):
+    # a closed vocabulary (``pending`` / ``ready`` / ``failed``) proving
+    # provider initialization completed — ``lifecycle_state`` and
+    # ``pre_task_identity_state`` cannot prove that. The row is born
+    # ``pending`` with the terminal row, moves to ``ready`` only after
+    # provider construction, initialization, and the post-create hook all
+    # succeeded, and moves to ``failed`` when a post-effect failure leaves
+    # the row behind. Only ``ready`` rows are adoptable. Nullable: legacy
+    # rows and non-supervisor launches predate it and stay NULL, which
+    # refuses contract-bearing adoption rather than backfilled. Never
+    # backfilled by migration.
+    provider_readiness = Column(Text, nullable=True)
+    # SHA-256 fingerprint of the canonical supervisor create-request
+    # document (cond-0817 repair): session, role, profile, provider,
+    # contract, normalized cwd, effective tools, env digest, and
+    # memory-manager input. Only the fingerprint persists — raw env
+    # values are never written to a row. A contract-bearing retry adopts
+    # only a row whose fingerprint exactly matches its own request.
+    # Nullable like the receipt: legacy rows stay NULL and refuse.
+    create_request_fingerprint = Column(Text, nullable=True)
     # The pre-task identity launch state of an activated ordinary launch:
     # a closed vocabulary (``pending`` / ``captured`` / ``ready`` from
     # ``provider_contracts.PRE_TASK_IDENTITY_*``) that marks the row as
@@ -5052,6 +5072,18 @@ def _migrate_terminals_schema() -> None:
                 "profile_receipt",
                 "ALTER TABLE terminals ADD COLUMN profile_receipt TEXT",
             ),
+            # cond-0817 repair: both land NULL on every existing row and
+            # are never backfilled — legacy rows keep refusing
+            # contract-bearing adoption, which the conductor types as
+            # unknown rather than inventing launch facts.
+            (
+                "provider_readiness",
+                "ALTER TABLE terminals ADD COLUMN provider_readiness TEXT",
+            ),
+            (
+                "create_request_fingerprint",
+                "ALTER TABLE terminals ADD COLUMN create_request_fingerprint TEXT",
+            ),
             (
                 "pre_task_identity_state",
                 "ALTER TABLE terminals ADD COLUMN pre_task_identity_state TEXT",
@@ -5418,6 +5450,8 @@ def create_terminal(
     assigned_quota_provider: Optional[str] = None,
     pre_task_identity_state: Optional[str] = None,
     profile_receipt: Optional[Dict[str, Any]] = None,
+    provider_readiness: Optional[str] = None,
+    create_request_fingerprint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create terminal metadata record."""
     import json as _json
@@ -5448,6 +5482,8 @@ def create_terminal(
             profile_receipt=(
                 _json.dumps(profile_receipt, sort_keys=True) if profile_receipt else None
             ),
+            provider_readiness=provider_readiness,
+            create_request_fingerprint=create_request_fingerprint,
         )
         db.add(terminal)
         db.commit()
@@ -5473,6 +5509,8 @@ def create_terminal(
             "assigned_quota_provider": terminal.assigned_quota_provider,
             "pre_task_identity_state": terminal.pre_task_identity_state,
             "profile_receipt": _parse_profile_receipt(terminal.profile_receipt),
+            "provider_readiness": terminal.provider_readiness,
+            "create_request_fingerprint": terminal.create_request_fingerprint,
         }
 
 
@@ -5790,6 +5828,8 @@ def get_terminal_adoption_row(terminal_id: str) -> Optional[Dict[str, Any]]:
             "assigned_quota_provider": terminal.assigned_quota_provider,
             "profile_receipt": receipt if isinstance(receipt, dict) else None,
             "receipt_unparseable": receipt is not None and not isinstance(receipt, dict),
+            "provider_readiness": terminal.provider_readiness,
+            "create_request_fingerprint": terminal.create_request_fingerprint,
         }
 
 
@@ -6445,6 +6485,56 @@ def set_terminal_pre_task_identity_state(terminal_id: str, state: str) -> bool:
         terminal.pre_task_identity_state = state
         db.commit()
         return True
+
+
+#: Closed provider-readiness vocabulary for sealed supervisor rows.
+PROVIDER_READINESS_PENDING = "pending"
+PROVIDER_READINESS_READY = "ready"
+PROVIDER_READINESS_FAILED = "failed"
+
+
+def cas_terminal_provider_readiness(terminal_id: str, expected: str, new: str) -> bool:
+    """Compare-and-swap a sealed supervisor row's provider readiness.
+
+    The swap lands only when the row currently holds ``expected`` —
+    ``pending`` → ``ready`` after provider construction, initialization,
+    and the post-create hook all succeeded, ``pending`` → ``failed``
+    when a post-effect failure leaves the row behind. Any other current
+    value (``NULL`` legacy rows, an already-``ready`` winner, an
+    already-``failed`` row) refuses with ``False`` and writes nothing,
+    so a crash or a retried hook can never resurrect or double-advance
+    a row. Returns whether the swap landed; ``False`` on a missing row.
+    """
+    if expected not in (
+        PROVIDER_READINESS_PENDING,
+        PROVIDER_READINESS_READY,
+        PROVIDER_READINESS_FAILED,
+    ) or new not in (
+        PROVIDER_READINESS_PENDING,
+        PROVIDER_READINESS_READY,
+        PROVIDER_READINESS_FAILED,
+    ):
+        logger.warning(
+            "Refusing unknown provider-readiness transition %r -> %r for terminal %s",
+            expected,
+            new,
+            terminal_id,
+        )
+        return False
+    with SessionLocal() as db:
+        swapped = (
+            db.query(TerminalModel)
+            .filter(
+                TerminalModel.id == terminal_id,
+                TerminalModel.provider_readiness == expected,
+            )
+            .update(
+                {TerminalModel.provider_readiness: new},
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        return swapped > 0
 
 
 def set_terminal_v2_native_session_id(terminal_id: str, native_session_id: str) -> bool:

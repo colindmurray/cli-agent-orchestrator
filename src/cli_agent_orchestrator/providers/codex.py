@@ -16,13 +16,14 @@ from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import (
     SEALED_TERMINAL_ID_PLACEHOLDER,
+    TERMINAL_ID_ENV_KEY,
     BaseProvider,
     PreparedSealedLaunch,
     ProviderPreflightBlocked,
     SealedLaunchMaterial,
     SealedPreparationUnsupported,
     SealedProfileSupport,
-    bind_sealed_bytes,
+    bind_codex_material,
     container_maps_set,
     custom_permission_mode_set,
     custom_timeout_set,
@@ -462,28 +463,31 @@ def resolve_codex_mcp_material_entry(
     }
 
 
-def bind_codex_material_json(raw: bytes, terminal_id: str) -> dict[str, Any]:
+def bind_codex_material_json(
+    raw: bytes, terminal_id: str, *, sites: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """Bind the terminal id into prepared Codex material and parse it.
 
-    Pure substitution over the already-validated final JSON (the
-    placeholder becomes the terminal id), then one exact parse: the
-    returned dict — system prompt, policy, validated MCP entries,
-    validated codexConfig, and no live profile object — is what the
-    bootstrap, the resumed TUI, and the managed bridge consume by
-    identity. A parse failure is a sealed bug, never caller input, and
-    fails closed with the typed refusal.
+    One exact parse of the already-validated final JSON, then
+    structural substitution at the injected ``env.CAO_TERMINAL_ID``
+    entries of the named ``sites`` only: the returned dict — system
+    prompt, policy, validated MCP entries, validated codexConfig, and
+    no live profile object — is what the bootstrap, the resumed TUI,
+    and the managed bridge consume by identity. A literal placeholder
+    in user content stays verbatim. A parse failure is a sealed bug,
+    never caller input, and fails closed with the typed refusal.
     """
     import json
 
     try:
-        material = json.loads(bind_sealed_bytes(raw, terminal_id))
+        material = json.loads(raw)
     except ValueError as exc:
         raise SealedPreparationUnsupported(
             f"prepared Codex material is not valid JSON: {exc}"
         ) from exc
     if not isinstance(material, dict):
         raise SealedPreparationUnsupported("prepared Codex material must be a JSON object")
-    return material
+    return bind_codex_material(material, terminal_id, sites=sites)
 
 
 def compose_codex_core_args(
@@ -956,8 +960,11 @@ class CodexProvider(BaseProvider):
                 "mcpServers must be a mapping of server configs, "
                 f"got {type(raw_servers).__name__}"
             )
+        binding_sites: list = []
         for entry_name, entry_value in raw_servers.items():
-            sealed_mcp_server_config(entry_name, entry_value)
+            _, injected = sealed_mcp_server_config(entry_name, entry_value)
+            if injected:
+                binding_sites.append(entry_name)
         try:
             composed = _profile_material_from_profile(
                 profile,
@@ -996,6 +1003,7 @@ class CodexProvider(BaseProvider):
         return PreparedSealedLaunch(
             provider="codex",
             codex_material_json=dump_sealed_json(final, source="sealed Codex material"),
+            terminal_id_binding_sites=tuple(binding_sites),
         )
 
     async def initialize(self) -> bool:

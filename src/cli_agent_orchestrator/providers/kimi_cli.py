@@ -46,7 +46,7 @@ from cli_agent_orchestrator.providers.base import (
     SealedLaunchMaterial,
     SealedPreparationUnsupported,
     SealedProfileSupport,
-    bind_sealed_bytes,
+    bind_sealed_mcp_document,
     container_maps_set,
     custom_permission_mode_set,
     dropped_q_fields,
@@ -395,11 +395,16 @@ class KimiCliProvider(BaseProvider):
                 # Kimi accepts --mcp-config as a JSON string (repeatable flag).
                 prepared = self._prepared_sealed_launch
                 if prepared is not None and prepared.mcp_servers_json is not None:
-                    # Sealed: consume the prepared text verbatim — bound
-                    # to this terminal by pure substitution, never
-                    # re-serialized (no json.dumps), re-resolved, or
-                    # coerced inline.
-                    sealed_bound = bind_sealed_bytes(prepared.mcp_servers_json, self.terminal_id)
+                    # Sealed: consume the prepared text bound structurally
+                    # at the injected terminal-id sites only (bare
+                    # servers mapping, never globally substituted,
+                    # re-resolved, or coerced inline).
+                    sealed_bound = bind_sealed_mcp_document(
+                        prepared.mcp_servers_json,
+                        self.terminal_id,
+                        sites=prepared.terminal_id_binding_sites,
+                        wrapped=False,
+                    )
                     if sealed_bound != EMPTY_MCP_SERVERS_JSON:
                         self._ensure_mcp_timeout()
                         command_parts.extend(["--mcp-config", sealed_bound.decode("utf-8")])
@@ -663,11 +668,12 @@ class KimiCliProvider(BaseProvider):
         profile = material.profile if material is not None else None
         if profile is None:
             raise SealedPreparationUnsupported("no frozen profile was supplied")
-        servers_json, document_json = prepare_sealed_mcp_documents(profile)
+        servers_json, document_json, sites = prepare_sealed_mcp_documents(profile)
         return PreparedSealedLaunch(
             provider="kimi_cli",
             mcp_servers_json=servers_json,
             mcp_document_json=document_json,
+            terminal_id_binding_sites=sites,
         )
 
     async def initialize(self) -> bool:
