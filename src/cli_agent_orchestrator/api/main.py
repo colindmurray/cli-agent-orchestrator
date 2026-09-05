@@ -1845,7 +1845,11 @@ async def create_session(
         )
         terminal = result.terminal
 
-        if memory_manager_enabled(memory_manager):
+        # cond-0818: an adopted exact-ready winner performs zero effects —
+        # the first creation already made its sidecar decision, so a
+        # response-loss retry must not schedule a second sidecar. Only a
+        # fresh creation schedules exactly one.
+        if not result.adopted and memory_manager_enabled(memory_manager):
             registry = get_plugin_registry(request)
             sidecar_provider = provider or DEFAULT_PROVIDER
             sidecar_session = terminal.session_name

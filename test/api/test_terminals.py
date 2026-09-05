@@ -1068,3 +1068,52 @@ class TestCrossProviderResolution:
 
             assert response.status_code == 500
             assert "Failed to create terminal" in response.json()["detail"]
+
+
+class TestMemoryManagerSidecarAdoption:
+    """cond-0818: the sidecar follows creation, never adoption.
+
+    A byte-identical response-loss retry adopts the exact ready winner
+    with zero effects — scheduling a memory-manager sidecar for it
+    would be a provider/tmux effect. A fresh creation with a truthy
+    memory_manager still schedules exactly one.
+    """
+
+    def _post(self, client, adopted):
+        with (
+            patch("cli_agent_orchestrator.api.main.session_service") as mock_svc,
+            patch(
+                "cli_agent_orchestrator.services.terminal_service.create_terminal",
+                new_callable=AsyncMock,
+            ) as mock_spawn,
+        ):
+            terminal = Terminal(
+                id="abcd1234",
+                name="w",
+                session_name="s",
+                provider="kimi_cli",
+                agent_profile="sup",
+            )
+            mock_svc.create_session = AsyncMock(
+                return_value=CreateOrAdoptResult(terminal=terminal, adopted=adopted)
+            )
+            response = client.post(
+                "/sessions",
+                params={
+                    "provider": "kimi_cli",
+                    "agent_profile": "sup",
+                    "memory_manager": "true",
+                },
+            )
+            return response, mock_spawn
+
+    def test_fresh_result_schedules_exactly_one_sidecar(self, client):
+        response, mock_spawn = self._post(client, adopted=False)
+        assert response.status_code == 201
+        mock_spawn.assert_awaited_once()
+
+    def test_adopted_result_schedules_no_sidecar(self, client):
+        response, mock_spawn = self._post(client, adopted=True)
+        assert response.status_code == 200
+        assert response.headers["x-cao-adopted"] == "exact-ready"
+        mock_spawn.assert_not_awaited()
