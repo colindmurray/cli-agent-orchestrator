@@ -288,18 +288,48 @@ def parse_agent_profile_text(resolved_text: str, profile_name: str) -> AgentProf
     return AgentProfile(**meta)
 
 
-def _read_agent_profile_source(agent_name: str) -> str:
-    """Locate an agent profile across configured stores and return the raw text.
+#: Canonical provenance for the CAO installed agent store
+#: (``LOCAL_AGENT_STORE_DIR``). Matches the conductor's
+#: ``installed-agent-store`` label so a preflighted
+#: ``cao-profile-launch-contract-v1`` and the runtime-authored
+#: ``cao-profile-receipt-v1`` agree on the field exactly.
+INSTALLED_AGENT_STORE_PROVENANCE = "installed-agent-store"
 
-    Search order:
-    1. Local store: ~/.aws/cli-agent-orchestrator/agent-store/{name}.md
+#: Provenance string older receipts and contracts used for the installed
+#: store. Accepted on incoming contracts only (see the launch-boundary
+#: validation); never emitted on new receipts.
+LEGACY_INSTALLED_STORE_PROVENANCE = "local"
+
+
+def read_agent_profile_bytes_with_provenance(agent_name: str) -> "tuple[bytes, str, str]":
+    """Locate an agent profile and return its exact source bytes once, with provenance.
+
+    Returns ``(raw_bytes, source_path, provenance)`` where ``source_path``
+    is the filesystem path (or ``built-in:<name>`` pseudo-path for the
+    packaged store) the bytes were read from, and ``provenance`` is the
+    winning store's label (``installed-agent-store``, a provider label such
+    as ``installed`` for the ``cao install`` agent-context store,
+    ``custom``, or ``built-in``).
+
+    Search order (on-disk installed stores take precedence over the packaged
+    built-in store):
+    1. Installed agent store: ~/.aws/cli-agent-orchestrator/agent-store/{name}.md
     2. Provider-specific directories (flat {name}.md or {name}/agent.md)
     3. Extra user-added directories (flat {name}.md or {name}/agent.md)
     4. Built-in store (packaged with CAO)
 
-    Shared by ``load_agent_profile`` (which parses the text into an
-    ``AgentProfile``) and the install service (which writes the raw text to
-    the context file). Centralising the lookup keeps the two callers in sync.
+    Filesystem sources are read in binary mode and the packaged source is
+    read as bytes directly: no universal-newline translation, no
+    re-encoding. Hash these bytes — never ``text.encode()`` of a decoded
+    copy — so the digest agrees with the conductor, which hashes the exact
+    source bytes it preflighted (a CRLF profile and its LF-normalised text
+    read are different byte strings with different digests).
+
+    Exactly one read is performed for the winning source: the caller that
+    needs the parsed profile, the route, and the source digest (the
+    supervisor launch boundary) must decode, parse, and hash this one
+    snapshot rather than reading and then calling ``load_agent_profile``,
+    which would read a second, possibly changed, copy.
     """
     _validate_agent_name(agent_name)
 
@@ -322,32 +352,45 @@ def _read_agent_profile_source(agent_name: str) -> str:
     if normalized_path(LOCAL_AGENT_STORE_DIR) not in disabled:
         local_profile = _safe_join(LOCAL_AGENT_STORE_DIR, f"{agent_name}.md")
         if local_profile is not None and local_profile.exists():
-            return local_profile.read_text(encoding="utf-8")
+            return (
+                local_profile.read_bytes(),
+                str(local_profile),
+                INSTALLED_AGENT_STORE_PROVENANCE,
+            )
 
-    def _lookup_in_directory(directory: Path) -> str | None:
+    provider_source_labels = {
+        "kiro_cli": "kiro",
+        "claude_code": "claude_code",
+        "codex": "codex",
+        "cao_installed": "installed",
+    }
+
+    def _lookup_in_directory(directory: Path) -> "tuple[bytes, str] | None":
         if not directory.exists():
             return None
         flat = _safe_join(directory, f"{agent_name}.md")
         if flat is not None and flat.exists():
-            return flat.read_text(encoding="utf-8")
+            return (flat.read_bytes(), str(flat))
         nested = _safe_join(directory, agent_name, "agent.md")
         if nested is not None and nested.exists():
-            return nested.read_text(encoding="utf-8")
+            return (nested.read_bytes(), str(nested))
         return None
 
-    for dir_path in get_agent_dirs().values():
+    for provider_key, dir_path in get_agent_dirs().items():
         if normalized_path(dir_path) in disabled:
             continue
         found = _lookup_in_directory(Path(dir_path))
         if found is not None:
-            return found
+            raw, source_path = found
+            return (raw, source_path, provider_source_labels.get(provider_key, provider_key))
 
     for extra_dir in get_extra_agent_dirs():
         if normalized_path(extra_dir) in disabled:
             continue
         found = _lookup_in_directory(Path(extra_dir))
         if found is not None:
-            return found
+            raw, source_path = found
+            return (raw, source_path, "custom")
 
     # Built-in store is inside the installed package — the traversable API
     # still concatenates agent_name as a single segment, so validate the
@@ -355,9 +398,37 @@ def _read_agent_profile_source(agent_name: str) -> str:
     agent_store = resources.files("cli_agent_orchestrator.agent_store")
     built_in = agent_store / f"{agent_name}.md"
     if built_in.name == f"{agent_name}.md" and built_in.is_file():
-        return built_in.read_text(encoding="utf-8")
+        return (
+            built_in.read_bytes(),
+            f"built-in:{agent_name}.md",
+            "built-in",
+        )
 
     raise FileNotFoundError(f"Agent profile not found: {agent_name}")
+
+
+def read_agent_profile_source_with_provenance(agent_name: str) -> "tuple[str, str, str]":
+    """Locate an agent profile and return its text exactly once, with provenance.
+
+    Legacy text API over :func:`read_agent_profile_bytes_with_provenance`:
+    the exact source bytes are decoded once with strict UTF-8 — no
+    universal-newline translation — so the text matches the hashed bytes.
+    Kept for callers that only need the text; the supervisor launch
+    boundary uses the bytes API so one snapshot supplies the parsed
+    profile, the route, and the digest.
+    """
+    raw, source_path, provenance = read_agent_profile_bytes_with_provenance(agent_name)
+    return (raw.decode("utf-8"), source_path, provenance)
+
+
+def _read_agent_profile_source(agent_name: str) -> str:
+    """Locate an agent profile across configured stores and return the raw text.
+
+    Shared by ``load_agent_profile`` (which parses the text into an
+    ``AgentProfile``) and the install service (which writes the raw text to
+    the context file). Centralising the lookup keeps the two callers in sync.
+    """
+    return read_agent_profile_source_with_provenance(agent_name)[0]
 
 
 def load_agent_profile(agent_name: str) -> AgentProfile:

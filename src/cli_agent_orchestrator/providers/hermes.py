@@ -4,11 +4,26 @@ import logging
 import os
 import re
 import shlex
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    PreparedSealedLaunch,
+    SealedLaunchMaterial,
+    SealedPreparationUnsupported,
+    SealedProfileSupport,
+    container_maps_set,
+    custom_permission_mode_set,
+    custom_timeout_set,
+    dropped_q_fields,
+    foreign_native_fields,
+    policy_restricted,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
@@ -120,10 +135,15 @@ class HermesProvider(BaseProvider):
         agent_profile: Optional[str] = None,
         allowed_tools: Optional[list] = None,
         skill_prompt: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ):
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
         self._agent_profile = agent_profile
+        # The launch's already-loaded profile (cond-0817): when set, the
+        # launch argv consumes this exact object and never reloads the
+        # profile by name. None keeps the legacy load.
+        self._launch_profile = launch_profile
         self._last_idle_timer: Optional[str] = None
         self._stable_idle_timer_count = 0
 
@@ -139,8 +159,8 @@ class HermesProvider(BaseProvider):
 
     def _build_hermes_command(self) -> str:
         """Build the Hermes launch command from the CAO agent profile."""
-        profile = None
-        if self._agent_profile is not None:
+        profile = self._launch_profile
+        if profile is None and self._agent_profile is not None:
             try:
                 profile = load_agent_profile(self._agent_profile)
             except Exception as e:
@@ -173,6 +193,91 @@ class HermesProvider(BaseProvider):
             )
 
         return shlex.join(command_parts)
+
+    @classmethod
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support covers the model-only default path.
+
+        A set ``hermesProfile`` launches that named Hermes profile
+        wrapper, whose persona and tools resolve from the mutable
+        Hermes-native store (refused). Without it the argv is the fixed
+        default command (``chat --yolo --accept-hooks --source cao``) plus
+        the frozen ``--model`` — prompt, skills, and policy have no Hermes
+        flags (the builder only logs about them), so any nonempty
+        behavior-bearing field beyond the model is refused rather than
+        recorded as launched.
+        """
+        if material is None or material.profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        profile = material.profile
+        wrapper = getattr(profile, "hermesProfile", None)
+        if isinstance(wrapper, str) and wrapper:
+            return SealedProfileSupport(
+                False,
+                f"Hermes launches the named profile wrapper {wrapper!r}; persona and "
+                "tools resolve from the mutable Hermes-native store, not the "
+                "frozen CAO profile",
+            )
+        dropped = []
+        if material.system_prompt:
+            dropped.append("system_prompt")
+        if material.skill_text:
+            dropped.append("skills")
+        if policy_restricted(material.allowed_tools):
+            dropped.append("allowedTools")
+        if getattr(profile, "mcpServers", None):
+            dropped.append("mcpServers")
+        dropped.extend(dropped_q_fields(profile))
+        dropped.extend(foreign_native_fields(profile, own="hermesProfile"))
+        for extra in ("codexConfig",):
+            if getattr(profile, extra, None):
+                dropped.append(extra)
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if custom_timeout_set(profile):
+            dropped.append("provider_init_timeout")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Hermes default launch argv carries only the frozen --model; "
+                f"{', '.join(sorted(dropped))} would be silently dropped from "
+                "the launch",
+            )
+        return SealedProfileSupport(
+            True,
+            "Hermes default launch argv (fixed chat command, frozen --model) "
+            "uses only the frozen material; prompt, skills, and policy inputs "
+            "are empty",
+        )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Carry the model-only default path, pre-effect.
+
+        The argv is the fixed default command plus the frozen
+        ``--model`` — already-typed material needing no serialization —
+        so preparation carries no payload. A set ``hermesProfile`` is
+        unconsumable on the frozen path (it launches the named wrapper
+        from the mutable Hermes-native store) and is refused outright;
+        every other dropped field is the capability gate's decision,
+        not preparation's.
+        """
+        if material is None or material.profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        wrapper = getattr(material.profile, "hermesProfile", None)
+        if isinstance(wrapper, str) and wrapper:
+            raise SealedPreparationUnsupported(
+                f"Hermes launches the named profile wrapper {wrapper!r}; persona and "
+                "tools resolve from the mutable Hermes-native store, not the "
+                "frozen CAO profile"
+            )
+        return PreparedSealedLaunch(provider="hermes")
 
     async def initialize(self) -> bool:
         """Initialize Hermes by starting the configured profile chat REPL."""

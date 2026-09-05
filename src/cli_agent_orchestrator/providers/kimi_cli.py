@@ -34,16 +34,33 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider, ProviderPreflightBlocked
+from cli_agent_orchestrator.providers.base import (
+    EMPTY_MCP_SERVERS_JSON,
+    BaseProvider,
+    PreparedSealedLaunch,
+    ProviderPreflightBlocked,
+    SealedLaunchMaterial,
+    SealedPreparationUnsupported,
+    SealedProfileSupport,
+    bind_sealed_mcp_document,
+    container_maps_set,
+    custom_permission_mode_set,
+    dropped_q_fields,
+    foreign_native_fields,
+    prepare_sealed_mcp_documents,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
 from cli_agent_orchestrator.utils.text import strip_terminal_escapes
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -210,13 +227,27 @@ class KimiCliProvider(BaseProvider):
         skill_prompt: Optional[str] = None,
         expected_model: Optional[str] = None,
         expected_effort: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
+        prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
     ):
-        """Initialize provider state."""
+        """Initialize provider state.
+
+        ``launch_profile`` is the launch's already-loaded profile
+        (cond-0817): when set, the launch argv consumes this exact object
+        and never reloads the profile by name. None keeps the legacy load.
+
+        ``prepared_sealed_launch`` is the one pre-effect prepared value:
+        when set, the inline ``--mcp-config`` content comes from its
+        bound configs instead of being re-resolved. None keeps the
+        legacy inline resolution.
+        """
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
         self._agent_profile = agent_profile
         self._expected_model = expected_model
         self._expected_effort = expected_effort
+        self._launch_profile = launch_profile
+        self._prepared_sealed_launch = prepared_sealed_launch
         # Track temp directory for cleanup (created when agent profile needs temp files)
         self._temp_dir: Optional[str] = None
         # Latching flag: set True when user input box (╭─) is detected in ANY
@@ -266,6 +297,8 @@ class KimiCliProvider(BaseProvider):
         the real (error-raising) load in ``_build_kimi_command`` gets a chance
         to report the actual problem.
         """
+        if self._launch_profile is not None:
+            return self._launch_profile
         if self._agent_profile is None:
             return None
         try:
@@ -313,9 +346,12 @@ class KimiCliProvider(BaseProvider):
             self._temp_dir = tempfile.mkdtemp(prefix="cao_kimi_")
 
         profile_model: Optional[str] = None
-        if self._agent_profile is not None:
+        if self._launch_profile is not None or self._agent_profile is not None:
             try:
-                profile = load_agent_profile(self._agent_profile)
+                if self._launch_profile is not None:
+                    profile = self._launch_profile
+                else:
+                    profile = load_agent_profile(self._agent_profile)
                 profile_model = profile.model
 
                 # Build agent file from profile's system prompt.
@@ -357,7 +393,22 @@ class KimiCliProvider(BaseProvider):
 
                 # Add MCP server configuration if present in the agent profile.
                 # Kimi accepts --mcp-config as a JSON string (repeatable flag).
-                if profile.mcpServers:
+                prepared = self._prepared_sealed_launch
+                if prepared is not None and prepared.mcp_servers_json is not None:
+                    # Sealed: consume the prepared text bound structurally
+                    # at the injected terminal-id sites only (bare
+                    # servers mapping, never globally substituted,
+                    # re-resolved, or coerced inline).
+                    sealed_bound = bind_sealed_mcp_document(
+                        prepared.mcp_servers_json,
+                        self.terminal_id,
+                        sites=prepared.terminal_id_binding_sites,
+                        wrapped=False,
+                    )
+                    if sealed_bound != EMPTY_MCP_SERVERS_JSON:
+                        self._ensure_mcp_timeout()
+                        command_parts.extend(["--mcp-config", sealed_bound.decode("utf-8")])
+                elif profile.mcpServers:
                     # Set MCP tool call timeout to 600s by modifying ~/.kimi/config.toml
                     # directly. We cannot use --config flag because it causes Kimi CLI
                     # to bypass its default config file, which breaks OAuth authentication
@@ -555,6 +606,75 @@ class KimiCliProvider(BaseProvider):
                     return True
             await asyncio.sleep(1.0)
         return False
+
+    @classmethod
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support needs the frozen per-launch material path.
+
+        The adapter renders model, effort, the system prompt plus skills
+        into a per-launch agent file, MCP servers into inline
+        ``--mcp-config``, the effective policy into advisory prompt text
+        (soft enforcement: Kimi has no native tool-blocking mechanism, so
+        a restricted policy is delivered, not enforced — documented here,
+        not refused), and the init timeout from the frozen material
+        (supported) — any other nonempty behavior-bearing field the CLI
+        never receives is refused.
+        """
+        profile = material.profile if material is not None else None
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        dropped = dropped_q_fields(profile)
+        dropped.extend(foreign_native_fields(profile, own=""))
+        for extra in ("codexConfig",):
+            if getattr(profile, extra, None):
+                dropped.append(extra)
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Kimi frozen per-launch material does not consume "
+                f"{', '.join(sorted(dropped))}; the frozen material would be "
+                "silently dropped from the launch",
+            )
+        return SealedProfileSupport(
+            True,
+            "Kimi frozen per-launch material (model, effort, agent-file prompt, "
+            "inline MCP config, advisory policy text, init timeout) uses only "
+            "the frozen material",
+        )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Resolve, validate, and finally serialize the MCP text, pre-effect.
+
+        The ``--mcp-config`` JSON is the one launch input whose shape
+        the profile parse leaves unvalidated: a transport-less entry —
+        or an unquoted YAML date hiding in ``env`` — would otherwise
+        reach the CLI only after launch effects exist. Preparation
+        validates every entry and serializes the flag text exactly once
+        to immutable bytes, so malformed MCP raises
+        :class:`SealedPreparationUnsupported` before any clear, tmux,
+        DB, file, or provider effect. Model, effort, prompt, and
+        timeout ride the already-typed material fields and need no
+        serialization validation.
+        """
+        profile = material.profile if material is not None else None
+        if profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        servers_json, document_json, sites = prepare_sealed_mcp_documents(profile)
+        return PreparedSealedLaunch(
+            provider="kimi_cli",
+            mcp_servers_json=servers_json,
+            mcp_document_json=document_json,
+            terminal_id_binding_sites=sites,
+        )
 
     async def initialize(self) -> bool:
         """Initialize Kimi CLI provider by starting the kimi command.

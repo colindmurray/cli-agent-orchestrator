@@ -1430,3 +1430,169 @@ def test_antigravity_resolves_the_agy_binary_not_its_policy_key():
     from cli_agent_orchestrator.services import unmanaged_native_identity as u
 
     assert u._PROVIDER_EXECUTABLE["antigravity_cli"] == "agy"
+
+
+def _stubbed_mint_subprocess(monkeypatch, conversation_id="conv-A"):
+    """Stub the agy binary/version seams and the mint turn itself."""
+    import json
+    import subprocess
+
+    from cli_agent_orchestrator.services import unmanaged_native_identity as u
+
+    def _run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps({"conversation_id": conversation_id}), stderr=""
+        )
+
+    monkeypatch.setattr(u, "_resolve_executable", lambda provider: "/usr/local/bin/agy")
+    monkeypatch.setattr(u, "_binary_sha256", lambda exe: "b" * 64)
+    monkeypatch.setattr(u, "_version_output", lambda provider, exe, env: "Antigravity CLI 1.1.11")
+    monkeypatch.setattr(subprocess, "run", _run)
+    return _run
+
+
+def _sealed_mint_material(**overrides):
+    from cli_agent_orchestrator.providers.base import SealedLaunchMaterial
+
+    fields = {
+        "name": "sup",
+        "description": "x",
+        "provider": "antigravity_cli",
+        "role": "supervisor",
+        "model": "m-A",
+        "system_prompt": "PROMPT-A",
+    }
+    fields.update(overrides)
+    profile = AgentProfile(**fields)
+    return SealedLaunchMaterial(
+        profile=profile,
+        model="m-A",
+        effort=None,
+        system_prompt="PROMPT-A",
+        skill_text="SKILL-A",
+        allowed_tools=("fs_read",),
+    )
+
+
+def test_compose_instruction_restricted_adds_security_wildcard_does_not():
+    from cli_agent_orchestrator.services.unmanaged_native_identity import (
+        _compose_antigravity_instruction,
+    )
+
+    restricted = _compose_antigravity_instruction(
+        system_prompt="P", skill_text="S", allowed_tools=("fs_read",), role_name="sup"
+    )
+    assert "P\n\nS" in restricted
+    assert "You are the sup" in restricted
+    from cli_agent_orchestrator.providers.antigravity_cli import SECURITY_PROMPT
+
+    assert SECURITY_PROMPT in restricted
+    wildcard = _compose_antigravity_instruction(
+        system_prompt="P", skill_text="", allowed_tools=("*",), role_name="sup"
+    )
+    assert SECURITY_PROMPT not in wildcard
+    assert (
+        _compose_antigravity_instruction(
+            system_prompt="", skill_text="S", allowed_tools=("*",), role_name="sup"
+        )
+        == "Acknowledge initialization in one sentence and wait."
+    )
+
+
+def test_sealed_mint_composes_from_material_without_rebuild(monkeypatch):
+    """The sealed mint consumes the admitted material verbatim.
+
+    Skill/store seams answer B-or-raise: the mint must still return A's
+    conversation with A's prompt, skill, policy, and model — proving no
+    rescan, no reload, and no raw-field read happens after the gate.
+    """
+    import subprocess
+
+    from cli_agent_orchestrator.services import unmanaged_native_identity as u
+
+    calls = []
+
+    def _record(cmd, *args, **kwargs):
+        calls.append(cmd)
+        import json
+
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps({"conversation_id": "conv-A"}), stderr=""
+        )
+
+    monkeypatch.setattr(u, "_resolve_executable", lambda provider: "/usr/local/bin/agy")
+    monkeypatch.setattr(u, "_binary_sha256", lambda exe: "b" * 64)
+    monkeypatch.setattr(u, "_version_output", lambda provider, exe, env: "Antigravity CLI 1.1.11")
+    monkeypatch.setattr(subprocess, "run", _record)
+    # NOTE: the mint imports these inside its body, so patch the source
+    # modules the local import reads from — not the service namespace.
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.utils.skills.build_skill_catalog",
+        lambda skills: "CATALOG-B",
+    )
+    monkeypatch.setattr(
+        "cli_agent_orchestrator.utils.agent_profiles.load_agent_profile",
+        lambda name: (_ for _ in ()).throw(AssertionError("reload")),
+    )
+
+    material = _sealed_mint_material()
+    identity = u._mint_antigravity_session(
+        terminal_id="t1",
+        session_name="s",
+        working_directory="/tmp",
+        expected_model="m-A",
+        expected_effort=None,
+        agent_profile="sup",
+        environment={},
+        launch_profile=material.profile,
+        sealed_launch_material=material,
+    )
+    assert identity["native_session_id"] == "conv-A"
+    assert identity["model"] == "m-A"
+    assert identity["role"] == "supervisor"
+    prompt_arg = calls[0][calls[0].index("-p") + 1]
+    assert "PROMPT-A" in prompt_arg
+    assert "SKILL-A" in prompt_arg
+    assert "CATALOG-B" not in prompt_arg
+    assert "You are the sup" in prompt_arg
+    assert calls[0][calls[0].index("--model") + 1] == "m-A"
+
+
+def test_legacy_mint_rebuilds_once_from_profile_fields(monkeypatch):
+    """Without sealed material the mint keeps its legacy fallback: one
+    skill build from the passed profile object (never a by-name reload
+    when launch_profile is set)."""
+    from cli_agent_orchestrator.services import unmanaged_native_identity as u
+
+    _stubbed_mint_subprocess(monkeypatch)
+    built = []
+    from cli_agent_orchestrator.utils import skills as skills_module
+
+    real_catalog = skills_module.build_skill_catalog
+
+    def _counting(skills):
+        built.append(skills)
+        return real_catalog(skills)
+
+    monkeypatch.setattr(skills_module, "build_skill_catalog", _counting)
+    profile = AgentProfile(
+        name="sup",
+        description="x",
+        provider="antigravity_cli",
+        role="supervisor",
+        model="m-A",
+        system_prompt="PROMPT-L",
+    )
+    identity = u._mint_antigravity_session(
+        terminal_id="t1",
+        session_name="s",
+        working_directory="/tmp",
+        expected_model=None,
+        expected_effort=None,
+        agent_profile="sup",
+        environment={},
+        launch_profile=profile,
+        sealed_launch_material=None,
+    )
+    assert identity["native_session_id"] == "conv-A"
+    assert built == [None]

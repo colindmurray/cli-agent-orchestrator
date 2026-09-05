@@ -11,13 +11,20 @@ import shlex
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 from libtmux.exc import LibTmuxException
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    SealedLaunchMaterial,
+    SealedProfileSupport,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_cao_mcp_command
 from cli_agent_orchestrator.utils.terminal import wait_for_shell
@@ -254,6 +261,19 @@ class CopilotCliProvider(BaseProvider):
             "Trust prompt handler timed out for %s:%s",
             self.session_name,
             self.window_name,
+        )
+
+    @classmethod
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed launch is refused: Copilot passes ``--agent <name>`` to
+        the provider-native agent store, so the runtime cannot guarantee the
+        supervisor consumes the frozen CAO profile."""
+        return SealedProfileSupport(
+            False,
+            "Copilot passes --agent <name> to the provider-native agent store; "
+            "the frozen CAO profile is not what the supervisor consumes",
         )
 
     async def initialize(self) -> bool:

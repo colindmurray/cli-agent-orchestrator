@@ -180,6 +180,13 @@ from cli_agent_orchestrator.services.install_service import InstallResult, insta
 from cli_agent_orchestrator.services.log_writer import log_writer
 from cli_agent_orchestrator.services.status_monitor import status_monitor
 from cli_agent_orchestrator.services.step_output_store import _validate_key_part
+from cli_agent_orchestrator.services.supervisor_profile_receipt import (
+    ProfileAdoptionMismatch,
+    ProfileLaunchConflict,
+    ProfileLaunchUnsupported,
+    ProfileNotFoundError,
+    memory_manager_enabled,
+)
 from cli_agent_orchestrator.services.terminal_service import (
     OutputMode,
     TerminalGenerationMismatchError,
@@ -1754,6 +1761,7 @@ async def list_annotations(
 @app.post("/sessions", response_model=Terminal, status_code=status.HTTP_201_CREATED)
 async def create_session(
     request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     agent_profile: str,
     provider: Optional[str] = None,
@@ -1762,6 +1770,12 @@ async def create_session(
     allowed_tools: Optional[str] = None,
     memory_manager: Optional[str] = None,
     env_vars: Optional[Dict[str, str]] = Body(default=None, embed=True),
+    # Endpoint-scoped raw contract value (cond-0817): ``Any`` so a JSON
+    # list/string reaches the endpoint instead of dying in FastAPI's
+    # generic 422 — the strict parser in supervisor_profile_receipt
+    # classifies malformed shapes as a typed 400. No global validation
+    # change: only this field is loosened, and only to be re-checked.
+    profile_contract: Optional[Any] = Body(default=None, embed=True),
     _scopes: List[str] = Depends(require_any_scope(SCOPE_WRITE, SCOPE_ADMIN)),
 ) -> Terminal:
     """Create a new session with exactly one terminal.
@@ -1777,6 +1791,28 @@ async def create_session(
     from ``cao launch --env``. It travels in the JSON body — not the query
     string — so values potentially containing secrets do not land in
     cao-server's HTTP access log. See issue #248.
+
+    ``profile_contract`` (request body, optional) is the conductor-preflighted
+    ``cao-profile-launch-contract-v1`` expectation for the supervisor profile.
+    A retry carrying the same contract on a fixed session name adopts the
+    exact durable ready winner with zero effects: HTTP 200, the stored
+    terminal with its stored receipt, and the ``x-cao-adopted`` indicator —
+    even when the profile source has since drifted, because the stored
+    winner is validated before the mutable source is consulted. A retry
+    whose request (cwd, tools, env, provider, model/effort) or stored
+    receipt differs, or whose winner is not ready, answers 409 with zero
+    effects. A first creation whose contract diverges from the loaded
+    profile answers 409 with the divergent fields and a retry path
+    (re-preflight, retry with the fresh contract), and a malformed
+    contract answers 400. A contract naming a provider/path whose
+    adapter cannot consume the frozen profile exactly (provider-native
+    ``--agent`` artifacts, mutable native prompt/tool stores) is refused
+    with an operation-scoped 422 and zero effects — no row, no provider,
+    no receipt. An absent contract launches normally — the contract is
+    an expectation, not a second authority. A sealed-capable launch
+    returns the runtime-authored ``cao-profile-receipt-v1`` on the
+    response; a legacy launch (unsupported adapter, no contract) records
+    no exact receipt.
     """
     try:
         if session_name is not None:
@@ -1804,12 +1840,19 @@ async def create_session(
             allowed_tools=allowed_tools_list,
             registry=get_plugin_registry(request),
             env_vars=env_vars,
+            profile_contract=profile_contract,
+            memory_manager=memory_manager,
         )
+        terminal = result.terminal
 
-        if memory_manager and str(memory_manager).lower() in ("true", "1", "yes"):
+        # cond-0818: an adopted exact-ready winner performs zero effects —
+        # the first creation already made its sidecar decision, so a
+        # response-loss retry must not schedule a second sidecar. Only a
+        # fresh creation schedules exactly one.
+        if not result.adopted and memory_manager_enabled(memory_manager):
             registry = get_plugin_registry(request)
             sidecar_provider = provider or DEFAULT_PROVIDER
-            sidecar_session = result.session_name
+            sidecar_session = terminal.session_name
 
             async def _spawn_sidecar() -> None:
                 try:
@@ -1827,8 +1870,64 @@ async def create_session(
 
             background_tasks.add_task(_spawn_sidecar)
 
-        return result
+        if result.adopted:
+            # The exact durable ready winner, zero effects: 200 plus
+            # the adoption indicator. The body is the stored terminal
+            # with its stored receipt — never relaunched, never
+            # rewritten. Fresh creations keep 201.
+            response.status_code = status.HTTP_200_OK
+            response.headers["x-cao-adopted"] = "exact-ready"
+        return terminal
 
+    except ProfileLaunchConflict as e:
+        # A pre-launch contract divergence: zero effects were produced, so
+        # the conductor re-preflights the current profile source and retries
+        # with the fresh contract. Retryable by construction.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": str(e).splitlines()[0],
+                "divergent_fields": e.divergent_fields,
+                "retry": e.retry,
+            },
+        )
+    except ProfileLaunchUnsupported as e:
+        # A sealed contract names a provider/path that cannot consume the
+        # frozen profile exactly: no row, no provider, no receipt was
+        # produced, so there is nothing to recover server-side. The
+        # operation-scoped 422 names the provider, the canonical source,
+        # the adapter's reason, and the recovery action.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error": str(e).splitlines()[0],
+                "provider": e.provider,
+                "source_path": e.source_path,
+                "reason": e.reason,
+                "recovery": e.recovery,
+            },
+        )
+    except ProfileAdoptionMismatch as e:
+        # A contract-bearing retry names a live duplicate that is not an
+        # exact adoptable match: zero effects were produced, so the
+        # conductor deletes the session (or retries a fresh name) and
+        # retries — or, for an in-flight launch, retries the same
+        # request after it completes. Retryable by construction.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": str(e).splitlines()[0],
+                "session_name": e.session_name,
+                "reason": e.reason,
+                "recovery": e.recovery,
+            },
+        )
+    # Narrowed to the launch-boundary typed error: only the profile
+    # lookup itself is a client error. A late, unrelated FileNotFoundError
+    # (tmux, FIFO, store mid-launch) must keep its 500 classification
+    # rather than being misreported as a bad profile name.
+    except ProfileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:

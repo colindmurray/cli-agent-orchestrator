@@ -171,6 +171,16 @@ class Terminal(BaseModel):
     recovery_evidence: Optional[ProviderRecoveryEvidence] = Field(
         None, description="Durable provider-terminal recovery episode for this generation"
     )
+    profile_receipt: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Runtime-authored supervisor launch receipt "
+            "(cao-profile-receipt-v1), persisted atomically with the terminal "
+            "row from the exact profile bytes the runtime loaded. Absent "
+            "(None) for legacy rows and non-supervisor launches, which the "
+            "conductor types as unknown."
+        ),
+    )
 
 
 class AgentStepResult(BaseModel):

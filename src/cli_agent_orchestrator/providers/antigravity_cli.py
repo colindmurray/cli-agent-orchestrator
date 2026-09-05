@@ -46,12 +46,25 @@ import shlex
 import shutil
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.constants import SECURITY_PROMPT
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    PreparedSealedLaunch,
+    SealedLaunchMaterial,
+    SealedPreparationUnsupported,
+    SealedProfileSupport,
+    container_maps_set,
+    custom_permission_mode_set,
+    dropped_q_fields,
+    foreign_native_fields,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_cao_mcp_command
@@ -173,6 +186,8 @@ class AntigravityCliProvider(BaseProvider):
         skill_prompt: Optional[str] = None,
         native_session_id: Optional[str] = None,
         effort: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
+        sealed_launch_material: Optional[SealedLaunchMaterial] = None,
     ):
         """Initialize the Antigravity CLI provider.
 
@@ -190,12 +205,28 @@ class AntigravityCliProvider(BaseProvider):
                 layer. Appended to the system prompt at launch.
             native_session_id: Optional existing conversation ID to resume via ``--conversation``.
             effort: Optional reasoning effort (e.g. ``"high"``, ``"medium"``, ``"low"``).
+            sealed_launch_material: The gate-frozen launch material
+                (cond-0817). When set, model/effort/skill/policy/profile
+                resolve from it verbatim — the mint and the resumed
+                ``--conversation`` launch consume the admitted inputs.
+                None keeps the legacy per-kwarg resolution.
         """
+        if sealed_launch_material is not None:
+            launch_profile = sealed_launch_material.profile
+            model = sealed_launch_material.model
+            effort = sealed_launch_material.effort
+            skill_prompt = sealed_launch_material.skill_text
+            allowed_tools = list(sealed_launch_material.allowed_tools)
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
         self._agent_profile = agent_profile
         self._model = model
         self._effort = effort
+        # The launch's already-loaded profile (cond-0817): when set, the
+        # launch argv consumes this exact object and never reloads the
+        # profile by name. None keeps the legacy load.
+        self._launch_profile = launch_profile
+        self._sealed_launch_material = sealed_launch_material
         self._native_session_id = native_session_id
         # MCP server names registered into ~/.gemini/config/mcp_config.json,
         # removed on cleanup().
@@ -237,6 +268,8 @@ class AntigravityCliProvider(BaseProvider):
         the real (error-raising) load in ``_build_agy_command`` gets a chance
         to report the actual problem.
         """
+        if self._launch_profile is not None:
+            return self._launch_profile
         if self._agent_profile is None:
             return None
         try:
@@ -280,8 +313,8 @@ class AntigravityCliProvider(BaseProvider):
         if self._native_session_id:
             command_parts.extend(["--conversation", self._native_session_id])
 
-        profile = None
-        if self._agent_profile is not None:
+        profile = self._launch_profile
+        if profile is None and self._agent_profile is not None:
             try:
                 profile = load_agent_profile(self._agent_profile)
             except Exception as exc:
@@ -501,6 +534,97 @@ class AntigravityCliProvider(BaseProvider):
                 if re.search(IDLE_FOOTER_PATTERN, clean):
                     return
             time.sleep(1.0)
+
+    @classmethod
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support needs frozen argv inputs with nothing dropped.
+
+        A nonempty ``mcpServers`` is merged into the shared
+        ``~/.gemini/config/mcp_config.json``, which has no per-launch
+        config path — a concurrent launch can overwrite it before ``agy``
+        consumes it (refused). With no MCP material the launch argv
+        (model, effort, system prompt plus skills, effective policy as
+        advisory text, init timeout) is built from the frozen material
+        (supported), while ambient Antigravity MCP configuration stays
+        outside the CAO profile receipt and authority — any other nonempty
+        behavior-bearing field the CLI never receives is refused.
+        """
+        profile = material.profile if material is not None else None
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        mcp_servers = getattr(profile, "mcpServers", None)
+        if mcp_servers:
+            names = (
+                ", ".join(sorted(mcp_servers))
+                if isinstance(mcp_servers, dict)
+                else "configured servers"
+            )
+            return SealedProfileSupport(
+                False,
+                f"Antigravity writes the frozen profile's MCP servers ({names}) into "
+                "the shared ~/.gemini/config/mcp_config.json, which has no "
+                "per-launch config path; the supervisor would consume whatever "
+                "the shared file holds at launch, not the frozen CAO profile",
+            )
+        dropped = dropped_q_fields(profile)
+        dropped.extend(foreign_native_fields(profile, own=""))
+        for extra in ("codexConfig",):
+            if getattr(profile, extra, None):
+                dropped.append(extra)
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Antigravity frozen argv does not consume "
+                f"{', '.join(sorted(dropped))}; the frozen material would be "
+                "silently dropped from the launch",
+            )
+        return SealedProfileSupport(
+            True,
+            "Antigravity frozen argv (model, effort, system prompt, advisory "
+            "policy text, init timeout) uses only the frozen material and the "
+            "profile contributes no MCP material; ambient Antigravity MCP "
+            "configuration (~/.gemini/config/mcp_config.json) is outside the "
+            "CAO profile receipt and authority",
+        )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Confirm there is no MCP material to merge, pre-effect.
+
+        Any nonempty ``mcpServers`` — well-formed or malformed — would
+        merge into the shared ``~/.gemini/config/mcp_config.json``,
+        which has no per-launch config path; it is refused here,
+        before any shared-file access and before any clear, tmux, DB,
+        or provider effect. With no MCP material the frozen argv
+        (model, effort, prompt, advisory policy) rides already-typed
+        fields and needs no serialization, so preparation carries no
+        payload: it is the choke point, not a composer.
+        """
+        profile = material.profile if material is not None else None
+        if profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        mcp_servers = getattr(profile, "mcpServers", None)
+        if mcp_servers:
+            names = (
+                ", ".join(sorted(mcp_servers))
+                if isinstance(mcp_servers, dict)
+                else "configured servers"
+            )
+            raise SealedPreparationUnsupported(
+                f"Antigravity writes the frozen profile's MCP servers ({names}) into "
+                "the shared ~/.gemini/config/mcp_config.json, which has no "
+                "per-launch config path; the supervisor would consume whatever "
+                "the shared file holds at launch, not the frozen CAO profile"
+            )
+        return PreparedSealedLaunch(provider="antigravity_cli")
 
     async def initialize(self) -> bool:
         """Initialize the Antigravity CLI provider by starting ``agy``.

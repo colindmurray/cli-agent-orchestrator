@@ -1,14 +1,20 @@
 """Provider manager as module singleton with direct terminal_id → provider mapping."""
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 
 from sqlalchemy.exc import OperationalError
 
 from cli_agent_orchestrator.clients.database import get_terminal_metadata, get_terminal_metadata_v2
 from cli_agent_orchestrator.models.provider import ProviderType
 from cli_agent_orchestrator.providers.antigravity_cli import AntigravityCliProvider
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    PreparedSealedLaunch,
+    SealedLaunchMaterial,
+    SealedPreparationUnsupported,
+    SealedProfileSupport,
+)
 from cli_agent_orchestrator.providers.claude_code import ClaudeCodeProvider
 from cli_agent_orchestrator.providers.codex import CodexProvider
 from cli_agent_orchestrator.providers.copilot_cli import CopilotCliProvider
@@ -21,6 +27,28 @@ from cli_agent_orchestrator.providers.muse_cli import MuseCliProvider
 from cli_agent_orchestrator.providers.opencode_cli import OpenCodeCliProvider
 
 logger = logging.getLogger(__name__)
+
+# Sealed-profile capability routing (cond-0817). Maps each constructed
+# provider type to its adapter class WITHOUT constructing it, so the
+# session boundary can refuse a sealed contract before any effect. This
+# mirrors the create_provider construction chain below — it is a class
+# lookup, not a supported-provider allowlist: the decision itself lives on
+# each adapter (conservative base default unsupported), and the capability
+# matrix test pins the two together so a new branch cannot drift. Unknown
+# or unmapped types are unsupported, never silently supported.
+_ADAPTER_CLASS_BY_TYPE: Dict[str, Type[BaseProvider]] = {
+    ProviderType.KIRO_CLI.value: KiroCliProvider,
+    ProviderType.CLAUDE_CODE.value: ClaudeCodeProvider,
+    ProviderType.CODEX.value: CodexProvider,
+    ProviderType.COPILOT_CLI.value: CopilotCliProvider,
+    ProviderType.KIMI_CLI.value: KimiCliProvider,
+    ProviderType.MUSE_CLI.value: MuseCliProvider,
+    ProviderType.OPENCODE_CLI.value: OpenCodeCliProvider,
+    ProviderType.HERMES.value: HermesProvider,
+    ProviderType.CURSOR_CLI.value: CursorCliProvider,
+    ProviderType.ANTIGRAVITY_CLI.value: AntigravityCliProvider,
+    ProviderType.MOCK_CLI.value: MockCliProvider,
+}
 
 
 class TerminalAssignedRouteIncompleteError(Exception):
@@ -57,6 +85,49 @@ class ProviderManager:
         # entries against the durable row before returning them.
         self._provider_identities: Dict[str, tuple] = {}
 
+    def sealed_launch_support(
+        self, provider_type: str, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Evaluate sealed-launch capability without constructing anything.
+
+        Pure class-level dispatch to the adapter's own predicate: no
+        provider instance, no tmux, no DB, no side effects. This table is a
+        lookup, not a supported-provider allowlist — the decision lives per
+        adapter. Unknown or unmapped provider types are unsupported.
+        """
+        adapter = _ADAPTER_CLASS_BY_TYPE.get(provider_type)
+        if adapter is None:
+            return SealedProfileSupport(
+                supported=False,
+                reason=(
+                    f"unknown provider type {provider_type!r}: no adapter declares "
+                    "frozen-launch-material support"
+                ),
+            )
+        return adapter.supports_sealed_launch(material)
+
+    def prepare_sealed_launch(
+        self, provider_type: str, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Validate + serialize the frozen material without any effect.
+
+        Pure class-level dispatch to the adapter's own preparation: no
+        provider instance, no tmux, no DB, no files. The session
+        boundary runs this exactly once after the capability gate and
+        before any effect; malformed material raises
+        :class:`SealedPreparationUnsupported` (mapped to 422 with zero
+        effects), unexpected failures propagate (still pre-effect).
+        Unknown or unmapped provider types are unpreparable, never
+        silently preparable.
+        """
+        adapter = _ADAPTER_CLASS_BY_TYPE.get(provider_type)
+        if adapter is None:
+            raise SealedPreparationUnsupported(
+                f"unknown provider type {provider_type!r}: no adapter prepares "
+                "frozen-launch-material"
+            )
+        return adapter.prepare_sealed_launch(material)
+
     def create_provider(
         self,
         provider_type: str,
@@ -73,6 +144,22 @@ class ProviderManager:
         native_session_id: Optional[str] = None,
         codex_profile_material: Optional[dict] = None,
         codex_executable: Optional[str] = None,
+        # The launch's already-loaded profile (cond-0817). Forwarded to the
+        # adapter constructor so the launch argv/config consumes this exact
+        # object and never reloads the profile by name. ``None`` keeps the
+        # legacy per-adapter load for direct construction.
+        launch_profile: Optional[Any] = None,
+        # The sealed material the gate froze (cond-0817). Forwarded to the
+        # adapters whose launch spans bootstrap and resume (Codex,
+        # Antigravity) so both consume the admitted inputs verbatim.
+        # ``None`` keeps legacy per-adapter resolution.
+        sealed_launch_material: Optional[SealedLaunchMaterial] = None,
+        # The one prepared sealed-launch value (cond-0817 repair).
+        # Forwarded to the adapters whose launch serializes MCP material
+        # (Codex, Claude, Kimi, Cursor) so they consume the pre-effect
+        # validated artifact instead of re-resolving. ``None`` keeps
+        # legacy per-adapter resolution.
+        prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
     ) -> BaseProvider:
         """Create and store provider instance."""
         try:
@@ -86,6 +173,7 @@ class ProviderManager:
                     tmux_window,
                     agent_profile,
                     allowed_tools,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.CLAUDE_CODE.value:
                 provider = ClaudeCodeProvider(
@@ -96,6 +184,8 @@ class ProviderManager:
                     allowed_tools,
                     skill_prompt=skill_prompt,
                     native_session_id=native_session_id,
+                    launch_profile=launch_profile,
+                    prepared_sealed_launch=prepared_sealed_launch,
                 )
             elif provider_type == ProviderType.CODEX.value:
                 provider = CodexProvider(
@@ -111,6 +201,8 @@ class ProviderManager:
                     native_session_id=native_session_id,
                     codex_profile_material=codex_profile_material,
                     codex_executable=codex_executable,
+                    launch_profile=launch_profile,
+                    sealed_launch_material=sealed_launch_material,
                 )
             elif provider_type == ProviderType.COPILOT_CLI.value:
                 provider = CopilotCliProvider(
@@ -131,6 +223,8 @@ class ProviderManager:
                     skill_prompt=skill_prompt,
                     expected_model=expected_model,
                     expected_effort=expected_effort,
+                    launch_profile=launch_profile,
+                    prepared_sealed_launch=prepared_sealed_launch,
                 )
             elif provider_type == ProviderType.MUSE_CLI.value:
                 provider = MuseCliProvider(
@@ -142,6 +236,7 @@ class ProviderManager:
                     skill_prompt=skill_prompt,
                     expected_model=expected_model,
                     expected_effort=expected_effort,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.OPENCODE_CLI.value:
                 provider = OpenCodeCliProvider(
@@ -160,6 +255,7 @@ class ProviderManager:
                     agent_profile,
                     allowed_tools,
                     skill_prompt=skill_prompt,
+                    launch_profile=launch_profile,
                 )
             elif provider_type == ProviderType.CURSOR_CLI.value:
                 provider = CursorCliProvider(
@@ -170,6 +266,8 @@ class ProviderManager:
                     allowed_tools,
                     model=model,
                     skill_prompt=skill_prompt,
+                    launch_profile=launch_profile,
+                    prepared_sealed_launch=prepared_sealed_launch,
                 )
             elif provider_type == ProviderType.ANTIGRAVITY_CLI.value:
                 provider = AntigravityCliProvider(
@@ -182,6 +280,8 @@ class ProviderManager:
                     skill_prompt=skill_prompt,
                     native_session_id=native_session_id,
                     effort=expected_effort,
+                    launch_profile=launch_profile,
+                    sealed_launch_material=sealed_launch_material,
                 )
             # --- Credentials-free mock provider (test/CI infrastructure) ---
             elif provider_type == ProviderType.MOCK_CLI.value:

@@ -43,14 +43,29 @@ from __future__ import annotations
 import logging
 import re
 import shlex
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    PreparedSealedLaunch,
+    SealedLaunchMaterial,
+    SealedPreparationUnsupported,
+    SealedProfileSupport,
+    container_maps_set,
+    custom_permission_mode_set,
+    custom_timeout_set,
+    dropped_q_fields,
+    foreign_native_fields,
+    policy_restricted,
+)
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
 from cli_agent_orchestrator.utils.text import strip_terminal_escapes
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +103,16 @@ class MuseCliProvider(BaseProvider):
         skill_prompt: Optional[str] = None,
         expected_model: Optional[str] = None,
         expected_effort: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ) -> None:
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._agent_profile = agent_profile
         self._expected_model = expected_model
         self._expected_effort = expected_effort
+        # The launch's already-loaded profile (cond-0817): when set, the
+        # launch argv consumes this exact object and never reloads the
+        # profile by name. None keeps the legacy load.
+        self._launch_profile = launch_profile
         self._initialized = False
         self._has_received_input = False
         # Shell process running in the pane before muse launches; used to detect
@@ -110,6 +130,8 @@ class MuseCliProvider(BaseProvider):
     def _resolve_model(self) -> Optional[str]:
         if self._expected_model:
             return self._expected_model
+        if self._launch_profile is not None:
+            return self._launch_profile.model
         if self._agent_profile:
             try:
                 return load_agent_profile(self._agent_profile).model
@@ -126,6 +148,72 @@ class MuseCliProvider(BaseProvider):
         if self._expected_effort:
             parts.extend(["--reasoning-effort", self._expected_effort])
         return shlex.join(parts)
+
+    @classmethod
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support covers model plus effort only, for content-free
+        wildcard profiles.
+
+        The v1 argv pins the frozen model (and expected effort) with
+        ``--yolo`` — it carries no prompt, no skills, no MCP material, and
+        no policy. Support therefore requires every dropped field to be
+        empty or default: a content-free profile under a wildcard policy.
+        Anything else is refused rather than recorded as launched.
+        """
+        if material is None or material.profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        profile = material.profile
+        dropped = []
+        if material.system_prompt:
+            dropped.append("system_prompt")
+        if material.skill_text:
+            dropped.append("skills")
+        if policy_restricted(material.allowed_tools):
+            dropped.append("allowedTools")
+        if getattr(profile, "mcpServers", None):
+            dropped.append("mcpServers")
+        dropped.extend(dropped_q_fields(profile))
+        dropped.extend(foreign_native_fields(profile, own=""))
+        for extra in ("codexConfig",):
+            if getattr(profile, extra, None):
+                dropped.append(extra)
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if custom_timeout_set(profile):
+            dropped.append("provider_init_timeout")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Muse launch argv carries only model and effort; "
+                f"{', '.join(sorted(dropped))} would be silently dropped from "
+                "the launch",
+            )
+        return SealedProfileSupport(
+            True,
+            "Muse launch argv (model, effort) uses only the frozen material; "
+            "the profile is content-free under a wildcard policy",
+        )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Carry the content-free wildcard shape, pre-effect.
+
+        The argv pins only the frozen model and effort — already-typed
+        material fields needing no serialization — so there is nothing
+        to validate and no payload to carry: preparation is the choke
+        point, not a second gate (the capability decision stays in
+        :meth:`supports_sealed_launch`). A missing frozen profile is
+        still refused outright.
+        """
+        if material is None or material.profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        return PreparedSealedLaunch(provider="muse_cli")
 
     async def initialize(self) -> bool:
         """Launch ``muse --yolo`` inside the tmux window (cwd = the worktree)."""

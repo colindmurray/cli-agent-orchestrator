@@ -20,15 +20,22 @@ The provider detects the following terminal states:
 import logging
 import re
 import shlex
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider
+from cli_agent_orchestrator.providers.base import (
+    BaseProvider,
+    SealedLaunchMaterial,
+    SealedProfileSupport,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
 from cli_agent_orchestrator.utils.text import strip_terminal_escapes
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +162,7 @@ class KiroCliProvider(BaseProvider):
         window_name: str,
         agent_profile: str,
         allowed_tools: Optional[list] = None,
+        launch_profile: Optional["AgentProfile"] = None,
     ):
         """Initialize Kiro CLI provider with terminal context.
 
@@ -164,11 +172,15 @@ class KiroCliProvider(BaseProvider):
             window_name: Name of the tmux window
             agent_profile: Name of the Kiro agent profile to use (e.g., "developer")
             allowed_tools: Optional list of CAO tool names the agent is allowed to use
+            launch_profile: The launch's already-loaded profile (cond-0817).
+                When set, the launch argv consumes this exact object and never
+                reloads the profile by name. None keeps the legacy load.
         """
         super().__init__(terminal_id, session_name, window_name, allowed_tools)
         self._initialized = False
         self._input_received = False
         self._agent_profile = agent_profile
+        self._launch_profile = launch_profile
 
         # Build dynamic prompt pattern based on agent profile
         # This pattern matches various Kiro prompt formats after ANSI stripping:
@@ -225,6 +237,8 @@ class KiroCliProvider(BaseProvider):
         CAO agent profile to be loadable at runtime (kiro-cli has its own
         agent store). A missing or unparseable profile must not block launch.
         """
+        if self._launch_profile is not None:
+            return self._launch_profile.model or None
         try:
             profile = load_agent_profile(self._agent_profile)
         except (FileNotFoundError, RuntimeError) as exc:
@@ -235,6 +249,20 @@ class KiroCliProvider(BaseProvider):
             )
             return None
         return profile.model or None
+
+    @classmethod
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed launch is refused: Kiro launches ``kiro --agent <name>``
+        and prompt/tool content resolves from the mutable Kiro-native agent
+        store, so the runtime cannot guarantee the supervisor consumes the
+        frozen CAO profile."""
+        return SealedProfileSupport(
+            False,
+            "Kiro launches kiro --agent <name>; prompt and tool content resolve "
+            "from the mutable Kiro-native agent store, not the frozen CAO profile",
+        )
 
     async def initialize(self) -> bool:
         """Initialize Kiro CLI provider by starting kiro-cli chat command.

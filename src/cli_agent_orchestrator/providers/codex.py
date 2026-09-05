@@ -7,11 +7,32 @@ import re
 import shlex
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
+
+if TYPE_CHECKING:
+    from cli_agent_orchestrator.models.agent_profile import AgentProfile
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
-from cli_agent_orchestrator.providers.base import BaseProvider, ProviderPreflightBlocked
+from cli_agent_orchestrator.providers.base import (
+    SEALED_TERMINAL_ID_PLACEHOLDER,
+    TERMINAL_ID_ENV_KEY,
+    BaseProvider,
+    PreparedSealedLaunch,
+    ProviderPreflightBlocked,
+    SealedLaunchMaterial,
+    SealedPreparationUnsupported,
+    SealedProfileSupport,
+    bind_codex_material,
+    container_maps_set,
+    custom_permission_mode_set,
+    custom_timeout_set,
+    dropped_q_fields,
+    dump_sealed_json,
+    foreign_native_fields,
+    require_json_safe,
+    sealed_mcp_server_config,
+)
 from cli_agent_orchestrator.services.settings_service import get_server_settings
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.mcp_resolution import resolve_mcp_server_config
@@ -442,6 +463,33 @@ def resolve_codex_mcp_material_entry(
     }
 
 
+def bind_codex_material_json(
+    raw: bytes, terminal_id: str, *, sites: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """Bind the terminal id into prepared Codex material and parse it.
+
+    One exact parse of the already-validated final JSON, then
+    structural substitution at the injected ``env.CAO_TERMINAL_ID``
+    entries of the named ``sites`` only: the returned dict — system
+    prompt, policy, validated MCP entries, validated codexConfig, and
+    no live profile object — is what the bootstrap, the resumed TUI,
+    and the managed bridge consume by identity. A literal placeholder
+    in user content stays verbatim. A parse failure is a sealed bug,
+    never caller input, and fails closed with the typed refusal.
+    """
+    import json
+
+    try:
+        material = json.loads(raw)
+    except ValueError as exc:
+        raise SealedPreparationUnsupported(
+            f"prepared Codex material is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(material, dict):
+        raise SealedPreparationUnsupported("prepared Codex material must be a JSON object")
+    return bind_codex_material(material, terminal_id, sites=sites)
+
+
 def compose_codex_core_args(
     *,
     codex_profile: Optional[str],
@@ -543,10 +591,31 @@ class CodexProvider(BaseProvider):
         native_session_id: Optional[str] = None,
         codex_profile_material: Optional[dict] = None,
         codex_executable: Optional[str] = None,
+        launch_profile: Optional["AgentProfile"] = None,
+        sealed_launch_material: Optional[SealedLaunchMaterial] = None,
     ):
-        """Initialize provider state."""
+        """Initialize provider state.
+
+        ``launch_profile`` is the launch's already-loaded profile
+        (cond-0817): when set — and no precomposed ``codex_profile_material``
+        was supplied — the launch argv composes from this exact object and
+        never reloads the profile by name. None keeps the legacy load.
+
+        ``sealed_launch_material`` is the gate-frozen launch material: when
+        set, the profile resolves from it verbatim, so bootstrap, provider
+        argv, and resumed TUI share the admitted inputs by identity. None
+        keeps the legacy per-kwarg resolution.
+        """
+        if sealed_launch_material is not None and sealed_launch_material.profile is not None:
+            launch_profile = sealed_launch_material.profile
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
+        self._launch_profile = launch_profile
+        # The gate-frozen launch material (cond-0817), when this provider was
+        # constructed for a sealed launch. Identity evidence, not a second
+        # input: argv composes from ``codex_profile_material`` /
+        # ``launch_profile`` above.
+        self._sealed_launch_material = sealed_launch_material
         # The pre-task bootstrap-minted thread id the launch argv must resume
         # (``codex ... resume <id>``); None keeps the legacy ambient launch.
         self._native_session_id = native_session_id
@@ -590,10 +659,13 @@ class CodexProvider(BaseProvider):
                 "system_prompt": self._apply_skill_prompt(""),
                 "mcp_servers": [],
             }
-        try:
-            profile = load_agent_profile(self._agent_profile)
-        except Exception as e:
-            raise ProviderError(f"Failed to load agent profile '{self._agent_profile}': {e}")
+        if self._launch_profile is not None:
+            profile = self._launch_profile
+        else:
+            try:
+                profile = load_agent_profile(self._agent_profile)
+            except Exception as e:
+                raise ProviderError(f"Failed to load agent profile '{self._agent_profile}': {e}")
         # Compose the developer instructions exactly as the resumed TUI always
         # has: the profile body, the runtime skill catalog supplied to this
         # provider, then the restricted-tool security prompt.
@@ -640,10 +712,20 @@ class CodexProvider(BaseProvider):
         only its TUI flags, the observed/pinned route, and the exact resume id.
         """
         material = self._resolve_codex_profile_material()
-        profile = material.get("profile")
+        # Sealed prepared material carries no live profile object: the
+        # composer consumes the final validated inputs (a set
+        # codexProfile was refused at preparation). Legacy material
+        # keeps the profile-object path, unchanged.
+        sealed_material = "profile" not in material
+        profile = None if sealed_material else material.get("profile")
+        codex_config = (
+            material.get("codex_config") or {}
+            if sealed_material
+            else getattr(profile, "codexConfig", None)
+        )
         core = compose_codex_core_args(
-            codex_profile=getattr(profile, "codexProfile", None),
-            codex_config=getattr(profile, "codexConfig", None),
+            codex_profile=None if sealed_material else getattr(profile, "codexProfile", None),
+            codex_config=codex_config,
             system_prompt=material.get("system_prompt") or "",
             mcp_servers=material.get("mcp_servers") or [],
             allowed_tools=material.get("allowed_tools") or self._allowed_tools,
@@ -659,15 +741,16 @@ class CodexProvider(BaseProvider):
         # the profile's own route — ``codexConfig.model`` override over the
         # bare ``profile.model`` field, and the codexConfig effort — the
         # same effective route the pre-task bootstrap pinned.  Either may
-        # be empty.
-        codex_config = getattr(profile, "codexConfig", None)
+        # be empty. The sealed path resolves identically through the
+        # carried codexConfig: the session boundary already applied the
+        # config seam into the expected pins.
         config = codex_config if isinstance(codex_config, dict) else {}
         effort_cfg = config.get("model_reasoning_effort")
         config_model = config.get("model")
         route = CodexRoute(
             model=self._expected_model
             or (config_model if isinstance(config_model, str) else "")
-            or (getattr(profile, "model", None) or ""),
+            or ("" if sealed_material else (getattr(profile, "model", None) or "")),
             effort=self._expected_effort or str(effort_cfg or ""),
         )
         command_parts.extend(codex_route_suffix(route))
@@ -775,6 +858,152 @@ class CodexProvider(BaseProvider):
             "Codex trust prompt handler timed out — no trust dialog or welcome banner detected. "
             "Pane tail:\n%s",
             pane_tail,
+        )
+
+    @classmethod
+    def supports_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> SealedProfileSupport:
+        """Sealed support needs the frozen composer path with nothing dropped.
+
+        A set ``codexProfile`` forwards ``--profile <name>`` to Codex,
+        loading the mutable ``[profiles.<name>]`` block from the operator's
+        ``~/.codex/config.toml`` (refused). Without it the composer emits
+        model, effort, system prompt plus skills, MCP inline config,
+        ``codexConfig`` overrides, and the effective policy from the frozen
+        material (supported) — any other nonempty behavior-bearing field
+        the CLI never receives is refused.
+        """
+        profile = material.profile if material is not None else None
+        if profile is None:
+            return SealedProfileSupport(False, "no frozen profile was supplied")
+        native = getattr(profile, "codexProfile", None)
+        if isinstance(native, str) and native:
+            return SealedProfileSupport(
+                False,
+                f"Codex forwards --profile {native!r} to the mutable native "
+                f"[profiles.{native}] block in ~/.codex/config.toml (approval "
+                "policy, sandbox mode, MCP servers, model provider); the "
+                "frozen CAO profile is not what the supervisor consumes",
+            )
+        dropped = dropped_q_fields(profile)
+        dropped.extend(foreign_native_fields(profile, own="codexProfile"))
+        if custom_permission_mode_set(profile):
+            dropped.append("permissionMode")
+        if custom_timeout_set(profile):
+            dropped.append("provider_init_timeout")
+        if container_maps_set(profile):
+            dropped.append("container")
+        if dropped:
+            return SealedProfileSupport(
+                False,
+                "Codex frozen composer does not consume "
+                f"{', '.join(sorted(dropped))}; the frozen material would be "
+                "silently dropped from the launch",
+            )
+        return SealedProfileSupport(
+            True,
+            "Codex frozen composer (model, effort, system prompt, MCP servers, "
+            "inline codexConfig, effective policy) uses only the frozen material",
+        )
+
+    @classmethod
+    def prepare_sealed_launch(
+        cls, material: Optional[SealedLaunchMaterial]
+    ) -> PreparedSealedLaunch:
+        """Compose the frozen Codex material exactly once, pre-effect.
+
+        Runs the ONE shared composer (the managed material builder) over
+        the frozen material with the terminal-id placeholder, plus the
+        full serialization the bootstrap and the resumed TUI will run:
+        MCP entry shapes, server/env key shapes, env_vars types,
+        timeouts, and every ``codexConfig`` key/value. Raw MCP shapes
+        are strictly pre-checked first, so the builder's silent
+        ``str()`` coercions can never launder a non-string env value,
+        date, or nested value into the launch. The final material —
+        system prompt, policy, validated MCP entries, validated
+        codexConfig, and no live profile object — is serialized exactly
+        once to immutable JSON bytes. A malformed shape raises
+        :class:`SealedPreparationUnsupported` here — before any clear,
+        tmux, DB, file, or provider effect — instead of failing late
+        inside ``create_terminal`` after the persisted session env was
+        already cleared. A set ``codexProfile`` is unconsumable on the
+        frozen path (it would emit ``--profile <name>`` against the
+        mutable native store) and is refused outright.
+        """
+        from cli_agent_orchestrator.services.managed_provider_bridge import (
+            _profile_material_from_profile,
+        )
+
+        if material is None or material.profile is None:
+            raise SealedPreparationUnsupported("no frozen profile was supplied")
+        profile = material.profile
+        native = getattr(profile, "codexProfile", None)
+        if isinstance(native, str) and native:
+            raise SealedPreparationUnsupported(
+                f"Codex forwards --profile {native!r} to the mutable native "
+                f"[profiles.{native}] block in ~/.codex/config.toml; the "
+                "frozen CAO profile is not what the supervisor consumes"
+            )
+        codex_config = getattr(profile, "codexConfig", None) or {}
+        if not isinstance(codex_config, Mapping):
+            raise SealedPreparationUnsupported(
+                f"codexConfig must be a mapping, got {type(codex_config).__name__}"
+            )
+        require_json_safe(codex_config, source="codexConfig")
+        # Strict raw-shape pre-check: the builder below would silently
+        # coerce non-string env/args values with str(), laundering the
+        # malformed shapes sealed preparation must refuse instead.
+        raw_servers = getattr(profile, "mcpServers", None) or {}
+        if not isinstance(raw_servers, Mapping):
+            raise SealedPreparationUnsupported(
+                "mcpServers must be a mapping of server configs, "
+                f"got {type(raw_servers).__name__}"
+            )
+        binding_sites: list = []
+        for entry_name, entry_value in raw_servers.items():
+            _, injected = sealed_mcp_server_config(entry_name, entry_value)
+            if injected:
+                binding_sites.append(entry_name)
+        try:
+            composed = _profile_material_from_profile(
+                profile,
+                SEALED_TERMINAL_ID_PLACEHOLDER,
+                allowed_tools=list(material.allowed_tools),
+                skill_prompt=material.skill_text,
+            )
+        except SealedPreparationUnsupported:
+            raise
+        except Exception as exc:
+            raise SealedPreparationUnsupported(
+                f"the codex profile material was refused by the pre-task identity "
+                f"contract: {exc}"
+            ) from exc
+        try:
+            # The exact serialization the bootstrap and resumed TUI run:
+            # entry/server/env shapes a malformed profile would otherwise
+            # trip only after launch effects exist.
+            _codex_mcp_args(composed.get("mcp_servers"))
+            for key, value in codex_config.items():
+                _toml_override(key, value)
+        except SealedPreparationUnsupported:
+            raise
+        except Exception as exc:
+            raise SealedPreparationUnsupported(
+                f"the codex launch composition was refused by the pre-task "
+                f"identity contract: {exc}"
+            ) from exc
+        final = {
+            "system_prompt": composed.get("system_prompt") or "",
+            "allowed_tools": list(composed.get("allowed_tools") or []),
+            "mcp_servers": composed.get("mcp_servers") or [],
+            "codex_config": dict(codex_config),
+        }
+        require_json_safe(final, source="sealed Codex material")
+        return PreparedSealedLaunch(
+            provider="codex",
+            codex_material_json=dump_sealed_json(final, source="sealed Codex material"),
+            terminal_id_binding_sites=tuple(binding_sites),
         )
 
     async def initialize(self) -> bool:

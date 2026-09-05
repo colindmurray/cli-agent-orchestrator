@@ -19,6 +19,7 @@ from cli_agent_orchestrator.api.main import (
 )
 from cli_agent_orchestrator.models.terminal import Terminal
 from cli_agent_orchestrator.services.inbox_service import inbox_service
+from cli_agent_orchestrator.services.session_service import CreateOrAdoptResult
 from cli_agent_orchestrator.utils.skills import SkillNameError
 
 # ── Health endpoint ──────────────────────────────────────────────────
@@ -276,7 +277,9 @@ class TestCreateSession:
         with patch("cli_agent_orchestrator.api.main.session_service") as mock_svc:
             # The endpoint awaits session_service.create_session, so the patched
             # attribute must be an AsyncMock to return an awaitable.
-            mock_svc.create_session = AsyncMock(return_value=mock_terminal)
+            mock_svc.create_session = AsyncMock(
+                return_value=CreateOrAdoptResult(terminal=mock_terminal, adopted=False)
+            )
 
             response = client.post(
                 "/sessions",
@@ -299,6 +302,10 @@ class TestCreateSession:
             allowed_tools=None,
             registry=ANY,
             env_vars=None,
+            # cond-0817: the optional conductor-preflighted launch contract
+            # rides the same call; absent here, so None.
+            profile_contract=None,
+            memory_manager=None,
         )
 
     def test_create_session_with_session_name(self, client):
@@ -313,7 +320,9 @@ class TestCreateSession:
         with patch("cli_agent_orchestrator.api.main.session_service") as mock_svc:
             # The endpoint awaits session_service.create_session, so the patched
             # attribute must be an AsyncMock to return an awaitable.
-            mock_svc.create_session = AsyncMock(return_value=mock_terminal)
+            mock_svc.create_session = AsyncMock(
+                return_value=CreateOrAdoptResult(terminal=mock_terminal, adopted=False)
+            )
 
             response = client.post(
                 "/sessions",
@@ -344,6 +353,22 @@ class TestCreateSession:
 
         assert response.status_code == 400
         assert "Invalid provider" in response.json()["detail"]
+
+    def test_create_session_list_contract_is_400_not_422(self, client):
+        """POST /sessions with a JSON-list contract answers 400, not FastAPI 422.
+
+        The endpoint declares ``Optional[Any]`` so the raw value reaches the
+        strict parser; the real service loads the built-in profile and the
+        parser classifies the shape before any launch effect.
+        """
+        response = client.post(
+            "/sessions",
+            params={"agent_profile": "developer"},
+            json={"profile_contract": ["not", "an", "object"]},
+        )
+
+        assert response.status_code == 400
+        assert "must be an object" in response.json()["detail"]
 
     def test_create_session_server_error(self, client):
         """POST /sessions returns 500 on unexpected error."""
@@ -420,12 +445,15 @@ class TestCreateSession:
             # The endpoint awaits session_service.create_session, so the patched
             # attribute must be an AsyncMock to return an awaitable.
             mock_svc.create_session = AsyncMock(
-                return_value=TerminalModel(
-                    id="abcd1234",
-                    name="w",
-                    session_name=prefixed,
-                    provider="kiro_cli",
-                    agent_profile="developer",
+                return_value=CreateOrAdoptResult(
+                    terminal=TerminalModel(
+                        id="abcd1234",
+                        name="w",
+                        session_name=prefixed,
+                        provider="kiro_cli",
+                        agent_profile="developer",
+                    ),
+                    adopted=False,
                 )
             )
             response = client.post(

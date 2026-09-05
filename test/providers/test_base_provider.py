@@ -126,6 +126,18 @@ class TestTranslatePath:
         profile = _profile(("/host", "/guest"))
         assert self.provider._translate_path("/hostile/x.txt", profile) == "/hostile/x.txt"
 
+    def test_sibling_prefix_collision_does_not_match(self):
+        """``/tmp/foo2/x`` must not match host prefix ``/tmp/foo``.
+
+        The comparison is ``startswith(host_prefix + "/")`` (or exact
+        equality), never a bare ``startswith(host_prefix)``: mutating the
+        separator away maps the sibling into the wrong guest and this test
+        turns red.
+        """
+        profile = _profile(("/tmp/foo", "/guest"))
+        assert self.provider._translate_path("/tmp/foo2/x", profile) == "/tmp/foo2/x"
+        assert self.provider._translate_path("/tmp/foo/x", profile) == "/guest/x"
+
     def test_root_mapping_alone_is_applied(self):
         """A host="/" mapping must not silently no-op (nit fix, PR #428 review).
 
