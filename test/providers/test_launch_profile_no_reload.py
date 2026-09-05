@@ -99,6 +99,30 @@ class TestClaude:
         prompt_path = parts[parts.index("--append-system-prompt-file") + 1]
         assert "FROZEN-CLAUDE" in Path(prompt_path).read_text(encoding="utf-8")
 
+    def test_skill_text_from_material_reaches_prompt_file(self):
+        """The service-built skill text (frozen at the gate) is what the
+        prompt file contains — the adapter never rebuilds the catalog."""
+        import shlex
+        from pathlib import Path
+
+        from cli_agent_orchestrator.providers import claude_code
+
+        provider = claude_code.ClaudeCodeProvider(
+            "t1",
+            "cao-s",
+            "w",
+            "sup",
+            launch_profile=_sentinel(system_prompt="FROZEN-CLAUDE"),
+            skill_prompt="SKILL-MATERIAL",
+        )
+        with _raises_loader(claude_code):
+            command = provider._build_claude_command()
+        parts = shlex.split(command)
+        prompt_path = parts[parts.index("--append-system-prompt-file") + 1]
+        prompt_text = Path(prompt_path).read_text(encoding="utf-8")
+        assert "FROZEN-CLAUDE" in prompt_text
+        assert "SKILL-MATERIAL" in prompt_text
+
     def test_legacy_path_still_loads_by_name(self):
         from cli_agent_orchestrator.providers import claude_code
 
@@ -144,6 +168,28 @@ class TestKimi:
         assert "--model" in command and _SENTINEL_MODEL in command
         system_md = Path(provider._temp_dir) / "system.md"
         assert "FROZEN-KIMI" in system_md.read_text(encoding="utf-8")
+
+    def test_skill_text_from_material_reaches_agent_file(self):
+        """The service-built skill text (frozen at the gate) is what the
+        agent file contains — the adapter never rebuilds the catalog."""
+        from pathlib import Path
+
+        from cli_agent_orchestrator.providers import kimi_cli
+
+        provider = kimi_cli.KimiCliProvider(
+            "t1",
+            "cao-s",
+            "w",
+            "sup",
+            launch_profile=_sentinel(system_prompt="FROZEN-KIMI"),
+            skill_prompt="SKILL-MATERIAL",
+        )
+        with _raises_loader(kimi_cli):
+            provider._build_kimi_command()
+        system_md = Path(provider._temp_dir) / "system.md"
+        agent_text = system_md.read_text(encoding="utf-8")
+        assert "FROZEN-KIMI" in agent_text
+        assert "SKILL-MATERIAL" in agent_text
 
     def test_legacy_path_still_loads_by_name(self):
         from cli_agent_orchestrator.providers import kimi_cli
@@ -305,6 +351,41 @@ class TestAntigravity:
         )
         with _raises_loader(antigravity_cli):
             assert provider._try_load_profile() is sentinel
+
+    def test_resumed_conversation_needs_no_reload_or_rebuild(self):
+        """A resumed launch consumes the admitted material verbatim: the
+        conversation id rides ``--conversation``, no ``-i`` is emitted,
+        and no store read or rebuild happens."""
+        from cli_agent_orchestrator.providers import antigravity_cli
+        from cli_agent_orchestrator.providers.base import SealedLaunchMaterial
+
+        profile = _sentinel(system_prompt="FROZEN-AGY")
+        material = SealedLaunchMaterial(
+            profile=profile,
+            model=_SENTINEL_MODEL,
+            effort=None,
+            system_prompt="FROZEN-AGY",
+            skill_text="",
+            allowed_tools=("*",),
+        )
+        provider = antigravity_cli.AntigravityCliProvider(
+            "t1",
+            "cao-s",
+            "w",
+            "sup",
+            native_session_id="conv-A",
+            sealed_launch_material=material,
+        )
+        assert provider._launch_profile is profile
+        with (
+            _raises_loader(antigravity_cli),
+            patch("shutil.which", return_value="/usr/local/bin/agy"),
+        ):
+            command = provider._build_agy_command()
+        parts = command.split()
+        assert "--conversation" in parts and "conv-A" in parts
+        assert "-i" not in parts
+        assert "FROZEN-AGY" not in command
 
     def test_argv_renders_frozen_prompt_and_model_without_store_read(self):
         from cli_agent_orchestrator.providers import antigravity_cli

@@ -1226,6 +1226,7 @@ def _profile_material_from_profile(
     terminal_id: str,
     *,
     allowed_tools: Optional[list[str]] = None,
+    skill_prompt: Optional[str] = None,
 ) -> dict[str, Any]:
     """Resolve the fully-composed profile material from an ALREADY-LOADED profile.
 
@@ -1241,13 +1242,19 @@ def _profile_material_from_profile(
     ``allowed_tools`` lets the caller pass the tool policy it already resolved
     (which may be an explicit per-step override, not the profile default), so
     the yolo/security composition matches what ``create_terminal`` computed.
+    ``skill_prompt`` lets a sealed launch pass the already-composed skill
+    catalog the session gate froze (cond-0817): the builder then performs no
+    skill rescan of its own, so gate and bootstrap cannot observe different
+    catalogs.  ``None`` keeps the legacy builder fallback for direct
+    construction, which composes from the passed profile object.
     """
     actual_digest = _digest(profile.model_dump(mode="json"))
     if allowed_tools is None:
         names = list(profile.mcpServers or {}) or None
         allowed_tools = resolve_allowed_tools(profile.allowedTools, profile.role, names)
     system_prompt = profile.system_prompt or ""
-    skill_prompt = build_skill_catalog(profile.skills)
+    if skill_prompt is None:
+        skill_prompt = build_skill_catalog(profile.skills)
     if skill_prompt:
         system_prompt = f"{system_prompt}\n\n{skill_prompt}" if system_prompt else skill_prompt
     if allowed_tools and "*" not in allowed_tools:
@@ -2013,6 +2020,14 @@ class _ProviderSession:
     def __init__(self, request: dict[str, Any]):
         self.request = request
         self.provider = request["provider"]
+        # Explicitly legacy/cross-process revalidation (cond-0817): this
+        # path reloads by name because it runs in a separate process that
+        # never held the launch material — but the durable reservation
+        # record stays the authority. The recomposed digest must equal the
+        # reserved ``profile_sha256`` or the session refuses: a profile SHA
+        # alone does not freeze the separately mutable skill catalog, so
+        # drift fails closed here instead of launching changed bytes. This
+        # path never authors a sealed receipt.
         self.profile_material = _profile_material(request["agent_profile"], request["terminal_id"])
         if self.profile_material["profile_sha256"] != request["profile_sha256"]:
             raise BridgeError("managed provider profile changed after reservation")

@@ -348,6 +348,22 @@ class TestCreateSession:
         assert response.status_code == 400
         assert "Invalid provider" in response.json()["detail"]
 
+    def test_create_session_list_contract_is_400_not_422(self, client):
+        """POST /sessions with a JSON-list contract answers 400, not FastAPI 422.
+
+        The endpoint declares ``Optional[Any]`` so the raw value reaches the
+        strict parser; the real service loads the built-in profile and the
+        parser classifies the shape before any launch effect.
+        """
+        response = client.post(
+            "/sessions",
+            params={"agent_profile": "developer"},
+            json={"profile_contract": ["not", "an", "object"]},
+        )
+
+        assert response.status_code == 400
+        assert "must be an object" in response.json()["detail"]
+
     def test_create_session_server_error(self, client):
         """POST /sessions returns 500 on unexpected error."""
         with patch("cli_agent_orchestrator.api.main.session_service") as mock_svc:

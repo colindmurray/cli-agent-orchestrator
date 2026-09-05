@@ -39,6 +39,7 @@ from cli_agent_orchestrator.services.supervisor_profile_receipt import (
     ProfileLaunchUnsupported,
     build_sealed_launch_material,
     load_supervisor_launch_context,
+    parse_profile_contract,
     validate_profile_contract,
 )
 from cli_agent_orchestrator.services.terminal_service import create_terminal
@@ -131,8 +132,11 @@ async def create_session(
         explicit_provider=provider,
         fallback_provider="kiro_cli",
     )
+    # A sealed contract arrives as the raw request value: strict-parse it
+    # once (malformed shape is a typed 400), then validate the well-formed
+    # expectation against the single loaded profile before any launch effect.
     if profile_contract is not None:
-        validate_profile_contract(profile_contract, launch_context)
+        validate_profile_contract(parse_profile_contract(profile_contract), launch_context)
 
     # Sealed-launch capability gate: the immutable launch material is built
     # from the already-frozen context (no second store read), evaluated

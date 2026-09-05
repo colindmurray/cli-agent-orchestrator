@@ -9,6 +9,7 @@ and the HTTP conflict/retry mapping.
 """
 
 import hashlib
+import os
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -387,6 +388,109 @@ class TestExactByteLoading:
         assert exc_info.value.retry
 
 
+class TestStrictContractParsing:
+    def _valid_raw(self, context):
+        return dict(_contract_for(context))
+
+    def test_non_mapping_contracts_are_malformed(self, profile_store):
+        _write_profile(profile_store, "sup")
+        load_supervisor_launch_context("sup")
+        for raw in (["not", "an", "object"], "a-string", 42, None):
+            with pytest.raises(spr.ProfileContractMalformed):
+                spr.parse_profile_contract(raw)
+
+    def test_missing_and_extra_fields_are_malformed(self, profile_store):
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        raw = self._valid_raw(context)
+        del raw["sha256"]
+        with pytest.raises(spr.ProfileContractMalformed):
+            spr.parse_profile_contract(raw)
+        raw = self._valid_raw(context)
+        raw["unexpected"] = 1
+        with pytest.raises(spr.ProfileContractMalformed):
+            spr.parse_profile_contract(raw)
+
+    def test_wrong_schema_role_and_types_are_malformed(self, profile_store):
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        for field, value in (
+            ("schema", "wrong-schema"),
+            ("role", "developer"),
+            ("profile", 42),
+            ("provider", ""),
+            ("provenance", ""),
+            ("model", 42),
+            ("effort", 42),
+        ):
+            raw = self._valid_raw(context)
+            raw[field] = value
+            with pytest.raises(spr.ProfileContractMalformed):
+                spr.parse_profile_contract(raw)
+
+    def test_invalid_source_path_forms_are_malformed(self, profile_store):
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        for bad in ("relative/path.md", "", "built-in:", "built-in:no-suffix", 42):
+            raw = self._valid_raw(context)
+            raw["source_path"] = bad
+            with pytest.raises(spr.ProfileContractMalformed):
+                spr.parse_profile_contract(raw)
+        raw = self._valid_raw(context)
+        raw["source_path"] = "built-in:developer.md"
+        spr.parse_profile_contract(raw)
+
+    def test_sha_must_be_exactly_64_hex(self, profile_store):
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        for bad in ("", "xyz", "a" * 63, "a" * 65, "g" * 64, "a" * 63 + " "):
+            raw = self._valid_raw(context)
+            raw["sha256"] = bad
+            with pytest.raises(spr.ProfileContractMalformed):
+                spr.parse_profile_contract(raw)
+
+    def test_uppercase_sha_normalizes_and_validates(self, profile_store):
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        raw = self._valid_raw(context)
+        raw["sha256"] = raw["sha256"].upper()
+        parsed = spr.parse_profile_contract(raw)
+        assert parsed["sha256"] == context.sha256
+        validate_profile_contract(parsed, context)
+        assert build_profile_receipt(context)["sha256"] == context.sha256
+
+    def test_well_formed_drift_is_conflict_not_malformed(self, profile_store):
+        """A valid-shape value that differs is 409 territory, not 400:
+        the parser accepts it and the validator names the divergence."""
+        _write_profile(profile_store, "sup")
+        context = load_supervisor_launch_context("sup")
+        raw = self._valid_raw(context)
+        raw["provenance"] = "composed-registry"
+        parsed = spr.parse_profile_contract(raw)
+        with pytest.raises(ProfileLaunchConflict) as exc_info:
+            validate_profile_contract(parsed, context)
+        assert "provenance" in [entry["field"] for entry in exc_info.value.divergent_fields]
+
+
+class TestInstalledStoreBoundary:
+    def test_sibling_prefix_is_outside_the_store(self, tmp_path, monkeypatch):
+        """Direct pin for the containment boundary.
+
+        ``tmp/foo2/sup.md`` shares a string prefix with ``tmp/foo`` but is
+        not inside it: containment is a ``commonpath`` equality, never a
+        bare prefix match — mutating the boundary to plain ``startswith``
+        turns this red.
+        """
+        from cli_agent_orchestrator.utils import agent_profiles
+
+        monkeypatch.setattr(agent_profiles, "LOCAL_AGENT_STORE_DIR", tmp_path / "foo")
+        inside = os.path.realpath(tmp_path / "foo" / "sup.md")
+        sibling = os.path.realpath(tmp_path / "foo2" / "sup.md")
+        assert spr._is_within_installed_store(inside) is True
+        assert spr._is_within_installed_store(sibling) is False
+        assert spr._is_within_installed_store("built-in:sup.md") is False
+
+
 class TestCanonicalProvenance:
     def test_installed_store_emits_canonical_provenance(self, profile_store):
         _write_profile(profile_store, "sup")
@@ -408,6 +512,32 @@ class TestCanonicalProvenance:
         """ "local" over packaged bytes is a divergence, not a spelling."""
         context = load_supervisor_launch_context("developer")
         assert context.provenance == "built-in"
+        contract = _contract_for(context)
+        contract["provenance"] = "local"
+        with pytest.raises(ProfileLaunchConflict) as exc_info:
+            validate_profile_contract(contract, context)
+        assert "provenance" in [entry["field"] for entry in exc_info.value.divergent_fields]
+
+    def test_legacy_local_contract_refused_for_sibling_prefix_store(
+        self, profile_store, tmp_path, monkeypatch
+    ):
+        """A sibling directory sharing a string prefix is not the store.
+
+        ``tmp/foo2/sup.md`` must not satisfy the installed-store check for
+        ``tmp/foo``: containment is a ``commonpath`` equality, never a bare
+        prefix match — mutating the boundary to plain ``startswith`` turns
+        this red.
+        """
+        from cli_agent_orchestrator.services import settings_service
+        from cli_agent_orchestrator.utils import agent_profiles
+
+        monkeypatch.setattr(agent_profiles, "LOCAL_AGENT_STORE_DIR", tmp_path / "foo")
+        sibling = tmp_path / "foo2"
+        sibling.mkdir()
+        _write_profile(sibling, "sup")
+        monkeypatch.setattr(settings_service, "get_extra_agent_dirs", lambda: [str(sibling)])
+        context = load_supervisor_launch_context("sup")
+        assert context.provenance == "custom"
         contract = _contract_for(context)
         contract["provenance"] = "local"
         with pytest.raises(ProfileLaunchConflict) as exc_info:
@@ -929,6 +1059,43 @@ class TestSealedRefusal:
         assert material.system_prompt == "PROMPT-A"
 
     @pytest.mark.asyncio
+    async def test_material_mcp_and_policy_frozen_across_store_mutation(self, profile_store):
+        """MCP servers and effective policy freeze with the material: a
+        store rewrite between admission and launch cannot move them."""
+        from cli_agent_orchestrator.providers.manager import ProviderManager
+
+        _write_bytes_profile(
+            profile_store,
+            "sup",
+            b"---\nname: sup\ndescription: x\nprovider: kimi_cli\n"
+            b"role: supervisor\nmodel: mcp-model-a\nmcpServers:\n"
+            b'  server-a:\n    command: server-a\nallowedTools: ["fs_read"]\n'
+            b"---\nDo A.\n",
+        )
+        context = load_supervisor_launch_context("sup")
+        material = spr.build_sealed_launch_material(context)
+        assert material.profile.mcpServers == {"server-a": {"command": "server-a"}}
+        # Effective policy: explicit tools plus the MCP server grant.
+        assert material.allowed_tools == ("fs_read", "@server-a")
+        before = ProviderManager().sealed_launch_support("kimi_cli", material)
+        assert before.supported is True
+
+        _write_bytes_profile(
+            profile_store,
+            "sup",
+            b"---\nname: sup\ndescription: x\nprovider: kimi_cli\n"
+            b"role: supervisor\nmodel: mcp-model-b\nmcpServers:\n"
+            b'  server-b:\n    command: server-b\nallowedTools: ["*"]\n'
+            b"---\nDo B.\n",
+        )
+        after = ProviderManager().sealed_launch_support("kimi_cli", material)
+        assert after == before
+        assert material.model == "mcp-model-a"
+        assert material.system_prompt == "Do A."
+        assert material.profile.mcpServers == {"server-a": {"command": "server-a"}}
+        assert material.allowed_tools == ("fs_read", "@server-a")
+
+    @pytest.mark.asyncio
     async def test_legacy_no_contract_unsupported_still_launches_without_receipt_claim(
         self, profile_store
     ):
@@ -1404,6 +1571,97 @@ class TestComposedFrozenContextWiring:
             command = instance._build_kimi_command()
         assert "--model" in command and "composed-model-7" in command
 
+    @pytest.mark.asyncio
+    async def test_sealed_codex_composes_skill_and_policy_exactly_once(
+        self, profile_store, isolated_memory_db, launched_provider
+    ):
+        """Gate, bootstrap, and TUI share one skill/policy composition.
+
+        The catalog builder answers CATALOG-A on its first call and raises
+        on any second: with the frozen skill threaded through, the bridge
+        builder never rescans, so the bootstrap observes CATALOG-A and the
+        launch performs exactly one skill composition and one policy
+        resolution. A rebuild (second call) errors the launch instead of
+        silently swapping in CATALOG-B.
+        """
+        import cli_agent_orchestrator.services.managed_provider_bridge as bridge
+        from cli_agent_orchestrator.services import terminal_service, unmanaged_native_identity
+        from cli_agent_orchestrator.services.terminal_service import create_terminal
+
+        _write_profile(profile_store, "sup", provider="codex", model="once-model-9")
+        context = load_supervisor_launch_context("sup")
+        validate_profile_contract(_contract_for(context), context)
+
+        catalog_calls = []
+        policy_calls = []
+        real_resolve = spr.resolve_allowed_tools
+
+        def _catalog_once(*args, **kwargs):
+            catalog_calls.append(1)
+            if len(catalog_calls) > 1:
+                raise AssertionError("skill catalog recomposed after the gate")
+            return "CATALOG-A"
+
+        def _policy_once(*args, **kwargs):
+            policy_calls.append(1)
+            return real_resolve(*args, **kwargs)
+
+        seen = {}
+
+        def _capture_bootstrap(**kwargs):
+            from cli_agent_orchestrator.services import native_attachment
+
+            seen.update(kwargs)
+            assert kwargs["launch_profile"] is context.profile
+            composed = kwargs["codex_profile_material"]["system_prompt"]
+            assert "CATALOG-A" in composed
+            return {
+                "native_session_id": "codex-once-native",
+                "acquisition_method": (native_attachment.ACQUISITION_ZERO_TURN_BOOTSTRAP),
+                "working_directory": "/tmp",
+                "model": "once-model-9",
+                "effort": None,
+                "binary_path": None,
+            }
+
+        service_provider_manager = MagicMock()
+        with (
+            _HermeticLaunch(
+                provider_manager=service_provider_manager,
+                launched_provider=launched_provider,
+                terminal_id="abcd1244",
+                session="cao-once-codex",
+            ),
+            patch.object(spr, "build_skill_catalog", side_effect=_catalog_once),
+            patch.object(terminal_service, "build_skill_catalog", side_effect=_catalog_once),
+            patch.object(bridge, "build_skill_catalog", side_effect=_catalog_once),
+            patch.object(spr, "resolve_allowed_tools", side_effect=_policy_once),
+            patch.object(
+                unmanaged_native_identity,
+                "resolve_pre_task_identity",
+                side_effect=_capture_bootstrap,
+            ),
+            patch(
+                f"{_SERVICE}.load_agent_profile",
+                side_effect=AssertionError("terminal reloaded by name"),
+            ),
+        ):
+            # The gate-equivalent composition: the single counted build.
+            material = spr.build_sealed_launch_material(context)
+            assert material.skill_text == "CATALOG-A"
+            terminal = await create_terminal(
+                provider="codex",
+                agent_profile="sup",
+                new_session=True,
+                profile_launch_context=context,
+                sealed_launch_material=material,
+                expected_model=context.model,
+                expected_effort=context.effort,
+            )
+        assert len(catalog_calls) == 1
+        assert len(policy_calls) == 1
+        assert terminal.profile_receipt == build_profile_receipt(context)
+
 
 class TestFrozenSurvivesStoreMutation:
     @pytest.mark.asyncio
@@ -1669,6 +1927,63 @@ class TestHttpMapping:
         assert detail["source_path"] == context.source_path
         assert "B" in detail["reason"]
         assert detail["recovery"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw", [["not", "an", "object"], "a-string", {"unexpected": "shape"}])
+    async def test_non_mapping_and_extra_field_contracts_map_to_400(self, profile_store, raw):
+        """A JSON list/string (or unknown shape) reaches the endpoint as
+        ``Optional[Any]`` instead of dying in FastAPI's generic 422: the
+        strict parser classifies it as a typed 400."""
+        from fastapi import BackgroundTasks, HTTPException
+
+        from cli_agent_orchestrator.api import main
+
+        _write_profile(profile_store, "sup")
+        with patch.object(main, "get_plugin_registry", return_value=MagicMock()):
+            with pytest.raises(HTTPException) as exc_info:
+                await main.create_session(
+                    request=MagicMock(),
+                    background_tasks=BackgroundTasks(),
+                    agent_profile="sup",
+                    profile_contract=raw,
+                )
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_uppercase_sha_contract_passes_boundary_lowercase(self, profile_store):
+        """An uppercase digest is accepted, normalized for comparison, and
+        the launch proceeds on the lowercase receipt digest."""
+        from fastapi import BackgroundTasks
+
+        from cli_agent_orchestrator.api import main
+
+        _write_profile(profile_store, "sup", provider="kimi_cli")
+        context = load_supervisor_launch_context("sup")
+        contract = _contract_for(context)
+        contract["sha256"] = contract["sha256"].upper()
+        with (
+            patch.object(main, "get_plugin_registry", return_value=MagicMock()),
+            patch(
+                "cli_agent_orchestrator.services.session_service.create_terminal",
+                new=AsyncMock(),
+            ) as mock_create,
+            patch("cli_agent_orchestrator.services.session_service.dispatch_plugin_event"),
+        ):
+            mock_create.return_value = MagicMock(session_name="cao-upper-sha")
+            await main.create_session(
+                request=MagicMock(),
+                background_tasks=BackgroundTasks(),
+                agent_profile="sup",
+                profile_contract=contract,
+            )
+        assert mock_create.call_args.kwargs["sealed_launch_material"].profile is (
+            mock_create.call_args.kwargs["profile_launch_context"].profile
+        )
+        assert (
+            mock_create.call_args.kwargs["profile_launch_context"].sha256
+            == context.sha256
+            == contract["sha256"].lower()
+        )
 
     @pytest.mark.asyncio
     async def test_malformed_contract_maps_to_400(self, profile_store):

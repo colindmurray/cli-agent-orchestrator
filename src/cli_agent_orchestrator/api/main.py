@@ -1767,7 +1767,12 @@ async def create_session(
     allowed_tools: Optional[str] = None,
     memory_manager: Optional[str] = None,
     env_vars: Optional[Dict[str, str]] = Body(default=None, embed=True),
-    profile_contract: Optional[Dict[str, Any]] = Body(default=None, embed=True),
+    # Endpoint-scoped raw contract value (cond-0817): ``Any`` so a JSON
+    # list/string reaches the endpoint instead of dying in FastAPI's
+    # generic 422 — the strict parser in supervisor_profile_receipt
+    # classifies malformed shapes as a typed 400. No global validation
+    # change: only this field is loosened, and only to be re-checked.
+    profile_contract: Optional[Any] = Body(default=None, embed=True),
     _scopes: List[str] = Depends(require_any_scope(SCOPE_WRITE, SCOPE_ADMIN)),
 ) -> Terminal:
     """Create a new session with exactly one terminal.

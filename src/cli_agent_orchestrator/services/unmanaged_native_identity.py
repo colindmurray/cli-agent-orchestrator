@@ -52,6 +52,7 @@ import shutil
 import subprocess
 from typing import Any, Mapping, Optional
 
+from cli_agent_orchestrator.constants import SECURITY_PROMPT
 from cli_agent_orchestrator.providers.codex import (
     CodexRoute,
     codex_route_suffix,
@@ -368,6 +369,34 @@ def _effective_codex_route(
     return CodexRoute(model=model, effort=effort)
 
 
+def _compose_antigravity_instruction(
+    *,
+    system_prompt: str,
+    skill_text: str,
+    allowed_tools: Any,
+    role_name: str,
+) -> str:
+    """Pure mint-instruction composer shared by sealed and legacy paths.
+
+    Appends the skill catalog to a nonempty system prompt, then the
+    security prompt for a restricted effective policy, then the role
+    guard. Identical composition either way — only the inputs differ
+    (gate-frozen material versus freshly read profile fields).
+    """
+    if system_prompt and skill_text:
+        system_prompt = f"{system_prompt}\n\n{skill_text}"
+    if system_prompt and allowed_tools and "*" not in allowed_tools:
+        system_prompt = f"{system_prompt}\n\n{SECURITY_PROMPT}"
+    if system_prompt:
+        return (
+            f"{system_prompt}\n\n---\n"
+            f"You are the {role_name}. Acknowledge your role in one sentence, "
+            f"then wait for tasks. Do not take any action or use any tools "
+            f"until you receive a specific task."
+        )
+    return "Acknowledge initialization in one sentence and wait."
+
+
 def _mint_antigravity_session(
     *,
     terminal_id: str,
@@ -378,10 +407,10 @@ def _mint_antigravity_session(
     agent_profile: Optional[str],
     environment: Optional[Mapping[str, str]] = None,
     launch_profile: Optional[Any] = None,
+    sealed_launch_material: Optional[Any] = None,
 ) -> dict[str, Any]:
     import json
 
-    from cli_agent_orchestrator.providers.antigravity_cli import SECURITY_PROMPT
     from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
     from cli_agent_orchestrator.utils.skills import build_skill_catalog
 
@@ -429,31 +458,39 @@ def _mint_antigravity_session(
                 f"failed to load agent profile {agent_profile!r} for antigravity_cli: {exc}"
             ) from exc
 
-    model = expected_model or (getattr(profile, "model", None) or "")
-    effort = expected_effort or ""
-
-    system_prompt = (getattr(profile, "system_prompt", None) or "") if profile else ""
-    if system_prompt:
-        skill_catalog = build_skill_catalog(getattr(profile, "skills", None))
-        if skill_catalog:
-            system_prompt = f"{system_prompt}\n\n{skill_catalog}"
-        allowed_tools = getattr(profile, "allowedTools", None) or []
-        if allowed_tools and "*" not in allowed_tools:
-            system_prompt = (
-                f"{system_prompt}\n\n{SECURITY_PROMPT}" if system_prompt else SECURITY_PROMPT
-            )
-
-    role_name = (getattr(profile, "name", None) or "agent") if profile else "agent"
-    guarded_prompt = (
-        (
-            f"{system_prompt}\n\n---\n"
-            f"You are the {role_name}. Acknowledge your role in one sentence, "
-            f"then wait for tasks. Do not take any action or use any tools "
-            f"until you receive a specific task."
+    material = sealed_launch_material
+    material_profile = getattr(material, "profile", None) if material is not None else None
+    if material is not None and material_profile is not None:
+        # Sealed: compose strictly from the gate-frozen material — the
+        # resolved route, the frozen system prompt and skill catalog, and
+        # the effective policy. No skill rescan, no raw profile-field
+        # reads, so the mint cannot observe anything but admission state.
+        # A combination the CLI cannot consume truthfully never reaches
+        # the mint: the capability gate refused it pre-effect.
+        model = material.model or expected_model or ""
+        effort = material.effort or expected_effort or ""
+        guarded_prompt = _compose_antigravity_instruction(
+            system_prompt=material.system_prompt,
+            skill_text=material.skill_text,
+            allowed_tools=material.allowed_tools,
+            role_name=getattr(material_profile, "name", None) or "agent",
         )
-        if system_prompt
-        else "Acknowledge initialization in one sentence and wait."
-    )
+        role_value = getattr(material_profile, "role", None)
+    else:
+        model = expected_model or (getattr(profile, "model", None) or "")
+        effort = expected_effort or ""
+        if profile is not None:
+            skill_catalog = build_skill_catalog(getattr(profile, "skills", None))
+            raw_tools = getattr(profile, "allowedTools", None) or []
+        else:
+            skill_catalog, raw_tools = "", []
+        guarded_prompt = _compose_antigravity_instruction(
+            system_prompt=(getattr(profile, "system_prompt", None) or "") if profile else "",
+            skill_text=skill_catalog,
+            allowed_tools=raw_tools,
+            role_name=(getattr(profile, "name", None) or "agent") if profile else "agent",
+        )
+        role_value = getattr(profile, "role", None) if profile else None
 
     # The mint is a REAL billed model turn carrying the whole system prompt and
     # skill catalog, so it is not a sub-minute operation.  Two bounds, ordered
@@ -522,7 +559,7 @@ def _mint_antigravity_session(
         "executable_hash": digest,
         "executable_version": version_output,
         "agent_profile": agent_profile,
-        "role": getattr(profile, "role", None) if profile else None,
+        "role": role_value,
         "bootstrap": {
             "provider": "antigravity_cli",
             "conversation_id": cid,
@@ -550,6 +587,7 @@ def resolve_pre_task_identity(
     codex_profile_material: Optional[Mapping[str, Any]] = None,
     forwarded_environment: Optional[Mapping[str, str]] = None,
     launch_profile: Optional[Any] = None,
+    sealed_launch_material: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Resolve the deterministic harness-native session id for an unmanaged
     new launch, BEFORE the provider starts.
@@ -610,6 +648,7 @@ def resolve_pre_task_identity(
             agent_profile=agent_profile,
             environment=forwarded_environment,
             launch_profile=launch_profile,
+            sealed_launch_material=sealed_launch_material,
         )
 
     # Codex: the zero-turn app-server bootstrap materializes a resumable

@@ -185,6 +185,7 @@ class AntigravityCliProvider(BaseProvider):
         native_session_id: Optional[str] = None,
         effort: Optional[str] = None,
         launch_profile: Optional["AgentProfile"] = None,
+        sealed_launch_material: Optional[SealedLaunchMaterial] = None,
     ):
         """Initialize the Antigravity CLI provider.
 
@@ -202,7 +203,18 @@ class AntigravityCliProvider(BaseProvider):
                 layer. Appended to the system prompt at launch.
             native_session_id: Optional existing conversation ID to resume via ``--conversation``.
             effort: Optional reasoning effort (e.g. ``"high"``, ``"medium"``, ``"low"``).
+            sealed_launch_material: The gate-frozen launch material
+                (cond-0817). When set, model/effort/skill/policy/profile
+                resolve from it verbatim — the mint and the resumed
+                ``--conversation`` launch consume the admitted inputs.
+                None keeps the legacy per-kwarg resolution.
         """
+        if sealed_launch_material is not None:
+            launch_profile = sealed_launch_material.profile
+            model = sealed_launch_material.model
+            effort = sealed_launch_material.effort
+            skill_prompt = sealed_launch_material.skill_text
+            allowed_tools = list(sealed_launch_material.allowed_tools)
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
         self._agent_profile = agent_profile
@@ -212,6 +224,7 @@ class AntigravityCliProvider(BaseProvider):
         # launch argv consumes this exact object and never reloads the
         # profile by name. None keeps the legacy load.
         self._launch_profile = launch_profile
+        self._sealed_launch_material = sealed_launch_material
         self._native_session_id = native_session_id
         # MCP server names registered into ~/.gemini/config/mcp_config.json,
         # removed on cleanup().

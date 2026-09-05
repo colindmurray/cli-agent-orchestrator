@@ -193,6 +193,52 @@ def _launch_failure_state(record, request, detail="ambient bridge control reject
     }
 
 
+def test_bridge_reentry_trusts_durable_sha_not_current_state(tmp_path, monkeypatch):
+    """Response-loss retry revalidates against the durable reservation.
+
+    ``_ProviderSession`` reloads by name only because it runs where the
+    launch material never reached — but the reserved ``profile_sha256``
+    stays the authority: unchanged bytes construct, bytes mutated after
+    reservation refuse with BridgeError instead of launching drift.
+    """
+    from cli_agent_orchestrator.services import settings_service
+    from cli_agent_orchestrator.utils import agent_profiles
+
+    store = tmp_path / "agent-store"
+    store.mkdir()
+    (store / "sup.md").write_text(
+        "---\nname: sup\ndescription: x\nprovider: codex\nrole: supervisor\n"
+        "model: m-a\n---\nDo A.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_profiles, "LOCAL_AGENT_STORE_DIR", store)
+    monkeypatch.setattr(settings_service, "get_agent_dirs", lambda: {})
+    monkeypatch.setattr(settings_service, "get_disabled_agent_dirs", lambda: [])
+    monkeypatch.setattr(settings_service, "get_extra_agent_dirs", lambda: [])
+
+    reserved_sha = bridge._profile_material("sup", "t9")["profile_sha256"]
+    request = {
+        "provider": "codex",
+        "agent_profile": "sup",
+        "terminal_id": "t9",
+        "profile_sha256": reserved_sha,
+        "model": "m-a",
+        "effort": None,
+        "reservation_id": "res-1",
+        "generation": 1,
+    }
+    session = bridge._ProviderSession(request)
+    assert session.profile_material["profile_sha256"] == reserved_sha
+
+    (store / "sup.md").write_text(
+        "---\nname: sup\ndescription: x\nprovider: codex\nrole: supervisor\n"
+        "model: m-b\n---\nDo B.\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(bridge.BridgeError, match="changed after reservation"):
+        bridge._ProviderSession(request)
+
+
 def test_reserve_is_idempotent_and_queryable(isolated_memory_db, tmp_path):
     request = _reserve_request(tmp_path)
     first, created = managed_launch.reserve(request)

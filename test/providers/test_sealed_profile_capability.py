@@ -65,8 +65,10 @@ def _material(sys_prompt="frozen prompt", skill="", policy=("*",), **overrides):
 
 
 # Sentinel per behavior-bearing field: setting exactly this must flip the
-# decision for every adapter that does not consume the field.
+# decision for every adapter that does not consume the field. ``model``
+# is consumed by every sealed-capable route, so its row pins support.
 _FIELD_SENTINELS = {
+    "model": {"model": "sentinel-model-9"},
     "system_prompt": {"sys_prompt": "FROZEN-PROMPT"},
     "skills": {"skill": "SKILL-CATALOG"},
     "allowedTools": {"policy": ("fs_read",)},

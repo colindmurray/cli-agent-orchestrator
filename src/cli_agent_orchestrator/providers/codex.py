@@ -557,6 +557,7 @@ class CodexProvider(BaseProvider):
         codex_profile_material: Optional[dict] = None,
         codex_executable: Optional[str] = None,
         launch_profile: Optional["AgentProfile"] = None,
+        sealed_launch_material: Optional[SealedLaunchMaterial] = None,
     ):
         """Initialize provider state.
 
@@ -564,10 +565,22 @@ class CodexProvider(BaseProvider):
         (cond-0817): when set — and no precomposed ``codex_profile_material``
         was supplied — the launch argv composes from this exact object and
         never reloads the profile by name. None keeps the legacy load.
+
+        ``sealed_launch_material`` is the gate-frozen launch material: when
+        set, the profile resolves from it verbatim, so bootstrap, provider
+        argv, and resumed TUI share the admitted inputs by identity. None
+        keeps the legacy per-kwarg resolution.
         """
+        if sealed_launch_material is not None and sealed_launch_material.profile is not None:
+            launch_profile = sealed_launch_material.profile
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._initialized = False
         self._launch_profile = launch_profile
+        # The gate-frozen launch material (cond-0817), when this provider was
+        # constructed for a sealed launch. Identity evidence, not a second
+        # input: argv composes from ``codex_profile_material`` /
+        # ``launch_profile`` above.
+        self._sealed_launch_material = sealed_launch_material
         # The pre-task bootstrap-minted thread id the launch argv must resume
         # (``codex ... resume <id>``); None keeps the legacy ambient launch.
         self._native_session_id = native_session_id

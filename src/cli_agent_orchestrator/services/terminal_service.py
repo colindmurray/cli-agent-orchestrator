@@ -1775,6 +1775,7 @@ def _pre_task_bind_and_resolve(
     codex_profile_material: Optional[dict],
     forwarded_environment: Optional[dict],
     launch_profile: Optional[Any] = None,
+    sealed_launch_material: Optional[SealedLaunchMaterial] = None,
 ) -> Optional[dict]:
     """ONE cancellation-owned operation: resolve the pre-task harness-native
     identity, durably persist it on the terminal row, and bind the roster —
@@ -1829,6 +1830,9 @@ def _pre_task_bind_and_resolve(
         # The launch's already-loaded profile: the bootstrap consumes this
         # rather than reloading the store by name mid-launch.
         launch_profile=launch_profile,
+        # The sealed material the gate froze: the Antigravity mint composes
+        # from it instead of rebuilding skills/policy mid-launch.
+        sealed_launch_material=sealed_launch_material,
     )
     if not isinstance(identity, dict) or not identity.get("native_session_id"):
         raise unmanaged_native_identity.UnmanagedIdentityUnavailable(
@@ -2211,6 +2215,38 @@ async def create_terminal(
                 raise ValueError("CODEX_HOME must be an absolute path for exact resume")
             forwarded_environment["CODEX_HOME"] = os.path.realpath(codex_home)
 
+        # Sealed Codex material is composed BEFORE any tmux/session effect
+        # from the already-frozen launch material: the skill catalog and
+        # tool policy the gate decided on are reused verbatim, so a
+        # malformed composition fails here with the typed refusal instead
+        # of after the window exists — and the bootstrap and resumed TUI
+        # below consume this exact object. Direct/legacy construction
+        # (no sealed material) keeps the builder fallback at its later
+        # site, unchanged.
+        codex_profile_material: Optional[dict] = None
+        if (
+            managed_native_command is None
+            and provider == ProviderType.CODEX.value
+            and sealed_launch_material is not None
+            and profile_launch_context is not None
+        ):
+            from cli_agent_orchestrator.services.managed_provider_bridge import (
+                _profile_material_from_profile,
+            )
+
+            try:
+                codex_profile_material = _profile_material_from_profile(
+                    profile_launch_context.profile,
+                    terminal_id,
+                    allowed_tools=list(sealed_launch_material.allowed_tools),
+                    skill_prompt=sealed_launch_material.skill_text,
+                )
+            except Exception as exc:  # noqa: BLE001 - record the concrete blocker
+                raise unmanaged_native_identity.UnmanagedIdentityUnavailable(
+                    f"the codex profile material was refused by the pre-task identity "
+                    f"contract: {exc}"
+                ) from exc
+
         # Step 2: Create tmux session or window
         if new_session:
             # Create new tmux session with initial window
@@ -2475,9 +2511,11 @@ async def create_terminal(
         # native launches run the provider bridge as the pane's own argv and
         # never reach provider creation, so they neither need nor consult
         # this material.
-        codex_profile_material: Optional[dict] = None
+        # A sealed launch already composed this before Step 2 (pre-effect);
+        # only direct/legacy construction reaches the builder fallback here.
         if (
-            managed_native_command is None
+            codex_profile_material is None
+            and managed_native_command is None
             and provider == ProviderType.CODEX.value
             and profile is not None
         ):
@@ -2522,6 +2560,9 @@ async def create_terminal(
                         if profile_launch_context is not None
                         else None
                     ),
+                    # The sealed material the gate froze from the same
+                    # context: bootstrap and provider consume it verbatim.
+                    sealed_launch_material=sealed_launch_material,
                 )
             )
             # The worker is SHIELDED from the very first await: Python
@@ -2719,6 +2760,10 @@ async def create_terminal(
             launch_profile=(
                 profile_launch_context.profile if profile_launch_context is not None else None
             ),
+            # The gate-frozen material: Codex/Antigravity constructors
+            # resolve model/effort/skill/policy/profile from it verbatim,
+            # so bootstrap, argv, and resumed launch share one authority.
+            sealed_launch_material=sealed_launch_material,
         )
 
         # Deferred-init path: return fast so callers (e.g. MCP assign) do not

@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
@@ -355,6 +356,88 @@ def _is_within_installed_store(canonical_source: str) -> bool:
         return os.path.commonpath([canonical_source, store]) == store
     except (ValueError, OSError):
         return False
+
+
+class ProfileContractMalformed(ValueError):
+    """The profile_contract request field is not a well-formed expectation.
+
+    A launch-boundary client error (``ValueError`` maps to 400 at the HTTP
+    boundary): non-mapping input, missing or extra fields, wrong schema or
+    role, wrong value types, an invalid source-path form, or a SHA that is
+    not exactly 64 hexadecimal characters. Well-formed values that merely
+    differ from the loaded profile are drift (:class:`ProfileLaunchConflict`,
+    409), not malformation.
+    """
+
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _is_valid_contract_source_path(value: str) -> bool:
+    """Accept absolute filesystem paths and ``built-in:<name>.md`` forms.
+
+    Aliased spellings (symlinks, ``..``, redundant separators) are NOT
+    malformed here: validation canonicalizes both sides and compares, so
+    an alias of the same physical profile agrees. Only the form is
+    checked — a relative path or a malformed ``built-in:`` pseudo-path
+    is a 400.
+    """
+    if value.startswith("built-in:"):
+        rest = value[len("built-in:") :]
+        return bool(rest) and rest.endswith(".md") and "/" not in rest and "\\" not in rest
+    return os.path.isabs(value)
+
+
+def parse_profile_contract(raw: Any) -> Dict[str, Any]:
+    """Endpoint-scoped strict parse of the profile_contract request field.
+
+    The HTTP layer passes the raw JSON value through (``Optional[Any]`` —
+    no global FastAPI validation change), and this single function decides
+    shape: it returns a normalized contract mapping (SHA lowercased) or
+    raises :class:`ProfileContractMalformed`. Uppercase SHA hex is
+    accepted and normalized for comparison; receipts always emit the
+    lowercase digest. Any non-empty-string provenance passes shape here —
+    a well-formed value that differs is drift (409), including the legacy
+    ``"local"`` compatibility the validator applies.
+    """
+    if not isinstance(raw, Mapping):
+        raise ProfileContractMalformed("profile_contract must be an object")
+    missing = [field for field in _CONTRACT_FIELDS if field not in raw]
+    if missing:
+        raise ProfileContractMalformed(f"profile_contract is missing fields: {sorted(missing)}")
+    extra = sorted(key for key in raw if key not in _CONTRACT_FIELDS and key != "schema")
+    if extra:
+        raise ProfileContractMalformed(f"profile_contract has unknown fields: {extra}")
+    if raw["schema"] != PROFILE_LAUNCH_CONTRACT_SCHEMA:
+        raise ProfileContractMalformed(
+            f"profile_contract schema must be {PROFILE_LAUNCH_CONTRACT_SCHEMA!r}"
+        )
+    if raw["role"] != SUPERVISOR_ROLE:
+        raise ProfileContractMalformed("profile_contract role must be 'supervisor'")
+    for field in ("profile", "provider", "provenance"):
+        if not isinstance(raw[field], str) or not raw[field]:
+            raise ProfileContractMalformed(
+                f"profile_contract field {field!r} must be a non-empty string"
+            )
+    for field in ("model", "effort"):
+        if raw[field] is not None and not isinstance(raw[field], str):
+            raise ProfileContractMalformed(
+                f"profile_contract field {field!r} must be a string or null"
+            )
+    source_path = raw["source_path"]
+    if not isinstance(source_path, str) or not _is_valid_contract_source_path(source_path):
+        raise ProfileContractMalformed(
+            "profile_contract field 'source_path' must be an absolute path "
+            "or a 'built-in:<name>.md' pseudo-path"
+        )
+    sha256 = raw["sha256"]
+    if not isinstance(sha256, str) or not _SHA256_HEX_RE.match(sha256):
+        raise ProfileContractMalformed(
+            "profile_contract field 'sha256' must be exactly 64 hexadecimal characters"
+        )
+    parsed = dict(raw)
+    parsed["sha256"] = sha256.lower()
+    return parsed
 
 
 def validate_profile_contract(contract: Mapping[str, Any], context: ProfileLaunchContext) -> None:

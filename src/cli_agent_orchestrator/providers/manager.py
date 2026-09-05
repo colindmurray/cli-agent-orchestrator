@@ -125,6 +125,11 @@ class ProviderManager:
         # object and never reloads the profile by name. ``None`` keeps the
         # legacy per-adapter load for direct construction.
         launch_profile: Optional[Any] = None,
+        # The sealed material the gate froze (cond-0817). Forwarded to the
+        # adapters whose launch spans bootstrap and resume (Codex,
+        # Antigravity) so both consume the admitted inputs verbatim.
+        # ``None`` keeps legacy per-adapter resolution.
+        sealed_launch_material: Optional[SealedLaunchMaterial] = None,
     ) -> BaseProvider:
         """Create and store provider instance."""
         try:
@@ -166,6 +171,7 @@ class ProviderManager:
                     codex_profile_material=codex_profile_material,
                     codex_executable=codex_executable,
                     launch_profile=launch_profile,
+                    sealed_launch_material=sealed_launch_material,
                 )
             elif provider_type == ProviderType.COPILOT_CLI.value:
                 provider = CopilotCliProvider(
@@ -242,6 +248,7 @@ class ProviderManager:
                     native_session_id=native_session_id,
                     effort=expected_effort,
                     launch_profile=launch_profile,
+                    sealed_launch_material=sealed_launch_material,
                 )
             # --- Credentials-free mock provider (test/CI infrastructure) ---
             elif provider_type == ProviderType.MOCK_CLI.value:
