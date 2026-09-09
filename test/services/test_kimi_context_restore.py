@@ -104,17 +104,6 @@ def test_render_restoration_requires_verified_ok():
     assert len(text) <= kr.MAX_CONTEXT_CHARS + len("\n[truncated]")
 
 
-def _ok_answer():
-    return {
-        "result_type": "ok",
-        "identity": {"generation_fence": "verified"},
-        "goal": {"objective": "ship it", "goal_version": 2},
-        "delivery_fence": {
-            "occurrence_id": "occ-1", "terminal_generation": "gen-1",
-            "flock_path": "/tmp/x/goal-effect.lock"},
-    }
-
-
 def test_wrapper_delivers_nothing_without_verified_fence(monkeypatch):
     calls = {}
 
@@ -132,25 +121,146 @@ def test_wrapper_delivers_nothing_without_verified_fence(monkeypatch):
         out=out, err=err) == 0
 
 
-def test_wrapper_posts_fence_and_context_on_ok(monkeypatch):
-    posted = {}
+def _never_post(**kwargs):
+    raise AssertionError("deferred run must not POST")
 
-    def fake_run(argv, **kwargs):
-        assert argv[1:3] == ["goal", "hook-context"]
-        return _ok_answer()
-    def fake_post(fork_base, terminal_id, fence, context, timeout_seconds):
-        posted.update(fence=fence, context=context, terminal=terminal_id)
-        return {"status": "posted"}
-    monkeypatch.setattr(kr, "_run_conduct", fake_run)
-    monkeypatch.setattr(kr, "_post_boundary", fake_post)
+
+def test_wrapper_busy_lock_defers_without_post(tmp_path, monkeypatch):
+    lockdir = tmp_path / "proj"
+    lockdir.mkdir()
+    flock_path = str(lockdir / "goal-effect.lock")
+    from cli_agent_orchestrator.services import goal_effect_flock as flockmod
+
+    def busy(path, **kwargs):
+        raise flockmod.GoalEffectBusy("held")
+
+    monkeypatch.setattr(
+        kr, "_run_conduct",
+        lambda argv, timeout_seconds=None, **k: _fenced_answer(1, flock_path))
+    monkeypatch.setattr(flockmod, "hold_path", busy)
+    monkeypatch.setattr(kr, "_post_boundary", _never_post)
     out, err = io.StringIO(), io.StringIO()
     assert kr.run_wrapper(
-        hook_input={"session_id": "s"}, terminal_id="term-9",
-        terminal_generation="g", native_session_id="s",
-        conduct_binary="/usr/bin/conduct", fork_base="http://base",
+        hook_input={"session_id": "sess-1"}, terminal_id="t",
+        terminal_generation="gen-1", native_session_id="sess-1",
+        conduct_binary="/usr/bin/conduct", fork_base="http://x",
         out=out, err=err) == 0
-    assert posted["terminal"] == "term-9"
-    assert posted["fence"]["occurrence_id"] == "occ-1"
+    assert "deferred" in err.getvalue()
+    assert "no bytes sent" in err.getvalue()
+
+
+def test_wrapper_fresh_transport_error_defers(tmp_path, monkeypatch):
+    lockdir = tmp_path / "proj"
+    lockdir.mkdir()
+    flock_path = str(lockdir / "goal-effect.lock")
+    calls = iter([_fenced_answer(1, flock_path),
+                  {"transport_error": "conduct died"}])
+    monkeypatch.setattr(
+        kr, "_run_conduct",
+        lambda argv, timeout_seconds=None, **k: next(calls))
+    monkeypatch.setattr(kr, "_post_boundary", _never_post)
+    out, err = io.StringIO(), io.StringIO()
+    assert kr.run_wrapper(
+        hook_input={"session_id": "sess-1"}, terminal_id="t",
+        terminal_generation="gen-1", native_session_id="sess-1",
+        conduct_binary="/usr/bin/conduct", fork_base="http://x",
+        out=out, err=err) == 0
+    assert "fresh projection unreadable" in err.getvalue()
+    assert "no bytes sent" in err.getvalue()
+
+
+def test_wrapper_fresh_missing_fence_defers(tmp_path, monkeypatch):
+    lockdir = tmp_path / "proj"
+    lockdir.mkdir()
+    flock_path = str(lockdir / "goal-effect.lock")
+    bare = {"result_type": "ok",
+            "identity": {"generation_fence": "verified"},
+            "goal": {"objective": "ship it", "goal_version": 2}}
+    calls = iter([_fenced_answer(1, flock_path), bare])
+    monkeypatch.setattr(
+        kr, "_run_conduct",
+        lambda argv, timeout_seconds=None, **k: next(calls))
+    monkeypatch.setattr(kr, "_post_boundary", _never_post)
+    out, err = io.StringIO(), io.StringIO()
+    assert kr.run_wrapper(
+        hook_input={"session_id": "sess-1"}, terminal_id="t",
+        terminal_generation="gen-1", native_session_id="sess-1",
+        conduct_binary="/usr/bin/conduct", fork_base="http://x",
+        out=out, err=err) == 0
+    assert "carries no delivery fence" in err.getvalue()
+
+
+def test_wrapper_changed_lock_path_defers(tmp_path, monkeypatch):
+    old = tmp_path / "projA"
+    old.mkdir()
+    new = tmp_path / "projB"
+    new.mkdir()
+    calls = iter([_fenced_answer(1, str(old / "goal-effect.lock")),
+                  _fenced_answer(2, str(new / "goal-effect.lock"))])
+    monkeypatch.setattr(
+        kr, "_run_conduct",
+        lambda argv, timeout_seconds=None, **k: next(calls))
+    monkeypatch.setattr(kr, "_post_boundary", _never_post)
+    out, err = io.StringIO(), io.StringIO()
+    assert kr.run_wrapper(
+        hook_input={"session_id": "sess-1"}, terminal_id="t",
+        terminal_generation="gen-1", native_session_id="sess-1",
+        conduct_binary="/usr/bin/conduct", fork_base="http://x",
+        out=out, err=err) == 0
+    assert "different project lock" in err.getvalue()
+
+
+def test_wrapper_rotated_native_defers(tmp_path, monkeypatch):
+    lockdir = tmp_path / "proj"
+    lockdir.mkdir()
+    flock_path = str(lockdir / "goal-effect.lock")
+    second = _fenced_answer(2, flock_path)
+    second["delivery_fence"]["native_session_id"] = "sess-rotated"
+    calls = iter([_fenced_answer(1, flock_path), second])
+    monkeypatch.setattr(
+        kr, "_run_conduct",
+        lambda argv, timeout_seconds=None, **k: next(calls))
+    monkeypatch.setattr(kr, "_post_boundary", _never_post)
+    out, err = io.StringIO(), io.StringIO()
+    assert kr.run_wrapper(
+        hook_input={"session_id": "sess-1"}, terminal_id="t",
+        terminal_generation="gen-1", native_session_id="sess-1",
+        conduct_binary="/usr/bin/conduct", fork_base="http://x",
+        out=out, err=err) == 0
+    assert "rotated" in err.getvalue()
+
+
+def test_wrapper_hold_activation_between_reads_delivers_current_only(
+        tmp_path, monkeypatch):
+    # Locator read showed goal v1; a hold activation committed before
+    # the shared hold; the fresh re-read shows v1→v2 with raised water.
+    # Only the current fence is ever POSTed — the stale v1 snapshot is
+    # not delivery, even though it was read first.
+    lockdir = tmp_path / "proj"
+    lockdir.mkdir()
+    flock_path = str(lockdir / "goal-effect.lock")
+    first = _fenced_answer(1, flock_path)
+    first["delivery_fence"]["hold_high_water"] = 0
+    second = _fenced_answer(2, flock_path)
+    second["delivery_fence"]["hold_high_water"] = 5
+    calls = iter([first, second])
+    posted = {}
+    monkeypatch.setattr(
+        kr, "_run_conduct",
+        lambda argv, timeout_seconds=None, **k: next(calls))
+    monkeypatch.setattr(
+        kr, "_post_boundary",
+        lambda **k: (posted.update(fence=k["fence"],
+                                   context=k["context"])
+                     or {"status": "posted"}))
+    out, err = io.StringIO(), io.StringIO()
+    assert kr.run_wrapper(
+        hook_input={"session_id": "sess-1"}, terminal_id="t",
+        terminal_generation="gen-1", native_session_id="sess-1",
+        conduct_binary="/usr/bin/conduct", fork_base="http://x",
+        out=out, err=err) == 0
+    assert posted["fence"]["goal_version"] == 2
+    assert posted["fence"]["hold_high_water"] == 5
     assert "cao-context-restoration" in posted["context"]
 
 
@@ -166,15 +276,21 @@ def test_wrapper_refuses_stdin_identity_mismatch(monkeypatch):
     assert "does not match" in err.getvalue()
 
 
-def test_wrapper_degrades_when_boundary_unreachable(monkeypatch):
-    monkeypatch.setattr(kr, "_run_conduct", lambda argv, **k: _ok_answer())
+def test_wrapper_degrades_when_boundary_unreachable(tmp_path, monkeypatch):
+    lockdir = tmp_path / "proj"
+    lockdir.mkdir()
+    flock_path = str(lockdir / "goal-effect.lock")
+    monkeypatch.setattr(
+        kr, "_run_conduct",
+        lambda argv, timeout_seconds=None, **k: _fenced_answer(2, flock_path))
     monkeypatch.setattr(kr, "_post_boundary",
                         lambda **k: {"transport_error": "down"})
     out, err = io.StringIO(), io.StringIO()
     assert kr.run_wrapper(
-        hook_input={}, terminal_id="t", terminal_generation="g",
-        native_session_id=None, conduct_binary="/usr/bin/conduct",
-        fork_base="http://x", out=out, err=err) == 0
+        hook_input={"session_id": "sess-1"}, terminal_id="t",
+        terminal_generation="gen-1", native_session_id="sess-1",
+        conduct_binary="/usr/bin/conduct", fork_base="http://x",
+        out=out, err=err) == 0
     assert "unreachable" in err.getvalue()
 
 
@@ -315,50 +431,20 @@ def test_wrapper_rereads_fence_under_shared_hold(tmp_path, monkeypatch):
     assert posted["fence"]["hold_high_water"] == 2
 
 
-def test_wrapper_busy_flock_delivers_first_fence(tmp_path, monkeypatch):
-    lockdir = tmp_path / "proj"
-    lockdir.mkdir()
-    flock_path = str(lockdir / "goal-effect.lock")
-    from cli_agent_orchestrator.services import goal_effect_flock as flockmod
-    posted = {}
-
-    def busy(path, **kwargs):
-        raise flockmod.GoalEffectBusy("held")
-
-    monkeypatch.setattr(
-        kr, "_run_conduct",
-        lambda argv, timeout_seconds=None, **k: _fenced_answer(1, flock_path))
-    monkeypatch.setattr(flockmod, "hold_path", busy)
-    monkeypatch.setattr(
-        kr, "_post_boundary",
-        lambda **k: (posted.update(fence=k["fence"]) or {"status": "posted"}))
-    out, err = io.StringIO(), io.StringIO()
-    assert kr.run_wrapper(
-        hook_input={"session_id": "sess-1"}, terminal_id="t",
-        terminal_generation="gen-1", native_session_id="sess-1",
-        conduct_binary="/usr/bin/conduct", fork_base="http://x",
-        out=out, err=err) == 0
-    assert posted["fence"]["goal_version"] == 1
-    assert "fence re-read skipped" in err.getvalue()
-
-
-def test_wrapper_without_flock_pointer_single_shot(monkeypatch):
-    events = []
+def test_wrapper_without_flock_pointer_defers_without_post(monkeypatch):
     answer = _fenced_answer(1, None)
     del answer["delivery_fence"]["flock_path"]
     monkeypatch.setattr(
         kr, "_run_conduct",
-        lambda argv, timeout_seconds=None, **k: (
-            events.append("conduct") or answer))
-    monkeypatch.setattr(
-        kr, "_post_boundary",
-        lambda **k: (events.append("post") or {"status": "posted"}))
+        lambda argv, timeout_seconds=None, **k: answer)
+    monkeypatch.setattr(kr, "_post_boundary", _never_post)
     out, err = io.StringIO(), io.StringIO()
     assert kr.run_wrapper(
         hook_input={}, terminal_id="t", terminal_generation="g",
         native_session_id=None, conduct_binary="/usr/bin/conduct",
         fork_base="http://x", out=out, err=err) == 0
-    assert events == ["conduct", "post"]
+    assert "deferred" in err.getvalue()
+    assert "no bytes sent" in err.getvalue()
 
 
 def test_managed_wire_roots_prefers_managed(tmp_path, monkeypatch):

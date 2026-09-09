@@ -371,6 +371,49 @@ def _post_boundary(*, fork_base: str, terminal_id: str, fence: Dict[str, Any],
     return body if isinstance(body, dict) else {"transport_error": "boundary answer is not an object"}
 
 
+def _fresh_fence_problem(*, fresh: object, held_flock_path: str,
+                         terminal_id: Optional[str],
+                         terminal_generation: Optional[str],
+                         native_session_id: str) -> Optional[str]:
+    """Why a fresh projection must not be delivered, or None when current.
+
+    Mirrors the boundary's own structural preconditions — plus the two
+    facts only the wrapper can check: the fresh fence still names the
+    lock path this hold covers, and it still names this wrapper's
+    baked identity. Anything else defers with zero POST.
+    """
+    if not isinstance(fresh, dict) or "transport_error" in fresh:
+        detail = fresh.get("transport_error", fresh) if isinstance(
+            fresh, dict) else fresh
+        return f"fresh projection unreadable ({detail})"
+    fence = fresh.get("delivery_fence")
+    if not isinstance(fence, dict):
+        return "fresh projection carries no delivery fence"
+    if not fence.get("occurrence_id"):
+        return "fresh fence names no occurrence"
+    if not fence.get("terminal_generation"):
+        return "fresh fence names no terminal generation"
+    if not _valid_flock_path(fence.get("flock_path")):
+        return "fresh fence names no project lock"
+    if str(fence["flock_path"]) != held_flock_path:
+        return (f"fresh fence moved to a different project lock "
+                f"({fence['flock_path']!r}); the held lock no longer "
+                f"covers it")
+    if (terminal_generation and fence.get("terminal_generation")
+            and str(fence["terminal_generation"]) != str(
+                terminal_generation)):
+        return "fresh fence generation moved under this wrapper"
+    if (terminal_id and fence.get("terminal_id")
+            and str(fence["terminal_id"]) != str(terminal_id)):
+        return "fresh fence names a different terminal"
+    if not fence.get("native_session_id"):
+        return "fresh fence names no native session"
+    if (native_session_id and str(fence["native_session_id"])
+            != str(native_session_id)):
+        return "native session rotated under this fence"
+    return None
+
+
 def run_wrapper(
     *,
     hook_input: Dict[str, Any],
@@ -402,52 +445,64 @@ def run_wrapper(
         print(f"cao-kimi-hook-context: projection unavailable: "
               f"{answer.get('transport_error', answer)}", file=err)
         return 0
-    context = render_restoration(answer)
-    if context is None:
+    # F5 (repair): the locator projection above was read with no hold,
+    # so NOTHING is ever delivered on it. A hold activation or claim
+    # could have committed between that read and now, and the boundary
+    # — fork-side — cannot re-read conductor legs. Delivery requires
+    # all three under one shared hold of the project lock: the hold
+    # acquired, a fresh conductor projection re-read inside it, and
+    # that fresh fence matching the held lock path and this wrapper's
+    # baked identity. Anything else defers with zero POST: the due
+    # clock and any pending row are untouched, and the next PostCompact
+    # notification or the sentinel periodic rendezvous retries. A stale
+    # projection is never safer than a missing restoration — it can
+    # authorize a turn the goal no longer permits.
+    locator_fence = answer.get("delivery_fence") or {}
+    held_flock = locator_fence.get("flock_path")
+    if not _valid_flock_path(held_flock):
+        print(f"cao-kimi-hook-context: deferred (locator fence names no "
+              f"project lock; the boundary would refuse unfenced delivery; "
+              f"retry on the next PostCompact or periodic rendezvous; "
+              f"no bytes sent)", file=err)
         return 0
-    fence = answer.get("delivery_fence") or {}
-    # F5: close the read-then-effect race. The projection above was
-    # read with no hold: a hold activation (or claim) could commit
-    # between that read and the boundary POST, and the boundary —
-    # fork-side — cannot re-read conductor legs. So when the fence
-    # names the project flock, hold it shared across a FRESH
-    # conductor re-read and the POST: writers serialize behind us for
-    # the whole read→effect window, and the fence the boundary freezes
-    # carries the updated goal version and hold water. Without a flock
-    # pointer there is nothing to hold; the boundary refuses unfenced
-    # delivery downstream, exactly as before.
-    boundary = None
-    if _valid_flock_path(fence.get("flock_path")):
-        from cli_agent_orchestrator.services import (
-            goal_effect_flock as _flock)
-        try:
-            with _flock.hold_path(
-                    str(fence["flock_path"]), shared=True,
-                    timeout_seconds=FENCE_FLOCK_TIMEOUT_SECONDS):
-                fresh = _run_conduct(
-                    conduct_argv, timeout_seconds=CONDUCT_TIMEOUT_SECONDS)
-                if (isinstance(fresh, dict)
-                        and "transport_error" not in fresh
-                        and _valid_flock_path(
-                            (fresh.get("delivery_fence") or {}).get(
-                                "flock_path"))):
-                    answer, fence = fresh, fresh["delivery_fence"]
-                    context = render_restoration(answer)
-                    if context is None:
-                        return 0
-                boundary = _post_boundary(
-                    fork_base=fork_base, terminal_id=terminal_id,
-                    fence=fence, context=context,
-                    timeout_seconds=BOUNDARY_TIMEOUT_SECONDS)
-        except _flock.GoalEffectBusy as exc:
-            # A writer holds the project lock: deliver on the first
-            # (seconds-old) fence rather than skip this compaction.
-            print(f"cao-kimi-hook-context: fence re-read skipped ({exc}); "
-                  f"delivering on the first projection", file=err)
-    if boundary is None:
-        boundary = _post_boundary(
-            fork_base=fork_base, terminal_id=terminal_id, fence=fence,
-            context=context, timeout_seconds=BOUNDARY_TIMEOUT_SECONDS)
+    held_flock = str(held_flock)
+    bound_native = native_session_id or str(stdin_session or "")
+    from cli_agent_orchestrator.services import (
+        goal_effect_flock as _flock)
+    try:
+        with _flock.hold_path(
+                held_flock, shared=True,
+                timeout_seconds=FENCE_FLOCK_TIMEOUT_SECONDS):
+            fresh = _run_conduct(
+                conduct_argv, timeout_seconds=CONDUCT_TIMEOUT_SECONDS)
+            problem = _fresh_fence_problem(
+                fresh=fresh, held_flock_path=held_flock,
+                terminal_id=terminal_id,
+                terminal_generation=terminal_generation,
+                native_session_id=bound_native)
+            if problem is not None:
+                print(f"cao-kimi-hook-context: deferred ({problem}; retry "
+                      f"on the next PostCompact or periodic rendezvous; "
+                      f"no bytes sent)", file=err)
+                return 0
+            assert isinstance(fresh, dict)
+            context = render_restoration(fresh)
+            if context is None:
+                print(f"cao-kimi-hook-context: deferred (fresh projection "
+                      f"renders nothing deliverable; retry on the next "
+                      f"PostCompact or periodic rendezvous; no bytes sent)",
+                      file=err)
+                return 0
+            boundary = _post_boundary(
+                fork_base=fork_base, terminal_id=terminal_id,
+                fence=fresh["delivery_fence"], context=context,
+                timeout_seconds=BOUNDARY_TIMEOUT_SECONDS)
+    except _flock.GoalEffectBusy as exc:
+        print(f"cao-kimi-hook-context: deferred (project lock held: {exc}; "
+              f"the next PostCompact notification or the sentinel periodic "
+              f"rendezvous retries; the due clock and any pending row are "
+              f"untouched; no bytes sent)", file=err)
+        return 0
     if "transport_error" in boundary:
         print(f"cao-kimi-hook-context: delivery boundary unreachable: "
               f"{boundary['transport_error']}", file=err)
