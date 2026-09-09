@@ -358,6 +358,138 @@ def test_harness_source_forbids_unsafe_cleanup():
         )
 
 
+def _undefined_names(tree):
+    """Names loaded with no binding in scope (a bounded F821).
+
+    Collect-only imports these modules but never executes bodies, so a
+    NameError inside a stage helper would surface only on the host after
+    a real model run (cond-0845 P1-B). No third-party linter is
+    available here; this AST pass is stdlib-only and deliberately
+    narrow: nested scopes, comprehensions, and global/nonlocal are
+    honoured, dynamic tricks (globals()/eval) are out of scope.
+    """
+    import ast as _ast
+    import builtins as _builtins
+
+    builtin = set(dir(_builtins))
+    module_attrs = {
+        "__name__", "__doc__", "__file__", "__package__", "__spec__",
+        "__loader__", "__cached__", "__path__", "__annotations__",
+    }
+    bad = set()
+    _scopes = (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef, _ast.Lambda)
+
+    def stores(node):
+        """Names a statement binds: Name Stores, string-held handler and
+        pattern names, and import aliases. Never descends into nested
+        scopes — their stores belong to them, not to this level."""
+        found = set()
+        todo = [node]
+        while todo:
+            child = todo.pop()
+            if child is not node and isinstance(child, _scopes):
+                if not isinstance(child, _ast.Lambda):
+                    found.add(child.name)
+                continue
+            if isinstance(child, _ast.Name) and isinstance(
+                child.ctx, (_ast.Store, _ast.Del)
+            ):
+                found.add(child.id)
+            elif isinstance(child, _ast.ExceptHandler) and child.name:
+                found.add(child.name)
+            elif isinstance(child, (_ast.MatchAs, _ast.MatchStar)) and child.name:
+                found.add(child.name)
+            elif isinstance(child, _ast.MatchMapping) and child.rest:
+                found.add(child.rest)
+            elif isinstance(child, _ast.Import):
+                for alias in child.names:
+                    found.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(child, _ast.ImportFrom):
+                for alias in child.names:
+                    if alias.name != "*":
+                        found.add(alias.asname or alias.name)
+            todo.extend(_ast.iter_child_nodes(child))
+        return found
+
+    def bound_in(stmts):
+        bound = set()
+        for stmt in stmts:
+            if isinstance(stmt, _scopes):
+                if not isinstance(stmt, _ast.Lambda):
+                    bound.add(stmt.name)
+                continue
+            bound.update(stores(stmt))
+        return bound
+
+    def check(node, scopes):
+        if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
+            if node.id not in builtin and not any(node.id in scope for scope in scopes):
+                bad.add(f"{node.id} (line {node.lineno})")
+            return
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda)):
+            inner = {a.arg for a in list(node.args.args) + list(node.args.kwonlyargs)}
+            if node.args.vararg:
+                inner.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                inner.add(node.args.kwarg.arg)
+            for default in list(node.args.defaults) + [d for d in node.args.kw_defaults if d]:
+                check(default, scopes)
+            for decorator in getattr(node, "decorator_list", []):
+                check(decorator, scopes)
+            body = node.body if isinstance(node.body, list) else [node.body]
+            check_body(body, scopes + [inner])
+            return
+        if isinstance(node, _ast.ClassDef):
+            for decorator in node.decorator_list:
+                check(decorator, scopes)
+            for base in node.bases:
+                check(base, scopes)
+            check_body(node.body, scopes)
+            return
+        if isinstance(node, (_ast.ListComp, _ast.SetComp, _ast.GeneratorExp, _ast.DictComp)):
+            scope = [set()]
+            for gen in node.generators:
+                check(gen.iter, scopes + scope)
+                scope[0].update(stores(gen.target))
+                for cond in gen.ifs:
+                    check(cond, scopes + scope)
+            if isinstance(node, _ast.DictComp):
+                check(node.key, scopes + scope)
+                check(node.value, scopes + scope)
+            else:
+                check(node.elt, scopes + scope)
+            return
+        if isinstance(node, _ast.Global):
+            scopes[0].update(node.names)
+            return
+        if isinstance(node, _ast.Nonlocal):
+            return
+        for child in _ast.iter_child_nodes(node):
+            check(child, scopes)
+
+    def check_body(stmts, scopes):
+        scopes = scopes + [bound_in(stmts)]
+        for stmt in stmts:
+            check(stmt, scopes)
+
+    check_body(tree.body, [set(module_attrs)])
+    return sorted(bad)
+
+
+def test_acceptance_modules_have_no_undefined_names():
+    """Collect-only must not hide another P1-B: every name loaded in the
+    two acceptance modules resolves to a binding, import, or builtin."""
+    import ast as _ast
+
+    modules = (
+        "test/integration/test_kimi_postcompact_isolated_harness.py",
+        "test/integration/test_kimi_postcompact_native_subject.py",
+    )
+    for name in modules:
+        tree = _ast.parse((FORK_ROOT / name).read_text(), filename=name)
+        assert _undefined_names(tree) == [], f"{name}: undefined names"
+
+
 def test_tmux_isolation_holds_with_or_without_platform_sockets(tmp_path):
     """Owned socket when the platform allows one; provably nothing ambient
     when it does not. Either way the shared/default server is untouched."""
@@ -1166,7 +1298,10 @@ def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_s
         assert rc == 0
         assert "deferred" in err.getvalue() and "no bytes sent" in err.getvalue()
 
-        terminal_id = f"t-harness-paired-{uuid.uuid4().hex[:8]}"
+        # Valid-but-unknown TerminalId (^[a-f0-9]{8}$): a prefixed fake
+        # dies with 422 at FastAPI validation before the handler, while
+        # this leg proves the handler's typed refusal for unknown ids.
+        terminal_id = uuid.uuid4().hex[:8]
         refused = requests.post(
             f"{base}/terminals/{terminal_id}/context-restore",
             json={

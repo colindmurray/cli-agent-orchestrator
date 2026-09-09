@@ -868,6 +868,195 @@ def _profile_binds_since(kimi_home: Path, cursor: Dict[str, int]):
     return binds
 
 
+# Event vocabulary below is the provider's own, verified against retained
+# Kimi 0.42.0 wire (keys observed, payloads redacted): context.append_message
+# carries {type,agentId,message,time} with message.role user and an array
+# content of {type:text} parts; turn.prompt carries
+# {type,agentId,input,origin,promptId,time}; turn.steer the same minus
+# promptId; prompt.accepted carries {type,agentId,promptId,content,time}.
+# Bookkeeping (context.append_loop_event, mcp.*, usage.*, token_counting.*,
+# llm.*, runtime.*, permission.*, metadata, prompt.completed, turn.ended) is
+# never turn activity. Mirrors production scan_wire_for_marker /
+# _wire_texts (services/kimi_native_control.py), which own the definitions.
+_TURN_TYPES = ("turn.prompt", "turn.steer", "prompt.accepted")
+
+
+def _append_entries_since(kimi_home: Path, cursor: Dict[str, int]):
+    """All user-role ``context.append_message`` events after ``cursor``.
+
+    The provider's own record that text reached model context (the
+    model_context_entry leg of ``scan_wire_for_marker``). Returns a list
+    of ``(path, event)`` in wire order; malformed lines are skipped, and
+    a cursor-known file that vanishes mid-observation fails loud instead
+    of passing vacuously.
+    """
+    import json as _json
+
+    entries = []
+    for path in dict.fromkeys([*cursor, *_wire_files(kimi_home)]):
+        start = cursor.get(path, 0)
+        with open(path, "rb") as handle:
+            handle.seek(start)
+            for raw in handle.read().splitlines():
+                try:
+                    event = _json.loads(raw.decode("utf-8"))
+                except Exception:
+                    continue
+                if (
+                    isinstance(event, dict)
+                    and event.get("type") == "context.append_message"
+                    and isinstance(event.get("message"), dict)
+                    and event["message"].get("role") == "user"
+                ):
+                    entries.append((path, event))
+    return entries
+
+
+def _entry_text(event) -> str:
+    """Renderable text of one wire event (mirrors ``_wire_texts``).
+
+    Checks message/input/content: a user-role dict unfolds to its
+    content, a list of {type:text} parts yields each text, a bare string
+    yields itself. Joined with newlines for substring assertions.
+    """
+    texts = []
+    for key in ("message", "input", "content"):
+        payload = event.get(key) if isinstance(event, dict) else None
+        if isinstance(payload, dict) and payload.get("role") == "user":
+            payload = payload.get("content")
+        if isinstance(payload, list):
+            for part in payload:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        texts.append(text)
+        elif isinstance(payload, str) and payload:
+            texts.append(payload)
+    return "\n".join(texts)
+
+
+def _turn_events_since(kimi_home: Path, cursor: Dict[str, int]):
+    """New turn activity after ``cursor``: turn.prompt / turn.steer /
+    prompt.accepted plus fresh user-role context entries — the exact
+    predicate the no-spurious-turn legs assert empty. Stream chatter and
+    completion bookkeeping are excluded; malformed lines are skipped.
+    """
+    import json as _json
+
+    found = []
+    for path in dict.fromkeys([*cursor, *_wire_files(kimi_home)]):
+        start = cursor.get(path, 0)
+        with open(path, "rb") as handle:
+            handle.seek(start)
+            for raw in handle.read().splitlines():
+                try:
+                    event = _json.loads(raw.decode("utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                kind = event.get("type")
+                if kind in _TURN_TYPES:
+                    found.append((path, event))
+                elif (
+                    kind == "context.append_message"
+                    and isinstance(event.get("message"), dict)
+                    and event["message"].get("role") == "user"
+                ):
+                    found.append((path, event))
+    return found
+
+
+def _wait_wire_quiet(kimi_home: Path, *, window: float = 10.0, deadline: float = 90.0) -> None:
+    """Block until no new turn activity lands for ``window`` seconds.
+
+    Bounded by ``deadline`` and loud on timeout — proceeding past an
+    active wire would shift the cursor over real turns and false-pass
+    the legs below. A home with no wire files at all is a pointed-at-
+    nothing error, not quiet.
+    """
+    import time as _time
+
+    files = _wire_files(kimi_home)
+    assert files, f"no wire files under {kimi_home}; refusing a vacuous cursor"
+    start = _time.monotonic()
+    while True:
+        cursor = _wire_cursor(kimi_home)
+        _time.sleep(window)
+        if _turn_events_since(kimi_home, cursor) == []:
+            return
+        assert _time.monotonic() - start < deadline, (
+            f"wire still turning after {deadline}s; refusing to observe a moving target"
+        )
+
+
+def test_wire_helpers_read_genuine_redacted_frames(tmp_path):
+    """Parser/readback/quiet paths against redacted frames in the genuine
+    Kimi 0.42.0 shapes: exact key sets per type as observed on retained
+    provider wire (payloads scrubbed, no bulk ingestion). A torn line is
+    skipped without losing its neighbours; chatter and completion
+    bookkeeping never count as turns; a cursor scopes reads; a deleted
+    wire file fails loud instead of passing vacuously."""
+    import json as _json
+
+    agent = tmp_path / "sessions" / "wd_probe" / "session_abc123" / "agents" / "main"
+    agent.mkdir(parents=True)
+    wire = agent / "wire.jsonl"
+
+    def _user(text, time):
+        return {
+            "type": "context.append_message",
+            "agentId": "main",
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            "time": time,
+        }
+
+    lines = [
+        _json.dumps({"type": "profile.bind", "agentId": "main", "modelAlias": "m",
+                     "thinkingEffort": "high", "time": 1}),
+        _json.dumps({"type": "mcp.tools_discovered", "agentId": "main", "time": 2}),
+        _json.dumps(_user("RESTORATION sentinel-alpha checkpoint check-alpha", 3)),
+        "NOT-JSON{{{",
+        _json.dumps({"type": "turn.prompt", "agentId": "main", "input": "i",
+                     "origin": "o", "promptId": "p1", "time": 4}),
+        _json.dumps({"type": "prompt.accepted", "agentId": "main", "promptId": "p1",
+                     "content": "i", "time": 5}),
+        _json.dumps({"type": "usage.record", "agentId": "main", "time": 6}),
+        _json.dumps({"type": "prompt.completed", "agentId": "main", "promptId": "p1",
+                     "finishedAt": 7, "reason": "done", "time": 7}),
+        _json.dumps({"type": "turn.ended", "agentId": "main", "turnId": "t1",
+                     "reason": "done", "durationMs": 1, "time": 8}),
+        _json.dumps(_user("later entry beta", 9)),
+    ]
+    wire.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    entries = _append_entries_since(tmp_path, {})
+    assert len(entries) == 2, f"torn line or chatter leaked in: {len(entries)}"
+    texts = [_entry_text(path_event[1]) for path_event in entries]
+    hits = [t for t in texts if "RESTORATION sentinel-alpha" in t]
+    assert hits and "check-alpha" in hits[0]
+    rest_idx = texts.index(hits[0])
+    replies = [t for t in texts[rest_idx + 1 :] if t and t != hits[0]]
+    assert replies == ["later entry beta"]
+
+    turns = _turn_events_since(tmp_path, {})
+    assert [event[1]["type"] for event in turns] == [
+        "context.append_message",
+        "turn.prompt",
+        "prompt.accepted",
+        "context.append_message",
+    ], "chatter counted as turns, or real turns missed"
+
+    fresh = _wire_cursor(tmp_path)
+    assert _turn_events_since(tmp_path, fresh) == []
+    assert _append_entries_since(tmp_path, fresh) == []
+    _wait_wire_quiet(tmp_path, window=0.05, deadline=5.0)
+
+    wire.unlink()
+    with pytest.raises(OSError):
+        _turn_events_since(tmp_path, fresh)
+
+
 def test_native_compact_restore_readback(native_pair, native_preflight, native_admission):
     """Real ``/compact`` -> real PostCompact hook -> real wrapper ->
     real boundary -> wire + model readback.
