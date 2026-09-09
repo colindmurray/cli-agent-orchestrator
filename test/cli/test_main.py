@@ -151,6 +151,8 @@ class TestHookContextEntryPoints:
 
     EXPECTED = {
         "cao-claude-hook-context": "cli_agent_orchestrator.services.claude_context_restore:main",
+        "cao-codex-hook-context": "cli_agent_orchestrator.services.codex_context_restore:main",
+        "cao-muse-hook-context": "cli_agent_orchestrator.services.muse_context_restore:main",
         "cao-agy-hook-context": "cli_agent_orchestrator.services.agy_context_restore:main",
         "cao-opencode-hook-context": (
             "cli_agent_orchestrator.services.opencode_context_restore:main"

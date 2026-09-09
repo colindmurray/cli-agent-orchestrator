@@ -3167,13 +3167,18 @@ async def create_terminal(
             skill_prompt=skill_prompt,
             model=profile.model if profile else None,
             trusted_project_root=provider_trust_root,
-            # The cond-0845 AGY PreInvocation hook installs into the same
-            # working directory the pane itself starts in (workspace
-            # ``.agents/hooks.json``) — AGY only; every other provider
-            # receives None and is unaffected.
+            # The cond-0845 hooks install into the same working directory
+            # the pane itself starts in (Muse PreLLMCall workspace
+            # ``.muse/hooks.json``; AGY PreInvocation workspace
+            # ``.agents/hooks.json``) — Muse and AGY only; every other
+            # provider receives None and is unaffected.
             hooks_workspace=(
                 effective_working_directory
-                if provider == ProviderType.ANTIGRAVITY_CLI.value
+                if provider
+                in (
+                    ProviderType.MUSE_CLI.value,
+                    ProviderType.ANTIGRAVITY_CLI.value,
+                )
                 else None
             ),
             # The provider launch consumes the exact pre-task minted native
