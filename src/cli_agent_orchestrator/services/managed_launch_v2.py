@@ -4514,6 +4514,31 @@ async def _launch_native_tui(
                 kimi_home=environment["KIMI_CODE_HOME"],
                 working_directory=record["working_directory"],
             )
+        if provider == "codex":
+            # Passive goal restoration rides a generation-private CODEX_HOME
+            # (Kimi kimi-home precedent): the composed config.toml carries
+            # exactly one managed SessionStart(^compact$) entry invoking the
+            # restore wrapper with this generation baked from the launch
+            # record. Degradation is to restoration-uninstalled, never a
+            # launch refusal; the outcome lands on the existing launch
+            # facts so diagnostics show mechanism or reason.
+            from cli_agent_orchestrator.services import codex_context_restore
+
+            environment, installation = codex_context_restore.prepare_codex_restoration(
+                record=record,
+                base_environment=environment,
+                companion_dir=COMPANION_DIR,
+            )
+            _ensure_locale_env(environment)
+            if record.get("reservation_id"):
+                _record_context_restoration(
+                    record["reservation_id"], installation
+                )
+            if installation.get("degraded_reason") is not None:
+                logger.warning(
+                    "codex context restoration degraded: %s",
+                    installation["degraded_reason"],
+                )
     except Exception as exc:  # noqa: BLE001 - nothing was started
         return _mark_preflight_blocked(
             reservation_id,
