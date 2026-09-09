@@ -337,15 +337,15 @@ def native_preflight(tmp_path_factory):
     from test.integration.test_kimi_postcompact_isolated_harness import (
         _can_bind_loopback,
         _can_create_tmux_socket,
-        _loopback_funnels_to_foreign_server,
+        _loopback_contact_verdict,
     )
 
     assert _can_bind_loopback(), "host driver needs loopback TCP bind"
     assert real_tmux_binary(), "host driver needs a tmux binary"
     assert _can_create_tmux_socket(), "host driver needs tmux socket creation"
-    assert not _loopback_funnels_to_foreign_server(), (
-        "loopback funnels to a foreign server here; the native run would "
-        "enroll against production state — refusing"
+    assert _loopback_contact_verdict() == "refused", (
+        f"loopback contact is {_loopback_contact_verdict()!r}, not proven "
+        "hermetic; the native run would risk foreign state — refusing"
     )
 
     binary = _kimi_binary()
@@ -479,7 +479,8 @@ def _http() -> requests.Session:
     """HTTP client that never consults proxy environment variables.
 
     The paired server is always direct loopback; ambient ``http_proxy``
-    must not route it (the funnel lesson). No parent-environ mutation.
+    must not route it (proxy behavior is never contact evidence).
+    No parent-environ mutation.
     """
     session = requests.Session()
     session.trust_env = False

@@ -402,64 +402,86 @@ def test_tmux_isolation_holds_with_or_without_platform_sockets(tmp_path):
 def _closed_port() -> int:
     """A port nothing legitimate holds, for paired-but-absent legs.
 
-    Freshly picked OS-ephemeral wherever bind works; port 1 (privileged,
-    never a CAO server) where it does not. No fixed fallback: a constant
-    could collide with a foreign listener and masquerade as paired
-    contact. Residual risk (a root-owned listener on 1) misdetects as a
-    funnel and skips — the safe direction.
+    Freshly picked OS-ephemeral wherever bind works, else the control
+    port (:attr:`_CLOSED_PROBE_PORT`). Contact-sensitive legs additionally
+    pass :func:`_require_hermetic_loopback`, so a foreign listener can
+    never masquerade as paired contact — it skips instead.
     """
     if _can_bind_loopback():
         from test.fixtures.cao_server import _pick_free_port
 
         return _pick_free_port()
-    return 1
+    return _CLOSED_PROBE_PORT
 
 
-_FUNNEL_VERDICT: Optional[bool] = None
+# Control port for the contact probe: privileged, so nothing legitimate
+# holds it here. A response on ONE port never proves anything about other
+# ports — the probe below reports only what this port does.
+_CLOSED_PROBE_PORT = 1
+
+_CONTACT_VERDICT: Optional[str] = None
 
 
-def _loopback_funnels_to_foreign_server() -> bool:
-    """True when loopback HTTP cannot be hermetic on this platform.
+def _probe_loopback_port(port: int, timeout: float = 5.0) -> str:
+    """Direct proxy-disabled observation of one loopback port.
 
-    Port 1 cannot be legitimately bound by a CAO server (privileged, never
-    used): a typed worker answer there — instead of ``unavailable`` —
-    proves an egress funnel routes every loopback port to one foreign live
-    server. The probe itself is a read-only ``hook-context`` (session list
-    + identity match, zero writes). Cached: one probe per session.
+    A raw socket is used precisely so no ``http_proxy``/``all_proxy``
+    entry (and no client transport quirk) can answer on the server's
+    behalf. Returns ``'refused'`` (nothing there — hermetic),
+    ``'answered'`` (a live HTTP server accepted and spoke), or
+    ``'error:...'`` (unobservable: timeout, denied, unreadable).
+    Absent, error, and answered stay three distinct outcomes.
     """
-    global _FUNNEL_VERDICT
-    if _FUNNEL_VERDICT is None:
-        with tempfile.TemporaryDirectory(prefix="cao-harness-xdg-") as xdg:
-            proc = _run_conduct(
-                [
-                    "goal",
-                    "hook-context",
-                    "--harness",
-                    "kimi_cli",
-                    "--native-session-id",
-                    "session-probe-no-such-worker",
-                    "--terminal",
-                    "t-harness-funnel-probe",
-                    "--base-url",
-                    "http://127.0.0.1:1",
-                ],
-                xdg=Path(xdg),
-                timeout=30.0,
-            )
+    import socket as _socket
+
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
         try:
-            answer = json.loads(proc.stdout) if proc.returncode == 0 else {}
-        except ValueError:
-            answer = {}
-        _FUNNEL_VERDICT = proc.returncode == 0 and answer.get("result_type") != "unavailable"
-    return _FUNNEL_VERDICT
+            sock.connect(("127.0.0.1", port))
+        except ConnectionRefusedError:
+            return "refused"
+        except OSError as exc:
+            return f"error:{type(exc).__name__}:{exc}"
+        try:
+            sock.sendall(b"GET /health HTTP/1.0\r\nHost: probe.invalid\r\n\r\n")
+            chunk = sock.recv(4096)
+        except OSError as exc:
+            return f"error:{type(exc).__name__}:{exc}"
+        if chunk.startswith((b"HTTP/", b"RTSP/")) or b"\r\n" in chunk[:64]:
+            return "answered"
+        return f"error:unreadable:{chunk[:32]!r}"
+    finally:
+        sock.close()
+
+
+def _loopback_contact_verdict() -> str:
+    """Cached contact verdict for the control port. See
+    :func:`_probe_loopback_port` for the outcome vocabulary."""
+    global _CONTACT_VERDICT
+    if _CONTACT_VERDICT is None:
+        _CONTACT_VERDICT = _probe_loopback_port(_CLOSED_PROBE_PORT)
+    return _CONTACT_VERDICT
 
 
 def _require_hermetic_loopback() -> None:
-    if _loopback_funnels_to_foreign_server():
+    """Gate paired mutations on PROVEN hermetic loopback.
+
+    Only ``'refused'`` on the control port permits contact-sensitive
+    legs. An ``'answered'`` means a genuine unexpected server is live on
+    loopback and MUST prevent mutations; an ``'error:...'`` means contact
+    is unobservable, which also prevents them. Neither skips silently:
+    the reason names the verdict.
+    """
+    verdict = _loopback_contact_verdict()
+    if verdict == "refused":
+        return
+    if verdict == "answered":
         pytest.skip(
-            "loopback HTTP funnels to a foreign live server on this "
-            "platform; hermetic paired legs run on host/CI"
+            "unexpected server answers loopback 127.0.0.1:1; paired "
+            "mutations refused so they cannot touch foreign state"
         )
+    pytest.skip(f"loopback contact unobservable ({verdict}); paired legs need proof")
 
 
 def _run_conduct(args, *, xdg: Path, timeout: float = 60.0):
@@ -467,9 +489,11 @@ def _run_conduct(args, *, xdg: Path, timeout: float = 60.0):
     env = dict(os.environ)
     env["XDG_STATE_HOME"] = str(xdg)
     env["PYTHONPATH"] = str(root)
-    # Direct loopback in the child: an egress proxy must never route the
-    # paired-server address (one once forwarded loopback to a live foreign
-    # server, which would masquerade as paired contact).
+    # Direct loopback in the child as hygiene: proxies must not route the
+    # paired-server address. Proxy behavior is NOT the contact arbiter —
+    # only the raw-socket verdict from :func:`_probe_loopback_port` is
+    # (a client transport quirk once made a local semantic negative look
+    # like foreign contact; see the confound replay test below).
     env["no_proxy"] = "127.0.0.1,localhost"
     env["NO_PROXY"] = "127.0.0.1,localhost"
     for var in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR"):
@@ -484,15 +508,111 @@ def _run_conduct(args, *, xdg: Path, timeout: float = 60.0):
     )
 
 
-def test_loopback_funnel_probe_names_the_platform():
-    """One read-only probe that names the platform's loopback behavior.
+def test_loopback_contact_verdict_names_the_platform():
+    """The contact verdict is always one well-formed outcome.
 
-    Hermetic platforms answer ``unavailable`` on a port nothing can hold;
-    this sandbox's egress funnel answers with a foreign worker verdict
-    instead. Either outcome is asserted — the point is that no later test
-    mistakes funneled contact for paired contact."""
-    funnels = _loopback_funnels_to_foreign_server()
-    assert isinstance(funnels, bool)
+    ``'refused'`` permits contact-sensitive legs; ``'answered'`` and
+    ``'error:...'`` both prevent them, each naming the verdict. The point
+    is that no later test mistakes anything else for paired contact."""
+    verdict = _loopback_contact_verdict()
+    assert verdict == "refused" or verdict == "answered" or verdict.startswith("error:"), verdict
+
+
+def test_terminal_hint_no_worker_without_contact(tmp_path):
+    """Confound replay: the real conductor CLI can answer ``no-worker``
+    with zero HTTP contact, so that answer must never count as contact.
+
+    ``hook_context._terminal_candidates`` swallows the transport failure
+    in its terminal-hint branch (``except Exception: listed = []``) and
+    the empty candidate list then renders the semantic negative
+    ``no-worker`` locally. This replays the exact observation that once
+    misread that negative as foreign-server contact: the real CLI runs
+    against the closed control port, and the verdict that matters is the
+    raw-socket one beside it. Skips actionably without the companion.
+    """
+    _require_conductor_root()
+    xdg = tmp_path / "conductor-xdg"
+    xdg.mkdir()
+    proc = _run_conduct(
+        [
+            "goal",
+            "hook-context",
+            "--harness",
+            "kimi_cli",
+            "--native-session-id",
+            "session-probe-no-such-worker",
+            "--terminal",
+            "t-harness-confound-probe",
+            "--base-url",
+            f"http://127.0.0.1:{_CLOSED_PROBE_PORT}",
+        ],
+        xdg=xdg,
+        timeout=30.0,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    answer = json.loads(proc.stdout)
+    # Both local negatives are possible here depending on transport
+    # behavior; neither is consulted as contact evidence either way.
+    assert answer.get("result_type") in ("no-worker", "unavailable"), answer
+    verdict = _loopback_contact_verdict()
+    if verdict != "refused":
+        pytest.skip(f"confound replay needs a refused control port, got {verdict}")
+    # The CLI may well say no-worker here (the swallowed-transport
+    # semantic negative). Whatever it says, the socket proved no contact —
+    # and the hermetic gate must agree.
+    _require_hermetic_loopback()
+
+
+def test_hermetic_gate_consults_only_socket_verdict(monkeypatch):
+    """Pure-unit counterpart for platforms where the socket is
+    unobservable: the hermetic gate maps ONLY the raw-socket verdict —
+    ``refused`` proceeds, ``answered`` and ``error:*`` both skip with
+    the verdict named. A conduct answer (e.g. the terminal-hint
+    ``no-worker``) is never an input to this decision, so the confound
+    cannot recur by construction. Stubbing the cached verdict here is
+    unit setup for the gate predicate itself — it enables no native
+    leg, launches nothing, and touches no network.
+    """
+    # sys.modules[__name__], not a fresh import: pytest may hold this
+    # file under a top-level module name, and the stub must hit the copy
+    # whose gate actually runs below.
+    import sys as _sys
+
+    harness = _sys.modules[__name__]
+    monkeypatch.setattr(harness, "_CONTACT_VERDICT", "refused")
+    _require_hermetic_loopback()
+    for verdict, reason in (
+        ("answered", "unexpected server"),
+        ("error:TimeoutError:timed out", "unobservable"),
+    ):
+        monkeypatch.setattr(harness, "_CONTACT_VERDICT", verdict)
+        with pytest.raises(pytest.skip.Exception, match=reason):
+            _require_hermetic_loopback()
+    # The removed confound helper must stay removed: any verdict shaped
+    # like a conduct answer is not a verdict at all.
+    assert not hasattr(harness, "_loopback_funnels_to_foreign_server")
+
+
+def test_probe_detects_owned_server_and_closed_port():
+    """The probe reports a real owned loopback server as ``answered``
+    and the closed control port as observed — no mocks of the network
+    path, just a stdlib server the test itself owns and closes."""
+    if not _can_bind_loopback():
+        pytest.skip("platform denies TCP bind; owned-server half runs on host/CI")
+    import http.server as _http_server
+    import threading as _threading
+
+    httpd = _http_server.HTTPServer(("127.0.0.1", 0), _http_server.BaseHTTPRequestHandler)
+    port = httpd.server_address[1]
+    thread = _threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    try:
+        assert _probe_loopback_port(port) == "answered"
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=10)
+        httpd.server_close()
+    assert _probe_loopback_port(port) == "refused"
 
 
 def test_conduct_hook_context_typed_unavailable_without_server(tmp_path):
@@ -667,7 +787,9 @@ def test_absent_companion_skips_actionably(tmp_path, monkeypatch):
     crash, and never a guess at the sibling checkout."""
     monkeypatch.setenv("COND0845_CONDUCTOR_ROOT", str(tmp_path / "no-such-clone"))
     assert discover_conductor_root() is None
-    with pytest.raises(Exception, match="COND0845_CONDUCTOR_ROOT"):
+    # Skipped derives from BaseException, so pytest.raises(Exception)
+    # cannot catch it — assert the skip explicitly.
+    with pytest.raises(pytest.skip.Exception, match="COND0845_CONDUCTOR_ROOT"):
         _require_conductor_root()
 
 
@@ -762,6 +884,19 @@ def live_state_snapshot():
     assert (names(fork_default), names(conductor_default)) == before
 
 
+def _prove_paired_server(server, port: int) -> None:
+    """Identity proof BEFORE any mutation: the answering server is the
+    owned test instance. Uses only the existing health/process contract:
+    our spawned PID is alive, and our own child's log records serving
+    this exact port. A foreign listener on the port fails here instead
+    of receiving our writes."""
+    assert server.process.poll() is None, "owned server process already dead"
+    log_text = server.log_path.read_text(errors="replace")[-4000:]
+    assert (
+        f"127.0.0.1:{port}" in log_text or f":{port}" in log_text
+    ), f"owned server log names no bind on {port}; refusing mutations"
+
+
 @needs_loopback
 def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_state_snapshot):
     """Full paired path against a real isolated fork server: bootstrap,
@@ -802,6 +937,7 @@ def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_s
     )
     base = server.url
     try:
+        _prove_paired_server(server, port)
         health = requests.get(f"{base}/health", timeout=5).json()
         assert health.get("status") == "ok"
         sessions = requests.get(f"{base}/sessions", timeout=10).json()
