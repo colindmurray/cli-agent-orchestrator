@@ -890,41 +890,220 @@ def submit_context_reminder(
                                         "admission and first byte; deferring to re-rendezvous")
                             return None
 
-                        try:
-                            record = adapter.remind(
-                                operation_id=operation_id,
-                                native_session_id=resolved.native_session_id,
-                                terminal_id=terminal_id,
-                                generation=resolved.terminal_generation,
-                                execution_mode=resolved.execution_mode,
-                                occurrence_id=occurrence_id,
-                                text=context,
-                                marker=operation_id,
-                                fence_snapshot={
-                                    "goal_version": fence.get("goal_version"),
-                                    "hold_high_water": fence.get("hold_high_water"),
-                                },
-                                observation=observation,
-                                transport=transport,
-                                turn_state=turn_state,
-                                provider_version=resolved.provider_version,
-                                steer_chord=chord,
-                                pre_write=pre_write,
-                                deadline_monotonic=deadline)
-                        except adapter.NativeControlConflict as exc:
-                            return {"status": "refused", "detail": str(exc)}
-                        except adapter.NativeControlInvalid as exc:
-                            return {"status": "refused", "detail": str(exc)}
-                        except Exception as exc:
+                        from cli_agent_orchestrator.services.canonical_json import (
+                            canonical_sha256 as _content_sha)
+                        incoming_sha = _content_sha({"context": context})
+                        roots = managed_wire_roots(
+                            terminal_id=terminal_id,
+                            generation=resolved.terminal_generation)
+
+                        def _attempt(op_id, supersede):
+                            """One remind() attempt with submit's error mapping.
+
+                            Returns (True, record) or (False, terminal
+                            response). Terminal responses carry
+                            new_bytes False: nothing was typed.
+                            """
                             try:
-                                adapter.mark_ambiguous(
-                                    operation_id=operation_id,
-                                    reason=f"reminder submit raised mid-effect: {exc}")
-                            except Exception:
+                                return (True, adapter.remind(
+                                    operation_id=op_id,
+                                    native_session_id=resolved.native_session_id,
+                                    terminal_id=terminal_id,
+                                    generation=resolved.terminal_generation,
+                                    execution_mode=resolved.execution_mode,
+                                    occurrence_id=occurrence_id,
+                                    text=context,
+                                    marker=op_id,
+                                    fence_snapshot={
+                                        "goal_version": fence.get("goal_version"),
+                                        "hold_high_water": fence.get("hold_high_water"),
+                                    },
+                                    observation=observation,
+                                    transport=transport,
+                                    turn_state=turn_state,
+                                    provider_version=resolved.provider_version,
+                                    steer_chord=chord,
+                                    pre_write=pre_write,
+                                    deadline_monotonic=deadline,
+                                    supersede_ids=supersede))
+                            except adapter.NativeControlConflict as exc:
+                                return (False, {"status": "refused",
+                                                "detail": str(exc),
+                                                "new_bytes": False})
+                            except adapter.NativeControlInvalid as exc:
+                                return (False, {"status": "refused",
+                                                "detail": str(exc),
+                                                "new_bytes": False})
+                            except Exception as exc:
+                                try:
+                                    adapter.mark_ambiguous(
+                                        operation_id=op_id,
+                                        reason=f"reminder submit raised mid-effect: {exc}")
+                                except Exception:
+                                    pass
+                                return (False, {"status": "unknown",
+                                                "detail": f"submit raised before its outcome was "
+                                                          f"journaled: {exc}; reconcile by exact "
+                                                          f"operation id",
+                                                "new_bytes": False})
+
+                        def _settle(record):
+                            """Wire-settle one adopted row; never types bytes."""
+                            try:
+                                settlement = adapter.reconcile_reminder_from_wire(
+                                    operation_id=record.get("operation_id") or operation_id,
+                                    marker=record.get("operation_id") or operation_id,
+                                    session_home=roots)
+                                if settlement.get("reconciled") and isinstance(
+                                        settlement.get("record"), dict):
+                                    record = settlement["record"]
+                            except Exception:  # noqa: BLE001 - reconcile never breaks adopt
                                 pass
-                            return {"status": "unknown",
-                                    "detail": f"submit raised before its outcome was journaled: "
-                                              f"{exc}; reconcile by exact operation id"}
+                            return record
+
+                        def _deliver_new(supersede):
+                            """Deliver this POST's context as a new row.
+
+                            Only the posted outcome carries new bytes (and
+                            a clock reset downstream); every other outcome
+                            carries new_bytes False.
+                            """
+                            ok, result = _attempt(operation_id, supersede)
+                            if not ok:
+                                return result
+                            out = result.get("reminder_outcome")
+                            if out == "posted":
+                                return {"status": "posted", "detail": turn_detail,
+                                        "record": result, "new_bytes": True}
+                            if out == "refused":
+                                reason = result.get("refusal_reason", "")
+                                if reason == adapter.REFUSED_TURN_MISMATCH:
+                                    return {"status": "deferred", "new_bytes": False,
+                                            "detail": "turn flipped at the last safe point",
+                                            "record": result}
+                                return {"status": "refused", "new_bytes": False,
+                                        "detail": reason or "refused",
+                                        "record": result}
+                            # Raced adoption (or a mid-effect ambiguity):
+                            # settle read-only, never new bytes.
+                            record = _settle(result)
+                            if record.get("state") == "completed":
+                                return {"status": "completed", "new_bytes": False,
+                                        "detail": "rendezvous settled the adopted row",
+                                        "record": record}
+                            return {"status": "pending", "new_bytes": False,
+                                    "detail": f"reminder {record.get('reminder_outcome')}; "
+                                              f"backing off",
+                                    "record": record}
+
+                        def _marker_of(row):
+                            transport = row.get("transport") or {}
+                            return transport.get("marker") or row.get("operation_id")
+
+                        def _sha_of(row):
+                            transport = row.get("transport") or {}
+                            return transport.get("context_sha256")
+
+                        rows = adapter.unresolved_reminders_for(
+                            terminal_id=terminal_id,
+                            generation=resolved.terminal_generation)
+                        live = [r for r in rows
+                                if r.get("state") in ("posted", "accepted")]
+                        owned = [r for r in rows
+                                 if r.get("state") in ("intended", "writing")]
+                        ambiguous = [r for r in rows
+                                     if r.get("state") == "ambiguous"]
+                        if owned:
+                            # An effect may still be typing: rendezvous
+                            # later, never compound now.
+                            return {"status": "deferred", "new_bytes": False,
+                                    "detail": f"an effect may still own reminder "
+                                              f"{owned[0].get('operation_id')}; will not compound",
+                                    "record": owned[0]}
+                        same = [r for r in live + ambiguous
+                                if _sha_of(r) is not None
+                                and _sha_of(r) == incoming_sha]
+                        if same:
+                            # Re-POST of the same compaction: rendezvous
+                            # with that row and settle it from the wire.
+                            # Zero new bytes by construction.
+                            elected = same[-1]
+                            ok, result = _attempt(elected.get("operation_id"),
+                                                  frozenset())
+                            if not ok:
+                                return result
+                            record = _settle(result)
+                            if record.get("state") == "completed":
+                                return {"status": "completed", "new_bytes": False,
+                                        "detail": "wire evidence shows the marker reached "
+                                                  "the model",
+                                        "record": record}
+                            return {"status": "pending", "new_bytes": False,
+                                    "detail": f"reminder {record.get('reminder_outcome')}; "
+                                              f"backing off",
+                                    "record": record}
+                        if len(live) > 1:
+                            return {"status": "deferred", "new_bytes": False,
+                                    "detail": "multiple live reminder rows; refusing to guess "
+                                              "which compaction this continues",
+                                    "record": live[-1]}
+                        if live:
+                            # New compaction while one row is live: settle
+                            # the old receipt, then deliver the new
+                            # context — never swallow it by adopting.
+                            target = live[0]
+                            settled = _settle(target)
+                            if settled is not target:
+                                target = settled
+                            if target.get("state") in ("completed", "refused"):
+                                return _deliver_new(
+                                    {r.get("operation_id") for r in ambiguous})
+                            try:
+                                composition = adapter.reconcile_reminder_composer(
+                                    operation_id=target.get("operation_id"),
+                                    marker=_marker_of(target),
+                                    pane_id=resolved.pane_id,
+                                    session_home=roots)
+                            except Exception:
+                                composition = {"composer_holds_marker": None,
+                                             "reason": "composer check raised",
+                                             "record": target}
+                            holds = composition.get("composer_holds_marker")
+                            if holds is not False:
+                                return {"status": "deferred", "new_bytes": False,
+                                        "detail": f"prior reminder "
+                                                  f"{target.get('operation_id')} unproven "
+                                                  f"({composition.get('reason')}); will not "
+                                                  f"compound bytes; retry on a later compaction",
+                                        "record": composition.get("record") or target}
+                            return _deliver_new(
+                                {r.get("operation_id") for r in ambiguous}
+                                | {target.get("operation_id")})
+                        if ambiguous:
+                            # No live rows, only superseded history: deliver
+                            # only when no history row still holds partial
+                            # bytes in the composer.
+                            for prior in ambiguous:
+                                try:
+                                    composition = adapter.reconcile_reminder_composer(
+                                        operation_id=prior.get("operation_id"),
+                                        marker=_marker_of(prior),
+                                        pane_id=resolved.pane_id,
+                                        session_home=roots)
+                                except Exception:
+                                    composition = {"composer_holds_marker": None,
+                                                 "reason": "composer check raised",
+                                                 "record": prior}
+                                if composition.get("composer_holds_marker") is not False:
+                                    return {"status": "deferred", "new_bytes": False,
+                                            "detail": f"superseded reminder "
+                                                      f"{prior.get('operation_id')} still constrains "
+                                                      f"delivery ({composition.get('reason')}); will "
+                                                      f"not compound bytes",
+                                            "record": composition.get("record") or prior}
+                            return _deliver_new(
+                                {r.get("operation_id") for r in ambiguous})
+                        return _deliver_new(frozenset())
     except goal_effect_flock.GoalEffectBusy as exc:
         return {"status": "deferred", "detail": str(exc)}
     except cohort_journal.SessionEffectRefused as exc:
@@ -934,49 +1113,7 @@ def submit_context_reminder(
                 "detail": f"another writer holds the pane: {exc}"}
     except Exception as exc:
         return {"status": "unknown", "detail": f"delivery failed before journaling: {exc}"}
-    outcome = record.get("reminder_outcome")
-    state = record.get("state")
-    if outcome == "posted":
-        return {"status": "posted", "detail": turn_detail, "record": record}
-    if outcome in ("adopted", "already-pending") or state in (
-            "intended", "writing", "posted", "accepted", "ambiguous"):
-        if state == "completed":
-            return {"status": "completed", "detail": "already completed", "record": record}
-        # A rendezvous with a live row is also the moment to reconcile
-        # it: a repeated compaction POSTs a fresh id, adopts the live
-        # row, and — when the provider's own wire shows the marker
-        # reached the model — completes it, which resets the due clock.
-        # No echo means no movement: the row stays pending.
-        try:
-            roots = managed_wire_roots(
-                terminal_id=terminal_id,
-                generation=resolved.terminal_generation)
-            settlement = adapter.reconcile_reminder_from_wire(
-                operation_id=record.get("operation_id") or operation_id,
-                marker=record.get("operation_id") or operation_id,
-                session_home=roots)
-            if settlement.get("reconciled") and isinstance(
-                    settlement.get("record"), dict):
-                record = settlement["record"]
-                state = record.get("state")
-        except Exception:  # noqa: BLE001 - reconcile never breaks adopt
-            pass
-        if state == "completed":
-            return {"status": "completed",
-                    "detail": "wire evidence shows the marker reached the model",
-                    "record": record}
-        return {"status": "pending", "detail": f"reminder {outcome}; backing off",
-                "record": record}
-    if state == "completed":
-        return {"status": "completed", "detail": "delivered and provider-acknowledged",
-                "record": record}
-    reason = record.get("refusal_reason", "")
-    if reason == adapter.REFUSED_TURN_MISMATCH:
-        return {"status": "deferred", "detail": "turn flipped at the last safe point",
-                "record": record}
-    return {"status": "refused",
-            "detail": reason or record.get("detail") or "refused",
-            "record": record}
+    # All delivery paths above return directly; nothing falls through.
 
 
 def compose_kimi_home(

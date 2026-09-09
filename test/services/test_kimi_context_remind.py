@@ -410,6 +410,71 @@ def test_refuse_reminder_journals_typed_zero_byte_refusal():
     assert again["refusal_reason"] == knc.REFUSED_WAIT_COVER
 
 
+def _stub_viewport(monkeypatch, rows=None, exc=None):
+    import cli_agent_orchestrator.services.native_pane_input as pane
+
+    def fake(pane_id, timeout=None):
+        if exc is not None:
+            raise exc
+        return list(rows or [])
+
+    monkeypatch.setattr(pane, "capture_pane_screen", fake)
+
+
+def test_composer_holding_marker_goes_ambiguous_never_erases(tmp_path, monkeypatch):
+    _attach()
+    _remind(Recorder(), operation_id="op_cmp_1", marker="op_cmp_1")
+    _stub_viewport(monkeypatch, rows=[
+        "k> partial bytes here",
+        "[cao-context-restoration marker:op_cmp_1]"])
+    result = knc.reconcile_reminder_composer(
+        operation_id="op_cmp_1", marker="op_cmp_1",
+        pane_id="%1", session_home=str(tmp_path))
+    assert result["reconciled"] is True
+    assert result["reason"] == "ambiguous-partial-composer"
+    assert result["composer_holds_marker"] is True
+    assert result["record"]["state"] == "ambiguous"
+
+
+def test_composer_clear_with_wire_echo_completes(tmp_path, monkeypatch):
+    _attach()
+    _remind(Recorder(), operation_id="op_cmp_2", marker="op_cmp_2")
+    home = _wire_home(tmp_path, "op_cmp_2")
+    _stub_viewport(monkeypatch, rows=["k> clean composer"])
+    result = knc.reconcile_reminder_composer(
+        operation_id="op_cmp_2", marker="op_cmp_2",
+        pane_id="%1", session_home=home)
+    assert result["reconciled"] is True
+    assert result["record"]["state"] == "completed"
+    assert result["composer_holds_marker"] is False
+
+
+def test_composer_clear_without_echo_goes_ambiguous(tmp_path, monkeypatch):
+    _attach()
+    _remind(Recorder(), operation_id="op_cmp_3", marker="op_cmp_3")
+    _stub_viewport(monkeypatch, rows=["k> user typed something else"])
+    result = knc.reconcile_reminder_composer(
+        operation_id="op_cmp_3", marker="op_cmp_3",
+        pane_id="%1", session_home=str(tmp_path / "empty"))
+    assert result["reconciled"] is True
+    assert result["reason"] == "ambiguous-unproven-clear"
+    assert result["composer_holds_marker"] is False
+    assert result["record"]["state"] == "ambiguous"
+
+
+def test_composer_unreadable_leaves_row_untouched(tmp_path, monkeypatch):
+    _attach()
+    _remind(Recorder(), operation_id="op_cmp_4", marker="op_cmp_4")
+    _stub_viewport(monkeypatch, exc=OSError("tmux down"))
+    result = knc.reconcile_reminder_composer(
+        operation_id="op_cmp_4", marker="op_cmp_4",
+        pane_id="%1", session_home=str(tmp_path))
+    assert result["reconciled"] is False
+    assert result["reason"] == "composer-unreadable"
+    assert result["composer_holds_marker"] is None
+    assert knc.get("op_cmp_4")["state"] == "posted"
+
+
 def test_loser_id_adopts_without_new_row_or_bytes():
     _attach()
     transport = Recorder()

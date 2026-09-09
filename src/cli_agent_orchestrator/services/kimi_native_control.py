@@ -1840,6 +1840,7 @@ def remind(
     steer_chord: Optional[str] = None,
     pre_write: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
     deadline_monotonic: Optional[float] = None,
+    supersede_ids: frozenset = frozenset(),
 ) -> dict[str, Any]:
     """Deliver one goal-context reminder through the live turn state.
 
@@ -1891,8 +1892,10 @@ def remind(
 
     try:
         with database.SessionLocal() as db:
-            pending = _pending_reminder_rows(
-                db, terminal_id=terminal_id, generation=generation)
+            pending = [
+                row for row in _pending_reminder_rows(
+                    db, terminal_id=terminal_id, generation=generation)
+                if row.operation_id not in supersede_ids]
             for row in pending:
                 if row.operation_id == binding["operation_id"]:
                     adopted = _row_dict(row)
@@ -2042,6 +2045,11 @@ def remind(
             "transport_json": _canonical({
                 "frozen_payload_sha256": plan["payload_sha256"],
                 "marker": marker,
+                # Marker-independent content hash: lets a later rendezvous
+                # tell a re-POST of the same compaction (adopt, zero new
+                # bytes) from a new compaction (supersede evaluation).
+                # Plain JSON field, no schema change.
+                "context_sha256": canonical_sha256({"context": body}),
                 "branch": "steer" if chord else "submit",
                 "enter_sent": enter_sent,
                 "transport_contract": "literal-lines-composer-breaks-then-explicit-boundary",
@@ -2162,6 +2170,10 @@ def scan_wire_for_marker(*, session_home: object, marker: str) -> dict[str, Any]
         try:
             size = _os.path.getsize(path)
             with open(path, "rb") as handle:
+                # A submitted marker stays in the append-only wire
+                # forever: read small files whole so an old proof is
+                # never missed (a miss could duplicate bytes another
+                # delivery already proved); tail only the large ones.
                 if size > WIRE_SCAN_TAIL_BYTES:
                     handle.seek(size - WIRE_SCAN_TAIL_BYTES)
                     handle.readline()  # drop a torn first line
@@ -2290,6 +2302,117 @@ def reconcile_reminder_from_wire(
                 "record": row, "evidence": scan}
     return {"reconciled": True, "reason": outcome, "record": record,
             "evidence": scan}
+
+
+def unresolved_reminders_for(*, terminal_id: str,
+                             generation: str) -> list:
+    """All unresolved KIND_REMIND rows for one scope, oldest first.
+
+    Includes ambiguous rows: the boundary — not the journal — decides
+    which of them still constrain a new delivery, by live-verifying
+    the composer.
+    """
+    try:
+        with database.SessionLocal() as db:
+            return [_row_dict(row) for row in _pending_reminder_rows(
+                db, terminal_id=terminal_id, generation=generation)]
+    except NativeControlError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise NativeControlUnavailable(
+            f"reminder lookup failed: {exc}") from exc
+
+
+def reconcile_reminder_composer(
+    *,
+    operation_id: str,
+    marker: str,
+    pane_id: str,
+    session_home: object,
+) -> dict[str, Any]:
+    """Reconcile one reminder row against the live composer and the wire.
+
+    The narrow existing-session path for partial owned bytes: capture
+    the pane viewport and look for this operation's frozen marker.
+
+    - Marker visible in the viewport: our bytes sit unsubmitted in the
+      composer (partial delivery). The row goes AMBIGUOUS honestly —
+      never completed, never erased, and crucially never re-typed over.
+      No keystroke is sent and no text is deleted here: user input is
+      never erased blindly.
+    - Marker absent: our bytes left the composer. The wire decides:
+      a marker echo completes/accepts via the existing verbs; no echo
+      means the bytes' fate is unproven (submitted-then-lost, deleted,
+      or never landed) and the row goes AMBIGUOUS honestly.
+    - Capture failure: no evidence either way; the row is untouched.
+
+    Returns ``{"reconciled", "reason", "record", "composer_holds_marker",
+    "evidence"}`` where ``composer_holds_marker`` is True/False/None
+    (unknown). Only a False lets a later delivery supersede this row
+    without compounding bytes in the composer.
+    """
+    try:
+        row = get(operation_id)
+    except NativeControlError as exc:
+        return {"reconciled": False, "reason": f"lookup failed: {exc}",
+                "record": None, "composer_holds_marker": None,
+                "evidence": None}
+    if row is None:
+        return {"reconciled": False, "reason": "unknown-operation",
+                "record": None, "composer_holds_marker": None,
+                "evidence": None}
+    state = row.get("state")
+    if state in (COMPLETED, REFUSED):
+        return {"reconciled": False, "reason": f"already-{state}",
+                "record": row, "composer_holds_marker": None,
+                "evidence": None}
+    if state in (INTENDED, WRITING):
+        return {"reconciled": False, "reason": "owned-by-effect-path",
+                "record": row, "composer_holds_marker": None,
+                "evidence": None}
+    if state not in (POSTED, ACCEPTED, AMBIGUOUS):
+        return {"reconciled": False, "reason": f"unexpected-state-{state}",
+                "record": row, "composer_holds_marker": None,
+                "evidence": None}
+    try:
+        from cli_agent_orchestrator.services import (
+            native_pane_input as _pane)
+        viewport = _pane.capture_pane_screen(
+            pane_id, timeout=_pane._OBSERVATION_CAPTURE_TIMEOUT_SECONDS)
+        visible = "\n".join(viewport)
+    except Exception:  # noqa: BLE001 - capture failure is no evidence
+        return {"reconciled": False, "reason": "composer-unreadable",
+                "record": row, "composer_holds_marker": None,
+                "evidence": None}
+    if marker and marker in visible:
+        if state == AMBIGUOUS:
+            return {"reconciled": False, "reason": "already-ambiguous",
+                    "record": row, "composer_holds_marker": True,
+                    "evidence": None}
+        record = mark_ambiguous(
+            operation_id=operation_id,
+            reason="partial owned bytes visible unsubmitted in the "
+                   "composer; fate unknown, will not compound")
+        return {"reconciled": True, "reason": "ambiguous-partial-composer",
+                "record": record, "composer_holds_marker": True,
+                "evidence": None}
+    settled = reconcile_reminder_from_wire(
+        operation_id=operation_id, marker=marker,
+        session_home=session_home)
+    if settled.get("reconciled"):
+        settled["composer_holds_marker"] = False
+        return settled
+    if state == AMBIGUOUS:
+        return {"reconciled": False, "reason": "already-ambiguous",
+                "record": row, "composer_holds_marker": False,
+                "evidence": settled.get("evidence")}
+    record = mark_ambiguous(
+        operation_id=operation_id,
+        reason="owned bytes absent from the composer but unproven in "
+               "the provider wire; fate unknown, composer verified clear")
+    return {"reconciled": True, "reason": "ambiguous-unproven-clear",
+            "record": record, "composer_holds_marker": False,
+            "evidence": settled.get("evidence")}
 
 
 def refuse_reminder(

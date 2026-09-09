@@ -614,6 +614,113 @@ def test_submit_journals_wait_cover_refusal(tmp_path, monkeypatch):
     assert box["transport"].calls == []
 
 
+def _stub_capture(monkeypatch, rows=None, exc=None):
+    import cli_agent_orchestrator.services.native_pane_input as pane
+
+    def fake(pane_id, timeout=None):
+        if exc is not None:
+            raise exc
+        return list(rows or [])
+
+    monkeypatch.setattr(pane, "capture_pane_screen", fake)
+
+
+def test_two_compactions_same_goal_delivers_new_context(tmp_path, monkeypatch):
+    # Compaction 1 delivers v1; compaction 2 carries new context while
+    # v1 is live but unproven. The boundary must settle v1 honestly
+    # (ambiguous: composer verified clear, wire silent) and deliver v2
+    # as a new row — never swallow v2 by adopting.
+    _attach_submit_world()
+    lockdir = tmp_path / "proj"
+    lockdir.mkdir()
+    home = tmp_path / "kh"
+    home.mkdir()
+    _, box = _install_submit_world(monkeypatch)
+    monkeypatch.setattr(kr, "managed_wire_roots", lambda **k: [str(home)])
+    _stub_capture(monkeypatch, rows=["k> idle viewport, no marker"])
+    fence = _submit_fence(str(lockdir / "goal-effect.lock"))
+    first = kr.submit_context_reminder(
+        terminal_id="t-submit", operation_id="op_2c_A",
+        occurrence_id="occ-1", context="current goal: ship it v1",
+        fence=fence)
+    assert first["status"] == "posted", first
+    assert first["new_bytes"] is True
+    typed = list(box["transport"].calls)
+    assert typed
+    second = kr.submit_context_reminder(
+        terminal_id="t-submit", operation_id="op_2c_B",
+        occurrence_id="occ-1", context="current goal: ship it v2!!",
+        fence=fence)
+    assert second["status"] == "posted", second
+    assert second["new_bytes"] is True
+    assert second["record"]["operation_id"] == "op_2c_B"
+    assert len(box["transport"].calls) > len(typed)
+    assert knc.get("op_2c_A")["state"] == "ambiguous"
+
+
+def test_same_compaction_repost_types_no_duplicate(tmp_path, monkeypatch):
+    _attach_submit_world()
+    lockdir = tmp_path / "proj"
+    lockdir.mkdir()
+    home = tmp_path / "kh"
+    home.mkdir()
+    _, box = _install_submit_world(monkeypatch)
+    monkeypatch.setattr(kr, "managed_wire_roots", lambda **k: [str(home)])
+    _stub_capture(monkeypatch, rows=["k> idle"])
+    fence = _submit_fence(str(lockdir / "goal-effect.lock"))
+    first = kr.submit_context_reminder(
+        terminal_id="t-submit", operation_id="op_dup_A",
+        occurrence_id="occ-1", context="current goal: same text",
+        fence=fence)
+    assert first["status"] == "posted", first
+    typed = list(box["transport"].calls)
+    second = kr.submit_context_reminder(
+        terminal_id="t-submit", operation_id="op_dup_B",
+        occurrence_id="occ-1", context="current goal: same text",
+        fence=fence)
+    assert second["status"] == "pending", second
+    assert second["new_bytes"] is False
+    assert second["record"]["operation_id"] == "op_dup_A"
+    assert box["transport"].calls == typed
+    assert knc.get("op_dup_B") is None
+
+
+def test_partial_composer_defers_new_compaction(tmp_path, monkeypatch):
+    # v1 bytes sit unsubmitted in the composer (partial delivery);
+    # a new compaction must defer, never compound, and the old row
+    # goes honestly ambiguous. A later operator op still passes the
+    # gate: partial owned bytes never freeze unrelated messaging.
+    _attach_submit_world()
+    lockdir = tmp_path / "proj"
+    lockdir.mkdir()
+    home = tmp_path / "kh"
+    home.mkdir()
+    _, box = _install_submit_world(monkeypatch)
+    monkeypatch.setattr(kr, "managed_wire_roots", lambda **k: [str(home)])
+    _stub_capture(monkeypatch, rows=["k> idle"])
+    fence = _submit_fence(str(lockdir / "goal-effect.lock"))
+    first = kr.submit_context_reminder(
+        terminal_id="t-submit", operation_id="op_pc_A",
+        occurrence_id="occ-1", context="current goal: v1 partial",
+        fence=fence)
+    assert first["status"] == "posted", first
+    typed = list(box["transport"].calls)
+    _stub_capture(monkeypatch, rows=[
+        "k> current goal: v1 partial",
+        "[cao-context-restoration marker:op_pc_A]"])
+    second = kr.submit_context_reminder(
+        terminal_id="t-submit", operation_id="op_pc_B",
+        occurrence_id="occ-1", context="current goal: v2 arrives",
+        fence=fence)
+    assert second["status"] == "deferred", second
+    assert second["new_bytes"] is False
+    assert box["transport"].calls == typed
+    assert knc.get("op_pc_A")["state"] == "ambiguous"
+    assert knc.get("op_pc_B") is None
+    knc._assert_session_unblocked(
+        native_session_id="sess-n", operation_id="op_operator_1")
+
+
 def test_submit_refuses_missing_fence_native(tmp_path, monkeypatch):
     _attach_submit_world()
     lockdir = tmp_path / "proj"
