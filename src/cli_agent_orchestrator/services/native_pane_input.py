@@ -993,6 +993,21 @@ _KIMI_EMPTY_EVIDENCE = (
     "corrected by this live evidence, never approximated"
 )
 
+_KIMI_0420_EMPTY_EVIDENCE = (
+    "composer layout live-verified on the installed Kimi Code 0.42.0 "
+    "(cond-0845/cond-0588, 2026-09-09, Gemini driver probe ecb73a1c "
+    "123851-99859-5961, zero model requests, owned scratch cleaned): the "
+    "composer is the same untitled rounded box as 0.29.2 — '╭─╮', content "
+    "rows framed by '│', a '> ' prompt, '╰─╯' — at 160x40 across five "
+    "captured states (empty idle True, ordinary draft False, marker-free "
+    "partial False, cleared empty True, wrapped multiline False); "
+    "installed bundle dist/main.mjs sha256 "
+    "3f632148344f68c15633215244e1ca8c106116051cd0e744968906773230930a; "
+    "raw frames retained under "
+    "build-and-execute/qa/cond-0588/kimi-0.42.0-composer-20260909-123947/"
+)
+
+
 _CLAUDE_EMPTY_EVIDENCE = (
     "composer layout read from the Claude Code 2.1.220 composer (in-tree "
     "fixtures, test_claude_code_unit.py) and live-verified on the installed "
@@ -1043,10 +1058,10 @@ _CODEX_0151_ALPHA_EMPTY_EVIDENCE = (
 #: The per-provider+build emptiness pins, keyed by normalized version.
 #: A build appears here only when its composer layout was read; an
 #: unpinned build refuses command-class controls ``provider-unsupported``
-#: rather than guessing at a region.  kimi 0.29.0/0.29.1 are deliberately
-#: absent: the only live-verified Kimi composer is 0.29.2's, and pinning
-#: their region from anything less would be the approximation this table
-#: exists to prevent (§4.1 — they refuse honestly until live-verified).
+#: rather than guessing at a region.  kimi builds other than 0.29.2 and
+#: 0.42.0 are deliberately absent: pinning their region from anything
+#: less than a live read would be the approximation this table exists
+#: to prevent (§4.1 — they refuse honestly until live-verified).
 _COMPOSER_EMPTINESS_PINS: dict[str, dict[str, ComposerEmptinessPin]] = {
     "kimi_cli": {
         "0.29.2": ComposerEmptinessPin(
@@ -1054,6 +1069,12 @@ _COMPOSER_EMPTINESS_PINS: dict[str, dict[str, ComposerEmptinessPin]] = {
             rule=_RULE_KIMI_COMPOSER_BOX,
             styled=False,
             evidence=_KIMI_EMPTY_EVIDENCE,
+        ),
+        "0.42.0": ComposerEmptinessPin(
+            provider="kimi_cli",
+            rule=_RULE_KIMI_COMPOSER_BOX,
+            styled=False,
+            evidence=_KIMI_0420_EMPTY_EVIDENCE,
         ),
     },
     "claude_code": {
