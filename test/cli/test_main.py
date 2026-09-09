@@ -2,10 +2,16 @@
 
 import importlib
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from click.testing import CliRunner
 
 from cli_agent_orchestrator.cli.main import cli
+
+try:
+    import tomllib
+except ImportError:  # Python 3.10 fallback, mirroring cli/main.py
+    import tomli as tomllib
 
 
 class TestCliMain:
@@ -138,3 +144,32 @@ class TestCliMain:
             assert result.exit_code == 0
 
         importlib.reload(main_module)  # patch is undone here — real version restored
+
+
+class TestHookContextEntryPoints:
+    """Pin the cond-0845 hook console scripts surviving packaging merges."""
+
+    EXPECTED = {
+        "cao-claude-hook-context": "cli_agent_orchestrator.services.claude_context_restore:main",
+        "cao-agy-hook-context": "cli_agent_orchestrator.services.agy_context_restore:main",
+        "cao-opencode-hook-context": (
+            "cli_agent_orchestrator.services.opencode_context_restore:main"
+        ),
+    }
+
+    def _scripts(self):
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        return tomllib.loads(pyproject.read_text())["project"]["scripts"]
+
+    def test_all_hook_context_scripts_declared(self):
+        """Every restoration hook keeps its console script after merges."""
+        scripts = self._scripts()
+        for name, target in self.EXPECTED.items():
+            assert scripts.get(name) == target
+
+    def test_all_hook_context_targets_importable(self):
+        """Each declared hook script resolves to an importable main."""
+        for target in self.EXPECTED.values():
+            module_name, attr = target.split(":")
+            module = importlib.import_module(module_name)
+            assert callable(getattr(module, attr))

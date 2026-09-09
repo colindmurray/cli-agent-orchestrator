@@ -3206,6 +3206,11 @@ async def create_terminal(
             # constructors consume its bound artifact instead of
             # re-resolving provider material.
             prepared_sealed_launch=prepared_sealed_launch,
+            # The managed generation and worker root this provider serves
+            # (cond-0845): the OpenCode branch bakes them into the
+            # restoration binding. Both may be None on legacy paths.
+            terminal_generation=terminal_generation,
+            terminal_working_directory=effective_working_directory,
         )
 
         # Deferred-init path: return fast so callers (e.g. MCP assign) do not
