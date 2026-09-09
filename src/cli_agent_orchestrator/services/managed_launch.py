@@ -776,9 +776,7 @@ def _v1_roster_binding_contract(row: Any, native_session_id: Optional[str]) -> A
     ``identity_missing`` rather than inventing an id.
     """
     return stable_agent_roster.BindingContract(
-        agent_id=stable_agent_roster.derive_initial_agent_id(
-            row.terminal_id, row.generation
-        ),
+        agent_id=stable_agent_roster.derive_initial_agent_id(row.terminal_id, row.generation),
         session_name=row.session_name,
         role=stable_agent_roster.ROLE_WORKER,
         profile_family=row.agent_profile or "default",
@@ -789,7 +787,9 @@ def _v1_roster_binding_contract(row: Any, native_session_id: Optional[str]) -> A
     )
 
 
-def _bind_v1_roster_incarnation(db: Any, row: Any, native_session_id: Optional[str]) -> dict[str, Any]:
+def _bind_v1_roster_incarnation(
+    db: Any, row: Any, native_session_id: Optional[str]
+) -> dict[str, Any]:
     """Bind (or adopt) the roster incarnation inside the caller's transaction.
 
     The caller commits afterwards, so the roster record lands atomically
@@ -808,9 +808,7 @@ def _bind_v1_roster_incarnation(db: Any, row: Any, native_session_id: Optional[s
             _v1_roster_binding_contract(row, native_session_id), db=db
         )
     except stable_agent_roster.StableAgentConflict as exc:
-        raise ManagedLaunchConflict(
-            f"stable-agent roster refused the v1 bind: {exc}"
-        ) from exc
+        raise ManagedLaunchConflict(f"stable-agent roster refused the v1 bind: {exc}") from exc
     except stable_agent_roster.StableAgentError as exc:
         raise ManagedLaunchUnavailable(
             f"stable-agent roster unavailable for the v1 bind: {exc}"
@@ -861,9 +859,7 @@ def _open_v1_admission_occurrence(
             db=db,
         )
     except occurrence.TaskOccurrenceConflict as exc:
-        raise ManagedLaunchConflict(
-            f"task occurrence refused the v1 admission: {exc}"
-        ) from exc
+        raise ManagedLaunchConflict(f"task occurrence refused the v1 admission: {exc}") from exc
     except occurrence.TaskOccurrenceError as exc:
         raise ManagedLaunchUnavailable(
             f"task occurrence unavailable for the v1 admission: {exc}"
@@ -886,13 +882,10 @@ def _heal_v1_roster_binding(row: Any, native_session_id: Optional[str]) -> Optio
             _v1_roster_binding_contract(row, native_session_id)
         )
     except stable_agent_roster.StableAgentConflict as exc:
-        raise ManagedLaunchConflict(
-            f"stable-agent roster refused the v1 bind: {exc}"
-        ) from exc
+        raise ManagedLaunchConflict(f"stable-agent roster refused the v1 bind: {exc}") from exc
     except stable_agent_roster.StableAgentError as exc:
         logger.warning(
-            "v1 roster heal deferred for terminal %s: %s; "
-            "the next reconcile pass retries it",
+            "v1 roster heal deferred for terminal %s: %s; " "the next reconcile pass retries it",
             row.terminal_id,
             exc,
         )
@@ -949,9 +942,7 @@ def _roster_mark_admitted_best_effort(row: Any) -> None:
     re-attempts the mark.  Delivery is never reported as not-delivered.
     """
     try:
-        stable_agent_roster.mark_admitted(
-            terminal_id=row.terminal_id, generation=row.generation
-        )
+        stable_agent_roster.mark_admitted(terminal_id=row.terminal_id, generation=row.generation)
     except stable_agent_roster.StableAgentError as exc:
         logger.warning(
             "v1 roster mark_admitted deferred for terminal %s; an idempotent "
@@ -1011,9 +1002,7 @@ def mark_ready(
                 # the provider session exists, so this is a truthful
                 # bound-but-not-yet-admitted registration — never invented
                 # liveness.  A response-lost retry adopts these rows.
-                _bind_v1_roster_incarnation(
-                    db, row, receipt.get("provider_session_id")
-                )
+                _bind_v1_roster_incarnation(db, row, receipt.get("provider_session_id"))
             db.commit()
             current = _query(db, reservation_id)
             if updated == 1:
@@ -1286,9 +1275,7 @@ def _abandon_admitting_delivery(
                     db=db,
                 )
             except occurrence.TaskOccurrenceConflict as exc:
-                raise ManagedLaunchConflict(
-                    f"task occurrence refused abandonment: {exc}"
-                ) from exc
+                raise ManagedLaunchConflict(f"task occurrence refused abandonment: {exc}") from exc
             except occurrence.TaskOccurrenceError as exc:
                 raise ManagedLaunchUnavailable(
                     f"task occurrence unavailable for abandonment: {exc}"
@@ -1314,9 +1301,7 @@ def _abandon_admitting_delivery(
     observations.append({**request.model_dump(mode="json"), "observed_at": _now()})
     row.admission_json = _canonical_json(admission)
     row.observations_json = _canonical_json(observations)
-    row.negative_json = _canonical_json(
-        {**request.model_dump(mode="json"), "observed_at": _now()}
-    )
+    row.negative_json = _canonical_json({**request.model_dump(mode="json"), "observed_at": _now()})
     row.state = request.kind
     row.updated_at = _now()
     db.commit()
@@ -1551,9 +1536,7 @@ def claim_admission(
                 # (task bytes are sent only after the claim), so a refusal
                 # here orphans nothing.
                 readiness = _parse_json(row.readiness_json, {})
-                bind = _bind_v1_roster_incarnation(
-                    db, row, readiness.get("provider_session_id")
-                )
+                bind = _bind_v1_roster_incarnation(db, row, readiness.get("provider_session_id"))
                 if request.task_occurrence_id is not None:
                     # The occurrence opens atomically with the admitting
                     # transition (cond-0842): a task-bearing claim without
@@ -1589,9 +1572,7 @@ def claim_admission(
                             or rechecked.get("status") != "io-attempted"
                             or rechecked.get("delivery_id") != request.delivery_id
                         ):
-                            raise ManagedLaunchConflict(
-                                "task admission changed concurrently"
-                            )
+                            raise ManagedLaunchConflict("task admission changed concurrently")
                         readiness = _parse_json(row.readiness_json, {})
                         bind = _bind_v1_roster_incarnation(
                             db, row, readiness.get("provider_session_id")

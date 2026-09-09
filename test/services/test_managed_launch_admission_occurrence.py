@@ -166,9 +166,7 @@ def test_v1_claim_opens_the_conductor_named_occurrence(effect_tmp):
     assert stored["generation"] == claimed["generation"]
     assert stored["session_name"] == claimed["session_name"]
     # The roster half of the pairing names the same identity.
-    incarnation = roster.get_incarnation_by_terminal(
-        claimed["terminal_id"], claimed["generation"]
-    )
+    incarnation = roster.get_incarnation_by_terminal(claimed["terminal_id"], claimed["generation"])
     assert incarnation is not None
     assert incarnation["agent_id"] == stored["agent_id"]
     assert incarnation["incarnation_id"] == stored["incarnation_id"]
@@ -203,9 +201,10 @@ def test_v1_claim_replay_with_a_different_occurrence_is_refused(effect_tmp):
             request.reservation_id, _v1_admit_request(occurrence_id=str(uuid.uuid4()))
         )
     # The first delivery's chain stands untouched.
-    assert occurrence.get_occurrence(
-        claimed["admission"]["task_occurrence_id"]
-    )["state"] == occurrence.STATE_OPEN
+    assert (
+        occurrence.get_occurrence(claimed["admission"]["task_occurrence_id"])["state"]
+        == occurrence.STATE_OPEN
+    )
 
 
 def test_v1_second_incarnation_cannot_represent_the_same_occurrence(effect_tmp):
@@ -243,23 +242,22 @@ def test_v1_taskless_claim_opens_nothing(effect_tmp):
     """A taskless admission (no occurrence id) claims without an occurrence."""
     tmp_path = effect_tmp
     request, ready = _v1_ready_row(tmp_path)
-    claimed, should_send = v1.claim_admission(
-        request.reservation_id, _v1_admit_request()
-    )
+    claimed, should_send = v1.claim_admission(request.reservation_id, _v1_admit_request())
     assert should_send is True
     assert claimed["admission"]["task_occurrence_id"] is None
-    assert roster.get_incarnation_by_terminal(
-        claimed["terminal_id"], claimed["generation"]
-    )["agent_id"] == claimed["stable_agent_id"]
+    assert (
+        roster.get_incarnation_by_terminal(claimed["terminal_id"], claimed["generation"])[
+            "agent_id"
+        ]
+        == claimed["stable_agent_id"]
+    )
 
 
 def test_v1_legacy_claim_heals_with_the_presented_occurrence(effect_tmp):
     """A claim from before the seam (no id) heals on retry with the same delivery."""
     tmp_path = effect_tmp
     request, ready = _v1_ready_row(tmp_path)
-    legacy, should_send = v1.claim_admission(
-        request.reservation_id, _v1_admit_request()
-    )
+    legacy, should_send = v1.claim_admission(request.reservation_id, _v1_admit_request())
     assert should_send is True
     assert legacy["admission"]["task_occurrence_id"] is None
     occurrence_id = str(uuid.uuid4())
@@ -279,19 +277,13 @@ def test_v1_legacy_heal_refuses_a_foreign_occurrence(effect_tmp):
     # A second worker with its own honestly opened occurrence.
     other_request, other_ready = _v1_ready_row(tmp_path)
     foreign_id = str(uuid.uuid4())
-    v1.claim_admission(
-        other_request.reservation_id, _v1_admit_request(occurrence_id=foreign_id)
-    )
+    v1.claim_admission(other_request.reservation_id, _v1_admit_request(occurrence_id=foreign_id))
     # A legacy claim for this worker, then a heal naming the foreign id.
     request, ready = _v1_ready_row(tmp_path)
     v1.claim_admission(request.reservation_id, _v1_admit_request())
     with pytest.raises(v1.ManagedLaunchConflict):
-        v1.claim_admission(
-            request.reservation_id, _v1_admit_request(occurrence_id=foreign_id)
-        )
-    assert occurrence.get_occurrence(foreign_id)["agent_id"] == other_ready[
-        "stable_agent_id"
-    ]
+        v1.claim_admission(request.reservation_id, _v1_admit_request(occurrence_id=foreign_id))
+    assert occurrence.get_occurrence(foreign_id)["agent_id"] == other_ready["stable_agent_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -336,9 +328,7 @@ def _v2_receipt(record, reservation_id, native_session_id, native=False):
         "bridge_version": BRIDGE_VERSION,
         "receipt_id": native_session_id,
         "provider_session_id": native_session_id,
-        "provider_receipt_kind": (
-            "kimi-native-tui-attached" if native else "kimi-acp-session-new"
-        ),
+        "provider_receipt_kind": ("kimi-native-tui-attached" if native else "kimi-acp-session-new"),
         # Native bind additionally requires a proven-capable provider build.
         "provider_version": "kimi 0.29.0" if native else "kimi-cli-stub",
         "provider_transcript_sha256": "a" * 64,
@@ -415,17 +405,19 @@ def _v2_bound_row(tmp_path, monkeypatch, execution_mode, occurrence_id=None):
     worktree = _v2_worktree(tmp_path, monkeypatch)
     occurrence_id = occurrence_id or str(uuid.uuid4())
     record, _ = v2.reserve(
-        _v2_request(worktree, tmp_path, execution_mode=execution_mode,
-                    occurrence_id=occurrence_id)
+        _v2_request(worktree, tmp_path, execution_mode=execution_mode, occurrence_id=occurrence_id)
     )
     v2.claim_launch(record["reservation_id"])
     native_session_id = f"v2-native-{uuid.uuid4()}"
     receipt = _v2_receipt(
-        record, record["reservation_id"], native_session_id,
+        record,
+        record["reservation_id"],
+        native_session_id,
         native=(execution_mode == "native_tui"),
     )
     monkeypatch.setattr(
-        bridge, "read_state",
+        bridge,
+        "read_state",
         lambda rid: {"state": "ready", "readiness": receipt},
     )
     bound = v2.bind_native(record["reservation_id"], _v2_bind_request(record))
@@ -438,9 +430,7 @@ def test_v2_claim_opens_the_row_named_occurrence(effect_tmp, monkeypatch, execut
     """Ordinary v2 entrypoint (both modes): claim opens the row's occurrence."""
     tmp_path = effect_tmp
     bound, occurrence_id = _v2_bound_row(tmp_path, monkeypatch, execution_mode)
-    claimed, should_send = v2.claim_admission(
-        bound["reservation_id"], _v2_admit_request(bound)
-    )
+    claimed, should_send = v2.claim_admission(bound["reservation_id"], _v2_admit_request(bound))
     assert should_send is True
     assert claimed["state"] == "admitting"
     stored = occurrence.get_occurrence(occurrence_id)
@@ -449,9 +439,7 @@ def test_v2_claim_opens_the_row_named_occurrence(effect_tmp, monkeypatch, execut
     assert stored["round_index"] == 0
     assert stored["terminal_id"] == bound["terminal_id"]
     assert stored["generation"] == bound["generation"]
-    incarnation = roster.get_incarnation_by_terminal(
-        bound["terminal_id"], bound["generation"]
-    )
+    incarnation = roster.get_incarnation_by_terminal(bound["terminal_id"], bound["generation"])
     assert incarnation is not None
     assert incarnation["agent_id"] == stored["agent_id"]
     assert incarnation["incarnation_id"] == stored["incarnation_id"]
@@ -466,9 +454,7 @@ def test_v2_claim_replay_adopts(effect_tmp, monkeypatch, execution_mode):
     tmp_path = effect_tmp
     bound, occurrence_id = _v2_bound_row(tmp_path, monkeypatch, execution_mode)
     v2.claim_admission(bound["reservation_id"], _v2_admit_request(bound))
-    again, should_send = v2.claim_admission(
-        bound["reservation_id"], _v2_admit_request(bound)
-    )
+    again, should_send = v2.claim_admission(bound["reservation_id"], _v2_admit_request(bound))
     assert should_send is False
     stored = occurrence.get_occurrence(occurrence_id)
     assert stored["state"] == occurrence.STATE_OPEN
@@ -512,17 +498,18 @@ def test_v2_taskless_claim_opens_nothing(effect_tmp, monkeypatch, execution_mode
     assert record.get("task_occurrence_id") is None
     v2.claim_launch(record["reservation_id"])
     receipt = _v2_receipt(
-        record, record["reservation_id"], f"v2-native-{uuid.uuid4()}",
+        record,
+        record["reservation_id"],
+        f"v2-native-{uuid.uuid4()}",
         native=(execution_mode == "native_tui"),
     )
     monkeypatch.setattr(
-        bridge, "read_state",
+        bridge,
+        "read_state",
         lambda rid: {"state": "ready", "readiness": receipt},
     )
     bound = v2.bind_native(record["reservation_id"], _v2_bind_request(record))
-    claimed, should_send = v2.claim_admission(
-        bound["reservation_id"], _v2_admit_request(bound)
-    )
+    claimed, should_send = v2.claim_admission(bound["reservation_id"], _v2_admit_request(bound))
     assert should_send is True
     assert claimed["state"] == "admitting"
 
@@ -530,6 +517,7 @@ def test_v2_taskless_claim_opens_nothing(effect_tmp, monkeypatch, execution_mode
 # ---------------------------------------------------------------------------
 # Definitive zero-byte abandonment
 # ---------------------------------------------------------------------------
+
 
 def _abandon_observation(claimed, request, kind="cancelled"):
     return ManagedLaunchObservationRequest(
@@ -572,19 +560,13 @@ def test_v1_abandon_fences_and_finalizes_the_chain(effect_tmp, monkeypatch):
     assert stored["finalized"]["disposition"] == occurrence.DISPOSITION_ABANDONED
     # The fence holds: no completion can follow, and re-abandoning adopts.
     with pytest.raises(v1.ManagedLaunchConflict):
-        v1.complete_admission(
-            request.reservation_id, DELIVERY_ID, {"provider": "codex"}
-        )
-    again = v1.append_observation(
-        request.reservation_id, _abandon_observation(claimed, request)
-    )
+        v1.complete_admission(request.reservation_id, DELIVERY_ID, {"provider": "codex"})
+    again = v1.append_observation(request.reservation_id, _abandon_observation(claimed, request))
     assert again["state"] == "cancelled"
     assert again["admission"]["status"] == "refused"
 
 
-def test_v1_abandon_refuses_when_bridge_recorded_a_submission(
-    effect_tmp, monkeypatch
-):
+def test_v1_abandon_refuses_when_bridge_recorded_a_submission(effect_tmp, monkeypatch):
     """A recorded submission is ambiguity, never abandonment: both preserved."""
     tmp_path = effect_tmp
     from cli_agent_orchestrator.services import managed_provider_bridge as bridge
@@ -592,13 +574,12 @@ def test_v1_abandon_refuses_when_bridge_recorded_a_submission(
     occurrence_id = str(uuid.uuid4())
     request, claimed = _v1_claim(tmp_path, occurrence_id)
     monkeypatch.setattr(
-        bridge, "read_state",
+        bridge,
+        "read_state",
         lambda rid: {"state": "ready", "submission": {"turn_id": "t-1"}},
     )
     with pytest.raises(v1.ManagedLaunchConflict):
-        v1.append_observation(
-            request.reservation_id, _abandon_observation(claimed, request)
-        )
+        v1.append_observation(request.reservation_id, _abandon_observation(claimed, request))
     assert v1.get(request.reservation_id)["state"] == "admitting"
     assert occurrence.get_occurrence(occurrence_id)["state"] == occurrence.STATE_OPEN
 
@@ -611,9 +592,7 @@ def test_v1_abandon_refuses_a_foreign_occurrence(effect_tmp, monkeypatch):
     # A fresh claim naming the other worker's occurrence is refused...
     request, ready = _v1_ready_row(tmp_path)
     with pytest.raises(v1.ManagedLaunchConflict):
-        v1.claim_admission(
-            request.reservation_id, _v1_admit_request(occurrence_id=foreign_id)
-        )
+        v1.claim_admission(request.reservation_id, _v1_admit_request(occurrence_id=foreign_id))
     # ...and abandoning the honest row finalizes only its own chain...
     own_id = str(uuid.uuid4())
     _v1_claim(tmp_path, own_id)
@@ -629,9 +608,7 @@ def test_v1_abandon_refuses_a_foreign_occurrence(effect_tmp, monkeypatch):
 
 
 @pytest.mark.parametrize("execution_mode", ["acp", "native_tui"])
-def test_v2_permanent_refusal_finalizes_the_occurrence(
-    effect_tmp, monkeypatch, execution_mode
-):
+def test_v2_permanent_refusal_finalizes_the_occurrence(effect_tmp, monkeypatch, execution_mode):
     """A permanent v2 refusal ends the occurrence chain in the same txn."""
     tmp_path = effect_tmp
     bound, occurrence_id = _v2_bound_row(tmp_path, monkeypatch, execution_mode)
@@ -649,9 +626,7 @@ def test_v2_permanent_refusal_finalizes_the_occurrence(
 
 
 @pytest.mark.parametrize("execution_mode", ["acp", "native_tui"])
-def test_v2_retryable_refusal_keeps_the_occurrence_open(
-    effect_tmp, monkeypatch, execution_mode
-):
+def test_v2_retryable_refusal_keeps_the_occurrence_open(effect_tmp, monkeypatch, execution_mode):
     """A retryable v2 refusal preserves the occurrence for later completion."""
     tmp_path = effect_tmp
     bound, occurrence_id = _v2_bound_row(tmp_path, monkeypatch, execution_mode)

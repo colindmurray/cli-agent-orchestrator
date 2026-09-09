@@ -635,7 +635,9 @@ def test_cancelled_or_negative_reservation_refuses_admission(isolated_memory_db,
         managed_launch.claim_launch(request.reservation_id)
         # Each loop reservation is an independent provider session; sharing
         # one native id across both would be a real cross-agent conflict.
-        receipt = _ready_receipt_for(record, request, native_session_id=f"provider-session-{kind}-opaque")
+        receipt = _ready_receipt_for(
+            record, request, native_session_id=f"provider-session-{kind}-opaque"
+        )
         record = managed_launch.mark_ready(
             request.reservation_id,
             terminal_id=record["terminal_id"],

@@ -128,6 +128,11 @@ def test_capability_handshake_is_exact_and_versioned(client, monkeypatch):
         "reservation_query": True,
         "reservation_reconcile": True,
         "no_task_launch": True,
+        # The admission claim opens the conductor-named task occurrence
+        # atomically with admitting (cond-0842). Required, not additive:
+        # an older peer omits this key and the conductor refuses before
+        # reserving, rather than admitting a task no occurrence backs.
+        "admission_occurrence_binding": True,
         "generation_bound_readiness": True,
         "idempotent_task_admission": True,
         "generation_bound_negative": True,

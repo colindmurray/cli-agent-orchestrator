@@ -167,21 +167,15 @@ def _endpoint_incarnation(terminal_id, generation=None):
     """The exact payload shape of GET /roster/terminals/{id}."""
     return {
         "schema": "cao-m3-roster-incarnation-v1",
-        "incarnation": stable_agent_roster.get_incarnation_by_terminal(
-            terminal_id, generation
-        ),
+        "incarnation": stable_agent_roster.get_incarnation_by_terminal(terminal_id, generation),
     }
 
 
-def test_reserve_projects_the_roster_derived_stable_agent_id(
-    isolated_memory_db, tmp_path
-):
+def test_reserve_projects_the_roster_derived_stable_agent_id(isolated_memory_db, tmp_path):
     record, created = managed_launch.reserve(_reserve_request(tmp_path))
     assert created is True
     assert record["stable_agent_id"] == (
-        stable_agent_roster.derive_initial_agent_id(
-            record["terminal_id"], record["generation"]
-        )
+        stable_agent_roster.derive_initial_agent_id(record["terminal_id"], record["generation"])
     )
     # The generation is load-bearing: the generation-less derivation names
     # a different identity (the unmanaged-terminal family) and must never
@@ -191,27 +185,20 @@ def test_reserve_projects_the_roster_derived_stable_agent_id(
     )
 
 
-def test_replay_get_and_reconcile_return_the_same_stable_agent_id(
-    isolated_memory_db, tmp_path
-):
+def test_replay_get_and_reconcile_return_the_same_stable_agent_id(isolated_memory_db, tmp_path):
     request = _reserve_request(tmp_path)
     first, _ = managed_launch.reserve(request)
     replay, created_again = managed_launch.reserve(request)
     assert created_again is False
     assert replay["stable_agent_id"] == first["stable_agent_id"]
-    assert (
-        managed_launch.get(request.reservation_id)["stable_agent_id"]
-        == first["stable_agent_id"]
-    )
+    assert managed_launch.get(request.reservation_id)["stable_agent_id"] == first["stable_agent_id"]
     assert (
         managed_launch.reconcile(request.reservation_id)["stable_agent_id"]
         == first["stable_agent_id"]
     )
 
 
-def test_distinct_reservations_get_distinct_stable_agent_ids(
-    isolated_memory_db, tmp_path
-):
+def test_distinct_reservations_get_distinct_stable_agent_ids(isolated_memory_db, tmp_path):
     one, _ = managed_launch.reserve(_reserve_request(tmp_path))
     two, _ = managed_launch.reserve(_reserve_request(tmp_path))
     assert one["stable_agent_id"] != two["stable_agent_id"]
@@ -242,7 +229,7 @@ def test_mark_ready_registers_the_projected_identity_in_the_roster(
     assert stable_agent_roster.get_agent(assignee)["agent_id"] == projected
     # The lineage carries the real provider-reported native session.
     agent = stable_agent_roster.get_agent(projected)
-    lineage = (agent.get("current_lineage") or {})
+    lineage = agent.get("current_lineage") or {}
     assert lineage.get("native_session_id") == native_session_id
 
 
@@ -267,9 +254,7 @@ def test_mark_ready_retry_adopts_the_same_identity(effect_tmp):
     request = _reserve_request(tmp_path)
     record, _ = managed_launch.reserve(request)
     assert (
-        stable_agent_roster.get_incarnation_by_terminal(
-            record["terminal_id"], record["generation"]
-        )
+        stable_agent_roster.get_incarnation_by_terminal(record["terminal_id"], record["generation"])
         is None
     )
     record, _ = managed_launch.claim_launch(request.reservation_id)
@@ -288,15 +273,11 @@ def test_mark_ready_retry_adopts_the_same_identity(effect_tmp):
     )
     assert again["stable_agent_id"] == first["stable_agent_id"]
     assert again["state"] == "ready"
-    incarnations = stable_agent_roster.list_incarnations(
-        agent_id=first["stable_agent_id"]
-    )
+    incarnations = stable_agent_roster.list_incarnations(agent_id=first["stable_agent_id"])
     assert len(incarnations) == 1
 
 
-def test_roster_bind_failure_keeps_the_row_launching_and_retry_heals(
-    effect_tmp, monkeypatch
-):
+def test_roster_bind_failure_keeps_the_row_launching_and_retry_heals(effect_tmp, monkeypatch):
     """Partial failure: a transient roster outage refuses typed, keeps the
     row launching (no orphaned live worker state), and the retry heals."""
     tmp_path = effect_tmp
@@ -319,9 +300,7 @@ def test_roster_bind_failure_keeps_the_row_launching_and_retry_heals(
         )
     assert managed_launch.get(request.reservation_id)["state"] == "launching"
     assert (
-        stable_agent_roster.get_incarnation_by_terminal(
-            record["terminal_id"], record["generation"]
-        )
+        stable_agent_roster.get_incarnation_by_terminal(record["terminal_id"], record["generation"])
         is None
     )
     monkeypatch.setattr(stable_agent_roster, "bind_generation", real_bind)
@@ -336,9 +315,7 @@ def test_roster_bind_failure_keeps_the_row_launching_and_retry_heals(
     assert incarnation["agent_id"] == healed["stable_agent_id"]
 
 
-def test_claim_heals_a_retained_row_without_a_roster_record(
-    effect_tmp, monkeypatch
-):
+def test_claim_heals_a_retained_row_without_a_roster_record(effect_tmp, monkeypatch):
     """A row that reached ready before the writer existed (simulated by
     silencing the mark_ready writer) is healed by the real claim path with
     the identical deterministic identity — never a new one."""
@@ -348,9 +325,7 @@ def test_claim_heals_a_retained_row_without_a_roster_record(
     record, _ = managed_launch.claim_launch(request.reservation_id)
     receipt = _ready_receipt_for(record, request)
     real_writer = managed_launch._bind_v1_roster_incarnation
-    monkeypatch.setattr(
-        managed_launch, "_bind_v1_roster_incarnation", lambda *a, **k: None
-    )
+    monkeypatch.setattr(managed_launch, "_bind_v1_roster_incarnation", lambda *a, **k: None)
     ready = managed_launch.mark_ready(
         request.reservation_id,
         terminal_id=record["terminal_id"],
@@ -359,18 +334,12 @@ def test_claim_heals_a_retained_row_without_a_roster_record(
     )
     assert ready["state"] == "ready"
     assert (
-        stable_agent_roster.get_incarnation_by_terminal(
-            record["terminal_id"], record["generation"]
-        )
+        stable_agent_roster.get_incarnation_by_terminal(record["terminal_id"], record["generation"])
         is None
     )
-    monkeypatch.setattr(
-        managed_launch, "_bind_v1_roster_incarnation", real_writer
-    )
+    monkeypatch.setattr(managed_launch, "_bind_v1_roster_incarnation", real_writer)
     admission = _admit_request()
-    claimed, should_send = managed_launch.claim_admission(
-        request.reservation_id, admission
-    )
+    claimed, should_send = managed_launch.claim_admission(request.reservation_id, admission)
     assert should_send is True
     incarnation = _endpoint_incarnation(record["terminal_id"])["incarnation"]
     assert isinstance(incarnation, dict)
@@ -384,9 +353,7 @@ def test_complete_admission_marks_the_incarnation_admitted(effect_tmp):
     tmp_path = effect_tmp
     request, ready, native_session_id = _launch_to_ready(tmp_path)
     admission = _admit_request()
-    claimed, should_send = managed_launch.claim_admission(
-        request.reservation_id, admission
-    )
+    claimed, should_send = managed_launch.claim_admission(request.reservation_id, admission)
     assert should_send is True
     done = managed_launch.complete_admission(
         request.reservation_id,
@@ -408,9 +375,7 @@ def test_complete_admission_marks_the_incarnation_admitted(effect_tmp):
             session_name=ready["session_name"],
             agent_id=assignee,
             round_index=0,
-            dispatch_digest=task_occurrence.dispatch_digest_for(
-                {"task": "test-task"}
-            ),
+            dispatch_digest=task_occurrence.dispatch_digest_for({"task": "test-task"}),
             incarnation=task_occurrence.EffectIncarnation(
                 incarnation_id=incarnation["incarnation_id"],
                 terminal_id=ready["terminal_id"],
@@ -461,9 +426,4 @@ def test_successor_generations_resolve_independently(effect_tmp):
     assert two["agent_id"] == second["stable_agent_id"]
     assert one["generation"] == first["generation"]
     assert two["generation"] == second["generation"]
-    assert (
-        _endpoint_incarnation(first["terminal_id"], second["generation"])[
-            "incarnation"
-        ]
-        is None
-    )
+    assert _endpoint_incarnation(first["terminal_id"], second["generation"])["incarnation"] is None

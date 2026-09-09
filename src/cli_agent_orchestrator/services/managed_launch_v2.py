@@ -3436,8 +3436,7 @@ def _open_v2_admission_occurrence(
     )
     if incarnation is None:
         raise ManagedLaunchUnavailable(
-            "roster incarnation for the bound generation is not yet readable; "
-            "retry the claim"
+            "roster incarnation for the bound generation is not yet readable; " "retry the claim"
         )
     expected_agent = getattr(row, "stable_agent_id", None) or (
         stable_agent_roster.derive_initial_agent_id(row.terminal_id, row.generation)
@@ -3469,9 +3468,7 @@ def _open_v2_admission_occurrence(
             db=db,
         )
     except occurrence.TaskOccurrenceConflict as exc:
-        raise ManagedLaunchConflict(
-            f"task occurrence refused the v2 admission: {exc}"
-        ) from exc
+        raise ManagedLaunchConflict(f"task occurrence refused the v2 admission: {exc}") from exc
     except occurrence.TaskOccurrenceError as exc:
         raise ManagedLaunchUnavailable(
             f"task occurrence unavailable for the v2 admission: {exc}"
@@ -3869,17 +3866,14 @@ def _finalize_row_occurrence_abandoned(db: Any, row: Any, delivery_id: str) -> N
                 db=db,
             )
         except occurrence.TaskOccurrenceConflict as exc:
-            raise ManagedLaunchConflict(
-                f"task occurrence refused abandonment: {exc}"
-            ) from exc
+            raise ManagedLaunchConflict(f"task occurrence refused abandonment: {exc}") from exc
         except occurrence.TaskOccurrenceError as exc:
             raise ManagedLaunchUnavailable(
                 f"task occurrence unavailable for abandonment: {exc}"
             ) from exc
     elif not (
         record.get("state") == occurrence.STATE_FINALIZED
-        and (record.get("finalized") or {}).get("disposition")
-        == occurrence.DISPOSITION_ABANDONED
+        and (record.get("finalized") or {}).get("disposition") == occurrence.DISPOSITION_ABANDONED
     ):
         raise ManagedLaunchConflict(
             "reservation names an occurrence already finalized "
