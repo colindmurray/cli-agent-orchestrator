@@ -5646,6 +5646,28 @@ def _muse_bootstrap_intent(
     )
 
 
+def _with_claude_context_restore(hook: dict[str, Any], *, record: dict[str, Any]) -> dict[str, Any]:
+    """Compose passive goal restoration onto a prepared Claude hook.
+
+    Shared by the mint and exact-resume paths so both generations of a
+    session carry the same restoration binding. Additive over the
+    readiness settings and degrading to readiness-only when the wrapper
+    or conduct is unresolvable — a restoration hook never fails a
+    launch. The degradation is logged, not silent.
+    """
+    from cli_agent_orchestrator.services import claude_context_restore
+
+    composed, degraded = claude_context_restore.attach_to_launch_settings(
+        hook["settings"],
+        terminal_id=record["terminal_id"],
+        generation=record["generation"],
+    )
+    if degraded is not None:
+        logger.warning("claude context restoration degraded: %s", degraded)
+        return hook
+    return {"readiness_path": hook["readiness_path"], "settings": composed}
+
+
 def _mint_claude_native_session(
     *,
     record: dict[str, Any],
@@ -5702,6 +5724,11 @@ def _mint_claude_native_session(
     hook = claude_native_readiness.prepare(
         COMPANION_DIR, record["terminal_id"], record["generation"]
     )
+    # Passive goal restoration rides the same managed --settings payload:
+    # additive SessionStart(compact) + startup/resume entries invoking the
+    # restore wrapper with this generation baked from the launch record.
+    # Degradation is to readiness-only, never a launch refusal.
+    hook = _with_claude_context_restore(hook, record=record)
     bootstrap = {
         "schema": CLAUDE_BOOTSTRAP_SCHEMA,
         "provider": "claude_code",
@@ -5789,6 +5816,10 @@ def _prepare_claude_resume_session(
     hook = claude_native_readiness.prepare(
         COMPANION_DIR, record["terminal_id"], record["generation"]
     )
+    # Same restoration composition as the mint path, bound to the
+    # successor generation: the resumed session replays the latest goal
+    # on its first SessionStart rather than its pre-rotation context.
+    hook = _with_claude_context_restore(hook, record=record)
     bootstrap = {
         "schema": CLAUDE_BOOTSTRAP_SCHEMA,
         "provider": "claude_code",
