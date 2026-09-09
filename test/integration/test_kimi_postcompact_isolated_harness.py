@@ -185,26 +185,44 @@ needs_tmux_sockets = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
+def _live_dep_dir() -> Optional[str]:
+    """Site-packages dir backing the live ``sqlalchemy`` import, if any.
+
+    A bare importability probe cannot tell an interpreter-native install
+    from an ambient ``PYTHONPATH`` entry, and the server child only sees
+    what ``build_child_env`` passes it — so resolve the directory from the
+    imported module itself (then ``sys.path``), never from probe success.
+    """
+    try:
+        import sqlalchemy as _sa
+    except ImportError:
+        return None
+    anchor = getattr(_sa, "__file__", None)
+    if anchor:
+        cand = Path(anchor).resolve().parent.parent
+        if (cand / "sqlalchemy").is_dir():
+            return str(cand)
+    for entry in sys.path:
+        if entry and (Path(entry) / "sqlalchemy").is_dir():
+            return entry
+    return None
+
+
 def discover_fork_dep_path() -> Optional[str]:
     """Extra ``sys.path`` entry the server child needs, if any.
 
-    None when this interpreter already imports the fork's runtime deps
-    (the normal CI case: the suite interpreter is the project env). Else
-    an explicit override, else the standard uv-tools layout — never a
-    hardcoded operator path.
+    Resolved from the live import location first, so a parent that imports
+    the fork's runtime deps only via ambient ``PYTHONPATH`` still yields a
+    path the child interpreter can use. Else an explicit override, else
+    the standard uv-tools layout — never a hardcoded operator path. None
+    only when the deps are nowhere to be found.
     """
     override = os.environ.get("COND0845_FORK_SITE_PACKAGES")
     if override:
         return override
-    try:
-        import fastapi  # noqa: F401
-        import requests  # noqa: F401
-        import sqlalchemy  # noqa: F401
-        import uvicorn  # noqa: F401
-    except ImportError:
-        pass
-    else:
-        return None
+    live = _live_dep_dir()
+    if live:
+        return live
     roots = sorted(
         (Path.home() / ".local" / "share" / "uv" / "tools").glob(
             "cli-agent-orchestrator/lib/python3*/site-packages"
@@ -216,20 +234,7 @@ def discover_fork_dep_path() -> Optional[str]:
     return None
 
 
-def _deps_importable() -> bool:
-    try:
-        import fastapi  # noqa: F401
-        import requests  # noqa: F401
-        import sqlalchemy  # noqa: F401
-        import uvicorn  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 def _require_fork_dep_path() -> Optional[str]:
-    if _deps_importable():
-        return None
     path = discover_fork_dep_path()
     if path is None:
         pytest.skip(
@@ -779,6 +784,37 @@ def test_helpers_ignore_unrelated_cwd(tmp_path, monkeypatch):
     assert discover_python() == sys.executable
     monkeypatch.setenv("COND0845_PYTHON", "/explicit/python")
     assert discover_python() == "/explicit/python"
+
+
+def test_server_child_imports_deps_without_parent_pythonpath(tmp_path):
+    """The resolved dep dir must import in a real child whose environment
+    carries no ambient ``PYTHONPATH`` — a parent that imports the deps via
+    its own ``PYTHONPATH`` must not green-light a child that cannot. This
+    is the cond-0845 host correction for the ``ModuleNotFoundError:
+    fastapi`` bootstrap failure: the child proves the import itself."""
+    dep_path = _require_fork_dep_path()
+    assert dep_path, "resolved dep dir must be a real path, never None"
+    home = tmp_path / "home"
+    home.mkdir()
+    env = build_child_env(
+        base={"PATH": os.environ.get("PATH", "")},
+        home_dir=home,
+        fork_state=tmp_path / "fork-state",
+        conductor_xdg=tmp_path / "conductor-xdg",
+        port=1,
+        dep_path=dep_path,
+    )
+    # base carried no PYTHONPATH: only the built entries reach the child.
+    assert dep_path in env["PYTHONPATH"].split(os.pathsep)
+    proc = subprocess.run(
+        [sys.executable, "-c", "import fastapi, requests, sqlalchemy, uvicorn; print('deps-ok')"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "deps-ok" in proc.stdout
 
 
 def test_absent_companion_skips_actionably(tmp_path, monkeypatch):
