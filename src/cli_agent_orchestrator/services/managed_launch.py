@@ -759,6 +759,107 @@ def claim_launch(reservation_id: str) -> tuple[dict[str, Any], bool]:
         raise ManagedLaunchUnavailable(f"managed-launch claim failed: {exc}") from exc
 
 
+def _v1_roster_binding_contract(row: Any, native_session_id: Optional[str]) -> Any:
+    """The stable-agent binding for one v1 (bridged) reservation, from durable facts.
+
+    Built exclusively from the machine-recorded reservation — the immutable
+    terminal+generation allocated at reserve and the validated provider
+    session id — never from pane scraping or guesses.  The agent id is
+    exactly the projected ``stable_agent_id``
+    (``derive_initial_agent_id(terminal_id, generation)``), so a goal the
+    conductor bound to the projection names the roster's own identity.
+
+    Role is launch truth: v1 managed reservations are supervisor-spawned
+    workers (``conduct up`` roots are unmanaged), mirroring the v2 bind.
+    ``native_session_id`` may be None for a legacy readiness row that
+    predates the strict receipt schema; the lineage then stays truthfully
+    ``identity_missing`` rather than inventing an id.
+    """
+    return stable_agent_roster.BindingContract(
+        agent_id=stable_agent_roster.derive_initial_agent_id(
+            row.terminal_id, row.generation
+        ),
+        session_name=row.session_name,
+        role=stable_agent_roster.ROLE_WORKER,
+        profile_family=row.agent_profile or "default",
+        harness=row.provider,
+        native_session_id=native_session_id,
+        terminal_id=row.terminal_id,
+        generation=row.generation,
+    )
+
+
+def _bind_v1_roster_incarnation(db: Any, row: Any, native_session_id: Optional[str]) -> None:
+    """Bind (or adopt) the roster incarnation inside the caller's transaction.
+
+    The caller commits afterwards, so the roster record lands atomically
+    with the reservation's state transition: real task admission can never
+    precede the durable roster record, and a response-lost retry adopts the
+    same rows instead of minting a second identity.  A conflicting
+    immutable roster identity refuses the transition (typed permanent); a
+    transient roster failure stays retryable (typed transient).
+    """
+    try:
+        stable_agent_roster.bind_generation(
+            _v1_roster_binding_contract(row, native_session_id), db=db
+        )
+    except stable_agent_roster.StableAgentConflict as exc:
+        raise ManagedLaunchConflict(
+            f"stable-agent roster refused the v1 bind: {exc}"
+        ) from exc
+    except stable_agent_roster.StableAgentError as exc:
+        raise ManagedLaunchUnavailable(
+            f"stable-agent roster unavailable for the v1 bind: {exc}"
+        ) from exc
+
+
+def _heal_v1_roster_binding(row: Any, native_session_id: Optional[str]) -> None:
+    """Adopt-bind the roster incarnation for already-established state.
+
+    Healing, not gating: the reservation transition this repairs already
+    committed, so a transient roster failure warns and defers to the next
+    recovery pass rather than failing a healthy row.  A conflicting
+    immutable identity still raises typed: it names a real disagreement
+    about who this incarnation belongs to, never a silent override.
+    """
+    try:
+        stable_agent_roster.bind_generation(
+            _v1_roster_binding_contract(row, native_session_id)
+        )
+    except stable_agent_roster.StableAgentConflict as exc:
+        raise ManagedLaunchConflict(
+            f"stable-agent roster refused the v1 bind: {exc}"
+        ) from exc
+    except stable_agent_roster.StableAgentError as exc:
+        logger.warning(
+            "v1 roster heal deferred for terminal %s: %s; "
+            "the next reconcile pass retries it",
+            row.terminal_id,
+            exc,
+        )
+
+
+def _roster_mark_admitted_best_effort(row: Any) -> None:
+    """Record the roster incarnation's admitted state after task delivery.
+
+    Best-effort, mirroring the v2 seam: the admission commit is the durable
+    fact that the task bytes were delivered, so a roster-store failure (or
+    a post-teardown retired incarnation) warns and an idempotent replay
+    re-attempts the mark.  Delivery is never reported as not-delivered.
+    """
+    try:
+        stable_agent_roster.mark_admitted(
+            terminal_id=row.terminal_id, generation=row.generation
+        )
+    except stable_agent_roster.StableAgentError as exc:
+        logger.warning(
+            "v1 roster mark_admitted deferred for terminal %s; an idempotent "
+            "completion replay retries it: %s",
+            row.terminal_id,
+            exc,
+        )
+
+
 def mark_ready(
     reservation_id: str,
     *,
@@ -777,6 +878,10 @@ def mark_ready(
             if row.state == "ready":
                 if _parse_json(row.readiness_json, None) != receipt:
                     raise ManagedLaunchConflict("readiness receipt changed after attestation")
+                # A retained ready row (or a response-lost retry) heals its
+                # roster registration here; the ready commit is established
+                # truth, so this adopts rather than gates.
+                _heal_v1_roster_binding(row, receipt.get("provider_session_id"))
                 return _row_dict(row)
             if row.state != "launching":
                 raise ManagedLaunchConflict(
@@ -798,6 +903,16 @@ def mark_ready(
                     synchronize_session=False,
                 )
             )
+            if updated == 1:
+                # Register the stable-agent incarnation in the same
+                # transaction as the ready commit (mirroring the v2
+                # bind-native seam): the validated readiness receipt proves
+                # the provider session exists, so this is a truthful
+                # bound-but-not-yet-admitted registration — never invented
+                # liveness.  A response-lost retry adopts these rows.
+                _bind_v1_roster_incarnation(
+                    db, row, receipt.get("provider_session_id")
+                )
             db.commit()
             current = _query(db, reservation_id)
             if updated == 1:
@@ -1195,6 +1310,17 @@ def claim_admission(
                     synchronize_session=False,
                 )
             )
+            if updated == 1:
+                # Heal a retained row that reached ready before the roster
+                # writer existed: the durable readiness receipt proves the
+                # native session, so this adopts the same deterministic
+                # identity mark_ready registers — never a new one.  Pre-I/O
+                # (task bytes are sent only after the claim), so a refusal
+                # here orphans nothing.
+                readiness = _parse_json(row.readiness_json, {})
+                _bind_v1_roster_incarnation(
+                    db, row, readiness.get("provider_session_id")
+                )
             db.commit()
             row = _query(db, reservation_id)
             if updated == 1:
@@ -1206,6 +1332,8 @@ def claim_admission(
                     raise ManagedLaunchConflict(
                         "reservation already carries a different task admission"
                     )
+                readiness = _parse_json(row.readiness_json, {})
+                _heal_v1_roster_binding(row, readiness.get("provider_session_id"))
                 return _row_dict(row), False
             if row.state != "ready" or row.readiness_json is None:
                 raise ManagedLaunchConflict(
@@ -1236,6 +1364,7 @@ def complete_admission(
                     raise ManagedLaunchConflict(
                         "provider submission receipt changed after admission"
                     )
+                _roster_mark_admitted_best_effort(row)
                 return _row_dict(row)
             if row.state != "admitting" or admission.get("status") != "io-attempted":
                 raise ManagedLaunchConflict(f"admission cannot complete from state {row.state!r}")
@@ -1249,6 +1378,10 @@ def complete_admission(
             row.updated_at = _now()
             db.commit()
             db.refresh(row)
+            # The task bytes are delivered; record the incarnation's
+            # admitted state best-effort (an idempotent replay re-attempts
+            # it).  Delivery truth stands regardless of roster bookkeeping.
+            _roster_mark_admitted_best_effort(row)
             # P1-7/P1-10 (final conformance §20.2f): publish the exact
             # provider/model-turn submission acknowledgement and the per-turn
             # route identity to the generation-bound companion store. The ack

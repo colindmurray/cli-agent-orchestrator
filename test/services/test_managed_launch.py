@@ -109,11 +109,14 @@ def _admit_request(message="review the exact head", **changes):
     return ManagedLaunchAdmitRequest(**payload)
 
 
-def _ready_receipt_for(record, request):
+def _ready_receipt_for(record, request, native_session_id="provider-session-ready-opaque"):
+    # Distinct live reservations must present distinct provider sessions:
+    # the roster refuses one native id live-attached to two stable agents.
+    # The default keeps the historical literal for single-reservation tests.
     return {
         "bridge_version": BRIDGE_VERSION,
-        "receipt_id": "provider-session-ready-opaque",
-        "provider_session_id": "provider-session-ready-opaque",
+        "receipt_id": native_session_id,
+        "provider_session_id": native_session_id,
         "provider_receipt_kind": "codex-thread-start",
         "provider_transcript_sha256": "a" * 64,
         # P1-8 (final conformance §20.2f): the complete readiness schema —
@@ -628,7 +631,17 @@ def test_stale_generation_evidence_is_rejected(isolated_memory_db, tmp_path):
 def test_cancelled_or_negative_reservation_refuses_admission(isolated_memory_db, tmp_path):
     for kind in ("cancelled", "negative"):
         request = _reserve_request(tmp_path)
-        record = _ready_record(request)
+        record, _ = managed_launch.reserve(request)
+        managed_launch.claim_launch(request.reservation_id)
+        # Each loop reservation is an independent provider session; sharing
+        # one native id across both would be a real cross-agent conflict.
+        receipt = _ready_receipt_for(record, request, native_session_id=f"provider-session-{kind}-opaque")
+        record = managed_launch.mark_ready(
+            request.reservation_id,
+            terminal_id=record["terminal_id"],
+            generation=record["generation"],
+            receipt=receipt,
+        )
         observation = ManagedLaunchObservationRequest(
             protocol_version=PROTOCOL_VERSION,
             observation_id=str(uuid.uuid4()),
