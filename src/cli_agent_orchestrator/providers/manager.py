@@ -59,6 +59,31 @@ class TerminalMetadataCollisionError(ValueError):
     """One terminal ID is present in both isolated metadata vintages."""
 
 
+def _opencode_restore_binding(
+    *,
+    terminal_id: str,
+    terminal_generation: Optional[str],
+    working_directory: Optional[str],
+):
+    """The cond-0845 restoration binding, or None when unbound.
+
+    A binding needs the managed generation (the projection's fence) and
+    the worker's project root (the plugin's home). Either absent — every
+    legacy caller, the reconstruction path — degrades to no restoration
+    rather than a guessed binding. Helper/conduct executables resolve at
+    install time, never here.
+    """
+    if not terminal_generation or not working_directory:
+        return None
+    from cli_agent_orchestrator.services.opencode_context_restore import RestoreBinding
+
+    return RestoreBinding(
+        working_directory=working_directory,
+        terminal_id=terminal_id,
+        generation=terminal_generation,
+    )
+
+
 def _is_missing_v2_table(error: OperationalError) -> bool:
     """Return whether an OperationalError is only an uncreated v2 table.
 
@@ -142,6 +167,12 @@ class ProviderManager:
         expected_model: Optional[str] = None,
         expected_effort: Optional[str] = None,
         native_session_id: Optional[str] = None,
+        # The managed generation this provider serves (cond-0845), and the
+        # worker's project root. Forwarded by the managed-launch callsite so
+        # the OpenCode branch can bake the restoration binding; None keeps
+        # every legacy caller unbound.
+        terminal_generation: Optional[str] = None,
+        terminal_working_directory: Optional[str] = None,
         codex_profile_material: Optional[dict] = None,
         codex_executable: Optional[str] = None,
         # The launch's already-loaded profile (cond-0817). Forwarded to the
@@ -160,6 +191,11 @@ class ProviderManager:
         # validated artifact instead of re-resolving. ``None`` keeps
         # legacy per-adapter resolution.
         prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
+        # Pane working directory for the cond-0845 hooks (Muse PreLLMCall
+        # workspace ``.muse/hooks.json``; AGY PreInvocation workspace
+        # ``.agents/hooks.json``). Forwarded to the Muse and Antigravity
+        # adapters only; ``None`` skips restoration with a logged reason.
+        hooks_workspace: Optional[str] = None,
     ) -> BaseProvider:
         """Create and store provider instance."""
         try:
@@ -237,6 +273,7 @@ class ProviderManager:
                     expected_model=expected_model,
                     expected_effort=expected_effort,
                     launch_profile=launch_profile,
+                    hooks_workspace=hooks_workspace,
                 )
             elif provider_type == ProviderType.OPENCODE_CLI.value:
                 provider = OpenCodeCliProvider(
@@ -246,6 +283,11 @@ class ProviderManager:
                     agent_profile,
                     allowed_tools,
                     model=model,
+                    context_restore=_opencode_restore_binding(
+                        terminal_id=terminal_id,
+                        terminal_generation=terminal_generation,
+                        working_directory=terminal_working_directory,
+                    ),
                 )
             elif provider_type == ProviderType.HERMES.value:
                 provider = HermesProvider(
@@ -282,6 +324,7 @@ class ProviderManager:
                     effort=expected_effort,
                     launch_profile=launch_profile,
                     sealed_launch_material=sealed_launch_material,
+                    hooks_workspace=hooks_workspace,
                 )
             # --- Credentials-free mock provider (test/CI infrastructure) ---
             elif provider_type == ProviderType.MOCK_CLI.value:
