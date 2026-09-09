@@ -2063,6 +2063,12 @@ async def managed_launch_capabilities(
         "reservation_query": True,
         "reservation_reconcile": True,
         "no_task_launch": True,
+        # The admission claim opens the conductor-named task occurrence
+        # atomically with the admitting transition (cond-0842).  A caller
+        # must negotiate this before sending task_occurrence_id: an older
+        # peer would ignore the field and admit a task no occurrence backs,
+        # leaving the goal chain unresolvable.
+        "admission_occurrence_binding": True,
         "generation_bound_readiness": True,
         "idempotent_task_admission": True,
         "generation_bound_negative": True,

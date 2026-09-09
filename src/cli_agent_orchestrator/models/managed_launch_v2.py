@@ -240,11 +240,31 @@ class ManagedLaunchV2NegativeRequest(BaseModel):
     generation: str
     obligation_generation: str
     reason: str
+    # Definitive abandonment of a stuck admitting row (cond-0842 lineage).
+    # Absent for the pre-admission zero-byte proof this verb also serves;
+    # present with kind "cancelled" plus the exact delivery id, the caller
+    # asserts the worker is gone with nothing delivered and asks the fork
+    # to re-verify bridge-negative before fencing. Old callers omit both
+    # and keep the pre-admission behavior unchanged.
+    delivery_id: Optional[str] = None
+    kind: Optional[str] = None
 
     @field_validator("finalize_id", "generation")
     @classmethod
     def _negative_uuids(cls, value: str) -> str:
         return _uuid_text(value)
+
+    @field_validator("delivery_id")
+    @classmethod
+    def _negative_optional_delivery(cls, value: Optional[str]) -> Optional[str]:
+        return _uuid_text(value) if value is not None else None
+
+    @field_validator("kind")
+    @classmethod
+    def _negative_optional_kind(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value:
+            raise ValueError("must be non-empty when present")
+        return value
 
     @field_validator("terminal_id")
     @classmethod

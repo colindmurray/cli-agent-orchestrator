@@ -150,11 +150,24 @@ class ManagedLaunchAdmitRequest(BaseModel):
     sender_id: str = Field(pattern=r"^[a-f0-9]{8}$")
     orchestration_type: Literal["assign", "handoff"]
     context: "ManagedLaunchAdmissionContext"
+    #: The conductor-minted canonical task occurrence this admission serves,
+    #: or None for a taskless admission (which opens no occurrence and binds
+    #: no goal). Sent only for task-bearing launches; part of the immutable
+    #: replay identity so a retried delivery id carrying a different
+    #: occurrence is refused rather than answered from another task's row.
+    task_occurrence_id: Optional[str] = None
 
     @field_validator("delivery_id")
     @classmethod
     def _validate_delivery_id(cls, value: str) -> str:
         return _uuid_text(value, "delivery_id")
+
+    @field_validator("task_occurrence_id")
+    @classmethod
+    def _validate_task_occurrence_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            return _uuid_text(value, "task_occurrence_id")
+        return value
 
     @field_validator("message_sha256")
     @classmethod
