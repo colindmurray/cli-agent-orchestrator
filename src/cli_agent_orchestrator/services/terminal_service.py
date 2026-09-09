@@ -3167,12 +3167,19 @@ async def create_terminal(
             skill_prompt=skill_prompt,
             model=profile.model if profile else None,
             trusted_project_root=provider_trust_root,
-            # The cond-0845 Muse PreLLMCall hook installs into the same
-            # working directory the pane itself starts in (workspace
-            # ``.muse/hooks.json``) — Muse only; every other provider
-            # receives None and is unaffected.
+            # The cond-0845 hooks install into the same working directory
+            # the pane itself starts in (Muse PreLLMCall workspace
+            # ``.muse/hooks.json``; AGY PreInvocation workspace
+            # ``.agents/hooks.json``) — Muse and AGY only; every other
+            # provider receives None and is unaffected.
             hooks_workspace=(
-                effective_working_directory if provider == ProviderType.MUSE_CLI.value else None
+                effective_working_directory
+                if provider
+                in (
+                    ProviderType.MUSE_CLI.value,
+                    ProviderType.ANTIGRAVITY_CLI.value,
+                )
+                else None
             ),
             # The provider launch consumes the exact pre-task minted native
             # id AND the same effective route (model/effort) the pre-task
@@ -3204,6 +3211,11 @@ async def create_terminal(
             # constructors consume its bound artifact instead of
             # re-resolving provider material.
             prepared_sealed_launch=prepared_sealed_launch,
+            # The managed generation and worker root this provider serves
+            # (cond-0845): the OpenCode branch bakes them into the
+            # restoration binding. Both may be None on legacy paths.
+            terminal_generation=terminal_generation,
+            terminal_working_directory=effective_working_directory,
         )
 
         # Deferred-init path: return fast so callers (e.g. MCP assign) do not

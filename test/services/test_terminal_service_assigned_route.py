@@ -121,3 +121,92 @@ async def test_assigned_route_survives_service_write_restart_and_reconstruction(
         assert provider is manager.create_provider.return_value
     finally:
         second_engine.dispose()
+
+
+@pytest.mark.asyncio
+@patch(f"{_SERVICE}.status_monitor")
+@patch(f"{_SERVICE}.fifo_manager")
+@patch(f"{_SERVICE}.FIFO_DIR")
+@patch(f"{_SERVICE}.provider_manager")
+@patch(
+    f"{_SERVICE}.generate_terminal_id",
+    side_effect=["route002a", "route002b", "route002c"],
+)
+@patch(f"{_SERVICE}.generate_session_name", return_value="cao-route")
+@patch(f"{_SERVICE}.generate_window_name", return_value="w-route")
+@patch(f"{_SERVICE}.load_agent_profile")
+@patch("cli_agent_orchestrator.backends.registry._backend")
+async def test_hooks_workspace_union_muse_and_agy_only(
+    backend,
+    load_profile,
+    _window_name,
+    _session_name,
+    _terminal_id,
+    service_provider_manager,
+    fifo_dir,
+    _fifo_manager,
+    _status_monitor,
+    tmp_path,
+    monkeypatch,
+):
+    """Stacked 250+251 union: Muse and AGY launches get the pane working
+    directory as hooks_workspace; every other provider gets None."""
+    from cli_agent_orchestrator.services.terminal_service import create_terminal
+
+    db_file = tmp_path / "service-hooks-ws.db"
+    engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
+    database.Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
+    try:
+        backend.session_exists.return_value = False
+        backend.window_identity.return_value = {
+            "pane_id": "%1",
+            "window_id": "@1",
+            "server_socket_path": "/tmp/tmux",
+            "session_id": "$1",
+            "pane_pid": "12345",
+        }
+        backend.supports_event_inbox.return_value = False
+        backend.supports_pane_identity.return_value = True
+        load_profile.return_value = AgentProfile(name="developer", description="dev")
+        fifo_dir.__truediv__ = MagicMock(return_value=tmp_path / "route.fifo")
+        launched_provider = AsyncMock()
+        launched_provider.initialize.return_value = True
+        service_provider_manager.create_provider.return_value = launched_provider
+
+        seen = {}
+        # AGY is an activated cell: stub the pre-task identity seam or the
+        # fail-closed bootstrap spawns the real binary. The hooks_workspace
+        # contract under test is unaffected.
+        pre_task = {
+            "native_session_id": "11111111-1111-4111-8111-111111111111",
+            "acquisition_method": "zero_turn_provider_bootstrap",
+            "working_directory": str(tmp_path),
+            "model": None,
+            "effort": None,
+        }
+        for provider in ("muse_cli", "antigravity_cli", "kiro_cli"):
+            service_provider_manager.create_provider.reset_mock()
+            with (
+                patch(f"{_SERVICE}._register_incarnation"),
+                patch(
+                    "cli_agent_orchestrator.services.unmanaged_native_identity"
+                    ".resolve_pre_task_identity",
+                    return_value=dict(pre_task),
+                ),
+            ):
+                await create_terminal(
+                    provider=provider,
+                    agent_profile="developer",
+                    new_session=True,
+                    working_directory=str(tmp_path),
+                )
+            seen[provider] = service_provider_manager.create_provider.call_args.kwargs[
+                "hooks_workspace"
+            ]
+
+        assert seen["muse_cli"] is not None
+        assert seen["antigravity_cli"] == seen["muse_cli"]
+        assert seen["kiro_cli"] is None
+    finally:
+        engine.dispose()
