@@ -70,9 +70,22 @@ KIND_CONTROL = "control"
 #: gated exactly like a queue operation but replaying on the caller's
 #: whole-request digest.
 KIND_OPERATOR_MESSAGE = "operator-message"
-OPERATION_KINDS = frozenset({KIND_QUEUE, KIND_STEER, KIND_CONTROL, KIND_OPERATOR_MESSAGE})
+#: cond-0845: one goal-context reminder, journaled like queue/steer but
+#: admitting BOTH observed-idle (ordinary submit) and observed-active
+#: (chord steer into the running turn). Neither queue (refuses active)
+#: nor steer (refuses idle, binds one turn) spans both, and a reminder
+#: rendered at delivery is valid for whichever turn is live — unlike a
+#: work instruction about a turn that already ended.
+KIND_REMIND = "remind"
+OPERATION_KINDS = frozenset(
+    {KIND_QUEUE, KIND_STEER, KIND_CONTROL, KIND_OPERATOR_MESSAGE, KIND_REMIND}
+)
 
 #: ``intended`` -> intent is durable, nothing has been typed.
+#: ``writing``  -> the frozen effect payload is committed and the first
+#:                 provider byte is imminent.  The exact bytes are fixed
+#:                 here so a crash during typing cannot be re-rendered
+#:                 into different bytes on retry.
 #: ``posted``   -> bytes reached the transport.  Transport fact only.
 #: ``accepted`` -> the provider was observed taking the input.
 #: ``completed``-> the provider was observed finishing the operation.
@@ -88,12 +101,13 @@ OPERATION_KINDS = frozenset({KIND_QUEUE, KIND_STEER, KIND_CONTROL, KIND_OPERATOR
 #: native TUI "we sent it" and "the provider took it" are separate facts
 #: with a real gap between them.
 INTENDED = "intended"
+WRITING = "writing"
 POSTED = "posted"
 ACCEPTED = "accepted"
 COMPLETED = "completed"
 REFUSED = "refused"
 AMBIGUOUS = "ambiguous"
-OPERATION_STATES = frozenset({INTENDED, POSTED, ACCEPTED, COMPLETED, REFUSED, AMBIGUOUS})
+OPERATION_STATES = frozenset({INTENDED, WRITING, POSTED, ACCEPTED, COMPLETED, REFUSED, AMBIGUOUS})
 
 #: States that need nothing further.  ``ambiguous`` is deliberately absent:
 #: it is frozen, not finished, and it still blocks the session.
@@ -122,6 +136,27 @@ REFUSED_UNPROVEN_COMPOSER_NEWLINE = "composer_newline_unproven"
 #: this module (``REFUSED_ATTACHMENT``).
 REFUSED_IMAGE_UNKNOWN = "image_attachment_unknown"
 REFUSED_IMAGE_NOT_READY = "image_attachment_not_ready"
+#: cond-0845 remind-only reasons. Each names a re-verified fence fact,
+#: so a consumer can tell "a wait landed first" from "the build cannot
+#: steer" from "the occurrence moved".
+REFUSED_WAIT_COVER = "wait_cover_active"
+REFUSED_LIFECYCLE = "lifecycle_not_working"
+REFUSED_OCCURRENCE = "occurrence_not_current"
+REFUSED_UNPROVEN_STEER = "steer_chord_unproven"
+#: cond-0845 Sol correction: the live composer holds content (or its
+#: emptiness is unprovable), so typing now would concatenate with an
+#: unknown draft on submit. Session-scoped: the refusal is journaled
+#: against the dispatch's own operation id, older rows are untouched,
+#: and unrelated sessions deliver normally. Recovery is operator
+#: action — submit or clear the draft, then retry — never a blind
+#: erase and never an installation-wide freeze.
+REFUSED_COMPOSER_NONEMPTY = "composer_nonempty"
+#: cond-0845 Sol correction: no composer-emptiness pin is proven for
+#: this provider build, so emptiness cannot be proven at all. Refuse
+#: the session (same scope/recovery shape as above; the recovery names
+#: the missing pin, not an operator draft) rather than guessing at an
+#: unread region.
+REFUSED_COMPOSER_UNPINNED = "composer_emptiness_unpinned"
 REFUSAL_REASONS = frozenset(
     {
         REFUSED_ACTIVE_TURN,
@@ -134,8 +169,20 @@ REFUSAL_REASONS = frozenset(
         REFUSED_UNPROVEN_COMPOSER_NEWLINE,
         REFUSED_IMAGE_UNKNOWN,
         REFUSED_IMAGE_NOT_READY,
+        REFUSED_WAIT_COVER,
+        REFUSED_LIFECYCLE,
+        REFUSED_OCCURRENCE,
+        REFUSED_UNPROVEN_STEER,
+        REFUSED_COMPOSER_NONEMPTY,
+        REFUSED_COMPOSER_UNPINNED,
     }
 )
+
+#: Why no ``reminder_already_pending`` refusal exists: a losing operation
+#: id rendezvouses with the live row as ``already-pending`` and types
+#: zero bytes. Journaling a REFUSED row for the loser would both lie
+#: (the winner is still live) and mislead a clock into discarding a
+#: due occurrence. The pending row itself is the record.
 
 #: The one control command the lifecycle contract names by itself.  Every
 #: other control -- including route controls -- must be advertised by the
@@ -415,6 +462,33 @@ _PROVEN_COMPOSER_NEWLINE: dict[str, dict[str, Any]] = {
             "rendered the exact session id, bound directory, and Version 0.34.0"
         ),
     },
+    # 0.42.0 is a bundle-read entry on the same terms: the installed
+    # 0.42.0 bundle (main.mjs sha256 below) declares
+    # '"tui.input.newLine": {defaultKeys: ["shift+enter", "ctrl+j"]}'
+    # with '"tui.input.submit": {defaultKeys: "enter"}', computes
+    # expandPasteMarkers(this.state.lines.join("\n")).trim() on the
+    # submit path, keeps PASTE_ENTER_SUPPRESS_WINDOW_MS = 120 with the
+    # byte-exact content-neutral paste-burst reset, and carries the
+    # matchesKey(normalized, Key.ctrl("s")) steer dispatch. Same proven
+    # behaviour, so the same normalization identifier; no live
+    # acceptance is claimed (cond-0845: live Kimi behaviour stays a
+    # separate preflighted gate, as does the composer-layout pin).
+    "0.42.0": {
+        "keystroke": "C-j",
+        "burst_reset_keystroke": "End",
+        "submit_settle_seconds": 0.25,
+        "normalization": NORMALIZATION_JOIN_LF_THEN_TRIM,
+        "evidence": (
+            "installed Kimi Code 0.42.0 dist/main.mjs (sha256 "
+            "3f632148344f68c15633215244e1ca8c106116051cd0e744968906773230930a) "
+            "declares the ['shift+enter', 'ctrl+j'] newLine defaultKeys and "
+            "'enter' submit, computes "
+            "expandPasteMarkers(this.state.lines.join('\\n')).trim() on submit; "
+            "PASTE_ENTER_SUPPRESS_WINDOW_MS = 120 with the byte-exact "
+            'content-neutral reset and the Key.ctrl("s") steer dispatch '
+            "(bundle read, cond-0845 Sol correction)"
+        ),
+    },
 }
 
 #: The settle an unproven build waits before its Enter. A missing pin
@@ -467,6 +541,10 @@ _PROVEN_STEER_CHORDS: dict[str, frozenset[str]] = {
     # build-specific source observation, not an inheritance rule for future
     # versions.
     "0.34.0": frozenset({"C-s"}),
+    # matchesKey(normalized, Key.ctrl("s")) is present in the installed
+    # 0.42.0 bundle (sha256 keyed in _PROVEN_COMPOSER_NEWLINE); a
+    # build-specific bundle-read observation, not inheritance.
+    "0.42.0": frozenset({"C-s"}),
 }
 
 
@@ -924,6 +1002,7 @@ def _intent(
     payload_sha256: str,
     turn_observation_record: Mapping[str, Any],
     keystroke_plan: Optional[Mapping[str, Any]] = None,
+    occurrence_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """The record written before anything is typed.
 
@@ -952,6 +1031,9 @@ def _intent(
         "payload_sha256": payload_sha256,
         "turn_observation": dict(turn_observation_record),
         "keystroke_plan": None if keystroke_plan is None else _journalable_plan(keystroke_plan),
+        # cond-0845 remind only; absent on every older kind so existing
+        # intent rows stay byte-identical.
+        **({"occurrence_id": occurrence_id} if occurrence_id is not None else {}),
     }
 
 
@@ -1029,6 +1111,14 @@ def _assert_session_unblocked(*, native_session_id: str, operation_id: str) -> N
     so the blocked attempt leaves a durable typed refusal rather than
     vanishing as a raised error.  A caller that later asks why nothing
     happened finds the record.
+
+    Ambiguous ``KIND_REMIND`` rows never block: a reminder payload is
+    inert labeled context (never an instruction), so a later work
+    instruction stays interpretable whether or not the reminder's bytes
+    landed, and the reminder channel has its own guard — one unresolved
+    row per terminal generation plus the wire-evidence reconcile that
+    clears it.  Every other ambiguous kind still freezes the whole
+    session: unknown instruction order is unrecoverable by inspection.
     """
     try:
         with database.SessionLocal() as db:
@@ -1038,6 +1128,7 @@ def _assert_session_unblocked(*, native_session_id: str, operation_id: str) -> N
                     database.KimiNativeControlOperationModel.native_session_id == native_session_id,
                     database.KimiNativeControlOperationModel.state == AMBIGUOUS,
                     database.KimiNativeControlOperationModel.operation_id != operation_id,
+                    database.KimiNativeControlOperationModel.kind != KIND_REMIND,
                 )
                 .first()
             )
@@ -1152,6 +1243,7 @@ def _open(
     payload_sha256: str,
     observation: Mapping[str, Any],
     keystroke_plan: Optional[Mapping[str, Any]] = None,
+    occurrence_id: Optional[str] = None,
 ) -> tuple[dict[str, Any], bool]:
     """Journal the intent, or return the existing operation unchanged.
 
@@ -1178,6 +1270,7 @@ def _open(
                 payload_sha256=payload_sha256,
                 turn_observation_record=observation,
                 keystroke_plan=keystroke_plan,
+                occurrence_id=occurrence_id,
             )
         ),
         "epoch": 0,
@@ -1730,6 +1823,848 @@ def steer(
     return _post(operation_id=binding["operation_id"], plan=plan, transport=transport)
 
 
+def _pending_reminder_rows(db: Any, *, terminal_id: str, generation: str) -> list:
+    """Unresolved KIND_REMIND rows for one terminal generation, oldest first.
+
+    The one-pending-per-occurrence authority without a schema migration:
+    scope key is (terminal, generation) — a retained-agent reassignment
+    mints a new generation, so a new generation can never alias an old
+    occurrence's pending row — and the occurrence itself is verified
+    from the winner's intent before anything is adopted.
+    """
+    return list(
+        db.query(database.KimiNativeControlOperationModel)
+        .filter(
+            database.KimiNativeControlOperationModel.kind == KIND_REMIND,
+            database.KimiNativeControlOperationModel.terminal_id == terminal_id,
+            database.KimiNativeControlOperationModel.generation == generation,
+            database.KimiNativeControlOperationModel.state.notin_((COMPLETED, REFUSED)),
+        )
+        .order_by(
+            database.KimiNativeControlOperationModel.created_at,
+            database.KimiNativeControlOperationModel.operation_id,
+        )
+        .all()
+    )
+
+
+def pending_reminder_for(*, terminal_id: str, generation: str) -> Optional[dict[str, Any]]:
+    """The unresolved reminder for one terminal generation, if any."""
+    try:
+        with database.SessionLocal() as db:
+            rows = _pending_reminder_rows(db, terminal_id=terminal_id, generation=generation)
+            if not rows:
+                return None
+            return _row_dict(rows[0])
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise NativeControlUnavailable(f"reminder pending lookup failed: {exc}") from exc
+
+
+def _intent_occurrence(intent: Optional[dict]) -> Optional[str]:
+    if not isinstance(intent, dict):
+        return None
+    if intent.get("occurrence_id"):
+        return str(intent["occurrence_id"])
+    return None
+
+
+def remind(
+    *,
+    operation_id: str,
+    native_session_id: str,
+    terminal_id: str,
+    generation: str,
+    execution_mode: str,
+    occurrence_id: str,
+    text: str,
+    marker: str,
+    observation: Mapping[str, Any],
+    transport: NativeControlTransport,
+    fence_snapshot: Optional[Mapping[str, Any]] = None,
+    turn_state: str = "idle",
+    provider_version: Optional[str] = None,
+    steer_chord: Optional[str] = None,
+    pre_write: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
+    deadline_monotonic: Optional[float] = None,
+    supersede_ids: frozenset = frozenset(),
+    origin: str = "periodic",
+    hook_evidence: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    """Deliver one goal-context reminder through the live turn state.
+
+    Unlike :func:`queue` (refuses active) and :func:`steer` (refuses
+    idle, binds one turn), a reminder admits BOTH: observed idle takes
+    the ordinary composer+Enter submit (a fresh turn under CAO
+    continuation policy); an observed active turn takes the proven
+    steer chord after typing with ``submit=False`` (the reminder joins
+    the running turn — composer text is preserved as turn input, never
+    destroyed). The payload is labeled context restoration carrying a
+    unique marker; it is never an assignment, amendment, satisfaction,
+    or hold release.
+
+    One unresolved row per (terminal, generation): a different
+    operation id arriving while one is pending returns the pending row
+    with ``reminder_outcome == "already-pending"`` and types zero
+    bytes — never a second delivery, never a blind retry. Ambiguity
+    freezes (never resends); acceptance/completion require provider
+    evidence naming this exact operation id AND echoing the marker
+    (see :func:`record_reminder_acceptance`).
+
+    ``origin`` names which path opened the row (``"event"`` for a hook
+    compaction notification, ``"periodic"`` for a timer request) and
+    ``hook_evidence`` carries the originating run's native invocation
+    evidence (stdin session/trigger/token count). Both are frozen into
+    the posted transport record as audit evidence: the boundary
+    coalesces only on exact request id, never on these fields and
+    never on content hashes.
+    """
+    if origin not in ("event", "periodic"):
+        raise NativeControlInvalid(f"reminder origin must be 'event' or 'periodic'; got {origin!r}")
+    frozen_origin = {
+        "origin": origin,
+        "hook_evidence": dict(hook_evidence) if hook_evidence else None,
+    }
+    binding = _validate_binding(
+        operation_id=operation_id,
+        native_session_id=native_session_id,
+        terminal_id=terminal_id,
+        generation=generation,
+        execution_mode=execution_mode,
+    )
+    occurrence_id = _require_text(occurrence_id, field="occurrence_id")
+    marker = _require_text(marker, field="marker")
+    body = _require_text(text, field="text")
+    payload = f"{body}\n\n[cao-context-restoration marker:{marker}]"
+    plan = plan_composer_keystrokes(payload, provider_version=provider_version, field="text")
+    observed = _validated_turn_observation(observation)
+    # Branch selection comes from the provider detector's turn state, not
+    # from the bound turn id: a freshly rendered context reminder is valid
+    # for whichever turn is live, so unlike a work instruction it needs no
+    # turn binding to be safe. An idle claim must still be exact (a named
+    # active turn with turn_state "idle" is a caller bug, refused loudly);
+    # an active turn needs no name to be joined.
+    if turn_state not in ("idle", "active"):
+        raise NativeControlInvalid(f"turn_state must be 'idle' or 'active'; got {turn_state!r}")
+    if turn_state == "idle" and observed["active_turn_id"] is not None:
+        raise NativeControlInvalid(
+            "turn_state 'idle' contradicts an observation naming active turn "
+            f"{observed['active_turn_id']!r}; re-observe instead of guessing"
+        )
+
+    try:
+        with database.SessionLocal() as db:
+            pending = [
+                row
+                for row in _pending_reminder_rows(
+                    db, terminal_id=terminal_id, generation=generation
+                )
+                if row.operation_id not in supersede_ids
+            ]
+            for row in pending:
+                if row.operation_id == binding["operation_id"]:
+                    adopted = _row_dict(row)
+                    if _intent_occurrence(adopted.get("intent")) not in (None, occurrence_id):
+                        raise NativeControlConflict(
+                            f"operation {binding['operation_id']} already exists for occurrence "
+                            f"{_intent_occurrence(adopted.get('intent'))!r}, not "
+                            f"{occurrence_id!r}; a caller-minted id is immutable"
+                        )
+                    return {**adopted, "reminder_outcome": "adopted"}
+            if pending:
+                winner = _row_dict(pending[0])
+                if _intent_occurrence(winner.get("intent")) not in (None, occurrence_id):
+                    raise NativeControlConflict(
+                        f"terminal {terminal_id} generation {generation} has a pending "
+                        f"reminder for occurrence "
+                        f"{_intent_occurrence(winner.get('intent'))!r}, not "
+                        f"{occurrence_id!r}; the generation was reassigned, adopt nothing"
+                    )
+                return {**winner, "reminder_outcome": "already-pending"}
+    except NativeControlError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise NativeControlUnavailable(f"reminder pending check failed: {exc}") from exc
+
+    record, is_new = _open(
+        kind=KIND_REMIND,
+        binding=binding,
+        turn_id=None,
+        payload_sha256=plan["payload_sha256"],
+        observation=observed,
+        keystroke_plan=plan,
+        occurrence_id=occurrence_id,
+    )
+    if not is_new:
+        if _intent_occurrence(record.get("intent")) not in (None, occurrence_id):
+            raise NativeControlConflict(
+                f"operation {binding['operation_id']} already exists for occurrence "
+                f"{_intent_occurrence(record.get('intent'))!r}, not {occurrence_id!r}; "
+                "a caller-minted id is immutable"
+            )
+        return {**record, "reminder_outcome": "adopted"}
+
+    try:
+        _assert_session_unblocked(
+            native_session_id=binding["native_session_id"],
+            operation_id=binding["operation_id"],
+        )
+        _assert_attachment_owner(
+            native_session_id=binding["native_session_id"],
+            terminal_id=binding["terminal_id"],
+            generation=binding["generation"],
+            execution_mode=binding["execution_mode"],
+        )
+        _assert_deliverable(plan)
+        chord = None
+        if turn_state == "active":
+            if steer_chord is None:
+                raise _Refusal(
+                    REFUSED_UNPROVEN_STEER,
+                    "the turn is active but no proven steer chord was supplied; an "
+                    "active-turn reminder is a steer, never a blind submit",
+                )
+            proven = steer_chords(provider_version)
+            if steer_chord not in proven:
+                raise _Refusal(
+                    REFUSED_UNPROVEN_STEER,
+                    f"steer chord {steer_chord!r} is not in the proven set for provider "
+                    f"version {provider_version!r}; refusing rather than typing an "
+                    "unproven key at a live turn",
+                )
+            send_chord = getattr(transport, "send_chord", None)
+            if not callable(send_chord):
+                raise _Refusal(
+                    REFUSED_UNSUPPORTED_CONTROL,
+                    "the turn is active but this transport has no steer-chord "
+                    "primitive; refusing rather than submitting into a live turn",
+                )
+            chord = steer_chord
+        if pre_write is not None:
+            # Last safe point: the caller's admission re-read (fork legs:
+            # lifecycle, waits, occurrence currency) runs after the
+            # journal claim and every gate above, immediately before the
+            # first byte. A refusal here journals zero bytes typed.
+            hook_refusal = pre_write()
+            if hook_refusal is not None:
+                reason, detail = hook_refusal
+                if reason not in REFUSAL_REASONS:
+                    raise NativeControlInvalid(
+                        f"the pre-write hook answered with unknown refusal reason " f"{reason!r}"
+                    )
+                return {
+                    **_refuse(binding["operation_id"], _Refusal(reason, detail)),
+                    "reminder_outcome": "refused",
+                }
+    except _Refusal as refusal:
+        return {**_refuse(binding["operation_id"], refusal), "reminder_outcome": "refused"}
+
+    # Freeze the exact effect payload: from here until POSTED the bytes
+    # are fixed, so a crash cannot be re-rendered into different bytes.
+    frozen = _canonical(
+        {
+            "frozen_payload_sha256": plan["payload_sha256"],
+            "marker": marker,
+            "branch": "steer" if chord else "submit",
+            "turn_state": turn_state,
+            "chord": chord,
+            "occurrence_id": occurrence_id,
+            # The conductor-verified fence (goal version, hold high-water
+            # mark) frozen for audit. The fork cannot re-read conductor
+            # legs; their truth across the effect comes from the project
+            # flock the caller holds shared — no conductor writer can
+            # commit between verification and first byte.
+            "fence_snapshot": dict(fence_snapshot) if fence_snapshot else None,
+        }
+    )
+    try:
+        _update(
+            operation_id=binding["operation_id"],
+            from_states=frozenset({INTENDED}),
+            to_state=WRITING,
+            extra={"transport_json": frozen},
+        )
+    except NativeControlError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise NativeControlUnavailable(f"reminder freeze failed: {exc}") from exc
+
+    try:
+        if chord is None:
+            result = execute_composer_plan(
+                plan=plan, transport=transport, deadline_monotonic=deadline_monotonic
+            )
+            enter_sent = bool(result.get("enter_sent"))
+        else:
+            execute_composer_plan(
+                plan=plan, transport=transport, submit=False, deadline_monotonic=deadline_monotonic
+            )
+            # The proven steer primitive (send_steer_chord under the
+            # control-input transport), never a bare control key: only
+            # the pinned chord may join a live turn.
+            getattr(transport, "send_chord")(chord)
+            enter_sent = False
+    except ComposerWriteInterrupted as exc:
+        return {
+            **mark_ambiguous(operation_id=binding["operation_id"], reason=exc.detail),
+            "reminder_outcome": "ambiguous",
+        }
+
+    return {
+        **_update(
+            operation_id=binding["operation_id"],
+            from_states=frozenset({WRITING}),
+            to_state=POSTED,
+            extra={
+                "posted_at": _now(),
+                "transport_json": _canonical(
+                    {
+                        "frozen_payload_sha256": plan["payload_sha256"],
+                        "marker": marker,
+                        # Audit evidence only, never identity: the boundary
+                        # coalesces solely on the exact request id. The origin
+                        # and native fields below record which invocation
+                        # opened the row; the content hash lets an operator
+                        # compare bytes after the fact.
+                        "context_sha256": canonical_sha256({"context": body}),
+                        **frozen_origin,
+                        "branch": "steer" if chord else "submit",
+                        "enter_sent": enter_sent,
+                        "transport_contract": "literal-lines-composer-breaks-then-explicit-boundary",
+                    }
+                ),
+            },
+        ),
+        "reminder_outcome": "posted",
+    }
+
+
+def record_reminder_acceptance(
+    *,
+    operation_id: str,
+    observation: Mapping[str, Any],
+    expected_marker: str,
+    outcome: str = COMPLETED,
+) -> dict[str, Any]:
+    """Accept/complete a posted reminder on exact-id marker-echo evidence.
+
+    Beyond :func:`record_observation`'s exact-id rule, the evidence must
+    echo the frozen marker: only provider-observed model-context entry
+    — the marker reaching the model — completes the receipt and (via
+    the caller) resets the eligible-time clock. A tmux write alone
+    stays POSTED; an observation without the echo is invalid evidence,
+    not a transport failure.
+    """
+    if outcome not in {ACCEPTED, COMPLETED}:
+        raise NativeControlInvalid(
+            f"reminder outcome must be accepted or completed; got {outcome!r}"
+        )
+    evidence = _validated_provider_observation(observation, operation_id=operation_id)
+    echo = (evidence.get("evidence") or {}).get("marker_echo")
+    if echo != expected_marker:
+        raise NativeControlInvalid(
+            "reminder evidence does not echo the frozen marker: provider "
+            "model-context entry is unproven, the operation stays posted"
+        )
+    return record_observation(operation_id=operation_id, observation=observation, outcome=outcome)
+
+
+#: Wire-evidence scan bounds. Wire files carry full tool schemas and can
+#: be megabytes; the scan reads only the tail of a few files and parses
+#: only lines containing the marker, so a reconcile stays a short local
+#: read, never a session replay.
+WIRE_SCAN_MAX_FILES = 8
+WIRE_SCAN_TAIL_BYTES = 256 * 1024
+WIRE_SCAN_MAX_MATCH_LINES = 200
+
+
+def _wire_texts(record: Mapping[str, Any]):
+    """Yield the text payloads of one wire record, if it carries any."""
+    for key in ("message", "input", "content"):
+        payload = record.get(key)
+        if isinstance(payload, dict) and payload.get("role") == "user":
+            payload = payload.get("content")
+        if isinstance(payload, list):
+            for part in payload:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        yield text
+        elif isinstance(payload, str) and payload:
+            yield payload
+
+
+def scan_wire_for_marker(*, session_home: object, marker: str) -> dict[str, Any]:
+    """Search Kimi session wire files for one reminder marker.
+
+    ``session_home`` is one KIMI_CODE_HOME root (managed private home
+    or the provider default) or a list of them; sessions live under
+    each root's ``sessions/`` tree.  Returns ``{"model_context_entry",
+    "prompt_accepted", "files_scanned"}`` where each hit is
+    ``{"wire_path", "wire_time", "wire_type"}`` or ``None``.
+
+    A ``context.append_message`` with role ``user`` carrying the marker
+    is model-context entry — the provider's own record that the text
+    reached the model.  A ``turn.prompt`` / ``turn.steer`` /
+    ``prompt.accepted`` carrying it is the provider taking the input.
+    Anything else (or an unreadable home) is no evidence, never an
+    inference: the caller leaves the row unresolved.
+    """
+    import glob as _glob
+    import os as _os
+
+    found: dict[str, Any] = {
+        "model_context_entry": None,
+        "prompt_accepted": None,
+        "files_scanned": 0,
+    }
+    marker = marker.strip() if isinstance(marker, str) else ""
+    if not marker:
+        return found
+    if isinstance(session_home, (list, tuple)):
+        homes = [session_home_item for session_home_item in session_home]
+    else:
+        homes = [session_home]
+    paths: list[str] = []
+    for home_item in homes:
+        try:
+            home = _os.fspath(home_item)
+        except TypeError:
+            continue
+        if not home or not _os.path.isdir(home):
+            continue
+        patterns = (
+            _os.path.join(home, "sessions", "*", "session_*", "agents", "*", "wire.jsonl"),
+            _os.path.join(home, "sessions", "*", "agents", "*", "wire.jsonl"),
+        )
+        for pattern in patterns:
+            try:
+                paths.extend(_glob.glob(pattern))
+            except Exception:  # noqa: BLE001 - a bad pattern scans nothing
+                continue
+    try:
+        paths = sorted(set(paths), key=lambda p: _os.path.getmtime(p), reverse=True)
+    except Exception:  # noqa: BLE001 - mtime failure keeps glob order
+        paths = sorted(set(paths))
+    for path in paths[:WIRE_SCAN_MAX_FILES]:
+        try:
+            size = _os.path.getsize(path)
+            with open(path, "rb") as handle:
+                # A submitted marker stays in the append-only wire
+                # forever: read small files whole so an old proof is
+                # never missed (a miss could duplicate bytes another
+                # delivery already proved); tail only the large ones.
+                if size > WIRE_SCAN_TAIL_BYTES:
+                    handle.seek(size - WIRE_SCAN_TAIL_BYTES)
+                    handle.readline()  # drop a torn first line
+                tail = handle.read()
+        except OSError:
+            continue
+        found["files_scanned"] += 1
+        try:
+            text = tail.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - undecodable tail scans nothing
+            continue
+        if marker not in text:
+            continue
+        checked = 0
+        for line in text.splitlines():
+            if marker not in line:
+                continue
+            if checked >= WIRE_SCAN_MAX_MATCH_LINES:
+                break
+            checked += 1
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            kind = record.get("type")
+            texts = [t for t in _wire_texts(record) if marker in t]
+            if not texts:
+                continue
+            hit = {"wire_path": path, "wire_time": record.get("time"), "wire_type": kind}
+            if (
+                kind == "context.append_message"
+                and isinstance(record.get("message"), dict)
+                and record["message"].get("role") == "user"
+            ):
+                if found["model_context_entry"] is None:
+                    found["model_context_entry"] = hit
+            elif kind in ("turn.prompt", "turn.steer", "prompt.accepted"):
+                if found["prompt_accepted"] is None:
+                    found["prompt_accepted"] = hit
+            if found["model_context_entry"] is not None and found["prompt_accepted"] is not None:
+                return found
+    return found
+
+
+def reconcile_reminder_from_wire(
+    *,
+    operation_id: str,
+    marker: str,
+    session_home: object,
+) -> dict[str, Any]:
+    """Resolve one reminder row from the provider's own wire evidence.
+
+    The production clear for a posted — or ambiguously frozen — reminder:
+    it scans the generation's Kimi session wire files for the frozen
+    marker and moves the row on exact-id evidence only.  Model-context
+    entry completes; bare prompt acceptance accepts; anything else
+    leaves the row untouched.  Terminal rows (completed/refused) and
+    rows the effect path still owns (intended/writing) are never
+    touched — an ambiguous receipt is never erased, and nothing here
+    invents an acknowledgement: no wire echo means no movement.
+
+    Returns ``{"reconciled", "reason", "record", "evidence"}``.
+    """
+    try:
+        row = get(operation_id)
+    except NativeControlError as exc:
+        return {
+            "reconciled": False,
+            "reason": f"lookup failed: {exc}",
+            "record": None,
+            "evidence": None,
+        }
+    if row is None:
+        return {
+            "reconciled": False,
+            "reason": "unknown-operation",
+            "record": None,
+            "evidence": None,
+        }
+    state = row.get("state")
+    if state in (COMPLETED, REFUSED):
+        return {"reconciled": False, "reason": f"already-{state}", "record": row, "evidence": None}
+    if state in (INTENDED, WRITING):
+        return {
+            "reconciled": False,
+            "reason": "owned-by-effect-path",
+            "record": row,
+            "evidence": None,
+        }
+    if state not in (POSTED, ACCEPTED, AMBIGUOUS):
+        return {
+            "reconciled": False,
+            "reason": f"unexpected-state-{state}",
+            "record": row,
+            "evidence": None,
+        }
+    scan = scan_wire_for_marker(session_home=session_home, marker=marker)
+    entry = scan.get("model_context_entry")
+    accepted = scan.get("prompt_accepted")
+    if entry is None and accepted is None:
+        return {"reconciled": False, "reason": "no-wire-evidence", "record": row, "evidence": scan}
+    if entry is not None:
+        outcome: str = COMPLETED
+        hit = entry
+    elif state == ACCEPTED:
+        return {"reconciled": False, "reason": "already-accepted", "record": row, "evidence": scan}
+    else:
+        outcome = ACCEPTED
+        hit = accepted
+    observation = provider_observation(
+        operation_id=operation_id,
+        observed_at=_now(),
+        observer="kimi-wire-scan",
+        evidence={
+            "marker_echo": marker,
+            "wire_path": hit.get("wire_path") if isinstance(hit, dict) else None,
+            "wire_time": hit.get("wire_time") if isinstance(hit, dict) else None,
+            "wire_type": hit.get("wire_type") if isinstance(hit, dict) else None,
+        },
+    )
+    try:
+        if state == AMBIGUOUS:
+            record = reconcile(operation_id=operation_id, observation=observation, outcome=outcome)
+        elif outcome == COMPLETED:
+            record = record_reminder_acceptance(
+                operation_id=operation_id,
+                observation=observation,
+                expected_marker=marker,
+                outcome=COMPLETED,
+            )
+        else:
+            record = record_observation(
+                operation_id=operation_id, observation=observation, outcome=ACCEPTED
+            )
+    except NativeControlError as exc:
+        return {
+            "reconciled": False,
+            "reason": f"evidence rejected: {exc}",
+            "record": row,
+            "evidence": scan,
+        }
+    return {"reconciled": True, "reason": outcome, "record": record, "evidence": scan}
+
+
+def unresolved_reminders_for(*, terminal_id: str, generation: str) -> list:
+    """All unresolved KIND_REMIND rows for one scope, oldest first.
+
+    Includes ambiguous rows: the boundary — not the journal — decides
+    which of them still constrain a new delivery, by live-verifying
+    the composer.
+    """
+    try:
+        with database.SessionLocal() as db:
+            return [
+                _row_dict(row)
+                for row in _pending_reminder_rows(
+                    db, terminal_id=terminal_id, generation=generation
+                )
+            ]
+    except NativeControlError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise NativeControlUnavailable(f"reminder lookup failed: {exc}") from exc
+
+
+def latest_terminal_reminder_for(*, terminal_id: str, generation: str) -> Optional[dict]:
+    """The newest terminal (completed/refused) KIND_REMIND row, if any.
+
+    Read-only health evidence for the conductor's hook-health path: a
+    recently completed event-origin row proves the event path delivered.
+    Metadata only; the caller never receives reminder text.
+    """
+    try:
+        with database.SessionLocal() as db:
+            row = (
+                db.query(database.KimiNativeControlOperationModel)
+                .filter(
+                    database.KimiNativeControlOperationModel.kind == KIND_REMIND,
+                    database.KimiNativeControlOperationModel.terminal_id == terminal_id,
+                    database.KimiNativeControlOperationModel.generation == generation,
+                    database.KimiNativeControlOperationModel.state.in_((COMPLETED, REFUSED)),
+                )
+                .order_by(
+                    database.KimiNativeControlOperationModel.updated_at.desc(),
+                    database.KimiNativeControlOperationModel.operation_id.desc(),
+                )
+                .first()
+            )
+            return _row_dict(row) if row is not None else None
+    except NativeControlError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise NativeControlUnavailable(f"terminal reminder lookup failed: {exc}") from exc
+
+
+def reconcile_reminder_composer(
+    *,
+    operation_id: str,
+    marker: str,
+    pane_id: str,
+    session_home: object,
+    viewport_rows: Optional[Sequence[str]] = None,
+) -> dict[str, Any]:
+    """Reconcile one reminder row against the live composer and the wire.
+
+    The narrow existing-session path for partial owned bytes: capture
+    the pane viewport and look for this operation's frozen marker.
+    ``viewport_rows`` shares one capture across several rows (and the
+    boundary's emptiness gate); None captures here.
+
+    - Marker visible in the viewport: our bytes sit unsubmitted in the
+      composer (partial delivery). The row goes AMBIGUOUS honestly —
+      never completed, never erased, and crucially never re-typed over.
+      No keystroke is sent and no text is deleted here: user input is
+      never erased blindly.
+    - Marker absent: our bytes left the composer. The wire decides:
+      a marker echo completes/accepts via the existing verbs; no echo
+      means the bytes' fate is unproven (submitted-then-lost, deleted,
+      or never landed) and the row goes AMBIGUOUS honestly. Marker
+      absence is NOT composer emptiness: a marker-free partial or an
+      operator draft may still sit there, so delivery permission always
+      needs the boundary's separate emptiness gate.
+    - Capture failure: no evidence either way; the row is untouched.
+
+    Returns ``{"reconciled", "reason", "record", "composer_holds_marker",
+    "evidence", "viewport_rows"}`` where ``composer_holds_marker`` is
+    True/False/None (unknown) and ``viewport_rows`` echoes the rows the
+    marker check read (or None when nothing was captured).
+    """
+    try:
+        row = get(operation_id)
+    except NativeControlError as exc:
+        return {
+            "reconciled": False,
+            "reason": f"lookup failed: {exc}",
+            "record": None,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
+    if row is None:
+        return {
+            "reconciled": False,
+            "reason": "unknown-operation",
+            "record": None,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
+    state = row.get("state")
+    if state in (COMPLETED, REFUSED):
+        return {
+            "reconciled": False,
+            "reason": f"already-{state}",
+            "record": row,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
+    if state in (INTENDED, WRITING):
+        return {
+            "reconciled": False,
+            "reason": "owned-by-effect-path",
+            "record": row,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
+    if state not in (POSTED, ACCEPTED, AMBIGUOUS):
+        return {
+            "reconciled": False,
+            "reason": f"unexpected-state-{state}",
+            "record": row,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
+    if viewport_rows is None:
+        try:
+            from cli_agent_orchestrator.services import native_pane_input as _pane
+
+            viewport_rows = list(
+                _pane.capture_pane_screen(
+                    pane_id, timeout=_pane._OBSERVATION_CAPTURE_TIMEOUT_SECONDS
+                )
+            )
+        except Exception:  # noqa: BLE001 - capture failure is no evidence
+            return {
+                "reconciled": False,
+                "reason": "composer-unreadable",
+                "record": row,
+                "composer_holds_marker": None,
+                "evidence": None,
+                "viewport_rows": None,
+            }
+    else:
+        viewport_rows = list(viewport_rows)
+    visible = "\n".join(viewport_rows)
+    if marker and marker in visible:
+        if state == AMBIGUOUS:
+            return {
+                "reconciled": False,
+                "reason": "already-ambiguous",
+                "record": row,
+                "composer_holds_marker": True,
+                "evidence": None,
+                "viewport_rows": viewport_rows,
+            }
+        record = mark_ambiguous(
+            operation_id=operation_id,
+            reason="partial owned bytes visible unsubmitted in the "
+            "composer; fate unknown, will not compound",
+        )
+        return {
+            "reconciled": True,
+            "reason": "ambiguous-partial-composer",
+            "record": record,
+            "composer_holds_marker": True,
+            "evidence": None,
+            "viewport_rows": viewport_rows,
+        }
+    settled = reconcile_reminder_from_wire(
+        operation_id=operation_id, marker=marker, session_home=session_home
+    )
+    if settled.get("reconciled"):
+        settled["composer_holds_marker"] = False
+        settled["viewport_rows"] = viewport_rows
+        return settled
+    if state == AMBIGUOUS:
+        return {
+            "reconciled": False,
+            "reason": "already-ambiguous",
+            "record": row,
+            "composer_holds_marker": False,
+            "evidence": settled.get("evidence"),
+            "viewport_rows": viewport_rows,
+        }
+    # Marker-absent says only that OUR marker bytes are not visible;
+    # it never proves the composer empty (a marker-free partial or an
+    # operator draft may sit there). Delivery permission is decided by
+    # the boundary's composer-emptiness gate, never by this reason.
+    record = mark_ambiguous(
+        operation_id=operation_id,
+        reason="owned bytes absent from the composer but unproven in "
+        "the provider wire; fate unknown, marker absent "
+        "(composer emptiness unproven)",
+    )
+    return {
+        "reconciled": True,
+        "reason": "ambiguous-unproven-clear",
+        "record": record,
+        "composer_holds_marker": False,
+        "evidence": settled.get("evidence"),
+        "viewport_rows": viewport_rows,
+    }
+
+
+def refuse_reminder(
+    *,
+    operation_id: str,
+    native_session_id: str,
+    terminal_id: str,
+    generation: str,
+    execution_mode: str,
+    occurrence_id: str,
+    text: str,
+    marker: str,
+    observation: Mapping[str, Any],
+    reason: str,
+    detail: str,
+) -> dict[str, Any]:
+    """Journal a typed refusal for a reminder that typed zero bytes.
+
+    The canonical writer for the ``REFUSED_WAIT_COVER`` /
+    ``REFUSED_LIFECYCLE`` / ``REFUSED_OCCURRENCE`` fence answers: the
+    boundary journals the refusal against the dispatch's operation id
+    instead of answering an unrecorded refusal, so a later reader can
+    tell a covered worker from a moved occurrence.  A replayed id
+    returns its existing row unchanged.
+    """
+    if reason not in REFUSAL_REASONS:
+        raise NativeControlInvalid(f"unknown refusal reason {reason!r}")
+    binding = _validate_binding(
+        operation_id=operation_id,
+        native_session_id=native_session_id,
+        terminal_id=terminal_id,
+        generation=generation,
+        execution_mode=execution_mode,
+    )
+    occurrence_id = _require_text(occurrence_id, field="occurrence_id")
+    marker = _require_text(marker, field="marker")
+    body = _require_text(text, field="text")
+    plan = plan_composer_keystrokes(
+        f"{body}\n\n[cao-context-restoration marker:{marker}]", field="text"
+    )
+    observed = _validated_turn_observation(observation)
+    record, is_new = _open(
+        kind=KIND_REMIND,
+        binding=binding,
+        turn_id=None,
+        payload_sha256=plan["payload_sha256"],
+        observation=observed,
+        keystroke_plan=plan,
+        occurrence_id=occurrence_id,
+    )
+    if not is_new:
+        return record
+    return _refuse(operation_id, _Refusal(reason, detail))
+
+
 def control(
     *,
     operation_id: str,
@@ -1898,7 +2833,7 @@ def mark_ambiguous(*, operation_id: str, reason: str) -> dict[str, Any]:
     try:
         return _update(
             operation_id=operation_id,
-            from_states=frozenset({INTENDED, POSTED, ACCEPTED, AMBIGUOUS}),
+            from_states=frozenset({INTENDED, WRITING, POSTED, ACCEPTED, AMBIGUOUS}),
             to_state=AMBIGUOUS,
             extra={"ambiguity_reason": detail},
         )
@@ -1955,6 +2890,8 @@ def unresolved_ambiguity(native_session_id: str) -> Optional[dict[str, Any]]:
 
     Exposed so a caller can see *why* it is blocked and go find the
     evidence, rather than discovering the block only as a refusal.
+    Mirrors the gate: ambiguous reminders never block (see
+    :func:`_assert_session_unblocked`), so they are not reported here.
     """
     try:
         with database.SessionLocal() as db:
@@ -1964,6 +2901,7 @@ def unresolved_ambiguity(native_session_id: str) -> Optional[dict[str, Any]]:
                     database.KimiNativeControlOperationModel.native_session_id
                     == _require_text(native_session_id, field="native_session_id"),
                     database.KimiNativeControlOperationModel.state == AMBIGUOUS,
+                    database.KimiNativeControlOperationModel.kind != KIND_REMIND,
                 )
                 .first()
             )

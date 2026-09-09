@@ -717,15 +717,29 @@ def _with_session(fn: Callable[[Any], _T], db: Any, *, unavailable: str) -> _T:
     raise TaskOccurrenceUnavailable(f"{unavailable}: {last_error}")
 
 
+def _occurrence_session_fence(session_name: str):
+    """Session write fence for occurrence open/finalize (cond-0845).
+
+    Occurrence disposal and succession rebind the exact identity a
+    restoration delivery re-verifies; both sides take the session
+    write claim, so a delivery and a succession are mutually exclusive.
+    Short transactions only, never across dispatch or other I/O.
+    """
+    from cli_agent_orchestrator.services.callback_recovery import session_lifecycle_write_claim
+
+    return session_lifecycle_write_claim(session_name)
+
+
 def open_occurrence(request: OpenRequest, db: Any = None) -> dict[str, Any]:
     """Open one task/round occurrence. Performs no dispatch and no effect."""
     if not isinstance(request, OpenRequest):
         raise TaskOccurrenceInvalid(f"request must be an OpenRequest; got {type(request).__name__}")
-    return _with_session(
-        lambda session: _open_once(session, request),
-        db,
-        unavailable="concurrent task-occurrence opens kept conflicting",
-    )
+    with _occurrence_session_fence(request.session_name):
+        return _with_session(
+            lambda session: _open_once(session, request),
+            db,
+            unavailable="concurrent task-occurrence opens kept conflicting",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1004,11 +1018,16 @@ def finalize_occurrence(request: FinalizeRequest, db: Any = None) -> dict[str, A
         raise TaskOccurrenceInvalid(
             f"request must be a FinalizeRequest; got {type(request).__name__}"
         )
-    return _with_session(
-        lambda session: _finalize_once(session, request),
-        db,
-        unavailable="concurrent finalize writes kept conflicting",
-    )
+    # The request names no session: resolve it from the row (session
+    # never moves for an occurrence; unknown ids raise here exactly as
+    # the write below would), then fence the write.
+    current = get_occurrence(request.task_occurrence_id)
+    with _occurrence_session_fence(current["session_name"]):
+        return _with_session(
+            lambda session: _finalize_once(session, request),
+            db,
+            unavailable="concurrent finalize writes kept conflicting",
+        )
 
 
 # ---------------------------------------------------------------------------

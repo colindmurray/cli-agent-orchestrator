@@ -4728,6 +4728,28 @@ async def _launch_native_tui(
                 kimi_home=environment["KIMI_CODE_HOME"],
                 working_directory=record["working_directory"],
             )
+            # Kimi restoration rides a generation-private KIMI_CODE_HOME:
+            # the composed config.toml carries exactly one managed
+            # PostCompact entry invoking the notify wrapper with this
+            # generation baked from the launch record. The hook notifies
+            # only (PostCompact output is ignored provider-side); CAO
+            # delivery goes through the admitting context-restore
+            # boundary. Degradation is to restoration-uninstalled, never
+            # a launch refusal.
+            from cli_agent_orchestrator.services import kimi_context_restore
+
+            environment, installation = kimi_context_restore.prepare_kimi_restoration(
+                record=record,
+                base_environment=environment,
+                companion_dir=COMPANION_DIR,
+            )
+            if record.get("reservation_id"):
+                _record_context_restoration(record["reservation_id"], installation)
+            if installation.get("degraded_reason") is not None:
+                logger.warning(
+                    "kimi context restoration degraded: %s",
+                    installation["degraded_reason"],
+                )
         if provider == "codex":
             # Passive goal restoration rides a generation-private CODEX_HOME
             # (Kimi kimi-home precedent): the composed config.toml carries

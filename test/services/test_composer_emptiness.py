@@ -364,3 +364,90 @@ class TestObserveComposerEmpty:
             provider="future", rule="some-future-rule", styled=False, evidence=""
         )
         assert npi.observe_composer_empty("%1", pin, screen=lambda: ["x"]) is None
+
+
+class TestKimi0420LiveFrames:
+    """cond-0845: the installed 0.42.0 composer, read live, not modeled.
+
+    Fixtures are byte-verbatim tmux captures from the Gemini driver
+    probe (ecb73a1c, zero model requests) at 160x40 — never
+    hand-drawn frames. The unstyled kimi-composer-box rule classifies
+    all five actual states as probed.
+    """
+
+    @staticmethod
+    def _frame(name):
+        from pathlib import Path
+
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "providers"
+            / "fixtures"
+            / f"kimi_code_0_42_0_composer_{name}.raw.txt"
+        )
+        return path.read_text().splitlines()
+
+    def test_resolver_selects_the_0420_entry(self):
+        pin = npi.composer_emptiness_pin_for("kimi_cli", "0.42.0")
+        assert pin is not None
+        assert pin.rule == "kimi-composer-box"
+        assert pin.styled is False
+        assert pin.provider == "kimi_cli"
+        for token in ("0.42.0", "3f632148344f68c15633215244e1ca8c106116051cd0e744968906773230930a"):
+            assert token in pin.evidence, token
+
+    def test_actual_empty_idle_proves_empty(self):
+        pin = npi.composer_emptiness_pin_for("kimi_cli", "0.42.0")
+        assert pin is not None
+        rows = self._frame("empty_idle")
+        assert len(rows) == 40
+        assert npi.observe_composer_empty("%1", pin, screen=lambda: rows) is True
+
+    def test_actual_cleared_empty_proves_empty(self):
+        pin = npi.composer_emptiness_pin_for("kimi_cli", "0.42.0")
+        assert pin is not None
+        rows = self._frame("cleared_empty")
+        assert npi.observe_composer_empty("%1", pin, screen=lambda: rows) is True
+
+    def test_actual_ordinary_draft_proves_nonempty(self):
+        pin = npi.composer_emptiness_pin_for("kimi_cli", "0.42.0")
+        assert pin is not None
+        rows = self._frame("ordinary_draft")
+        assert any("ordinary draft test payload 12345" in row for row in rows)
+        assert npi.observe_composer_empty("%1", pin, screen=lambda: rows) is False
+
+    def test_actual_marker_free_partial_proves_nonempty(self):
+        pin = npi.composer_emptiness_pin_for("kimi_cli", "0.42.0")
+        assert pin is not None
+        rows = self._frame("partial_reminder")
+        assert any("Restoration context:" in row for row in rows)
+        assert not any("cao-context-restoration marker:" in row for row in rows)
+        assert npi.observe_composer_empty("%1", pin, screen=lambda: rows) is False
+
+    def test_actual_wrapped_multiline_proves_nonempty(self):
+        pin = npi.composer_emptiness_pin_for("kimi_cli", "0.42.0")
+        assert pin is not None
+        rows = self._frame("wrapped_multiline")
+        assert any("line_1_long_draft_payload" in row for row in rows)
+        assert npi.observe_composer_empty("%1", pin, screen=lambda: rows) is False
+
+    def test_gate_consumes_the_0420_observer(self):
+        from cli_agent_orchestrator.services import kimi_context_restore as kr
+
+        assert (
+            kr._composer_empty_gate(
+                pane_id="%1",
+                provider_version="0.42.0",
+                viewport_rows=self._frame("empty_idle"),
+            )
+            is None
+        )
+        gate = kr._composer_empty_gate(
+            pane_id="%1",
+            provider_version="0.42.0",
+            viewport_rows=self._frame("partial_reminder"),
+        )
+        assert gate is not None
+        from cli_agent_orchestrator.services import kimi_native_control as knc
+
+        assert gate[0] == knc.REFUSED_COMPOSER_NONEMPTY

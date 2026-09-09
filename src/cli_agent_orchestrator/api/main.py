@@ -3842,6 +3842,127 @@ async def send_terminal_input(
         )
 
 
+class ContextRestoreBody(BaseModel):
+    operation_id: str
+    occurrence_id: str
+    generation: Optional[str] = None
+    native_session_id: Optional[str] = None
+    goal_version: Optional[int] = None
+    hold_high_water: Optional[int] = None
+    flock_path: Optional[str] = None
+    # The canonical hook-context answer; the boundary renders delivery
+    # bytes from it through the single restoration renderer.
+    projection: Optional[Dict[str, Any]] = None
+    # The originating run's native invocation evidence (event path)
+    # or None (periodic request). Audit only, never identity.
+    hook_evidence: Optional[Dict[str, Any]] = None
+
+
+@app.post("/terminals/{terminal_id}/context-restore")
+async def context_restore(
+    terminal_id: TerminalId,
+    body: ContextRestoreBody,
+    _scopes: List[str] = Depends(require_any_scope(SCOPE_WRITE, SCOPE_ADMIN)),
+) -> Dict:
+    """Admit-or-refuse one CAO goal-context reminder (cond-0845 Kimi lane).
+
+    The conductor (PostCompact hook wrapper or sentinel periodic duty)
+    supplies the validated fence; this boundary re-verifies every leg
+    under the project flock (shared), the session fence, and byte
+    admission before the first provider byte, then delivers exactly one
+    KIND_REMIND through the existing pane transport. Response
+    ``status`` is posted/pending/refused/deferred/unknown/completed —
+    never a bare boolean, so a due clock can tell backoff from reset.
+    """
+    from cli_agent_orchestrator.services import kimi_context_restore
+
+    if not body.operation_id or not body.occurrence_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="operation_id and occurrence_id are required",
+        )
+    try:
+        result = await asyncio.to_thread(
+            kimi_context_restore.submit_context_reminder,
+            terminal_id=str(terminal_id),
+            operation_id=body.operation_id,
+            occurrence_id=body.occurrence_id,
+            projection=body.projection or {},
+            fence={
+                "generation": body.generation,
+                "native_session_id": body.native_session_id,
+                "goal_version": body.goal_version,
+                "hold_high_water": body.hold_high_water,
+                "flock_path": body.flock_path,
+            },
+            hook_evidence=body.hook_evidence,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"context restore failed before admission: {str(e)}",
+        )
+    if not isinstance(result, dict) or "status" not in result:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="context restore returned no status",
+        )
+    return result
+
+
+@app.get("/terminals/{terminal_id}/context-restore/pending")
+async def context_restore_pending(
+    terminal_id: TerminalId,
+    generation: Optional[str] = None,
+    _scopes: List[str] = Depends(require_any_scope(SCOPE_READ, SCOPE_WRITE, SCOPE_ADMIN)),
+) -> Dict[str, Any]:
+    """Unresolved reminder receipts plus the newest terminal one.
+
+    The conductor's per-receipt monitor (cond-0845 Sol correction):
+    retry rendezvous re-POST under a live row's own operation id, and
+    hook-health reads event-origin activity here — never a fresh id
+    while a row is outstanding. Metadata only (no reminder text), so
+    no goal content crosses into unrelated readers.
+    """
+    from cli_agent_orchestrator.services import kimi_native_control as adapter
+
+    def _meta(row: Dict[str, Any]) -> Dict[str, Any]:
+        transport = row.get("transport") or {}
+        if not isinstance(transport, dict):
+            transport = {}
+        evidence = transport.get("hook_evidence")
+        return {
+            "operation_id": row.get("operation_id"),
+            "state": row.get("state"),
+            "occurrence_id": (adapter._intent_occurrence(row.get("intent"))),
+            "origin": transport.get("origin"),
+            "hook_evidence": evidence if isinstance(evidence, dict) else None,
+            "posted_at": row.get("posted_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    try:
+        rows = await asyncio.to_thread(
+            adapter.unresolved_reminders_for,
+            terminal_id=str(terminal_id),
+            generation=generation or "",
+        )
+        last = await asyncio.to_thread(
+            adapter.latest_terminal_reminder_for,
+            terminal_id=str(terminal_id),
+            generation=generation or "",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"pending reminder lookup failed: {str(e)}",
+        )
+    return {
+        "unresolved": [_meta(r) for r in rows],
+        "last_terminal": _meta(last) if last else None,
+    }
+
+
 @app.post("/terminals/{terminal_id}/key")
 async def send_terminal_key(
     terminal_id: TerminalId,
