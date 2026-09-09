@@ -873,7 +873,8 @@ def _install_deploy_receipt(
     missing conductor tree hash, dirty worktrees, head mismatches
     against the live clones, a package-hash mismatch against the loaded
     conductor tree, and an interpreter that cannot load an installed
-    conductor with -I or disagrees with the receipt. On success copies
+    conductor with -I, imports a package that disagrees with the receipt,
+    or disagrees with the receipt itself. On success copies
     the raw bytes byte-identical into
     ``<xdg_state_home>/cao-conductor/deploy.json`` and returns its path.
     """
@@ -947,11 +948,23 @@ def _install_deploy_receipt(
             "paired-head verification requires an exact fork record"
         )
     kind = receipt.get("conduct_identity_kind")
-    manifest = (
-        install.hash_conduct_tree(str(conductor_root))
+    # Hash domain is the conduct PACKAGE (repo/conduct), exactly like
+    # deploy's conduct_src and sourcechain's package_root: the required
+    # asset lives at <package>/assets/..., so hashing the repo root can
+    # never match a genuine receipt (and legacy digests differ too).
+    package_dir = install.conduct_source_dir(str(conductor_root))
+    hash_package = (
+        install.hash_conduct_tree
         if kind == install.CONDUCT_IDENTITY_KIND
-        else install.hash_tree(str(conductor_root))
+        else install.hash_tree
     )
+    try:
+        manifest = hash_package(package_dir)
+    except OSError as exc:
+        raise AssertionError(
+            "cannot hash the conductor package at "
+            f"{package_dir} the way deploy did: {exc}"
+        ) from exc
     if install.tree_hash(manifest) != expected_hash:
         raise AssertionError(
             "deploy receipt conductor tree hash differs from the loaded "
@@ -997,6 +1010,33 @@ def _install_deploy_receipt(
                 "interpreter; set COND0845_PYTHON to "
                 f"{recorded_exe.get('path') or recorded_exe['realpath']}"
             )
+    # Which package the -I interpreter ACTUALLY loads: the same base
+    # binary in another venv can resolve a different installed conduct
+    # while the realpath/sha256 binary legs still match, so the imported
+    # package tree must equal the genuine receipt as well.
+    try:
+        imported_file = json.loads(probe.stdout).get("file")
+    except ValueError:
+        imported_file = None
+    if not isinstance(imported_file, str) or not imported_file:
+        raise AssertionError(
+            "the -I interpreter loads a conduct package with no __file__; "
+            "cannot establish the imported package root"
+        )
+    imported_root = os.path.dirname(os.path.abspath(imported_file))
+    try:
+        imported_manifest = hash_package(imported_root)
+    except OSError as exc:
+        raise AssertionError(
+            "cannot hash the -I imported conductor package at "
+            f"{imported_root}: {exc}"
+        ) from exc
+    if install.tree_hash(imported_manifest) != expected_hash:
+        raise AssertionError(
+            "the -I interpreter's imported conductor package tree hash "
+            "differs from the genuine receipt; run the deployed interpreter "
+            "whose installed package matches"
+        )
     dest = xdg_state_home / "cao-conductor" / "deploy.json"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(raw)
@@ -1054,12 +1094,21 @@ def _git_head(path: Path) -> str:
 
 
 def _receipt_case(tmp_path: Path):
-    """Hermetic conductor+fork roots with the required package asset."""
+    """Hermetic conductor+fork roots with a realistic package layout.
+
+    The package lives at ``conduct/`` inside the repo (asset at
+    ``conduct/assets/...``), exactly like the companion clone; the
+    receipt digest is minted the way deploy mints it
+    (``conduct_source_dir`` + ``hash_conduct_tree``), never from the
+    repo root.
+    """
     cond = _fake_git_root(
         tmp_path / "cond",
         {
             "conduct/__init__.py": "",
-            "assets/marshal-harness.sh": "#!/bin/sh\n",
+            "conduct/lib/sourcechain.py": "# stub\n",
+            "conduct/assets/marshal-harness.sh": "#!/bin/sh\n",
+            "README.md": "# decoy root file\n",
         },
     )
     fork = _fake_git_root(
@@ -1069,7 +1118,8 @@ def _receipt_case(tmp_path: Path):
         },
     )
     install = _real_install()
-    manifest = install.hash_conduct_tree(str(cond))
+    package_dir = install.conduct_source_dir(str(cond))
+    manifest = install.hash_conduct_tree(package_dir)
     digest = install.tree_hash(manifest)
     base = {
         "schema_version": 1,
@@ -1109,6 +1159,40 @@ def _exe_identity(python: str) -> dict:
     with open(real, "rb") as handle:
         digest = _hashlib.sha256(handle.read()).hexdigest()
     return {"path": python, "realpath": real, "sha256": digest}
+
+
+def _venv_with_installed_package(python: str, package_dir: Path, dest: Path):
+    """A real isolated interpreter whose -I import resolves our package.
+
+    Stdlib ``venv --without-pip`` (offline), then the fixture package
+    tree is laid into the venv site-packages exactly like an installed
+    wheel's package directory. Returns ``(venv_python, installed_dir)``.
+    """
+    proc = subprocess.run(
+        [python, "-m", "venv", "--without-pip", str(dest)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, f"venv creation failed: {proc.stderr[-500:]}"
+    venv_python = str(dest / "bin" / "python")
+    purelib = subprocess.run(
+        [venv_python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout.strip()
+    installed = Path(purelib) / "conduct"
+    shutil.copytree(str(package_dir), str(installed))
+    probe = subprocess.run(
+        [venv_python, "-I", "-c", "import conduct; print(conduct.__file__)"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert probe.returncode == 0, f"venv cannot -I import conduct: {probe.stderr[-500:]}"
+    return venv_python, installed
 
 
 def _stage_receipt_payload() -> dict:
@@ -1269,10 +1353,70 @@ def test_deploy_receipt_interpreter_mismatch_rejected(tmp_path):
         )
 
 
-def test_deploy_receipt_copies_bytes_exactly(tmp_path):
+def test_deploy_receipt_package_domain_not_repo_root(tmp_path):
+    """P1 pin: the hash domain is repo/conduct, never the repo root.
+
+    Real install functions on the realistic fixture: the deploy-minted
+    package digest verifies, hashing the repo root raises the missing
+    required asset, and the legacy repo-root digest differs too.
+    """
+    install = _real_install()
+    cond, _, _, base = _receipt_case(tmp_path)
+    package_dir = install.conduct_source_dir(str(cond))
+    assert (
+        install.tree_hash(install.hash_conduct_tree(package_dir))
+        == base["conduct_tree_hash"]
+    )
+    with pytest.raises(FileNotFoundError, match="marshal-harness"):
+        install.hash_conduct_tree(str(cond))
+    assert install.tree_hash(install.hash_tree(str(cond))) != base["conduct_tree_hash"]
+
+
+def test_deploy_receipt_wrong_package_tree_rejected(tmp_path):
+    """Mutant: well-formed receipt attesting different package content.
+
+    Heads agree (intruder committed, receipt head updated); only the
+    content attestation differs, so the package-hash leg must fire.
+    """
     install = _real_install()
     cond, fork, _, base = _receipt_case(tmp_path)
-    python = _deployed_python_or_skip()
+    package_dir = Path(install.conduct_source_dir(str(cond)))
+    (package_dir / "lib" / "extra.py").write_text("# intruder\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(cond), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(cond),
+            "-c",
+            "user.email=cao-test@example.invalid",
+            "-c",
+            "user.name=cao-test",
+            "commit",
+            "-qm",
+            "intruder",
+        ],
+        check=True,
+    )
+    base["git_head"] = _git_head(cond)
+    src = _write_receipt(tmp_path / "receipt.json", base)
+    with pytest.raises(AssertionError, match="tree hash differs"):
+        _install_deploy_receipt(
+            receipt_path=str(src),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=tmp_path / "xdg",
+            python=sys.executable,
+            install=install,
+        )
+
+
+def test_deploy_receipt_copies_bytes_exactly(tmp_path):
+    """Raw success on a proper package: the installed copy matches."""
+    install = _real_install()
+    cond, fork, _, base = _receipt_case(tmp_path)
+    package_dir = Path(install.conduct_source_dir(str(cond)))
+    python, _ = _venv_with_installed_package(sys.executable, package_dir, tmp_path / "venv")
     base["interpreters"] = {"conduct": _exe_identity(python)}
     src = _write_receipt(tmp_path / "receipt.json", base)
     xdg = tmp_path / "xdg"
@@ -1289,6 +1433,34 @@ def test_deploy_receipt_copies_bytes_exactly(tmp_path):
     assert sorted(p.relative_to(xdg).as_posix() for p in xdg.rglob("*") if p.is_file()) == [
         "cao-conductor/deploy.json"
     ]
+
+
+def test_deploy_receipt_wrong_installed_package_rejected(tmp_path):
+    """Mutant: interpreter binary matches, the -I imported copy does not.
+
+    Same base binary in the venv (realpath/sha256 legs pass), but the
+    installed conduct content is altered after install, so the
+    imported-package leg must refuse.
+    """
+    install = _real_install()
+    cond, fork, _, base = _receipt_case(tmp_path)
+    package_dir = Path(install.conduct_source_dir(str(cond)))
+    python, installed = _venv_with_installed_package(
+        sys.executable, package_dir, tmp_path / "venv"
+    )
+    with open(installed / "__init__.py", "a", encoding="utf-8") as handle:
+        handle.write("# intruder\n")
+    base["interpreters"] = {"conduct": _exe_identity(python)}
+    src = _write_receipt(tmp_path / "receipt.json", base)
+    with pytest.raises(AssertionError, match="imported conductor package"):
+        _install_deploy_receipt(
+            receipt_path=str(src),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=tmp_path / "xdg",
+            python=python,
+            install=install,
+        )
 
 
 def test_native_goal_assignment_ok(native_pair, native_preflight, native_admission):
