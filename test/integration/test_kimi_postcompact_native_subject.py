@@ -954,16 +954,13 @@ def _install_deploy_receipt(
     # never match a genuine receipt (and legacy digests differ too).
     package_dir = install.conduct_source_dir(str(conductor_root))
     hash_package = (
-        install.hash_conduct_tree
-        if kind == install.CONDUCT_IDENTITY_KIND
-        else install.hash_tree
+        install.hash_conduct_tree if kind == install.CONDUCT_IDENTITY_KIND else install.hash_tree
     )
     try:
         manifest = hash_package(package_dir)
     except OSError as exc:
         raise AssertionError(
-            "cannot hash the conductor package at "
-            f"{package_dir} the way deploy did: {exc}"
+            "cannot hash the conductor package at " f"{package_dir} the way deploy did: {exc}"
         ) from exc
     if install.tree_hash(manifest) != expected_hash:
         raise AssertionError(
@@ -1028,8 +1025,7 @@ def _install_deploy_receipt(
         imported_manifest = hash_package(imported_root)
     except OSError as exc:
         raise AssertionError(
-            "cannot hash the -I imported conductor package at "
-            f"{imported_root}: {exc}"
+            "cannot hash the -I imported conductor package at " f"{imported_root}: {exc}"
         ) from exc
     if install.tree_hash(imported_manifest) != expected_hash:
         raise AssertionError(
@@ -1363,10 +1359,7 @@ def test_deploy_receipt_package_domain_not_repo_root(tmp_path):
     install = _real_install()
     cond, _, _, base = _receipt_case(tmp_path)
     package_dir = install.conduct_source_dir(str(cond))
-    assert (
-        install.tree_hash(install.hash_conduct_tree(package_dir))
-        == base["conduct_tree_hash"]
-    )
+    assert install.tree_hash(install.hash_conduct_tree(package_dir)) == base["conduct_tree_hash"]
     with pytest.raises(FileNotFoundError, match="marshal-harness"):
         install.hash_conduct_tree(str(cond))
     assert install.tree_hash(install.hash_tree(str(cond))) != base["conduct_tree_hash"]
@@ -1445,9 +1438,7 @@ def test_deploy_receipt_wrong_installed_package_rejected(tmp_path):
     install = _real_install()
     cond, fork, _, base = _receipt_case(tmp_path)
     package_dir = Path(install.conduct_source_dir(str(cond)))
-    python, installed = _venv_with_installed_package(
-        sys.executable, package_dir, tmp_path / "venv"
-    )
+    python, installed = _venv_with_installed_package(sys.executable, package_dir, tmp_path / "venv")
     with open(installed / "__init__.py", "a", encoding="utf-8") as handle:
         handle.write("# intruder\n")
     base["interpreters"] = {"conduct": _exe_identity(python)}
