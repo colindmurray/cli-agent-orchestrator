@@ -595,6 +595,15 @@ class TestUnknownAndMalformedAnswersDiscard:
             {"result_type": "ok"},
             {"schema": "cao-hook-context-v1", "result_type": "ok", "goal": None},
             {"schema": "cao-hook-context-v1", "result_type": "ok", "goal": ["not", "a", "dict"]},
+            # The schema gate's own pins: a renderable goal under a wrong
+            # or missing schema must still restore nothing — the fields
+            # are uninterpretable, never a guess about their meaning.
+            {
+                "schema": "other-schema-v9",
+                "result_type": "ok",
+                "goal": _ok_answer()["goal"],
+            },
+            {"result_type": "ok", "goal": _ok_answer()["goal"]},
         ],
     )
     def test_unreadable_answers_render_nothing(self, answer):
