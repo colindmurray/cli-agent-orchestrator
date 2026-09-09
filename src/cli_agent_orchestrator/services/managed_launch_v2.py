@@ -4531,9 +4531,7 @@ async def _launch_native_tui(
             )
             _ensure_locale_env(environment)
             if record.get("reservation_id"):
-                _record_context_restoration(
-                    record["reservation_id"], installation
-                )
+                _record_context_restoration(record["reservation_id"], installation)
             if installation.get("degraded_reason") is not None:
                 logger.warning(
                     "codex context restoration degraded: %s",

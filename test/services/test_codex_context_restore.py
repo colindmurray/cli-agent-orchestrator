@@ -129,9 +129,7 @@ def fake(tmp_path, monkeypatch):
     wrapper = bindir / "cao-codex-hook-context"
     wrapper.write_text(
         f"#!{sys.executable}\n"
-        "import sys; sys.path.insert(0, "
-        + repr(str(SRC_DIR))
-        + ")\n"
+        "import sys; sys.path.insert(0, " + repr(str(SRC_DIR)) + ")\n"
         "from cli_agent_orchestrator.services.codex_context_restore import main\n"
         "raise SystemExit(main())\n",
         encoding="utf-8",
@@ -165,8 +163,13 @@ def _run_wrapper(fake, stdin_bytes, *argv):
 
 
 def _hook_input(session_id=SESSION, **extra):
-    payload = {"session_id": session_id, "hook_event_name": "SessionStart",
-               "source": "compact", "cwd": "/work", "model": "gpt-5"}
+    payload = {
+        "session_id": session_id,
+        "hook_event_name": "SessionStart",
+        "source": "compact",
+        "cwd": "/work",
+        "model": "gpt-5",
+    }
     payload.update(extra)
     return json.dumps(payload).encode("utf-8")
 
@@ -228,7 +231,8 @@ class TestPrivateHome:
         provider = self._provider_home(tmp_path / "provider")
         home, degraded = restore.compose_codex_home(
             companion_dir=str(tmp_path / "companion"),
-            terminal_id="term-1", generation="gen-1",
+            terminal_id="term-1",
+            generation="gen-1",
             provider_home=str(provider),
             base_config_text=(provider / "config.toml").read_text(encoding="utf-8"),
             command="/bin/w --terminal term-1",
@@ -250,8 +254,10 @@ class TestPrivateHome:
         before = (provider / "config.toml").read_bytes()
         restore.compose_codex_home(
             companion_dir=str(tmp_path / "companion"),
-            terminal_id="term-1", generation="gen-1",
-            provider_home=str(provider), base_config_text=before.decode(),
+            terminal_id="term-1",
+            generation="gen-1",
+            provider_home=str(provider),
+            base_config_text=before.decode(),
             command="/bin/w",
         )
         assert (provider / "config.toml").read_bytes() == before
@@ -260,21 +266,30 @@ class TestPrivateHome:
     def test_missing_provider_home_still_composes(self, tmp_path):
         home, degraded = restore.compose_codex_home(
             companion_dir=str(tmp_path / "companion"),
-            terminal_id="term-1", generation="gen-1",
+            terminal_id="term-1",
+            generation="gen-1",
             provider_home=str(tmp_path / "no-such-home"),
-            base_config_text="", command="/bin/w",
+            base_config_text="",
+            command="/bin/w",
         )
         assert degraded is None
-        assert tomllib.loads((Path(home) / "config.toml").read_text())[
-            "hooks"]["SessionStart"][0]["matcher"] == "^compact$"
+        assert (
+            tomllib.loads((Path(home) / "config.toml").read_text())["hooks"]["SessionStart"][0][
+                "matcher"
+            ]
+            == "^compact$"
+        )
 
     def test_drifted_entry_degrades_loudly(self, tmp_path):
         provider = self._provider_home(tmp_path / "provider")
-        kwargs = dict(companion_dir=str(tmp_path / "companion"),
-                      terminal_id="term-1", generation="gen-1",
-                      provider_home=str(provider),
-                      base_config_text="",
-                      command="/bin/w")
+        kwargs = dict(
+            companion_dir=str(tmp_path / "companion"),
+            terminal_id="term-1",
+            generation="gen-1",
+            provider_home=str(provider),
+            base_config_text="",
+            command="/bin/w",
+        )
         home, degraded = restore.compose_codex_home(**kwargs)
         assert degraded is None
         # A successor that finds a foreign file where its link belongs
@@ -288,9 +303,14 @@ class TestPrivateHome:
 class TestWrapperProcess:
     def test_compact_restores_the_current_goal(self, fake):
         proc = _run_wrapper(
-            fake, _hook_input(),
-            "--terminal", "term-1", "--terminal-generation", "gen-1",
-            "--conduct-bin", fake["conduct"],
+            fake,
+            _hook_input(),
+            "--terminal",
+            "term-1",
+            "--terminal-generation",
+            "gen-1",
+            "--conduct-bin",
+            fake["conduct"],
         )
         assert proc.returncode == 0
         output = json.loads(proc.stdout.decode("utf-8"))
@@ -305,7 +325,10 @@ class TestWrapperProcess:
 
     def test_repeated_compact_tracks_goal_version_changes(self, fake):
         first = _run_wrapper(fake, _hook_input(), "--conduct-bin", fake["conduct"])
-        assert "version 3" in json.loads(first.stdout.decode())["hookSpecificOutput"]["additionalContext"]
+        assert (
+            "version 3"
+            in json.loads(first.stdout.decode())["hookSpecificOutput"]["additionalContext"]
+        )
         answer = _ok_answer()
         answer["goal"]["goal_version"] = 4
         answer["goal"]["objective"] = "implement the other thing"
@@ -327,11 +350,17 @@ class TestWrapperProcess:
         never defaulted, never matched against a second source."""
         # Decoy identity fields a guessed mapping might consult: the
         # wrapper must ignore all of them and forward session_id alone.
-        proc = _run_wrapper(fake, _hook_input(
-            session_id="thr_parent", agent_id="child-1",
-            transcript_path="/other/rollout.jsonl",
-            agent_transcript_path="/other/child.jsonl",
-        ), "--conduct-bin", fake["conduct"])
+        proc = _run_wrapper(
+            fake,
+            _hook_input(
+                session_id="thr_parent",
+                agent_id="child-1",
+                transcript_path="/other/rollout.jsonl",
+                agent_transcript_path="/other/child.jsonl",
+            ),
+            "--conduct-bin",
+            fake["conduct"],
+        )
         logged = [json.loads(line) for line in fake["log"].read_text().splitlines()]
         assert logged and "--native-session-id" in logged[0]
         assert logged[0][logged[0].index("--native-session-id") + 1] == "thr_parent"
@@ -345,15 +374,20 @@ class TestWrapperProcess:
         assert json.loads(proc.stdout.decode())["hookSpecificOutput"]["additionalContext"] == ""
 
     def test_missing_assignment_is_truthful_without_goal_text(self, fake):
-        answer = _ok_answer(result_type="no-assignment", goal=None,
-                            detail="no goal row is bound to occurrence 'occ-9'")
+        answer = _ok_answer(
+            result_type="no-assignment",
+            goal=None,
+            detail="no goal row is bound to occurrence 'occ-9'",
+        )
         fake["canned"].write_text(json.dumps(answer), encoding="utf-8")
         proc = _run_wrapper(fake, _hook_input(), "--conduct-bin", fake["conduct"])
         context = json.loads(proc.stdout.decode())["hookSpecificOutput"]["additionalContext"]
         assert "unavailable" in context and "occ-9" in context
         assert "implement the thing" not in context
 
-    @pytest.mark.parametrize("result_type", ["stale-generation", "dead-incarnation", "ambiguous", "no-worker"])
+    @pytest.mark.parametrize(
+        "result_type", ["stale-generation", "dead-incarnation", "ambiguous", "no-worker"]
+    )
     def test_discard_verdicts_restore_nothing(self, fake, result_type):
         answer = _ok_answer(result_type=result_type, goal=None)
         fake["canned"].write_text(json.dumps(answer), encoding="utf-8")
@@ -385,7 +419,16 @@ class TestWrapperProcess:
         steer/send/resume fields, no second mechanism."""
         proc = _run_wrapper(fake, _hook_input(), "--conduct-bin", fake["conduct"])
         text = proc.stdout.decode("utf-8")
-        for token in ("continue\":", "steer", "send", "resume", "SubagentStart", "PostCompact", "SubagentStop", "UserPromptSubmit"):
+        for token in (
+            'continue":',
+            "steer",
+            "send",
+            "resume",
+            "SubagentStart",
+            "PostCompact",
+            "SubagentStop",
+            "UserPromptSubmit",
+        ):
             assert token not in text
 
     def test_conduct_failure_exits_zero_with_empty_context(self, fake, monkeypatch):
@@ -433,10 +476,10 @@ class TestPrepare:
         provider.mkdir()
         (provider / "config.toml").write_text('model = "gpt-5"\n', encoding="utf-8")
         base_env["CODEX_HOME"] = str(provider)
-        record = {"terminal_id": "term-9", "generation": "gen-4",
-                  "reservation_id": "res-1"}
+        record = {"terminal_id": "term-9", "generation": "gen-4", "reservation_id": "res-1"}
         env, installation = restore.prepare_codex_restoration(
-            record=record, base_environment=base_env,
+            record=record,
+            base_environment=base_env,
             companion_dir=str(tmp_path / "companion"),
         )
         assert installation["mechanism"] == restore.MECHANISM
@@ -450,7 +493,8 @@ class TestPrepare:
         base_env = {"PATH": str(empty)}
         record = {"terminal_id": "term-9", "generation": "gen-4"}
         env, installation = restore.prepare_codex_restoration(
-            record=record, base_environment=base_env,
+            record=record,
+            base_environment=base_env,
             companion_dir=str(tmp_path / "companion"),
         )
         assert installation["mechanism"] is None
@@ -460,6 +504,7 @@ class TestPrepare:
     def test_prepare_requires_record_binding(self, tmp_path):
         with pytest.raises(KeyError):
             restore.prepare_codex_restoration(
-                record={}, base_environment={},
+                record={},
+                base_environment={},
                 companion_dir=str(tmp_path / "companion"),
             )

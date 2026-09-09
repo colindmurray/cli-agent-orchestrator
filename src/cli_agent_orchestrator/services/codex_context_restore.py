@@ -192,15 +192,17 @@ MANAGED_CONFIG_FILENAME = "config.toml"
 #: successor generation resume or observe its predecessor's state — the
 #: exact staleness class this increment fights. ``auth.json`` links back
 #: (identity, not state); the doctor probe confirms it is home-scoped.
-_LINK_BACK_DENY = frozenset({
-    "config.toml",
-    "state_5.sqlite",
-    "logs_2.sqlite",
-    "goals_1.sqlite",
-    "memories_1.sqlite",
-    "queue_1.sqlite",
-    "thread_history_1.sqlite",
-})
+_LINK_BACK_DENY = frozenset(
+    {
+        "config.toml",
+        "state_5.sqlite",
+        "logs_2.sqlite",
+        "goals_1.sqlite",
+        "memories_1.sqlite",
+        "queue_1.sqlite",
+        "thread_history_1.sqlite",
+    }
+)
 
 #: Projection answers that carry a projectable goal.
 _OK_RESULT = "ok"
