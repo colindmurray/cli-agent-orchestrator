@@ -833,8 +833,8 @@ def _observe_branch(
     branch only when a proven chord exists, else the adapter refuses
     (missing capability, never a blind submit into a live turn).
     """
-    from cli_agent_orchestrator.services import managed_launch_v2
     from cli_agent_orchestrator.models.terminal import TerminalStatus
+    from cli_agent_orchestrator.services import managed_launch_v2
 
     try:
         status = managed_launch_v2._observe_turn_state(
@@ -977,9 +977,11 @@ def submit_context_reminder(
     posted outcome carries new bytes (``new_bytes`` True); every other
     outcome carries ``new_bytes`` False.
     """
-    from cli_agent_orchestrator.services import cohort_journal
-    from cli_agent_orchestrator.services import control_input_service
-    from cli_agent_orchestrator.services import goal_effect_flock
+    from cli_agent_orchestrator.services import (
+        cohort_journal,
+        control_input_service,
+        goal_effect_flock,
+    )
     from cli_agent_orchestrator.services import kimi_native_control as adapter
     from cli_agent_orchestrator.services.pane_input_arbiter import PaneBusyError, pane_input_lease
     from cli_agent_orchestrator.utils.terminal import managed_window_name

@@ -346,8 +346,9 @@ def _session_fence(session_name: Optional[str]):
     Order everywhere: session fence -> monitor RLock -> inbox lock ->
     transaction. Nothing nested under the fence takes another lock.
     """
-    from cli_agent_orchestrator.services.callback_recovery import session_lifecycle_write_claim
     from contextlib import nullcontext
+
+    from cli_agent_orchestrator.services.callback_recovery import session_lifecycle_write_claim
 
     if not session_name:
         return nullcontext()
