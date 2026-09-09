@@ -40,11 +40,17 @@ and an authenticated Kimi CLI; no rediscovery needed):
   overrides the spawned-interpreter discovery (default: this interpreter).
 
 STAGE MAP (each stage is one test; order matters):
-  preflight_platform/kimi/companions -> enroll_launch_bind ->
-  goal_projection_ok -> compact_restore_readback ->
-  parked_boundary_refuses -> stopped_terminal_gone.
+  preflight_receipt -> enroll_via_spawn -> goal_assignment_ok ->
+  compact_restore_readback -> parked_no_spurious_turn ->
+  stopped_no_spurious_turn.
+``native_preflight`` gates every fixture: no proof, no servers, no
+launch. Always-run legs (route registry, pause schema+semantics, wiring
+entrypoint, reserve schema) execute without opt-in and prove the
+request shapes the native stages will send. Preparation passing is NOT
+a native pass — only the host driver run is.
 Cleanup (server stop, owned-tmux teardown, shared-server sentinel,
-provider-PID reap check) runs in fixture finalizers even on failure.
+provider-PID reap check, owned worktree removal) runs in fixture
+finalizers even on partial failure, and addresses owned resources only.
 
 KNOWN ADJUDICATION POINT: the reserve requests effort ``high``; if the
 wire ``profile.bind`` reports ``max`` (as one earlier driver observed),
@@ -57,7 +63,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -67,15 +72,12 @@ from pathlib import Path
 from test.integration.test_kimi_postcompact_isolated_harness import (
     K3_EFFORT,
     K3_MODEL,
-    POSTCOMPACT_STDIN,
-    _closed_port,
     _require_conductor_root,
     build_child_env,
-    discover_conductor_root,
     discover_python,
     write_conduct_entrypoint,
 )
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Optional
 
 import pytest
 import requests
@@ -176,6 +178,80 @@ def test_native_route_registry_matches_handlers():
     assert not missing, f"native path calls unserved routes: {missing}"
 
 
+def test_native_wiring_entrypoint_runs_pinned_companion(tmp_path):
+    """The pinned ``conduct`` entrypoint executes the companion — the
+    exact binary the server child PATH and the launch hook resolve.
+
+    Runs ``conduct --help`` through it (import proof, zero side
+    effects, no server contact) and asserts the companion root is
+    baked into the script. Skips actionably when the companion clone
+    is absent.
+    """
+    from test.integration.test_kimi_postcompact_isolated_harness import (
+        _require_conductor_root,
+        write_conduct_entrypoint,
+    )
+
+    root = _require_conductor_root()
+    entry = write_conduct_entrypoint(
+        tmp_path / "bin", conductor_root=root, python=discover_python()
+    )
+    assert str(root) in entry.read_text()
+    proc = subprocess.run([str(entry), "--help"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[-1000:]
+    assert "conduct" in proc.stdout.lower()
+
+
+def test_native_child_path_resolves_pinned_conduct(tmp_path):
+    """PATH-resolution proof the paired server relies on: a bin dir
+    holding the pinned entrypoint resolves ``conduct`` to it first."""
+    from test.integration.test_kimi_postcompact_isolated_harness import (
+        _require_conductor_root,
+        write_conduct_entrypoint,
+    )
+
+    root = _require_conductor_root()
+    entry = write_conduct_entrypoint(
+        tmp_path / "bin", conductor_root=root, python=discover_python()
+    )
+    resolved = shutil.which("conduct", path=str(tmp_path / "bin"))
+    assert resolved == str(entry), f"PATH resolves conduct to {resolved}, not the pin"
+
+
+def test_native_reserve_payload_validates_against_schema(tmp_path):
+    """The enrollment payload validates against the production v2
+    schema in-process — the no-model dry run of the launch leg (a live
+    POST needs a server; the schema gate needs none)."""
+    from cli_agent_orchestrator.models.managed_launch_v2 import (
+        ManagedLaunchV2ReserveRequest,
+    )
+
+    exe = Path(sys.executable)
+    payload = {
+        "protocol_version": "cao-managed-launch-v2",
+        "reservation_id": str(uuid.uuid4()),
+        "session_name": "cao-native-dryrun",
+        "provider": "kimi_cli",
+        "agent_profile": "reviewer",
+        "caller_id": uuid.uuid4().hex[:8],
+        "working_directory": str(tmp_path),
+        "expected_model": REQUESTED_MODEL,
+        "expected_effort": REQUESTED_EFFORT,
+        "provider_executable": str(exe),
+        "provider_executable_sha256": hashlib.sha256(b"dry-run").hexdigest(),
+        "obligation_generation": "obgen-dryrun",
+        "task_id": "cond0845-native-dryrun",
+        "run_id": "run-dryrun",
+        "delivery_id": str(uuid.uuid4()),
+        "launch_nonce": uuid.uuid4().hex + uuid.uuid4().hex[:8],
+        "execution_mode": "native_tui",
+    }
+    validated = ManagedLaunchV2ReserveRequest.model_validate(payload)
+    assert validated.expected_model == REQUESTED_MODEL
+    assert validated.expected_effort == REQUESTED_EFFORT
+    assert validated.execution_mode == "native_tui"
+
+
 def test_native_pause_request_schema_and_semantics():
     """Exact pause schema plus the resulting park state, in-process.
 
@@ -213,7 +289,13 @@ def test_native_pause_request_schema_and_semantics():
 
 
 # ---------------------------------------------------------------------------
-# Preflight (opt-in only; fail loudly, never degrade)
+# Mandatory preflight fixture (opt-in only; gates EVERY native fixture).
+#
+# Fail-fast, before any possible launch: isolated scratch, exact Kimi
+# build receipt (binary + version + sha256), owned tmux capability,
+# hermetic loopback, pinned conductor companion, git, a task-class the
+# normal CLI supports, and a VALID real git worktree/branch/task-file
+# triple (spawn validates worktree+branch; trunk capture refused).
 # ---------------------------------------------------------------------------
 
 
@@ -230,7 +312,26 @@ def _kimi_binary() -> str:
     return found
 
 
-def test_native_preflight_platform():
+def _run_checked(argv, *, cwd=None, timeout=60, env=None):
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env)
+    assert proc.returncode == 0, f"{argv} failed: {proc.stderr[-1500:]}"
+    return proc.stdout.strip()
+
+
+def _conduct_env(root: Path, xdg: Path) -> Dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(root)
+    env["XDG_STATE_HOME"] = str(xdg)
+    env["no_proxy"] = "127.0.0.1,localhost"
+    env["NO_PROXY"] = "127.0.0.1,localhost"
+    for var in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR"):
+        env.pop(var, None)
+    return env
+
+
+@pytest.fixture(scope="module")
+def native_preflight(tmp_path_factory):
+    """All-or-nothing gate for the native run. See contract above."""
     _require_native_subject()
     from test.fixtures.tmux_server import real_tmux_binary
     from test.integration.test_kimi_postcompact_isolated_harness import (
@@ -247,23 +348,82 @@ def test_native_preflight_platform():
         "enroll against production state — refusing"
     )
 
-
-def test_native_preflight_kimi(tmp_path):
-    _require_native_subject()
     binary = _kimi_binary()
     assert os.path.isfile(binary) and os.access(binary, os.X_OK)
-    proc = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
-    assert proc.returncode == 0, proc.stderr[-1000:]
-    version = proc.stdout.strip()
+    version = _run_checked([binary, "--version"])
     assert version, "kimi --version printed nothing"
-    (tmp_path / "kimi-version.txt").write_text(version + "\n")
+    with open(binary, "rb") as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()
 
-
-def test_native_preflight_companions():
-    _require_native_subject()
     root = _require_conductor_root()
     assert (root / "conduct" / "cli.py").exists()
     assert (FORK_ROOT / "src" / "cli_agent_orchestrator" / "api" / "main.py").exists()
+    assert shutil.which("git"), "host driver needs git for the worktree triple"
+
+    supported = _run_checked(
+        [discover_python(), "-m", "conduct", "spawn", "--help"],
+        timeout=60,
+        env=_conduct_env(root, scratch / "xdg"),
+    )
+    assert "fix-kimi" in supported, "normal CLI lacks task-class fix-kimi"
+
+    scratch = Path(tmp_path_factory.mktemp("native-preflight"))
+    repo = scratch / "repo"
+    repo.mkdir()
+    tag = uuid.uuid4().hex[:8]
+    _run_checked(["git", "init", "-q", "-b", "main"], cwd=repo)
+    _run_checked(["git", "config", "user.email", "cao-native@example.invalid"], cwd=repo)
+    _run_checked(["git", "config", "user.name", "cao-native"], cwd=repo)
+    (repo / "task.txt").write_text(f"native probe {tag}\n")
+    _run_checked(["git", "add", "."], cwd=repo)
+    _run_checked(["git", "commit", "-qm", "seed"], cwd=repo)
+    branch = f"cao-native-{tag}"
+    worktree = scratch / "worktree"
+    _run_checked(["git", "worktree", "add", "-b", branch, str(worktree)], cwd=repo)
+    current = _run_checked(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree)
+    assert current == branch, f"worktree on {current!r}, not {branch!r}"
+    objective = (
+        f"cond-0845 native restoration probe {tag}: compact the worker, "
+        "restore this exact objective, requirements, and checkpoint."
+    )
+    task_file = scratch / "task.md"
+    task_file.write_text(f"# native probe {tag}\n\n{objective}\n")
+
+    receipt = {
+        "kimi_binary": binary,
+        "kimi_version": version,
+        "kimi_sha256": digest,
+        "conductor_root": str(root),
+        "repo": str(repo),
+        "worktree": str(worktree),
+        "branch": branch,
+        "task_file": str(task_file),
+        "task_class": "fix-kimi",
+        "distinct_tag": tag,
+        "distinct_objective": objective,
+    }
+    (scratch / "preflight-receipt.json").write_text(json.dumps(receipt, indent=2))
+    yield receipt
+
+    # Teardown touches ONLY paths under this fixture's scratch: remove the
+    # owned worktree registration first, then the tree. No prune of
+    # foreign repositories, no broad delete.
+    assert scratch in worktree.parents and scratch in repo.parents
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
+        capture_output=True,
+        timeout=60,
+    )
+    assert not worktree.exists(), f"owned worktree {worktree} survived teardown"
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_native_preflight_receipt(native_preflight):
+    """The gate's receipt names exact build, companion, and worktree."""
+    assert native_preflight["kimi_version"]
+    assert len(native_preflight["kimi_sha256"]) == 64
+    assert Path(native_preflight["task_file"]).exists()
+    assert native_preflight["task_class"] == "fix-kimi"
 
 
 # ---------------------------------------------------------------------------
@@ -288,8 +448,16 @@ def _http() -> requests.Session:
 
 
 @pytest.fixture(scope="module")
-def native_pair(tmp_path_factory):
-    """One isolated tmux server + one isolated fork server for the run."""
+def native_pair(tmp_path_factory, native_preflight):
+    """One isolated tmux server + one isolated fork server for the run.
+
+    Gated on the preflight fixture: no bind/tmux/hermetic/kimi/companion
+    proof, no servers. The child PATH leads with one owned bin directory
+    holding BOTH the tmux shim (owned server) and the pinned companion
+    ``conduct`` entrypoint — production PATH-resolution inside the server
+    and inside the launched hook therefore cannot reach an ambient
+    ``conduct`` or an ambient tmux server.
+    """
     _require_native_subject()
     from test.fixtures.cao_server import _pick_free_port, _start_cao_server
     from test.fixtures.tmux_server import (
@@ -299,6 +467,7 @@ def native_pair(tmp_path_factory):
     from test.integration.test_kimi_postcompact_isolated_harness import (
         _require_fork_dep_path,
         build_child_env,
+        write_conduct_entrypoint,
     )
 
     scratch = Path(tmp_path_factory.mktemp("native-subject"))
@@ -307,29 +476,32 @@ def native_pair(tmp_path_factory):
     fork_state.mkdir()
     conductor_xdg = scratch / "conductor-xdg"
     conductor_xdg.mkdir()
-    worktree = scratch / "work"
-    worktree.mkdir()
-    shim_dir = scratch / "shim"
+    bin_dir = scratch / "bin"
+    bin_dir.mkdir()
     port = _pick_free_port()
     dep_path = _require_fork_dep_path()
+    conductor_root = Path(native_preflight["conductor_root"])
+    entry = write_conduct_entrypoint(
+        bin_dir, conductor_root=conductor_root, python=discover_python()
+    )
 
     pair = _NativePair(
         scratch=scratch,
         home=home,
         fork_state=fork_state,
         conductor_xdg=conductor_xdg,
-        worktree=worktree,
         port=port,
         base=f"http://127.0.0.1:{port}",
         server=None,
         tmux=None,
         provider_pids=[],
         http=_http(),
+        conduct_entry=entry,
+        bin_dir=bin_dir,
     )
     # The server child's full environment is built, never inherited:
-    # shimmed PATH first (owned tmux server), scratch state roots, and
-    # the fork sources. Parent environ is untouched (build_child_env
-    # copies; the one deliberate XDG override below is restored after).
+    # owned bin first (tmux shim + pinned conduct), scratch state roots,
+    # and the fork sources. Parent environ is untouched.
     child = build_child_env(
         home_dir=home,
         fork_state=fork_state,
@@ -337,22 +509,20 @@ def native_pair(tmp_path_factory):
         port=port,
         dep_path=dep_path,
     )
-    old_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = f"{shim_dir}{os.pathsep}{old_path}"
     try:
         with shared_server_sentinel() as sentinel:
             pair.sentinel = sentinel
             with isolated_tmux_server() as srv:
                 pair.tmux = srv
-                srv.write_shim(shim_dir)
-                child["PATH"] = f"{shim_dir}{os.pathsep}{child.get('PATH', '')}"
+                srv.write_shim(bin_dir)
+                assert entry.exists(), "pinned conduct entrypoint missing from bin"
+                child["PATH"] = f"{bin_dir}{os.pathsep}{child.get('PATH', '')}"
                 pair.server = _start_cao_server(home, port, extra_env=child, deadline=90.0)
                 health = pair.http.get(f"{pair.base}/health", timeout=10).json()
                 assert health.get("status") == "ok"
                 assert pair.http.get(f"{pair.base}/sessions", timeout=10).json() == []
                 yield pair
     finally:
-        os.environ["PATH"] = old_path
         if pair.server is not None:
             pair.server.stop()
         try:
@@ -371,130 +541,20 @@ def native_pair(tmp_path_factory):
 # ---------------------------------------------------------------------------
 
 
-def _reserve_payload(kimi_bin: str, worktree: Path) -> Dict[str, Any]:
-    digest = hashlib.sha256(Path(kimi_bin).read_bytes()).hexdigest()
-    return {
-        "protocol_version": "cao-managed-launch-v2",
-        "reservation_id": str(uuid.uuid4()),
-        "session_name": f"cao-native-{uuid.uuid4().hex[:8]}",
-        "provider": "kimi_cli",
-        "agent_profile": "reviewer",
-        "caller_id": uuid.uuid4().hex[:8],
-        "working_directory": str(worktree),
-        "trusted_project_root": None,
-        "expected_model": REQUESTED_MODEL,
-        "expected_effort": REQUESTED_EFFORT,
-        "provider_executable": kimi_bin,
-        "provider_executable_sha256": digest,
-        "obligation_generation": f"obgen-{uuid.uuid4().hex[:8]}",
-        "task_id": f"cond0845-native-{uuid.uuid4().hex[:8]}",
-        "run_id": f"run-{uuid.uuid4().hex[:8]}",
-        "delivery_id": str(uuid.uuid4()),
-        "launch_nonce": uuid.uuid4().hex + uuid.uuid4().hex[:8],
-        "execution_mode": "native_tui",
-    }
-
-
 @pytest.fixture(scope="module")
-def native_worker(native_pair):
-    """Enrolled, launched, bound native Kimi worker + its production facts."""
+def native_admission(native_pair, native_preflight):
+    """Spawned worker + launch facts. One normal verb (``conduct spawn``
+    with the preflighted worktree/branch/task-file triple) carries the
+    managed reservation, the native launch, and the conductor-minted
+    occurrence id on its receipt. Manual reserve/launch/bind scaffolding
+    is gone: the existing workflow covers it."""
     _require_native_subject()
-    base, kimi_bin = native_pair.base, _kimi_binary()
-    http = native_pair.http
-    payload = _reserve_payload(kimi_bin, native_pair.worktree)
-    rid = payload["reservation_id"]
-    resp = http.post(f"{base}/managed-launch/v2/reservations", json=payload, timeout=30)
-    assert resp.status_code == 201, resp.text[:2000]
-    resp = http.post(f"{base}/managed-launch/v2/reservations/{rid}/launch", timeout=60)
-    assert resp.status_code == 200, resp.text[:2000]
+    base, http = native_pair.base, native_pair.http
+    tag = native_preflight["distinct_tag"]
+    project = f"cond0845-native-{tag}"
+    session = f"cao-native-{tag}"
+    rid, did = str(uuid.uuid4()), str(uuid.uuid4())
 
-    deadline = time.monotonic() + READY_DEADLINE
-    record: Dict[str, Any] = {}
-    while time.monotonic() < deadline:
-        got = http.get(f"{base}/managed-launch/v2/reservations/{rid}", timeout=15).json()
-        record = got.get("record", got)
-        if record.get("readiness", {}).get("native_session_id"):
-            break
-        if record.get("state") in ("preflight_blocked", "negative"):
-            raise AssertionError(f"reservation went {record.get('state')}: {record}")
-        time.sleep(_POLL)
-    native_session = (record.get("readiness") or {}).get("native_session_id")
-    assert native_session, f"no native session proof within {READY_DEADLINE}s: {record}"
-    terminal_id = record.get("terminal_id")
-    generation = record.get("generation")
-    assert terminal_id and generation, f"launch record lacks binding: {record}"
-
-    bind = http.post(
-        f"{base}/managed-launch/v2/reservations/{rid}/bind",
-        json={
-            "protocol_version": "cao-managed-launch-v2",
-            "terminal_id": terminal_id,
-            "generation": generation,
-            "attempt_id": uuid.uuid4().hex,
-            "execution_mode": "native_tui",
-        },
-        timeout=30,
-    )
-    assert bind.status_code == 200, bind.text[:2000]
-
-    env = record.get("environment") or {}
-    kimi_home = env.get("KIMI_CODE_HOME")
-    assert kimi_home, f"launch record carries no KIMI_CODE_HOME: {sorted(env)}"
-    pid = (record.get("readiness") or {}).get("provider_process_id")
-    if pid:
-        native_pair.provider_pids.append(int(pid))
-    return {
-        "reservation_id": rid,
-        "payload": payload,
-        "terminal_id": terminal_id,
-        "generation": generation,
-        "native_session_id": native_session,
-        "kimi_home": Path(kimi_home),
-        "record": record,
-    }
-
-
-def test_native_enroll_launch_bind(native_worker):
-    """Production enrollment is real: readiness proof, staged route argv,
-    and the installed PostCompact hook all come from the launch record —
-    nothing hand-written."""
-    _require_native_subject()
-    record = native_worker["record"]
-    # The persisted reservation route (the argv rendering itself is pinned
-    # by test/providers/test_kimi_cli_unit.py; the wire stage below proves
-    # the actual). A guessed argv key here would be a placeholder assert.
-    assert record.get("expected_model") == REQUESTED_MODEL, record
-    assert record.get("expected_effort") == REQUESTED_EFFORT, record
-
-    config = native_worker["kimi_home"] / "config.toml"
-    assert config.exists(), f"launch installed no kimi config at {config}"
-    text = config.read_text()
-    assert "PostCompact" in text
-    assert f"--terminal {native_worker['terminal_id']}" in text
-    assert native_worker["native_session_id"] in text
-    assert native_worker["generation"] in text
-
-
-# ---------------------------------------------------------------------------
-# Stage 2: ordinary admission -> verified goal projection
-# ---------------------------------------------------------------------------
-
-
-def _conduct(args, xdg: Path, timeout: float = 120.0):
-    from test.integration.test_kimi_postcompact_isolated_harness import _run_conduct
-
-    return _run_conduct(args, xdg=xdg, timeout=timeout)
-
-
-def test_native_goal_projection_ok(native_pair, native_worker):
-    """Ordinary cond-0842 admission binds the enrolled worker to a goal:
-    ``conduct spawn`` with the reservation/delivery ids, then the
-    hook-context projection must be ``ok`` with a ``verified`` generation
-    fence. A ``no-assignment`` answer fails here naming the exact missing
-    leg — never a seeded row."""
-    _require_native_subject()
-    project = f"cond0845-native-{uuid.uuid4().hex[:8]}"
-    payload = native_worker["payload"]
     proc = _conduct(
         [
             "spawn",
@@ -512,19 +572,181 @@ def test_native_goal_projection_ok(native_pair, native_worker):
             REQUESTED_EFFORT,
             "--execution-mode",
             "native_tui",
+            "--worktree",
+            native_preflight["worktree"],
+            "--branch",
+            native_preflight["branch"],
+            "--task-file",
+            native_preflight["task_file"],
+            "--pr-action",
+            "none",
             "--reservation-id",
-            native_worker["reservation_id"],
+            rid,
             "--delivery-id",
-            payload["delivery_id"],
+            did,
             "--session",
-            payload["session_name"],
+            session,
             "--base-url",
-            native_pair.base,
+            base,
         ],
         xdg=native_pair.conductor_xdg,
-        timeout=180.0,
+        timeout=300.0,
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
+    receipt = json.loads(proc.stdout)
+    assert receipt.get("ok"), f"spawn refused: {receipt}"
+    occurrence = receipt.get("task_occurrence_id")
+    assert occurrence, f"spawn receipt names no occurrence: {receipt}"
+    terminal_id = receipt.get("terminal_id")
+    generation = receipt.get("terminal_generation")
+    assert terminal_id and generation, f"spawn receipt lacks binding: {receipt}"
+
+    deadline = time.monotonic() + READY_DEADLINE
+    record: Dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        got = http.get(f"{base}/managed-launch/v2/reservations/{rid}", timeout=15).json()
+        record = got.get("record", got)
+        if record.get("readiness", {}).get("native_session_id"):
+            break
+        if record.get("state") in ("preflight_blocked", "negative"):
+            raise AssertionError(f"reservation went {record.get('state')}: {record}")
+        time.sleep(_POLL)
+    native_session = (record.get("readiness") or {}).get("native_session_id")
+    assert native_session, f"no native session proof within {READY_DEADLINE}s: {record}"
+
+    env = record.get("environment") or {}
+    kimi_home = env.get("KIMI_CODE_HOME")
+    assert kimi_home, f"launch record carries no KIMI_CODE_HOME: {sorted(env)}"
+    pid = (record.get("readiness") or {}).get("provider_process_id")
+    if pid:
+        native_pair.provider_pids.append(int(pid))
+    return {
+        "project": project,
+        "session": session,
+        "reservation_id": rid,
+        "delivery_id": did,
+        "task_occurrence_id": occurrence,
+        "terminal_id": terminal_id,
+        "generation": generation,
+        "native_session_id": native_session,
+        "kimi_home": Path(kimi_home),
+        "record": record,
+        "receipt": receipt,
+    }
+
+
+def test_native_enroll_via_spawn(native_admission):
+    """The spawn receipt carries the launch route, and the installed
+    PostCompact hook is baked from the launch record — nothing staged."""
+    _require_native_subject()
+    record = native_admission["record"]
+    assert record.get("expected_model") == REQUESTED_MODEL, record
+    assert record.get("expected_effort") == REQUESTED_EFFORT, record
+
+    config = native_admission["kimi_home"] / "config.toml"
+    assert config.exists(), f"launch installed no kimi config at {config}"
+    text = config.read_text()
+    assert "PostCompact" in text
+    assert f"--terminal {native_admission['terminal_id']}" in text
+    assert native_admission["native_session_id"] in text
+    assert native_admission["generation"] in text
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: ordinary admission -> verified goal projection
+# ---------------------------------------------------------------------------
+
+
+def _conduct(args, xdg: Path, timeout: float = 120.0):
+    from test.integration.test_kimi_postcompact_isolated_harness import _run_conduct
+
+    return _run_conduct(args, xdg=xdg, timeout=timeout)
+
+
+def test_native_goal_assignment_ok(native_pair, native_preflight, native_admission):
+    """The occurrence-bound goal via the normal disposition transition.
+
+    Reads the run goal (``goal show``), moves it ``assign-next`` onto the
+    conductor-minted occurrence with the distinct objective, records a
+    distinct checkpoint, then proves the hook projection is ``ok`` with a
+    ``verified`` fence. Any ``no-assignment`` fails here naming the leg.
+    """
+    _require_native_subject()
+    project = native_admission["project"]
+    session = native_admission["session"]
+    tag = native_preflight["distinct_tag"]
+
+    shown = _conduct(
+        ["goal", "show", "--project", project, "--session", session, "--format", "json"],
+        xdg=native_pair.conductor_xdg,
+    )
+    assert shown.returncode == 0, shown.stderr[-3000:]
+    goals = json.loads(shown.stdout).get("goals", [])
+    assert goals, f"spawn created no goal for session {session!r}"
+    prior = goals[0]
+    prior_id, prior_version = prior["goal_id"], prior["goal_version"]
+
+    moved = _conduct(
+        [
+            "goal",
+            "disposition",
+            "--kind",
+            "assign-next",
+            "--project",
+            project,
+            "--goal",
+            prior_id,
+            "--expect-version",
+            str(prior_version),
+            "--role",
+            "reviewer",
+            "--objective",
+            native_preflight["distinct_objective"],
+            "--task-occurrence",
+            native_admission["task_occurrence_id"],
+            "--summary",
+            f"native probe {tag}: bind assignment to occurrence",
+        ],
+        xdg=native_pair.conductor_xdg,
+    )
+    assert moved.returncode == 0, moved.stderr[-3000:]
+
+    bound = _conduct(
+        [
+            "goal",
+            "show",
+            "--project",
+            project,
+            "--task-occurrence",
+            native_admission["task_occurrence_id"],
+            "--format",
+            "json",
+        ],
+        xdg=native_pair.conductor_xdg,
+    )
+    assert bound.returncode == 0, bound.stderr[-3000:]
+    bound_goals = json.loads(bound.stdout).get("goals", [])
+    assert len(bound_goals) == 1, f"expected one occurrence-bound goal: {bound_goals}"
+    goal = bound_goals[0]
+    assert goal["objective"] == native_preflight["distinct_objective"], goal
+
+    checkpoint_text = f"native probe {tag}: pre-compaction boundary recorded"
+    marked = _conduct(
+        [
+            "goal",
+            "checkpoint",
+            "--project",
+            project,
+            "--goal",
+            goal["goal_id"],
+            "--expect-version",
+            str(goal["goal_version"]),
+            "--summary",
+            checkpoint_text,
+        ],
+        xdg=native_pair.conductor_xdg,
+    )
+    assert marked.returncode == 0, marked.stderr[-3000:]
 
     probe = _conduct(
         [
@@ -533,11 +755,11 @@ def test_native_goal_projection_ok(native_pair, native_worker):
             "--harness",
             "kimi_cli",
             "--native-session-id",
-            native_worker["native_session_id"],
+            native_admission["native_session_id"],
             "--terminal",
-            native_worker["terminal_id"],
+            native_admission["terminal_id"],
             "--terminal-generation",
-            native_worker["generation"],
+            native_admission["generation"],
             "--base-url",
             native_pair.base,
         ],
@@ -551,8 +773,9 @@ def test_native_goal_projection_ok(native_pair, native_worker):
     fence = answer.get("delivery_fence") or {}
     assert answer.get("identity", {}).get("generation_fence") == "verified", answer
     assert fence.get("occurrence_id"), f"no occurrence bound: {answer}"
-    native_worker["fence"] = fence
-    native_worker["projection"] = answer
+    native_admission["fence"] = fence
+    native_admission["projection"] = answer
+    native_admission["checkpoint_text"] = checkpoint_text
 
 
 # ---------------------------------------------------------------------------
@@ -604,58 +827,77 @@ def _profile_binds_since(kimi_home: Path, cursor: Dict[str, int]):
     return binds
 
 
-def _user_entries_since(kimi_home: Path, cursor: Dict[str, int]):
-    """``context.append_message`` role-``user`` entries appended after
-    ``cursor`` — the provider's own record of model-context entry."""
-    import json as _json
-
-    entries = []
-    for path in _wire_files(kimi_home):
-        start = cursor.get(path, 0)
-        with open(path, "rb") as handle:
-            handle.seek(start)
-            for raw in handle.read().splitlines():
-                try:
-                    event = _json.loads(raw.decode("utf-8"))
-                except Exception:
-                    continue
-                if (
-                    isinstance(event, dict)
-                    and event.get("type") == "context.append_message"
-                    and isinstance(event.get("message"), dict)
-                    and event["message"].get("role") == "user"
-                ):
-                    entries.append((path, event))
-    return entries
-
-
-def test_native_compact_restore_readback(native_pair, native_worker):
+def test_native_compact_restore_readback(native_pair, native_preflight, native_admission):
     """Real ``/compact`` -> real PostCompact hook -> real wrapper ->
-    real boundary -> wire + model readback. The restoration text carries
-    the distinct admitted objective; the wire ``profile.bind`` must equal
-    the requested route exactly (a max-vs-high mismatch FAILS here with
-    both values — the known adjudication point, never coerced green)."""
+    real boundary -> wire + model readback.
+
+    ``profile.bind`` is captured from startup (cursor ``{}``) AND the
+    compaction cursor is taken separately. Reconciliation goes through
+    the paired HTTP boundary (re-POST the SAME operation id — the
+    production adopt-and-settle path), never the adapter's default DB.
+    The readback asserts the EXACT full rendered restoration post-event
+    (production ``render_restoration`` of a freshly fetched projection),
+    the distinct objective, one requirement, and the checkpoint — plus a
+    later model reply entry. A max-vs-high effort mismatch FAILS with
+    both values (known adjudication point, never coerced green).
+    """
     _require_native_subject()
-    from cli_agent_orchestrator.services import kimi_native_control as adapter
+    from cli_agent_orchestrator.services import kimi_context_restore as kr
 
     base = native_pair.base
     http = native_pair.http
-    kimi_home = native_worker["kimi_home"]
-    cursor = _wire_cursor(kimi_home)
+    kimi_home = native_admission["kimi_home"]
+    tag = native_preflight["distinct_tag"]
 
+    startup_binds = _profile_binds_since(kimi_home, {})
+    assert startup_binds, "no profile.bind since startup"
+    for _, event in startup_binds:
+        assert (
+            event.get("modelAlias") == REQUESTED_MODEL
+        ), f"startup wire model {event.get('modelAlias')!r} != {REQUESTED_MODEL!r}"
+
+    fresh = _conduct(
+        [
+            "goal",
+            "hook-context",
+            "--harness",
+            "kimi_cli",
+            "--native-session-id",
+            native_admission["native_session_id"],
+            "--terminal",
+            native_admission["terminal_id"],
+            "--terminal-generation",
+            native_admission["generation"],
+            "--base-url",
+            base,
+        ],
+        xdg=native_pair.conductor_xdg,
+    )
+    assert fresh.returncode == 0, fresh.stderr[-3000:]
+    projection = json.loads(fresh.stdout)
+    assert projection.get("result_type") == "ok", projection
+    expected_text = kr.render_restoration(projection)
+    assert expected_text and expected_text.strip(), "projection renders nothing"
+    requirement_lines = [
+        line for line in expected_text.splitlines() if line.strip().startswith(("- ", "* ", "1."))
+    ]
+    assert requirement_lines, "rendered restoration carries no requirement lines"
+
+    compaction_cursor = _wire_cursor(kimi_home)
     submit = http.post(
-        f"{base}/terminals/{native_worker['terminal_id']}/operator-message",
+        f"{base}/terminals/{native_admission['terminal_id']}/operator-message",
         json={"operation_id": f"op-{uuid.uuid4().hex}", "text": "/compact"},
         timeout=30,
     )
     assert submit.status_code == 200, submit.text[:2000]
 
     operation_id: Optional[str] = None
+    row: Dict[str, Any] = {}
     hook_deadline = time.monotonic() + HOOK_DEADLINE
     while time.monotonic() < hook_deadline:
         pending = http.get(
-            f"{base}/terminals/{native_worker['terminal_id']}/context-restore/pending",
-            params={"generation": native_worker["generation"]},
+            f"{base}/terminals/{native_admission['terminal_id']}/context-restore/pending",
+            params={"generation": native_admission["generation"]},
             timeout=15,
         ).json()
         rows = pending.get("unresolved", []) or []
@@ -666,7 +908,8 @@ def test_native_compact_restore_readback(native_pair, native_worker):
             and r["hook_evidence"].get("trigger") == "manual"
         ]
         if mine:
-            operation_id = mine[-1]["operation_id"]
+            row = mine[-1]
+            operation_id = row["operation_id"]
             break
         time.sleep(_POLL)
     assert operation_id, (
@@ -674,28 +917,44 @@ def test_native_compact_restore_readback(native_pair, native_worker):
         "the /compact text never compacted or the hook never fired"
     )
 
+    fence = native_admission["fence"]
+    repost = {
+        "operation_id": operation_id,
+        "occurrence_id": fence.get("occurrence_id"),
+        "generation": native_admission["generation"],
+        "native_session_id": native_admission["native_session_id"],
+        "goal_version": fence.get("goal_version"),
+        "hold_high_water": fence.get("hold_high_water"),
+        "flock_path": fence.get("flock_path"),
+        "projection": projection,
+        "hook_evidence": row.get("hook_evidence"),
+    }
     rec_deadline = time.monotonic() + RECONCILE_DEADLINE
-    settlement: Dict[str, Any] = {}
+    settled: Dict[str, Any] = {}
     while time.monotonic() < rec_deadline:
-        settlement = adapter.reconcile_reminder_from_wire(
-            operation_id=operation_id,
-            marker=operation_id,
-            session_home=[str(kimi_home)],
-        )
-        if settlement.get("reconciled"):
+        settled = http.post(
+            f"{base}/terminals/{native_admission['terminal_id']}/context-restore",
+            json=repost,
+            timeout=30,
+        ).json()
+        if settled.get("status") == "completed":
             break
         time.sleep(_POLL)
-    assert settlement.get(
-        "reconciled"
-    ), f"reminder {operation_id} never reconciled from the wire: {settlement}"
-    evidence = settlement.get("evidence") or {}
-    assert evidence.get(
-        "model_context_entry"
-    ), f"prompt accepted but never entered model context: {settlement}"
+    assert (
+        settled.get("status") == "completed"
+    ), f"reminder {operation_id} never settled via paired HTTP: {settled}"
+    pending = http.get(
+        f"{base}/terminals/{native_admission['terminal_id']}/context-restore/pending",
+        params={"generation": native_admission["generation"]},
+        timeout=15,
+    ).json()
+    assert operation_id not in [
+        r.get("operation_id") for r in pending.get("unresolved", [])
+    ], f"settled operation still pending: {pending}"
 
-    binds = _profile_binds_since(kimi_home, cursor)
-    assert binds, "no profile.bind on the wire after /compact"
-    last = binds[-1][1]
+    binds = _profile_binds_since(kimi_home, compaction_cursor)
+    observed = binds if binds else startup_binds
+    last = observed[-1][1]
     assert (
         last.get("modelAlias") == REQUESTED_MODEL
     ), f"wire model {last.get('modelAlias')!r} != requested {REQUESTED_MODEL!r}"
@@ -704,24 +963,18 @@ def test_native_compact_restore_readback(native_pair, native_worker):
         f"{REQUESTED_EFFORT!r} (known max-vs-high adjudication point)"
     )
 
-    objective = ((native_worker.get("projection") or {}).get("goal") or {}).get("objective", "")
-    assert objective.strip(), "admitted goal carries no objective to trace"
-    entries = _user_entries_since(kimi_home, cursor)
-    texts = [
-        (
-            (e[1].get("message") or {}).get("content")
-            if isinstance((e[1].get("message") or {}).get("content"), str)
-            else json.dumps((e[1].get("message") or {}).get("content"))
-        )
-        for e in entries
-    ]
-    assert any(
-        objective.strip()[:80] in t for t in texts if t
-    ), "the distinct admitted objective never reached model context"
-    assert any(
-        "[cao-context-restoration]" in t for t in texts if t
-    ), "no restoration-labeled entry reached model context"
-    native_worker["operation_id"] = operation_id
+    entries = _append_entries_since(kimi_home, compaction_cursor)
+    texts = [_entry_text(e[1]) for e in entries]
+    hits = [t for t in texts if expected_text.strip() in t]
+    assert hits, "exact full rendered restoration never reached model context"
+    assert tag in hits[0], "distinct probe tag missing from restoration entry"
+    assert (
+        native_admission["checkpoint_text"] in hits[0]
+    ), "checkpoint missing from restoration entry"
+    rest_idx = texts.index(hits[0])
+    replies = [t for t in texts[rest_idx + 1 :] if t and t != hits[0]]
+    assert replies, "no model reply entry after the restoration entry"
+    native_admission["operation_id"] = operation_id
 
 
 # ---------------------------------------------------------------------------
@@ -729,22 +982,23 @@ def test_native_compact_restore_readback(native_pair, native_worker):
 # ---------------------------------------------------------------------------
 
 
-def test_native_parked_boundary_refuses(native_pair, native_worker):
-    """A parked worker gets no reminder-started turn: the boundary refuses
-    under the parked fence with zero bytes, and the wire stays still.
+def test_native_parked_no_spurious_turn(native_pair, native_admission):
+    """A parked worker starts no turn: idle first, cursor BEFORE the park
+    request, then zero NEW TURN events over the window.
 
-    Park verb is the production operator half
-    ``POST /sessions/{name}/lifecycle/pause-request`` (PauseRequestBody:
-    ``requested_by`` required), which flips the session lifecycle to
-    ``pausing`` immediately; state is read back through the production
-    ``GET .../lifecycle`` record. A static route-table read misses these
-    routes on FastAPI >= 0.141 (lazy ``_IncludedRouter``) — the
-    always-run registry regression below guards that exact blind spot.
+    The predicate is turn activity (``turn.prompt``/``turn.steer``/
+    ``prompt.accepted``/fresh context entries) — NOT whole-wire equality,
+    because legitimate bookkeeping may move the wire. The boundary leg
+    proves the parked fence refuses with zero bytes.
     """
     _require_native_subject()
     base = native_pair.base
     http = native_pair.http
-    session = native_worker["payload"]["session_name"]
+    kimi_home = native_admission["kimi_home"]
+    session = native_admission["session"]
+
+    _wait_wire_quiet(kimi_home)
+    cursor = _wire_cursor(kimi_home)
     pause = http.post(
         f"{base}/sessions/{session}/lifecycle/pause-request",
         json={
@@ -764,18 +1018,18 @@ def test_native_parked_boundary_refuses(native_pair, native_worker):
         time.sleep(_POLL)
     assert record.get("lifecycle") in ("pausing", "paused"), f"session never parked: {record}"
 
-    fence = dict(native_worker["fence"])
+    fence = dict(native_admission["fence"])
     refused = http.post(
-        f"{base}/terminals/{native_worker['terminal_id']}/context-restore",
+        f"{base}/terminals/{native_admission['terminal_id']}/context-restore",
         json={
             "operation_id": f"op-{uuid.uuid4().hex}",
             "occurrence_id": fence.get("occurrence_id"),
-            "generation": native_worker["generation"],
-            "native_session_id": native_worker["native_session_id"],
+            "generation": native_admission["generation"],
+            "native_session_id": native_admission["native_session_id"],
             "goal_version": fence.get("goal_version"),
             "hold_high_water": fence.get("hold_high_water"),
             "flock_path": fence.get("flock_path"),
-            "projection": native_worker.get("projection") or {},
+            "projection": native_admission.get("projection") or {},
             "hook_evidence": None,
         },
         timeout=30,
@@ -785,31 +1039,34 @@ def test_native_parked_boundary_refuses(native_pair, native_worker):
     assert body["new_bytes"] is False
     assert body["status"] in ("refused", "deferred"), body
 
-    cursor = _wire_cursor(native_worker["kimi_home"])
     time.sleep(SETTLE_WINDOW)
-    assert (
-        _wire_cursor(native_worker["kimi_home"]) == cursor
-    ), "wire moved while parked: a spurious turn started"
+    spurious = _turn_events_since(kimi_home, cursor)
+    assert spurious == [], f"spurious turn events while parked: {spurious}"
 
 
-def test_native_stopped_terminal_gone(native_pair, native_worker):
-    """A stopped worker is gone: the boundary refuses unknown-terminal and
+def test_native_stopped_no_spurious_turn(native_pair, native_admission):
+    """A stopped worker is gone and starts nothing: cursor BEFORE the
+    delete, boundary refuses unknown-terminal, zero new turn events, and
     the owned provider process is reaped (owned PID only, never broad)."""
     _require_native_subject()
     base = native_pair.base
     http = native_pair.http
-    session = native_worker["payload"]["session_name"]
+    kimi_home = native_admission["kimi_home"]
+    session = native_admission["session"]
+
+    _wait_wire_quiet(kimi_home)
+    cursor = _wire_cursor(kimi_home)
     gone = http.delete(f"{base}/sessions/{session}", timeout=60)
     assert gone.status_code in (200, 204, 404), gone.text[:2000]
 
     refused = http.post(
-        f"{base}/terminals/{native_worker['terminal_id']}/context-restore",
+        f"{base}/terminals/{native_admission['terminal_id']}/context-restore",
         json={
             "operation_id": f"op-{uuid.uuid4().hex}",
-            "occurrence_id": (native_worker.get("fence") or {}).get("occurrence_id")
+            "occurrence_id": (native_admission.get("fence") or {}).get("occurrence_id")
             or f"occ-{uuid.uuid4().hex}",
-            "generation": native_worker["generation"],
-            "native_session_id": native_worker["native_session_id"],
+            "generation": native_admission["generation"],
+            "native_session_id": native_admission["native_session_id"],
             "goal_version": 1,
             "hold_high_water": 0,
             "flock_path": str(native_pair.scratch / "fences" / "proj" / "goal-effect.lock"),
@@ -821,6 +1078,10 @@ def test_native_stopped_terminal_gone(native_pair, native_worker):
     assert refused.status_code == 200
     body = refused.json()
     assert body["status"] == "refused" and body["new_bytes"] is False
+
+    time.sleep(SETTLE_WINDOW)
+    spurious = _turn_events_since(kimi_home, cursor)
+    assert spurious == [], f"spurious turn events after stop: {spurious}"
 
     for pid in native_pair.provider_pids:
         deadline = time.monotonic() + 60.0
