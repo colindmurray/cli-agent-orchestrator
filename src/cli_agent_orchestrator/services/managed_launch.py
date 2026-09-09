@@ -31,7 +31,7 @@ from cli_agent_orchestrator.models.managed_launch import (
 )
 from cli_agent_orchestrator.services import companion_receipts
 from cli_agent_orchestrator.services import execution_mode as em
-from cli_agent_orchestrator.services import provider_contracts
+from cli_agent_orchestrator.services import provider_contracts, stable_agent_roster
 
 logger = logging.getLogger(__name__)
 from cli_agent_orchestrator.utils.terminal import generate_terminal_id, managed_window_name
@@ -348,6 +348,16 @@ def _row_dict(row: Any) -> dict[str, Any]:
         "reservation_id": row.reservation_id,
         "terminal_id": row.terminal_id,
         "generation": row.generation,
+        # The fork-authoritative stable CAO-agent id for this reservation
+        # (cond-0842): the roster's deterministic initial id derived from
+        # the immutable terminal+generation allocated at reserve, so an
+        # exact-id replay, get, or reconcile after response loss returns
+        # the same id and a retry never invents or nulls the binding.
+        # Projected, never stored: every v1 row already carries
+        # terminal+generation, so no migration and no request-shape change.
+        "stable_agent_id": stable_agent_roster.derive_initial_agent_id(
+            row.terminal_id, row.generation
+        ),
         "session_name": row.session_name,
         "provider": row.provider,
         "agent_profile": row.agent_profile,
@@ -748,6 +758,199 @@ def claim_launch(reservation_id: str) -> tuple[dict[str, Any], bool]:
         raise ManagedLaunchUnavailable(f"managed-launch claim failed: {exc}") from exc
 
 
+def _v1_roster_binding_contract(row: Any, native_session_id: Optional[str]) -> Any:
+    """The stable-agent binding for one v1 (bridged) reservation, from durable facts.
+
+    Built exclusively from the machine-recorded reservation — the immutable
+    terminal+generation allocated at reserve and the validated provider
+    session id — never from pane scraping or guesses.  The agent id is
+    exactly the projected ``stable_agent_id``
+    (``derive_initial_agent_id(terminal_id, generation)``), so a goal the
+    conductor bound to the projection names the roster's own identity.
+
+    Role is launch truth: v1 managed reservations are supervisor-spawned
+    workers (``conduct up`` roots are unmanaged), mirroring the v2 bind.
+    ``native_session_id`` may be None for a legacy readiness row that
+    predates the strict receipt schema; the lineage then stays truthfully
+    ``identity_missing`` rather than inventing an id.
+    """
+    return stable_agent_roster.BindingContract(
+        agent_id=stable_agent_roster.derive_initial_agent_id(row.terminal_id, row.generation),
+        session_name=row.session_name,
+        role=stable_agent_roster.ROLE_WORKER,
+        profile_family=row.agent_profile or "default",
+        harness=row.provider,
+        native_session_id=native_session_id,
+        terminal_id=row.terminal_id,
+        generation=row.generation,
+    )
+
+
+def _bind_v1_roster_incarnation(
+    db: Any, row: Any, native_session_id: Optional[str]
+) -> dict[str, Any]:
+    """Bind (or adopt) the roster incarnation inside the caller's transaction.
+
+    The caller commits afterwards, so the roster record lands atomically
+    with the reservation's state transition: real task admission can never
+    precede the durable roster record, and a response-lost retry adopts the
+    same rows instead of minting a second identity.  A conflicting
+    immutable roster identity refuses the transition (typed permanent); a
+    transient roster failure stays retryable (typed transient).
+
+    Returns the bind result (agent/lineage/incarnation) so the caller can
+    open the admission's task occurrence against the exact registered
+    identity — never a caller-supplied one.
+    """
+    try:
+        return stable_agent_roster.bind_generation(
+            _v1_roster_binding_contract(row, native_session_id), db=db
+        )
+    except stable_agent_roster.StableAgentConflict as exc:
+        raise ManagedLaunchConflict(f"stable-agent roster refused the v1 bind: {exc}") from exc
+    except stable_agent_roster.StableAgentError as exc:
+        raise ManagedLaunchUnavailable(
+            f"stable-agent roster unavailable for the v1 bind: {exc}"
+        ) from exc
+
+
+def _open_v1_admission_occurrence(
+    db: Any,
+    row: Any,
+    bind: dict[str, Any],
+    identity: dict[str, Any],
+    task_occurrence_id: str,
+) -> None:
+    """Open (or adopt) the admission's task occurrence in the claim txn.
+
+    The fork owns occurrence materialization because it alone holds the
+    authoritative stable agent/incarnation beside the reservation it is
+    changing: the occurrence opens atomically with the ``admitting``
+    transition, so the reader can never see an admitted-task claim without
+    the occurrence the goal chain needs.  ``identity`` is the claim's own
+    immutable admission identity (delivery, bytes, context, occurrence);
+    its digest binds the occurrence to this exact delivery.  A new initial
+    assignment opens at round 0; an exact existing-id replay adopts the
+    stored content; any divergence refuses typed.
+    """
+    from cli_agent_orchestrator.services import task_occurrence as occurrence
+
+    incarnation = bind["incarnation"] or {}
+    lineage = bind["lineage"] or {}
+    try:
+        occurrence.open_occurrence(
+            occurrence.OpenRequest(
+                task_occurrence_id=task_occurrence_id,
+                session_name=row.session_name,
+                agent_id=bind["agent"]["agent_id"],
+                round_index=0,
+                dispatch_digest=occurrence.dispatch_digest_for(
+                    {**identity, "task_occurrence_id": task_occurrence_id}
+                ),
+                incarnation=occurrence.EffectIncarnation(
+                    incarnation_id=incarnation["incarnation_id"],
+                    terminal_id=row.terminal_id,
+                    generation=row.generation,
+                    lineage_id=incarnation.get("lineage_id") or lineage.get("lineage_id"),
+                    native_session_id=lineage.get("native_session_id"),
+                ),
+            ),
+            db=db,
+        )
+    except occurrence.TaskOccurrenceConflict as exc:
+        raise ManagedLaunchConflict(f"task occurrence refused the v1 admission: {exc}") from exc
+    except occurrence.TaskOccurrenceError as exc:
+        raise ManagedLaunchUnavailable(
+            f"task occurrence unavailable for the v1 admission: {exc}"
+        ) from exc
+
+
+def _heal_v1_roster_binding(row: Any, native_session_id: Optional[str]) -> Optional[dict[str, Any]]:
+    """Adopt-bind the roster incarnation for already-established state.
+
+    Healing, not gating: the reservation transition this repairs already
+    committed, so a transient roster failure warns and defers to the next
+    recovery pass rather than failing a healthy row.  A conflicting
+    immutable identity still raises typed: it names a real disagreement
+    about who this incarnation belongs to, never a silent override.
+
+    Returns the bind result, or None when healing deferred.
+    """
+    try:
+        return stable_agent_roster.bind_generation(
+            _v1_roster_binding_contract(row, native_session_id)
+        )
+    except stable_agent_roster.StableAgentConflict as exc:
+        raise ManagedLaunchConflict(f"stable-agent roster refused the v1 bind: {exc}") from exc
+    except stable_agent_roster.StableAgentError as exc:
+        logger.warning(
+            "v1 roster heal deferred for terminal %s: %s; " "the next reconcile pass retries it",
+            row.terminal_id,
+            exc,
+        )
+        return None
+
+
+def _heal_v1_admission_occurrence(
+    db: Any, row: Any, bind: Optional[dict[str, Any]], task_occurrence_id: str
+) -> None:
+    """Adopt-open the occurrence for an already-claimed admission.
+
+    The claim committed before this healing exists (or its response was
+    lost): the occurrence opens now against the stored admission identity,
+    adopting when the first attempt already opened it.  A conflicting
+    identity raises typed; a transient failure — including a still-missing
+    roster incarnation — warns and defers to the next recovery pass.
+    """
+    if bind is None:
+        logger.warning(
+            "v1 occurrence heal deferred for terminal %s: roster binding "
+            "unresolved; the next reconcile pass retries it",
+            row.terminal_id,
+        )
+        return
+    stored = _parse_json(row.admission_json, {})
+    identity = {
+        key: stored.get(key)
+        for key in (
+            "delivery_id",
+            "message_sha256",
+            "sender_id",
+            "orchestration_type",
+            "context",
+            "task_occurrence_id",
+        )
+    }
+    try:
+        _open_v1_admission_occurrence(db, row, bind, identity, task_occurrence_id)
+    except ManagedLaunchUnavailable as exc:
+        logger.warning(
+            "v1 occurrence heal deferred for terminal %s: %s; "
+            "the next reconcile pass retries it",
+            row.terminal_id,
+            exc,
+        )
+
+
+def _roster_mark_admitted_best_effort(row: Any) -> None:
+    """Record the roster incarnation's admitted state after task delivery.
+
+    Best-effort, mirroring the v2 seam: the admission commit is the durable
+    fact that the task bytes were delivered, so a roster-store failure (or
+    a post-teardown retired incarnation) warns and an idempotent replay
+    re-attempts the mark.  Delivery is never reported as not-delivered.
+    """
+    try:
+        stable_agent_roster.mark_admitted(terminal_id=row.terminal_id, generation=row.generation)
+    except stable_agent_roster.StableAgentError as exc:
+        logger.warning(
+            "v1 roster mark_admitted deferred for terminal %s; an idempotent "
+            "completion replay retries it: %s",
+            row.terminal_id,
+            exc,
+        )
+
+
 def mark_ready(
     reservation_id: str,
     *,
@@ -766,6 +969,10 @@ def mark_ready(
             if row.state == "ready":
                 if _parse_json(row.readiness_json, None) != receipt:
                     raise ManagedLaunchConflict("readiness receipt changed after attestation")
+                # A retained ready row (or a response-lost retry) heals its
+                # roster registration here; the ready commit is established
+                # truth, so this adopts rather than gates.
+                _heal_v1_roster_binding(row, receipt.get("provider_session_id"))
                 return _row_dict(row)
             if row.state != "launching":
                 raise ManagedLaunchConflict(
@@ -787,6 +994,14 @@ def mark_ready(
                     synchronize_session=False,
                 )
             )
+            if updated == 1:
+                # Register the stable-agent incarnation in the same
+                # transaction as the ready commit (mirroring the v2
+                # bind-native seam): the validated readiness receipt proves
+                # the provider session exists, so this is a truthful
+                # bound-but-not-yet-admitted registration — never invented
+                # liveness.  A response-lost retry adopts these rows.
+                _bind_v1_roster_incarnation(db, row, receipt.get("provider_session_id"))
             db.commit()
             current = _query(db, reservation_id)
             if updated == 1:
@@ -980,6 +1195,117 @@ def mark_launch_failed_bridge(
         raise ManagedLaunchUnavailable(f"bridge launch failure finalization failed: {exc}") from exc
 
 
+def _abandon_admitting_delivery(
+    db: Any, row: Any, request: ManagedLaunchObservationRequest
+) -> None:
+    """Fence an admitting delivery proven zero-byte and end its chain.
+
+    Verifies, in one transaction: the row is admitting with an
+    io-attempted admission for exactly this generation; the bridge
+    recorded no submission for the reservation (a recorded submission
+    refuses — complete the admission instead); and the admission's
+    occurrence, when present, is still open for this reservation's own
+    terminal/generation (a foreign or differently-finalized occurrence
+    refuses — never a silent override). Then fences the admission as
+    refused/abandoned, finalizes the occurrence as abandoned, records the
+    observation, and moves the row to the requested terminal kind. A
+    complete_admission arriving later finds the fence and refuses, so no
+    byte can cross after abandonment. Already-abandoned rows return
+    idempotently. Commits itself; the caller must not CAS afterwards.
+    """
+    from cli_agent_orchestrator.services import task_occurrence as occurrence
+    from cli_agent_orchestrator.services.managed_provider_bridge import read_state
+
+    admission = _parse_json(row.admission_json, {})
+    if admission.get("status") == "refused":
+        return
+    if admission.get("status") != "io-attempted":
+        raise ManagedLaunchConflict(
+            "only an io-attempted admission can be abandoned; "
+            f"found status {admission.get('status')!r}"
+        )
+    try:
+        bridge_state = read_state(row.reservation_id)
+    except Exception as exc:  # noqa: BLE001 - unreadable bridge preserves ambiguity
+        raise ManagedLaunchUnavailable(
+            f"bridge state unreadable; abandonment unproven: {exc}"
+        ) from exc
+    submission = (bridge_state or {}).get("submission")
+    if isinstance(submission, dict):
+        raise ManagedLaunchConflict(
+            "bridge recorded a submission for this delivery; complete the "
+            "admission instead of abandoning it"
+        )
+    occurrence_id = admission.get("task_occurrence_id")
+    if occurrence_id is not None:
+        try:
+            record = occurrence.get_occurrence(occurrence_id, db=db)
+        except occurrence.TaskOccurrenceNotFound as exc:
+            raise ManagedLaunchConflict(
+                "admission names an occurrence the store does not have; "
+                "refusing rather than abandoning half a chain"
+            ) from exc
+        except occurrence.TaskOccurrenceError as exc:
+            raise ManagedLaunchUnavailable(
+                f"task occurrence unreadable; abandonment unproven: {exc}"
+            ) from exc
+        if record.get("state") == occurrence.STATE_OPEN:
+            if (
+                record.get("terminal_id") != row.terminal_id
+                or record.get("generation") != row.generation
+            ):
+                raise ManagedLaunchConflict(
+                    "admission names an occurrence bound to a different "
+                    "terminal/generation; refusing rather than finalizing "
+                    "another worker's occurrence"
+                )
+            try:
+                occurrence.finalize_occurrence(
+                    occurrence.FinalizeRequest(
+                        task_occurrence_id=occurrence_id,
+                        expected_revision=record.get("revision", 0),
+                        disposition=occurrence.DISPOSITION_ABANDONED,
+                        finalized_by="managed-launch-abandonment",
+                        note=(
+                            "definitive zero-byte abandonment of delivery "
+                            f"{admission.get('delivery_id')}"
+                        ),
+                    ),
+                    db=db,
+                )
+            except occurrence.TaskOccurrenceConflict as exc:
+                raise ManagedLaunchConflict(f"task occurrence refused abandonment: {exc}") from exc
+            except occurrence.TaskOccurrenceError as exc:
+                raise ManagedLaunchUnavailable(
+                    f"task occurrence unavailable for abandonment: {exc}"
+                ) from exc
+        elif not (
+            record.get("state") == occurrence.STATE_FINALIZED
+            and (record.get("finalized") or {}).get("disposition")
+            == occurrence.DISPOSITION_ABANDONED
+        ):
+            raise ManagedLaunchConflict(
+                "admission names an occurrence already finalized "
+                f"{(record.get('finalized') or {}).get('disposition')!r}; "
+                "refusing rather than rewriting a closed chain"
+            )
+    admission["status"] = "refused"
+    admission["refusal_reason"] = "abandoned"
+    admission["refusal_detail"] = {
+        "evidence_digest": request.evidence_digest,
+        "detail": request.detail,
+    }
+    admission["refused_at"] = _now()
+    observations = _parse_json(row.observations_json, [])
+    observations.append({**request.model_dump(mode="json"), "observed_at": _now()})
+    row.admission_json = _canonical_json(admission)
+    row.observations_json = _canonical_json(observations)
+    row.negative_json = _canonical_json({**request.model_dump(mode="json"), "observed_at": _now()})
+    row.state = request.kind
+    row.updated_at = _now()
+    db.commit()
+
+
 def append_observation(
     reservation_id: str, request: ManagedLaunchObservationRequest
 ) -> dict[str, Any]:
@@ -1012,7 +1338,23 @@ def append_observation(
                     request.kind in {"negative", "cancelled"}
                     and row.state != "launch-failed-bridge"
                 ):
-                    if row.state in {"admitting", "admitted"}:
+                    if row.state == "admitting":
+                        # Definitive zero-byte abandonment (cond-0842): the
+                        # caller decided this admitting delivery will never
+                        # complete, and the fork verifies no byte crossed
+                        # before fencing it. The admission's occurrence —
+                        # opened atomically at claim — finalizes as
+                        # abandoned in the same transaction, so the goal
+                        # chain ends instead of dangling. Ambiguity (a
+                        # recorded submission, an unknown bridge, a foreign
+                        # occurrence) refuses and preserves both sides.
+                        _abandon_admitting_delivery(db, row, request)
+                        # _abandon_admitting_delivery commits itself: the
+                        # fenced admission plus the finalized occurrence
+                        # must land atomically, and the shared CAS below
+                        # cannot express the occurrence half.
+                        return _row_dict(_query(db, reservation_id))
+                    if row.state in {"admitted"}:
                         raise ManagedLaunchConflict(
                             f"{request.kind} evidence cannot supersede task admission"
                         )
@@ -1133,6 +1475,7 @@ def claim_admission(
         "sender_id": request.sender_id,
         "orchestration_type": request.orchestration_type,
         "context": request.context.model_dump(mode="json"),
+        "task_occurrence_id": request.task_occurrence_id,
     }
     try:
         with database.SessionLocal() as db:
@@ -1184,6 +1527,22 @@ def claim_admission(
                     synchronize_session=False,
                 )
             )
+            if updated == 1:
+                # Heal a retained row that reached ready before the roster
+                # writer existed: the durable readiness receipt proves the
+                # native session, so this adopts the same deterministic
+                # identity mark_ready registers — never a new one.  Pre-I/O
+                # (task bytes are sent only after the claim), so a refusal
+                # here orphans nothing.
+                readiness = _parse_json(row.readiness_json, {})
+                bind = _bind_v1_roster_incarnation(db, row, readiness.get("provider_session_id"))
+                if request.task_occurrence_id is not None:
+                    # The occurrence opens atomically with the admitting
+                    # transition (cond-0842): a task-bearing claim without
+                    # one leaves the goal chain unresolvable.
+                    _open_v1_admission_occurrence(
+                        db, row, bind, identity, request.task_occurrence_id
+                    )
             db.commit()
             row = _query(db, reservation_id)
             if updated == 1:
@@ -1192,9 +1551,47 @@ def claim_admission(
             if existing is not None:
                 existing_identity = {key: existing.get(key) for key in identity}
                 if existing_identity != identity:
+                    if (
+                        existing_identity.get("task_occurrence_id") is None
+                        and request.task_occurrence_id is not None
+                        and all(
+                            existing_identity.get(key) == value
+                            for key, value in identity.items()
+                            if key != "task_occurrence_id"
+                        )
+                    ):
+                        # Legacy heal: claimed before the occurrence seam
+                        # existed.  The presented occurrence belongs to this
+                        # same delivery, so open (or adopt) it and converge
+                        # the record rather than bricking a retained row.
+                        db.refresh(row)
+                        rechecked = _parse_json(row.admission_json, {})
+                        if (
+                            row.state != "admitting"
+                            or rechecked.get("status") != "io-attempted"
+                            or rechecked.get("delivery_id") != request.delivery_id
+                        ):
+                            raise ManagedLaunchConflict("task admission changed concurrently")
+                        readiness = _parse_json(row.readiness_json, {})
+                        bind = _bind_v1_roster_incarnation(
+                            db, row, readiness.get("provider_session_id")
+                        )
+                        _open_v1_admission_occurrence(
+                            db, row, bind, identity, request.task_occurrence_id
+                        )
+                        admission = _parse_json(row.admission_json, {})
+                        admission["task_occurrence_id"] = request.task_occurrence_id
+                        row.admission_json = _canonical_json(admission)
+                        row.updated_at = _now()
+                        db.commit()
+                        return _row_dict(_query(db, reservation_id)), False
                     raise ManagedLaunchConflict(
                         "reservation already carries a different task admission"
                     )
+                readiness = _parse_json(row.readiness_json, {})
+                bind = _heal_v1_roster_binding(row, readiness.get("provider_session_id"))
+                if request.task_occurrence_id is not None:
+                    _heal_v1_admission_occurrence(db, row, bind, request.task_occurrence_id)
                 return _row_dict(row), False
             if row.state != "ready" or row.readiness_json is None:
                 raise ManagedLaunchConflict(
@@ -1225,7 +1622,18 @@ def complete_admission(
                     raise ManagedLaunchConflict(
                         "provider submission receipt changed after admission"
                     )
+                _roster_mark_admitted_best_effort(row)
                 return _row_dict(row)
+            if admission.get("status") == "refused":
+                # The abandonment fence: no byte may cross after a
+                # definitive zero-byte abandonment fenced this delivery.
+                # The conductor treats a refused record as proof of zero
+                # bytes and never resends; this guard is the fork side of
+                # that contract.
+                raise ManagedLaunchConflict(
+                    "task admission was refused "
+                    f"({admission.get('refusal_reason')}); no completion can follow"
+                )
             if row.state != "admitting" or admission.get("status") != "io-attempted":
                 raise ManagedLaunchConflict(f"admission cannot complete from state {row.state!r}")
             _validate_native_receipt(row, provider_receipt, admission=admission)
@@ -1238,6 +1646,10 @@ def complete_admission(
             row.updated_at = _now()
             db.commit()
             db.refresh(row)
+            # The task bytes are delivered; record the incarnation's
+            # admitted state best-effort (an idempotent replay re-attempts
+            # it).  Delivery truth stands regardless of roster bookkeeping.
+            _roster_mark_admitted_best_effort(row)
             # P1-7/P1-10 (final conformance §20.2f): publish the exact
             # provider/model-turn submission acknowledgement and the per-turn
             # route identity to the generation-bound companion store. The ack
