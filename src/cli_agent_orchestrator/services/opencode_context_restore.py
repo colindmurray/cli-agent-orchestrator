@@ -38,6 +38,14 @@ How the pieces fit (mirrors the accepted Claude adapter, fork PR #247):
 * The helper (console entry :data:`WRAPPER_ENTRY_POINT`) runs the read-only
   slice-1 projection (conductor PR #349, ``1f1e415f``) and prints the one
   bounded string, or nothing. The shim pushes stdout iff non-empty.
+* The helper also observes the provider-minted session id
+  (:func:`observe_native_session`): first sighting per generation is
+  recorded through the existing identity contract
+  (``terminal_service.record_native_session`` — refuse-to-repoint row
+  write plus best-effort roster repair), guarded by a live-generation
+  check so a late callback can never clobber its successor. The
+  ``conduct`` subprocess stays read-only; observation never alters the
+  printed text.
 * :func:`install_plugin` places the file additively under
   ``<working_directory>/.opencode/plugins/`` with a per-(terminal,
   generation) name. Stale files are safe by construction: a rotated
@@ -50,7 +58,10 @@ What this adapter does NOT do, by construction:
   a resume-paused worker. The helper's only subprocess is ``conduct goal
   hook-context`` — the read-only slice-1 projection — which starts zero
   turns by contract. There is no code path that could utter any other verb,
-  and the TS shim never touches ``client``, tools, or events.
+  and the TS shim never touches ``client``, tools, or events. The
+  helper's one additional effect is the identity observation above: a
+  generation-scoped marker file plus the sanctioned row write — never a
+  goal write, steer, or turn.
 * It never invents a goal. Anything but a projectable ``ok`` answer prints
   nothing: stale/foreign callbacks, satisfied/cancelled assignments (§10.2),
   and lookup failures restore nothing with exit 0. Unlike the Claude
@@ -67,10 +78,13 @@ Limits (honest, not waived):
   normally milliseconds). A wedged server can delay a request by up to
   :data:`CONDUCT_TIMEOUT_SECONDS` before the shim degrades to no push.
 * Fork-side recording of the opencode native session id (the live binding
-  the conductor checks) is owned outside this slice; until it exists, live
-  resolution answers ``no-worker`` and the shim pushes nothing — the same
-  degraded-safe shape as a stale callback. Unseeded normal-launch
-  end-to-end therefore remains dependent on cond-0842.
+  the conductor checks) is this slice's writer (:func:`observe_native_session`
+  + the control-identity fallback for v1 opencode rows); until a first
+  request observes it, live resolution answers ``no-worker`` and the shim
+  pushes nothing — the same degraded-safe shape as a stale callback.
+  Roster incarnation agreement and occurrence binding stay
+  roster/admission-owned (cond-0842): a terminal with no lineage still
+  resolves ``dead-incarnation``, honestly surfaced, never papered over.
 * ``opencode export`` shows stored system messages, not proof the model
   read them; export output alone is never claimed here as model-entry
   evidence.
@@ -139,12 +153,22 @@ PLUGIN_FILENAME_PREFIX = "cao-goal-restoration-"
 #: directory (official plugin contract).
 PLUGIN_DIRNAME = ".opencode/plugins"
 
+#: Filename of the per-generation native-session observation record under
+#: the companion dir. First observed session id wins for the generation;
+#: a later different id is rotation evidence, never an overwrite.
+NATIVE_SESSION_FILENAME = "opencode-native-session.json"
+
+#: Launch-facts key carrying the install outcome (§10.1 diagnostics).
+CONTEXT_RESTORATION_FACTS_KEY = "context_restoration"
+
 __all__ = [
     "CONDUCT_TIMEOUT_SECONDS",
+    "CONTEXT_RESTORATION_FACTS_KEY",
     "FORBIDDEN_HOOK_FRAGMENTS",
     "HARNESS",
     "HOOK_CONTEXT_SCHEMA",
     "MECHANISM",
+    "NATIVE_SESSION_FILENAME",
     "PLUGIN_DIRNAME",
     "PLUGIN_FILENAME_PREFIX",
     "SESSION_ID_ENV_VAR",
@@ -157,10 +181,14 @@ __all__ = [
     "describe_installation",
     "install_plugin",
     "main",
+    "observe_native_session",
     "parse_helper_argv",
     "plugin_filename",
     "project_plugin_dir",
+    "record_installation",
+    "recorded_session_path",
     "remove_plugin",
+    "remove_stale_plugins",
     "render_plugin_source",
     "render_restoration",
     "render_transform_text",
@@ -445,6 +473,218 @@ def remove_plugin(path: str | Path) -> bool:
     return True
 
 
+def remove_stale_plugins(
+    working_directory: str, terminal_id: str, keep_generation: str
+) -> List[Path]:
+    """Remove this terminal's superseded managed plugin files.
+
+    Keeps exactly the ``keep_generation`` file; removes our own
+    ``cao-goal-restoration-<terminal_id>-*`` files for other generations
+    (rotation leftovers). Never touches user files, other terminals'
+    files, or non-file entries. Returns the removed paths. Stale files
+    are already safe by the projection's generation fence (a rotated
+    generation answers ``stale-generation`` and restores nothing); this
+    is bounded retention, not a correctness gate, so any filesystem
+    error aborts with what was already removed — the next launch retries.
+    """
+    _check_filename_safe(terminal_id, field="terminal id")
+    _check_filename_safe(keep_generation, field="generation")
+    plugdir = project_plugin_dir(working_directory)
+    if not plugdir.is_dir():
+        return []
+    keep = f"{PLUGIN_FILENAME_PREFIX}{terminal_id}-{keep_generation}.ts"
+    prefix = f"{PLUGIN_FILENAME_PREFIX}{terminal_id}-"
+    removed: List[Path] = []
+    for child in sorted(plugdir.iterdir()):
+        if child.name == keep:
+            continue
+        if not child.name.startswith(prefix) or not child.name.endswith(".ts"):
+            continue
+        if not child.is_file() or child.is_symlink():
+            continue
+        child.unlink()
+        removed.append(child)
+    return removed
+
+
+def record_installation(*, terminal_id: str, installation: Dict[str, Any]) -> bool:
+    """Record the install outcome on the v1 reservation's launch facts.
+
+    Additive merge under :data:`CONTEXT_RESTORATION_FACTS_KEY`: every
+    other fact survives byte-identical. Returns True when recorded.
+    Best-effort by contract — unknown terminal, unreadable or corrupt
+    facts (never overwritten blind), or any store error returns False
+    and logs; a restoration plugin never fails a launch. No edits to the
+    managed-launch module: this reader/writer lives entirely here.
+    """
+    try:
+        from cli_agent_orchestrator.clients import database
+
+        with database.SessionLocal() as db:
+            row = (
+                db.query(database.ManagedLaunchReservationModel)
+                .filter(database.ManagedLaunchReservationModel.terminal_id == terminal_id)
+                .one_or_none()
+            )
+            if row is None:
+                logger.warning(
+                    "opencode context restoration facts not recorded: "
+                    "no reservation for terminal %s",
+                    terminal_id,
+                )
+                return False
+            raw = getattr(row, "launch_facts_json", None)
+            try:
+                facts = json.loads(raw) if raw else {}
+            except ValueError:
+                logger.warning(
+                    "opencode context restoration facts not recorded: "
+                    "unreadable launch facts for terminal %s; refusing to overwrite",
+                    terminal_id,
+                )
+                return False
+            if not isinstance(facts, dict):
+                logger.warning(
+                    "opencode context restoration facts not recorded: "
+                    "non-object launch facts for terminal %s",
+                    terminal_id,
+                )
+                return False
+            facts[CONTEXT_RESTORATION_FACTS_KEY] = installation
+            # Same canonical form as managed_launch._canonical_json.
+            row.launch_facts_json = json.dumps(facts, sort_keys=True, separators=(",", ":"))
+            db.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001 - diagnostics never fail a launch
+        logger.warning(
+            "opencode context restoration facts not recorded for terminal %s: %s",
+            terminal_id,
+            exc,
+        )
+        return False
+
+
+def recorded_session_path(
+    *, terminal_id: str, generation: str, companion_root: Optional[Path] = None
+) -> Path:
+    """Path of the per-generation native-session observation record."""
+    from cli_agent_orchestrator.constants import COMPANION_DIR
+
+    root = Path(companion_root) if companion_root is not None else Path(COMPANION_DIR)
+    return root / terminal_id / generation / NATIVE_SESSION_FILENAME
+
+
+def _read_recorded_session(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    sid = payload.get("native_session_id")
+    if not isinstance(sid, str) or not sid.strip():
+        return None
+    return {"native_session_id": sid.strip(), "recorded": bool(payload.get("recorded"))}
+
+
+def _live_generation(terminal_id: str) -> Optional[str]:
+    """The managed store's current generation for the terminal, or None.
+
+    Read-only; None covers unknown terminals and unreadable stores.
+    """
+    try:
+        from cli_agent_orchestrator.services import managed_launch
+
+        identity = managed_launch.managed_control_identity(terminal_id)
+    except Exception as exc:  # noqa: BLE001 - an unread store, not a verdict
+        logger.debug("opencode native-session observe: identity unreadable: %s", exc)
+        return None
+    if not isinstance(identity, dict):
+        return None
+    generation = identity.get("generation")
+    return generation if isinstance(generation, str) and generation else None
+
+
+def observe_native_session(
+    *,
+    terminal_id: Optional[str],
+    generation: Optional[str],
+    session_id: Optional[str],
+    read_generation=None,
+    record_native=None,
+    companion_root: Optional[Path] = None,
+) -> str:
+    """Record the provider-observed native session id. Never raises.
+
+    The transform hook observes the one identity the provider actually
+    mints (``input.sessionID``); no other fork surface sees it — the
+    pre-task identity seam covers only claude/codex/antigravity and the
+    managed v2 path has no opencode cell. This is this slice's minimal
+    writer, through the existing identity contract
+    (:func:`terminal_service.record_native_session`: refuse-to-repoint row
+    write plus best-effort roster repair).
+
+    Returns an outcome string: ``"recorded"``, ``"already-recorded"``,
+    ``"refused"`` (row carries another session — a supersession, never an
+    update), ``"stale-generation"`` (live generation moved on; a late
+    callback must not clobber the successor), ``"generation-unknown"``,
+    ``"unbound"`` (no baked binding — manual probe), or ``"error"``.
+    ``read_generation``/``record_native`` are the seams tests substitute;
+    production uses the live managed store and the sanctioned writer.
+    A per-generation marker file amortizes the steady state to zero store
+    I/O: once a generation's session is recorded (or refused), later
+    requests skip the store entirely.
+    """
+    if not session_id or not session_id.strip():
+        return "no-session"
+    if not terminal_id or not generation:
+        return "unbound"
+    observed = session_id.strip()
+    try:
+        marker = recorded_session_path(
+            terminal_id=terminal_id, generation=generation, companion_root=companion_root
+        )
+    except Exception as exc:  # noqa: BLE001 - unresolvable companion root
+        logger.debug("opencode native-session observe: marker path unusable: %s", exc)
+        return "error"
+    cached = _read_recorded_session(marker)
+    if cached is not None and cached["native_session_id"] == observed:
+        return "already-recorded" if cached["recorded"] else "refused"
+    try:
+        live = (
+            read_generation(terminal_id)
+            if read_generation is not None
+            else _live_generation(terminal_id)
+        )
+    except Exception as exc:  # noqa: BLE001 - a broken seam skips, never fails
+        logger.debug("opencode native-session observe: generation read failed: %s", exc)
+        return "error"
+    if live is None:
+        return "generation-unknown"
+    if live != generation:
+        return "stale-generation"
+    try:
+        if record_native is not None:
+            recorded = record_native(terminal_id, observed)
+        else:
+            from cli_agent_orchestrator.services import terminal_service
+
+            recorded = terminal_service.record_native_session(terminal_id, observed)
+    except Exception as exc:  # noqa: BLE001 - recording never breaks the request
+        logger.debug("opencode native-session observe: record failed: %s", exc)
+        return "error"
+    outcome = "recorded" if recorded else "refused"
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps({"native_session_id": observed, "recorded": recorded}),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.debug("opencode native-session observe: marker unwritable: %s", exc)
+    return outcome
+
+
 def resolve_session_id(
     explicit: Optional[str],
     *,
@@ -532,15 +772,21 @@ def run_helper(
     timeout_seconds: float,
     max_chars: int,
     run_conduct=None,
+    read_generation=None,
+    record_native=None,
+    companion_root: Optional[Path] = None,
 ) -> Tuple[int, str, str]:
     """Execute one helper invocation. Always exits 0.
 
     Returns ``(exit_code, stdout_text, stderr_note)``. ``stdout_text``
     is the one bounded string or "". ``run_conduct`` is the seam tests
-    substitute for the ``conduct`` subprocess. Every failure — missing
-    session id, missing conduct, slow conduct, malformed answer, discard
+    substitute for the ``conduct`` subprocess; ``read_generation`` and
+    ``record_native`` are the seams for the native-session observation
+    (:func:`observe_native_session`). Every failure — missing session
+    id, missing conduct, slow conduct, malformed answer, discard
     verdict — restores nothing and still exits 0: a restoration hook
-    must never break the request path.
+    must never break the request path. The observation outcome never
+    alters the returned text: recording is enrichment, not gating.
     """
     if session_id is None:
         return 0, "", "no native session observed; restoring nothing"
@@ -556,12 +802,28 @@ def run_helper(
         else:
             answer = _run_conduct(conduct_argv, timeout_seconds=timeout_seconds)
     except Exception as exc:  # noqa: BLE001 - lookup failure is scoped to restoration
+        observe_native_session(
+            terminal_id=terminal_id,
+            generation=terminal_generation,
+            session_id=session_id,
+            read_generation=read_generation,
+            record_native=record_native,
+            companion_root=companion_root,
+        )
         return (
             0,
             "",
             f"goal projection lookup failed ({exc}); restoration only, request unaffected",
         )
     text = render_transform_text(answer)
+    observe_native_session(
+        terminal_id=terminal_id,
+        generation=terminal_generation,
+        session_id=session_id,
+        read_generation=read_generation,
+        record_native=record_native,
+        companion_root=companion_root,
+    )
     if not text:
         return 0, "", "projection names no restorable goal; restoring nothing"
     if len(text) > max_chars:

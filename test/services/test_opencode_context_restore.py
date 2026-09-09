@@ -43,8 +43,9 @@ import shutil
 import stat
 import subprocess
 import sys
+import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -176,7 +177,9 @@ def _binding(tmp_path, *, fake=None, **overrides):
     return restore.RestoreBinding(**kwargs)
 
 
-def _run_helper_process(*, fake, extra_args=(), session_id=SESSION):
+def _run_helper_process(
+    *, fake, extra_args=(), session_id=SESSION, terminal_id=TERMINAL, generation=GENERATION
+):
     """The real helper process: env/argv in, one string out."""
     env = dict(fake["env"], PYTHONPATH=str(SRC_DIR))
     if session_id is not None:
@@ -189,9 +192,9 @@ def _run_helper_process(*, fake, extra_args=(), session_id=SESSION):
             "-m",
             "cli_agent_orchestrator.services.opencode_context_restore",
             "--terminal",
-            TERMINAL,
+            terminal_id,
             "--terminal-generation",
-            GENERATION,
+            generation,
             "--conduct-bin",
             str(fake["script"]),
             "--timeout",
@@ -827,3 +830,809 @@ class TestBunTransform:
             env=fake["env"],
         )
         assert result == {"system": []}
+
+
+# ---------------------------------------------------------------------------
+# R2 P1: the real construction path carries the binding (never injected)
+# ---------------------------------------------------------------------------
+
+
+class TestManagerBinding:
+    def test_create_provider_binds_managed_opencode(self, tmp_path):
+        from cli_agent_orchestrator.providers.manager import ProviderManager
+
+        workdir = tmp_path / "work"
+        workdir.mkdir()
+        provider = ProviderManager().create_provider(
+            "opencode_cli",
+            "tid-p1",
+            "sess-p1",
+            "win-p1",
+            "developer",
+            None,
+            terminal_working_directory=str(workdir),
+            terminal_generation="gen-p1",
+        )
+        binding = provider._context_restore
+        assert binding is not None
+        assert binding.working_directory == str(workdir)
+        assert binding.terminal_id == "tid-p1"
+        assert binding.generation == "gen-p1"
+
+    def test_create_provider_without_generation_stays_unbound(self, tmp_path):
+        from cli_agent_orchestrator.providers.manager import ProviderManager
+
+        workdir = tmp_path / "work"
+        workdir.mkdir()
+        provider = ProviderManager().create_provider(
+            "opencode_cli",
+            "tid-p1",
+            "sess-p1",
+            "win-p1",
+            "developer",
+            None,
+            terminal_working_directory=str(workdir),
+        )
+        assert provider._context_restore is None
+
+    def test_create_provider_without_root_stays_unbound(self):
+        from cli_agent_orchestrator.providers.manager import ProviderManager
+
+        provider = ProviderManager().create_provider(
+            "opencode_cli",
+            "tid-p1",
+            "sess-p1",
+            "win-p1",
+            "developer",
+            None,
+            terminal_generation="gen-p1",
+        )
+        assert provider._context_restore is None
+
+    def test_binding_builder_unit(self):
+        from cli_agent_orchestrator.providers.manager import _opencode_restore_binding
+
+        assert (
+            _opencode_restore_binding(
+                terminal_id="t", terminal_generation=None, working_directory="/w"
+            )
+            is None
+        )
+        assert (
+            _opencode_restore_binding(
+                terminal_id="t", terminal_generation="g", working_directory=None
+            )
+            is None
+        )
+        binding = _opencode_restore_binding(
+            terminal_id="t", terminal_generation="g", working_directory="/w"
+        )
+        assert (binding.terminal_id, binding.generation) == ("t", "g")
+
+    @pytest.mark.asyncio
+    @patch("cli_agent_orchestrator.services.terminal_service.status_monitor")
+    @patch("cli_agent_orchestrator.services.terminal_service.fifo_manager")
+    @patch("cli_agent_orchestrator.services.terminal_service.FIFO_DIR")
+    @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
+    @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
+    @patch("cli_agent_orchestrator.backends.registry._backend")
+    @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
+    @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
+    @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
+    @patch("cli_agent_orchestrator.services.terminal_service.load_agent_profile")
+    @patch("cli_agent_orchestrator.services.terminal_service.clear_session_env")
+    async def test_create_terminal_forwards_generation(
+        self,
+        mock_clear_env,
+        mock_load_profile,
+        mock_gen_id,
+        mock_gen_session,
+        mock_gen_window,
+        mock_tmux,
+        mock_db_create,
+        mock_provider_manager,
+        mock_fifo_dir,
+        mock_fifo_manager,
+        mock_status_monitor,
+        tmp_path,
+    ):
+        """The managed-launch callsite forwards the generation it owns."""
+        from cli_agent_orchestrator.models.agent_profile import AgentProfile
+        from cli_agent_orchestrator.services.terminal_service import create_terminal
+
+        mock_gen_id.return_value = "test1234"
+        mock_gen_session.return_value = "cao-session"
+        mock_gen_window.return_value = "developer-abcd"
+        mock_tmux.session_exists.return_value = False
+        mock_load_profile.return_value = AgentProfile(name="developer", description="Developer")
+        mock_provider = AsyncMock()
+        mock_provider.initialize.return_value = True
+        mock_provider_manager.create_provider.return_value = mock_provider
+        mock_fifo_dir.__truediv__ = MagicMock(return_value="fake.fifo")
+
+        workdir = tmp_path / "work"
+        workdir.mkdir()
+        await create_terminal(
+            "opencode_cli",
+            "developer",
+            new_session=True,
+            reserved_terminal_id="abcdef12",
+            terminal_generation="gen-fw",
+            working_directory=str(workdir),
+        )
+        _args, kwargs = mock_provider_manager.create_provider.call_args
+        assert kwargs.get("terminal_generation") == "gen-fw"
+        assert kwargs.get("terminal_working_directory") == str(workdir)
+
+
+# ---------------------------------------------------------------------------
+# R2 P2: install outcome lands on the existing launch facts
+# ---------------------------------------------------------------------------
+
+
+def _v1_reservation_row(*, terminal_id, generation, facts=None):
+    from cli_agent_orchestrator.clients import database
+
+    with database.SessionLocal() as db:
+        db.add(
+            database.ManagedLaunchReservationModel(
+                reservation_id=f"res-{terminal_id}",
+                terminal_id=terminal_id,
+                generation=generation,
+                session_name="sess",
+                provider="opencode_cli",
+                agent_profile="developer",
+                caller_id="test",
+                working_directory="/tmp/wt",
+                state="admitted",
+                request_json="{}",
+                observations_json="[]",
+                launch_facts_json=facts,
+                created_at="2026-09-09T00:00:00Z",
+                updated_at="2026-09-09T00:00:00Z",
+            )
+        )
+        db.commit()
+
+
+def _read_facts(terminal_id):
+    import json as _json
+
+    from cli_agent_orchestrator.clients import database
+
+    with database.SessionLocal() as db:
+        row = (
+            db.query(database.ManagedLaunchReservationModel)
+            .filter(database.ManagedLaunchReservationModel.terminal_id == terminal_id)
+            .one()
+        )
+        return _json.loads(row.launch_facts_json)
+
+
+class TestRecordInstallation:
+    def test_records_mechanism_additively(self):
+        tid, gen = f"tid-{uuid.uuid4().hex[:8]}", f"gen-{uuid.uuid4().hex[:8]}"
+        _v1_reservation_row(terminal_id=tid, generation=gen, facts='{"model":"m1"}')
+        installation = restore.describe_installation(
+            terminal_id=tid, generation=gen, degraded_reason=None
+        )
+        assert restore.record_installation(terminal_id=tid, installation=installation) is True
+        facts = _read_facts(tid)
+        assert facts["model"] == "m1"
+        assert facts[restore.CONTEXT_RESTORATION_FACTS_KEY] == installation
+        assert facts[restore.CONTEXT_RESTORATION_FACTS_KEY]["mechanism"] == restore.MECHANISM
+
+    def test_records_degraded_reason(self):
+        tid, gen = f"tid-{uuid.uuid4().hex[:8]}", f"gen-{uuid.uuid4().hex[:8]}"
+        _v1_reservation_row(terminal_id=tid, generation=gen, facts="{}")
+        installation = restore.describe_installation(
+            terminal_id=tid, generation=gen, degraded_reason="no helper"
+        )
+        assert restore.record_installation(terminal_id=tid, installation=installation) is True
+        facts = _read_facts(tid)
+        assert facts[restore.CONTEXT_RESTORATION_FACTS_KEY]["mechanism"] is None
+        assert facts[restore.CONTEXT_RESTORATION_FACTS_KEY]["degraded_reason"] == "no helper"
+
+    def test_unknown_terminal_returns_false(self):
+        assert (
+            restore.record_installation(
+                terminal_id=f"tid-absent-{uuid.uuid4().hex[:8]}",
+                installation={"mechanism": None},
+            )
+            is False
+        )
+
+    def test_corrupt_facts_never_overwritten(self):
+        tid, gen = f"tid-{uuid.uuid4().hex[:8]}", f"gen-{uuid.uuid4().hex[:8]}"
+        _v1_reservation_row(terminal_id=tid, generation=gen, facts="not-json{")
+        assert restore.record_installation(terminal_id=tid, installation={"a": 1}) is False
+        from cli_agent_orchestrator.clients import database
+
+        with database.SessionLocal() as db:
+            row = (
+                db.query(database.ManagedLaunchReservationModel)
+                .filter(database.ManagedLaunchReservationModel.terminal_id == tid)
+                .one()
+            )
+            assert row.launch_facts_json == "not-json{"
+
+    @pytest.mark.asyncio
+    @patch("cli_agent_orchestrator.providers.opencode_cli.wait_until_status")
+    @patch("cli_agent_orchestrator.providers.opencode_cli.wait_for_shell")
+    @patch("cli_agent_orchestrator.providers.opencode_cli.get_backend")
+    async def test_initialize_records_facts(
+        self, mock_backend, mock_shell, mock_wait, tmp_path, fake
+    ):
+        mock_shell.return_value = True
+        mock_wait.return_value = True
+        tid, gen = f"tid-{uuid.uuid4().hex[:8]}", f"gen-{uuid.uuid4().hex[:8]}"
+        _v1_reservation_row(terminal_id=tid, generation=gen, facts="{}")
+        binding = _binding(tmp_path, fake=fake, terminal_id=tid, generation=gen)
+        provider = _provider(
+            terminal_id=tid, session_name="s", window_name="w", context_restore=binding
+        )
+        assert await provider.initialize() is True
+        facts = _read_facts(tid)
+        assert facts[restore.CONTEXT_RESTORATION_FACTS_KEY]["mechanism"] == restore.MECHANISM
+
+
+# ---------------------------------------------------------------------------
+# R2 native writer: observe + record through the existing contract
+# ---------------------------------------------------------------------------
+
+
+class TestObserveNativeSession:
+    def test_recorded_then_cached(self, tmp_path):
+        calls = []
+
+        def record(tid, sid):
+            calls.append((tid, sid))
+            return True
+
+        outcome = restore.observe_native_session(
+            terminal_id="t1",
+            generation="g1",
+            session_id="ses-1",
+            read_generation=lambda tid: "g1",
+            record_native=record,
+            companion_root=tmp_path,
+        )
+        assert outcome == "recorded"
+        assert calls == [("t1", "ses-1")]
+        marker = tmp_path / "t1" / "g1" / restore.NATIVE_SESSION_FILENAME
+        assert json.loads(marker.read_text())["native_session_id"] == "ses-1"
+        outcome2 = restore.observe_native_session(
+            terminal_id="t1",
+            generation="g1",
+            session_id="ses-1",
+            read_generation=lambda tid: (_ for _ in ()).throw(AssertionError("must not read")),
+            record_native=lambda tid, sid: (_ for _ in ()).throw(AssertionError("must not record")),
+            companion_root=tmp_path,
+        )
+        assert outcome2 == "already-recorded"
+        assert calls == [("t1", "ses-1")]
+
+    def test_refused_is_stable(self, tmp_path):
+        calls = []
+
+        def record(tid, sid):
+            calls.append((tid, sid))
+            return False
+
+        kwargs = dict(
+            terminal_id="t1",
+            generation="g1",
+            session_id="ses-1",
+            read_generation=lambda tid: "g1",
+            record_native=record,
+            companion_root=tmp_path,
+        )
+        assert restore.observe_native_session(**kwargs) == "refused"
+        assert restore.observe_native_session(**kwargs) == "refused"
+        assert calls == [("t1", "ses-1")]
+
+    def test_stale_generation_never_records(self, tmp_path):
+        calls = []
+        outcome = restore.observe_native_session(
+            terminal_id="t1",
+            generation="g1",
+            session_id="ses-1",
+            read_generation=lambda tid: "g2",
+            record_native=lambda tid, sid: calls.append((tid, sid)),
+            companion_root=tmp_path,
+        )
+        assert outcome == "stale-generation"
+        assert calls == []
+        assert not (tmp_path / "t1" / "g1" / restore.NATIVE_SESSION_FILENAME).exists()
+
+    def test_unknown_generation_skips(self, tmp_path):
+        calls = []
+        outcome = restore.observe_native_session(
+            terminal_id="t1",
+            generation="g1",
+            session_id="ses-1",
+            read_generation=lambda tid: None,
+            record_native=lambda tid, sid: calls.append((tid, sid)),
+            companion_root=tmp_path,
+        )
+        assert outcome == "generation-unknown"
+        assert calls == []
+
+    def test_unbound_and_blank(self, tmp_path):
+        assert (
+            restore.observe_native_session(
+                terminal_id=None,
+                generation="g1",
+                session_id="ses-1",
+                companion_root=tmp_path,
+            )
+            == "unbound"
+        )
+        assert (
+            restore.observe_native_session(
+                terminal_id="t1",
+                generation="g1",
+                session_id="  ",
+                companion_root=tmp_path,
+            )
+            == "no-session"
+        )
+
+    def test_record_error_never_raises(self, tmp_path):
+        def boom(tid, sid):
+            raise RuntimeError("db gone")
+
+        outcome = restore.observe_native_session(
+            terminal_id="t1",
+            generation="g1",
+            session_id="ses-1",
+            read_generation=lambda tid: "g1",
+            record_native=boom,
+            companion_root=tmp_path,
+        )
+        assert outcome == "error"
+
+    def test_run_helper_threading_keeps_text_on_record_error(self, tmp_path):
+        def boom(tid, sid):
+            raise RuntimeError("db gone")
+
+        exit_code, text, _note = restore.run_helper(
+            session_id=SESSION,
+            terminal_id=TERMINAL,
+            terminal_generation=GENERATION,
+            conduct_binary="conduct",
+            timeout_seconds=5,
+            max_chars=8000,
+            run_conduct=lambda argv: _ok_answer(),
+            read_generation=lambda tid: GENERATION,
+            record_native=boom,
+            companion_root=tmp_path,
+        )
+        assert exit_code == 0
+        assert "Ship the thing" in text
+
+    def test_run_helper_observes(self, tmp_path):
+        seen = []
+        exit_code, text, _note = restore.run_helper(
+            session_id=SESSION,
+            terminal_id=TERMINAL,
+            terminal_generation=GENERATION,
+            conduct_binary="conduct",
+            timeout_seconds=5,
+            max_chars=8000,
+            run_conduct=lambda argv: _ok_answer(),
+            read_generation=lambda tid: GENERATION,
+            record_native=lambda tid, sid: seen.append((tid, sid)) or True,
+            companion_root=tmp_path,
+        )
+        assert exit_code == 0 and text
+        assert seen == [(TERMINAL, SESSION)]
+
+    def test_real_row_write_and_refuse_to_repoint(self, tmp_path, fake):
+        """End to end through the real store: first sighting wins."""
+        from cli_agent_orchestrator.clients import database
+
+        tid, gen = f"tid-{uuid.uuid4().hex[:8]}", f"gen-{uuid.uuid4().hex[:8]}"
+        _v1_reservation_row(terminal_id=tid, generation=gen, facts="{}")
+        with database.SessionLocal() as db:
+            db.add(
+                database.TerminalModel(
+                    id=tid, tmux_session="sess", tmux_window="w", provider="opencode_cli"
+                )
+            )
+            db.commit()
+
+        def row_sid():
+            with database.SessionLocal() as db:
+                row = (
+                    db.query(database.TerminalModel).filter(database.TerminalModel.id == tid).one()
+                )
+                return row.native_session_id
+
+        proc = _run_helper_process(
+            fake=fake, session_id="ses-first", terminal_id=tid, generation=gen
+        )
+        assert proc.returncode == 0
+        assert row_sid() == "ses-first"
+        proc = _run_helper_process(
+            fake=fake, session_id="ses-second", terminal_id=tid, generation=gen
+        )
+        assert proc.returncode == 0
+        # The projection still answers (canned ok); only the row keeps the
+        # first sighting: a supersession never becomes an update.
+        assert row_sid() == "ses-first"
+
+
+# ---------------------------------------------------------------------------
+# R2 P3: stale-file disposition (unit)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleCleanup:
+    def _seed(self, plugdir, *names):
+        plugdir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (plugdir / name).write_text("x\n")
+        return plugdir
+
+    def test_removes_only_same_terminal_other_generations(self, tmp_path):
+        workdir = tmp_path / "work"
+        plugdir = self._seed(
+            restore.project_plugin_dir(str(workdir)),
+            f"{restore.PLUGIN_FILENAME_PREFIX}{TERMINAL}-gen-old.ts",
+            f"{restore.PLUGIN_FILENAME_PREFIX}{TERMINAL}-{GENERATION}.ts",
+            f"{restore.PLUGIN_FILENAME_PREFIX}other-tid-gen-old.ts",
+            "my-plugin.ts",
+        )
+        removed = restore.remove_stale_plugins(str(workdir), TERMINAL, GENERATION)
+        assert [p.name for p in removed] == [
+            f"{restore.PLUGIN_FILENAME_PREFIX}{TERMINAL}-gen-old.ts"
+        ]
+        remaining = sorted(p.name for p in plugdir.iterdir())
+        assert remaining == sorted(
+            [
+                f"{restore.PLUGIN_FILENAME_PREFIX}{TERMINAL}-{GENERATION}.ts",
+                f"{restore.PLUGIN_FILENAME_PREFIX}other-tid-gen-old.ts",
+                "my-plugin.ts",
+            ]
+        )
+
+    def test_absent_dir_is_noop(self, tmp_path):
+        assert restore.remove_stale_plugins(str(tmp_path / "absent"), TERMINAL, GENERATION) == []
+
+    def test_symlink_and_subdir_never_followed(self, tmp_path):
+        workdir = tmp_path / "work"
+        plugdir = self._seed(
+            restore.project_plugin_dir(str(workdir)),
+            f"{restore.PLUGIN_FILENAME_PREFIX}{TERMINAL}-gen-old.ts",
+        )
+        subdir = plugdir / f"{restore.PLUGIN_FILENAME_PREFIX}{TERMINAL}-gen-dir.ts"
+        subdir.mkdir()
+        (subdir / "inner.ts").write_text("x\n")
+        link = plugdir / f"{restore.PLUGIN_FILENAME_PREFIX}{TERMINAL}-gen-link.ts"
+        link.symlink_to(plugdir / f"{restore.PLUGIN_FILENAME_PREFIX}{TERMINAL}-gen-old.ts")
+        removed = restore.remove_stale_plugins(str(workdir), TERMINAL, GENERATION)
+        assert [p.name for p in removed] == [
+            f"{restore.PLUGIN_FILENAME_PREFIX}{TERMINAL}-gen-old.ts"
+        ]
+        assert subdir.is_dir() and link.is_symlink()
+
+    def test_unsafe_ids_raise(self, tmp_path):
+        with pytest.raises(ValueError):
+            restore.remove_stale_plugins(str(tmp_path), "../evil", GENERATION)
+
+
+# ---------------------------------------------------------------------------
+# R2 P3: shared workdir — two workers, no cross-inject, no double-inject
+# ---------------------------------------------------------------------------
+
+FAKE_BINDING_CONDUCT = (
+    """\
+#!"""
+    + sys.executable
+    + """
+import json, os, sys
+
+argv = sys.argv[1:]
+if "--harness" not in argv or argv[argv.index("--harness") + 1] != "opencode_cli":
+    sys.stderr.write("wrong harness claim\\n")
+    sys.exit(2)
+with open(os.environ["CONDUCT_BINDINGS"]) as handle:
+    table = json.load(handle)
+session = argv[argv.index("--native-session-id") + 1]
+terminal = argv[argv.index("--terminal") + 1] if "--terminal" in argv else None
+generation = (
+    argv[argv.index("--terminal-generation") + 1] if "--terminal-generation" in argv else None
+)
+entry = table.get(session)
+if (
+    entry is not None
+    and entry["terminal"] == terminal
+    and entry["generation"] == generation
+):
+    answer = {
+        "ok": True,
+        "schema": "cao-hook-context-v1",
+        "result_type": "ok",
+        "detail": None,
+        "recovery": None,
+        "identity": {
+            "harness": "opencode_cli",
+            "native_session_id": session,
+            "terminal_id": terminal,
+            "terminal_generation": generation,
+            "generation_fence": "verified",
+        },
+        "goal": {
+            "goal_id": "g-" + session,
+            "state": "open",
+            "goal_version": "v1",
+            "objective": "objective-for-" + session,
+            "requirements_outstanding": [],
+            "requirements_outstanding_count": 0,
+            "completion_requirements_truncated": False,
+            "active_hold": None,
+            "next_action": "ordinary work may continue; this read starts no turn",
+        },
+        "bounds": {},
+    }
+else:
+    answer = {
+        "ok": True,
+        "schema": "cao-hook-context-v1",
+        "result_type": "no-worker",
+        "detail": "no live terminal binds native session",
+        "recovery": None,
+        "identity": None,
+        "goal": None,
+        "bounds": {},
+    }
+sys.stdout.write(json.dumps(answer))
+"""
+)
+
+
+@pytest.fixture()
+def binding_conduct(tmp_path):
+    script = tmp_path / "binding-conduct"
+    script.write_text(FAKE_BINDING_CONDUCT)
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    bindings = tmp_path / "bindings.json"
+    env = dict(os.environ, CONDUCT_BINDINGS=str(bindings))
+    return {"script": script, "bindings": bindings, "env": env}
+
+
+def _install_bound_plugin(tmp_path, *, workdir, terminal_id, generation, conduct):
+    shim = tmp_path / f"cao-opencode-hook-context-{terminal_id[:8]}"
+    _helper_shim(shim)
+    binding = restore.RestoreBinding(
+        working_directory=str(workdir),
+        terminal_id=terminal_id,
+        generation=generation,
+        helper_executable=str(shim),
+        conduct_binary=str(conduct["script"]),
+        timeout_seconds=5.0,
+    )
+    path, degraded = restore.install_plugin(binding)
+    assert degraded is None
+    return path
+
+
+@needs_bun
+class TestSharedWorkdir:
+    BINDINGS = {
+        "ses-A": {"terminal": "tid-A", "generation": "gen-A"},
+        "ses-B": {"terminal": "tid-B", "generation": "gen-B"},
+    }
+
+    def _two_workers(self, tmp_path, binding_conduct):
+        workdir = tmp_path / "shared"
+        workdir.mkdir()
+        binding_conduct["bindings"].write_text(json.dumps(self.BINDINGS))
+        path_a = _install_bound_plugin(
+            tmp_path,
+            workdir=workdir,
+            terminal_id="tid-A",
+            generation="gen-A",
+            conduct=binding_conduct,
+        )
+        path_b = _install_bound_plugin(
+            tmp_path,
+            workdir=workdir,
+            terminal_id="tid-B",
+            generation="gen-B",
+            conduct=binding_conduct,
+        )
+        files = sorted(p.name for p in restore.project_plugin_dir(str(workdir)).iterdir())
+        assert files == [path_a.name, path_b.name]
+        return path_a, path_b
+
+    def _drive(self, tmp_path, plugin_path, session_id, env):
+        return _run_bun(
+            _write_bun_case(
+                tmp_path,
+                plugin_source=plugin_path.read_text(),
+                helper_script=None,
+                session_id=session_id,
+            ),
+            env=env,
+        )
+
+    def test_each_worker_restores_only_its_own_session(self, tmp_path, binding_conduct):
+        path_a, path_b = self._two_workers(tmp_path, binding_conduct)
+        env = binding_conduct["env"]
+        result = self._drive(tmp_path, path_a, "ses-A", env)
+        assert result == {"system": [restore.render_transform_text(self._ok("ses-A"))]}
+        result = self._drive(tmp_path, path_b, "ses-A", env)
+        assert result == {"system": []}
+        result = self._drive(tmp_path, path_b, "ses-B", env)
+        assert result == {"system": [restore.render_transform_text(self._ok("ses-B"))]}
+        result = self._drive(tmp_path, path_a, "ses-B", env)
+        assert result == {"system": []}
+
+    def _ok(self, session):
+        entry = self.BINDINGS[session]
+        return {
+            "ok": True,
+            "schema": "cao-hook-context-v1",
+            "result_type": "ok",
+            "detail": None,
+            "recovery": None,
+            "identity": {
+                "harness": "opencode_cli",
+                "native_session_id": session,
+                "terminal_id": entry["terminal"],
+                "terminal_generation": entry["generation"],
+                "generation_fence": "verified",
+            },
+            "goal": {
+                "goal_id": "g-" + session,
+                "state": "open",
+                "goal_version": "v1",
+                "objective": "objective-for-" + session,
+                "requirements_outstanding": [],
+                "requirements_outstanding_count": 0,
+                "completion_requirements_truncated": False,
+                "active_hold": None,
+                "next_action": "ordinary work may continue; this read starts no turn",
+            },
+            "bounds": {},
+        }
+
+    def test_one_request_pushes_at_most_once(self, tmp_path, binding_conduct):
+        path_a, _path_b = self._two_workers(tmp_path, binding_conduct)
+        result = self._drive(tmp_path, path_a, "ses-A", binding_conduct["env"])
+        assert len(result["system"]) == 1
+
+    def test_successor_launch_cleans_predecessor_file(self, tmp_path, binding_conduct):
+        workdir = tmp_path / "shared"
+        workdir.mkdir()
+        binding_conduct["bindings"].write_text(json.dumps(self.BINDINGS))
+        old = _install_bound_plugin(
+            tmp_path,
+            workdir=workdir,
+            terminal_id="tid-A",
+            generation="gen-old",
+            conduct=binding_conduct,
+        )
+        assert old.exists()
+        other = _install_bound_plugin(
+            tmp_path,
+            workdir=workdir,
+            terminal_id="tid-B",
+            generation="gen-B",
+            conduct=binding_conduct,
+        )
+        user_plugin = restore.project_plugin_dir(str(workdir)) / "user-plugin.ts"
+        user_plugin.write_text("export const U = 1;\n")
+        binding = restore.RestoreBinding(
+            working_directory=str(workdir),
+            terminal_id="tid-A",
+            generation="gen-A",
+            helper_executable=sys.executable,
+            conduct_binary=str(binding_conduct["script"]),
+            timeout_seconds=5.0,
+        )
+        removed = restore.remove_stale_plugins(str(workdir), "tid-A", "gen-A")
+        assert [p.name for p in removed] == [old.name]
+        new, degraded = restore.install_plugin(binding)
+        assert degraded is None and new.exists()
+        assert not old.exists()
+        assert other.exists() and user_plugin.exists()
+
+
+# ---------------------------------------------------------------------------
+# R2 reader fallback: v1 opencode rows surface recorded sessions
+# ---------------------------------------------------------------------------
+
+
+class TestControlIdentityFallback:
+    def _fallback(self, managed, metadata):
+        from cli_agent_orchestrator.services import control_input_service
+
+        return control_input_service._managed_native_session_id(managed, metadata)
+
+    def test_managed_value_wins_including_explicit_null(self):
+        assert (
+            self._fallback(
+                {"native_session_id": "live-s"},
+                {"provider": "opencode_cli", "native_session_id": "row-s"},
+            )
+            == "live-s"
+        )
+        # The v2 refusal shape (explicit null) is never papered over.
+        assert (
+            self._fallback(
+                {"native_session_id": None},
+                {"provider": "opencode_cli", "native_session_id": "row-s"},
+            )
+            is None
+        )
+
+    def test_absent_key_falls_back_for_opencode_only(self):
+        assert (
+            self._fallback(
+                {"generation": "g1"},
+                {"provider": "opencode_cli", "native_session_id": "row-s"},
+            )
+            == "row-s"
+        )
+        assert (
+            self._fallback(
+                {"generation": "g1"},
+                {"provider": "codex", "native_session_id": "row-s"},
+            )
+            is None
+        )
+        assert (
+            self._fallback(None, {"provider": "opencode_cli", "native_session_id": "row-s"})
+            == "row-s"
+        )
+
+    def test_resolve_control_identity_surfaces_recorded_opencode_session(self):
+        from cli_agent_orchestrator.services import control_input_service
+
+        metadata = {
+            "provider": "opencode_cli",
+            "native_session_id": "ses-live",
+            "tmux_session": "sess",
+            "generation": "gen-1",
+        }
+        managed = {"generation": "gen-1", "provider": "opencode_cli"}
+        with (
+            patch.object(control_input_service, "_terminal_metadata", return_value=metadata),
+            patch.object(control_input_service, "_managed_identity", return_value=managed),
+            patch.object(control_input_service, "_tmux_client", return_value=None),
+        ):
+            resolved = control_input_service.resolve_control_identity("tid-1")
+        assert resolved is not None
+        assert resolved.native_session_id == "ses-live"
+
+    def test_resolve_control_identity_keeps_v2_null(self):
+        from cli_agent_orchestrator.services import control_input_service
+
+        metadata = {
+            "provider": "opencode_cli",
+            "native_session_id": "ses-live",
+            "tmux_session": "sess",
+        }
+        managed = {"generation": "gen-1", "native_session_id": None}
+        with (
+            patch.object(control_input_service, "_terminal_metadata", return_value=metadata),
+            patch.object(control_input_service, "_managed_identity", return_value=managed),
+            patch.object(control_input_service, "_tmux_client", return_value=None),
+        ):
+            resolved = control_input_service.resolve_control_identity("tid-1")
+        assert resolved is not None
+        assert resolved.native_session_id is None
+
+    def test_blank_and_missing_stay_none(self):
+        assert (
+            self._fallback(
+                {"generation": "g1"},
+                {"provider": "opencode_cli", "native_session_id": "  "},
+            )
+            is None
+        )
+        assert self._fallback({"generation": "g1"}, {"provider": "opencode_cli"}) is None
+        assert self._fallback(None, None) is None

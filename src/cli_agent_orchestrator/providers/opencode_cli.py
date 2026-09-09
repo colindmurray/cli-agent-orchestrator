@@ -190,19 +190,38 @@ class OpenCodeCliProvider(BaseProvider):
         """Install the managed goal-restoration plugin, if bound.
 
         No-op when the provider was constructed without a
-        ``context_restore`` binding. Any install failure degrades to a
-        launch without restoration (logged) — a restoration plugin never
-        fails a launch. The outcome record is debug-logged for
-        diagnostics; durable launch-facts recording belongs to the
-        managed-launch owner (cond-0842), not this provider.
+        ``context_restore`` binding (every legacy and reconstructed
+        provider). Otherwise, before the launch command is sent: remove
+        this terminal's superseded plugin files, install this
+        generation's file, and record the outcome (mechanism or degraded
+        reason) on the reservation's existing launch facts (§10.1). Any
+        failure degrades to a launch without restoration (logged) — a
+        restoration plugin never fails a launch.
         """
         if self._context_restore is None:
             return
         try:
             from cli_agent_orchestrator.services import opencode_context_restore
 
-            path, degraded = opencode_context_restore.install_plugin(
-                self._context_restore
+            binding = self._context_restore
+            removed = opencode_context_restore.remove_stale_plugins(
+                binding.working_directory, binding.terminal_id, binding.generation
+            )
+            if removed:
+                logger.debug(
+                    "opencode context restoration removed %d superseded plugin(s) "
+                    "for terminal %s",
+                    len(removed),
+                    self.terminal_id,
+                )
+            path, degraded = opencode_context_restore.install_plugin(binding)
+            opencode_context_restore.record_installation(
+                terminal_id=binding.terminal_id,
+                installation=opencode_context_restore.describe_installation(
+                    terminal_id=binding.terminal_id,
+                    generation=binding.generation,
+                    degraded_reason=degraded,
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - restoration never fails a launch
             logger.warning(
