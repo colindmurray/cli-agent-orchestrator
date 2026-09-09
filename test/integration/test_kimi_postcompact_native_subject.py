@@ -360,62 +360,70 @@ def native_preflight(tmp_path_factory):
     assert (FORK_ROOT / "src" / "cli_agent_orchestrator" / "api" / "main.py").exists()
     assert shutil.which("git"), "host driver needs git for the worktree triple"
 
-    supported = _run_checked(
-        [discover_python(), "-m", "conduct", "spawn", "--help"],
-        timeout=60,
-        env=_conduct_env(root, scratch / "xdg"),
-    )
-    assert "fix-kimi" in supported, "normal CLI lacks task-class fix-kimi"
-
+    # Owned scratch comes FIRST: every path below (probe XDG, repo,
+    # worktree, receipt) derives from it, and the finally-block cleanup
+    # must hold even when an early probe fails.
     scratch = Path(tmp_path_factory.mktemp("native-preflight"))
-    repo = scratch / "repo"
-    repo.mkdir()
-    tag = uuid.uuid4().hex[:8]
-    _run_checked(["git", "init", "-q", "-b", "main"], cwd=repo)
-    _run_checked(["git", "config", "user.email", "cao-native@example.invalid"], cwd=repo)
-    _run_checked(["git", "config", "user.name", "cao-native"], cwd=repo)
-    (repo / "task.txt").write_text(f"native probe {tag}\n")
-    _run_checked(["git", "add", "."], cwd=repo)
-    _run_checked(["git", "commit", "-qm", "seed"], cwd=repo)
-    branch = f"cao-native-{tag}"
-    worktree = scratch / "worktree"
-    _run_checked(["git", "worktree", "add", "-b", branch, str(worktree)], cwd=repo)
-    current = _run_checked(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree)
-    assert current == branch, f"worktree on {current!r}, not {branch!r}"
-    objective = (
-        f"cond-0845 native restoration probe {tag}: compact the worker, "
-        "restore this exact objective, requirements, and checkpoint."
-    )
-    task_file = scratch / "task.md"
-    task_file.write_text(f"# native probe {tag}\n\n{objective}\n")
+    repo: Optional[Path] = None
+    worktree: Optional[Path] = None
+    try:
+        supported = _run_checked(
+            [discover_python(), "-m", "conduct", "spawn", "--help"],
+            timeout=60,
+            env=_conduct_env(root, scratch / "xdg"),
+        )
+        assert "fix-kimi" in supported, "normal CLI lacks task-class fix-kimi"
 
-    receipt = {
-        "kimi_binary": binary,
-        "kimi_version": version,
-        "kimi_sha256": digest,
-        "conductor_root": str(root),
-        "repo": str(repo),
-        "worktree": str(worktree),
-        "branch": branch,
-        "task_file": str(task_file),
-        "task_class": "fix-kimi",
-        "distinct_tag": tag,
-        "distinct_objective": objective,
-    }
-    (scratch / "preflight-receipt.json").write_text(json.dumps(receipt, indent=2))
-    yield receipt
+        repo = scratch / "repo"
+        repo.mkdir()
+        tag = uuid.uuid4().hex[:8]
+        _run_checked(["git", "init", "-q", "-b", "main"], cwd=repo)
+        _run_checked(["git", "config", "user.email", "cao-native@example.invalid"], cwd=repo)
+        _run_checked(["git", "config", "user.name", "cao-native"], cwd=repo)
+        (repo / "task.txt").write_text(f"native probe {tag}\n")
+        _run_checked(["git", "add", "."], cwd=repo)
+        _run_checked(["git", "commit", "-qm", "seed"], cwd=repo)
+        branch = f"cao-native-{tag}"
+        worktree = scratch / "worktree"
+        _run_checked(["git", "worktree", "add", "-b", branch, str(worktree)], cwd=repo)
+        current = _run_checked(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree)
+        assert current == branch, f"worktree on {current!r}, not {branch!r}"
+        objective = (
+            f"cond-0845 native restoration probe {tag}: compact the worker, "
+            "restore this exact objective, requirements, and checkpoint."
+        )
+        task_file = scratch / "task.md"
+        task_file.write_text(f"# native probe {tag}\n\n{objective}\n")
 
-    # Teardown touches ONLY paths under this fixture's scratch: remove the
-    # owned worktree registration first, then the tree. No prune of
-    # foreign repositories, no broad delete.
-    assert scratch in worktree.parents and scratch in repo.parents
-    subprocess.run(
-        ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
-        capture_output=True,
-        timeout=60,
-    )
-    assert not worktree.exists(), f"owned worktree {worktree} survived teardown"
-    shutil.rmtree(scratch, ignore_errors=True)
+        receipt = {
+            "kimi_binary": binary,
+            "kimi_version": version,
+            "kimi_sha256": digest,
+            "conductor_root": str(root),
+            "repo": str(repo),
+            "worktree": str(worktree),
+            "branch": branch,
+            "task_file": str(task_file),
+            "task_class": "fix-kimi",
+            "distinct_tag": tag,
+            "distinct_objective": objective,
+        }
+        (scratch / "preflight-receipt.json").write_text(json.dumps(receipt, indent=2))
+        yield receipt
+    finally:
+        # Teardown touches ONLY paths under this fixture's scratch: remove
+        # the owned worktree registration first, then the tree. Guards hold
+        # when setup failed partway (repo/worktree may be unbound). No
+        # prune of foreign repositories, no broad delete.
+        if repo is not None and worktree is not None and worktree.exists():
+            assert scratch in worktree.parents and scratch in repo.parents
+            subprocess.run(
+                ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
+                capture_output=True,
+                timeout=60,
+            )
+            assert not worktree.exists(), f"owned worktree {worktree} survived teardown"
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def test_native_preflight_receipt(native_preflight):
@@ -424,6 +432,37 @@ def test_native_preflight_receipt(native_preflight):
     assert len(native_preflight["kimi_sha256"]) == 64
     assert Path(native_preflight["task_file"]).exists()
     assert native_preflight["task_class"] == "fix-kimi"
+
+
+def test_native_preflight_no_use_before_def():
+    """AST regression for the cf4f2f90 P1: ``native_preflight`` used
+    ``scratch`` a dozen lines before assigning it, so every opt-in run
+    died with UnboundLocalError at gate setup. This enforces
+    definition-before-use for every local in that fixture — a revert
+    reintroducing the order fails here with the exact name and lines.
+    Pure static analysis: no subprocess, no platform capability, and
+    nothing here stands in for a native run."""
+    import ast
+
+    tree = ast.parse(Path(__file__).read_text())
+    fn = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "native_preflight"
+    )
+    stores: Dict[str, int] = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            stores.setdefault(node.id, node.lineno)
+    errors = [
+        f"{node.id} loaded line {node.lineno} before store line {stores[node.id]}"
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id in stores
+        and node.lineno < stores[node.id]
+    ]
+    assert not errors, errors
 
 
 # ---------------------------------------------------------------------------
