@@ -109,15 +109,107 @@ def _require_native_subject() -> None:
         )
 
 
-def test_native_plan_self_consistent():
-    """The opt-in contract cannot drift from its documentation: the gate
-    reads the same env name the HOST DRIVER block tells the driver to
-    set, and the requested route is the staged K3/high selection."""
-    doc = Path(__file__).read_text()
-    assert NATIVE_OPT_IN_ENV in doc
-    assert NATIVE_KIMI_BIN_ENV in doc
-    assert "COND0845_NATIVE_SUBJECT=1" in doc
-    assert REQUESTED_MODEL == "kimi-code/k3" and REQUESTED_EFFORT == "high"
+# ---------------------------------------------------------------------------
+# Always-run regression: native-path route registry + park semantics.
+#
+# Guards the exact P1 blind spot from review run 140227: a static
+# ``app.routes`` read misses every router-included endpoint on FastAPI >=
+# 0.141 (lazy ``_IncludedRouter``), which misreported the production
+# ``lifecycle/pause-request`` park verb as nonexistent. This test expands
+# lazy includes exactly like the framework serves them, pins every
+# (path, method) this native path calls, pins the pause request schema,
+# and proves the resulting semantic state end to end in-process:
+# pause-request -> lifecycle ``pausing`` -> the restoration boundary's
+# own lifecycle gate refuses. No server, no model, no tmux.
+# ---------------------------------------------------------------------------
+
+
+def _effective_route_table(app) -> Dict[str, set]:
+    """(path, methods) served by ``app``, expanding lazy includes.
+
+    Compatible with both the pre-0.141 flat layout (included routes
+    copied into ``app.routes``) and the lazy ``_IncludedRouter`` layout.
+    """
+    table: Dict[str, set] = {}
+    stack = list(app.routes)
+    while stack:
+        route = stack.pop()
+        if type(route).__name__ == "_IncludedRouter":
+            stack.extend(route.original_router.routes)
+            continue
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", None)
+        if isinstance(path, str) and methods:
+            table.setdefault(path, set()).update(methods)
+    return table
+
+
+NATIVE_ROUTE_CONTRACT = {
+    "/health": {"GET"},
+    "/sessions": {"GET"},
+    "/sessions/{session_name}": {"GET", "DELETE"},
+    "/sessions/{session_name}/lifecycle": {"GET"},
+    "/sessions/{session_name}/lifecycle/pause-request": {"POST"},
+    "/sessions/{session_name}/lifecycle/pause-settled": {"POST"},
+    "/terminals/{terminal_id}/operator-message": {"POST"},
+    "/terminals/{terminal_id}/context-restore": {"POST"},
+    "/terminals/{terminal_id}/context-restore/pending": {"GET"},
+    "/managed-launch/v2/reservations": {"POST"},
+    "/managed-launch/v2/reservations/{reservation_id}": {"GET"},
+    "/managed-launch/v2/reservations/{reservation_id}/launch": {"POST"},
+    "/managed-launch/v2/reservations/{reservation_id}/bind": {"POST"},
+}
+
+
+def test_native_route_registry_matches_handlers():
+    """Every endpoint the native path calls is served, with the method
+    the path uses — read off the real candidate app, not a static list."""
+    from cli_agent_orchestrator.api.main import app
+
+    table = _effective_route_table(app)
+    assert len(table) > len(NATIVE_ROUTE_CONTRACT)
+    missing = {
+        path: sorted(methods)
+        for path, methods in NATIVE_ROUTE_CONTRACT.items()
+        if not set(methods) <= set(table.get(path, ()))
+    }
+    assert not missing, f"native path calls unserved routes: {missing}"
+
+
+def test_native_pause_request_schema_and_semantics():
+    """Exact pause schema plus the resulting park state, in-process.
+
+    ``requested_by`` is required (a body without it must fail request
+    validation); a valid request flips a fresh session to ``pausing``;
+    and the restoration boundary's own lifecycle gate then refuses that
+    session while an untouched session stays working. This is the same
+    verdict the native parked leg asserts over HTTP.
+    """
+    from pydantic import ValidationError
+
+    from cli_agent_orchestrator.api.session_lifecycle import PauseRequestBody
+    from cli_agent_orchestrator.services import kimi_context_restore as kr
+    from cli_agent_orchestrator.services import session_lifecycle as sl
+
+    with pytest.raises(ValidationError):
+        PauseRequestBody.model_validate({})
+    body = PauseRequestBody.model_validate(
+        {"requested_by": "cond0845-regression", "note": "park-state proof"}
+    )
+    assert body.deadline_seconds > 0
+
+    session = f"cao-native-regression-{uuid.uuid4().hex[:8]}"
+    assert sl.describe(session).get("lifecycle") == "working"
+    assert kr._fork_lifecycle_working(session_name=session) is None
+    sl.request_pause(
+        session,
+        requested_by=body.requested_by,
+        deadline_seconds=body.deadline_seconds,
+        note=body.note,
+    )
+    assert sl.describe(session).get("lifecycle") == "pausing"
+    refused = kr._fork_lifecycle_working(session_name=session)
+    assert refused is not None and refused[0] == "lifecycle_not_working", refused
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +731,16 @@ def test_native_compact_restore_readback(native_pair, native_worker):
 
 def test_native_parked_boundary_refuses(native_pair, native_worker):
     """A parked worker gets no reminder-started turn: the boundary refuses
-    under the parked fence with zero bytes, and the wire stays still."""
+    under the parked fence with zero bytes, and the wire stays still.
+
+    Park verb is the production operator half
+    ``POST /sessions/{name}/lifecycle/pause-request`` (PauseRequestBody:
+    ``requested_by`` required), which flips the session lifecycle to
+    ``pausing`` immediately; state is read back through the production
+    ``GET .../lifecycle`` record. A static route-table read misses these
+    routes on FastAPI >= 0.141 (lazy ``_IncludedRouter``) — the
+    always-run registry regression below guards that exact blind spot.
+    """
     _require_native_subject()
     base = native_pair.base
     http = native_pair.http
@@ -655,14 +756,13 @@ def test_native_parked_boundary_refuses(native_pair, native_worker):
     assert pause.status_code == 200, pause.text[:2000]
 
     deadline = time.monotonic() + 120.0
-    paused = False
+    record: Dict[str, Any] = {}
     while time.monotonic() < deadline:
-        detail = http.get(f"{base}/sessions/{session}", timeout=15).json()
-        if detail.get("lifecycle") in ("pausing", "paused"):
-            paused = True
+        record = http.get(f"{base}/sessions/{session}/lifecycle", timeout=15).json()
+        if record.get("lifecycle") in ("pausing", "paused"):
             break
         time.sleep(_POLL)
-    assert paused, f"session never parked: {detail}"
+    assert record.get("lifecycle") in ("pausing", "paused"), f"session never parked: {record}"
 
     fence = dict(native_worker["fence"])
     refused = http.post(
