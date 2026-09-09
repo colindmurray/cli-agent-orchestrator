@@ -596,11 +596,20 @@ def native_admission(native_pair, native_preflight):
     session = f"cao-native-{tag}"
     rid, did = str(uuid.uuid4()), str(uuid.uuid4())
 
+    # Explicit isolated-test caller identity: spawn records a supervisor
+    # terminal id for callback routing, and outside a CAO terminal there
+    # is no provable one (env/TTY are diagnostics, never identity). A
+    # fresh random id per fixture run names the test rig without
+    # impersonating any operator or worker terminal; the explicit flag
+    # always wins over an ambient $CAO_TERMINAL_ID.
+    caller_id = uuid.uuid4().hex[:8]
     proc = _conduct(
         [
             "spawn",
             "--project",
             project,
+            "--caller-id",
+            caller_id,
             "--task-class",
             "fix-kimi",
             "--provider",
@@ -702,6 +711,71 @@ def _conduct(args, xdg: Path, timeout: float = 120.0):
     from test.integration.test_kimi_postcompact_isolated_harness import _run_conduct
 
     return _run_conduct(args, xdg=xdg, timeout=timeout)
+
+
+def test_spawn_admission_caller_gate(tmp_path, monkeypatch):
+    """Spawn admission validation with the real CLI and owned fixture
+    setup — no model, no server. Leg 1 reproduces the host enrollment
+    failure exactly (omitted caller, no CAO terminal): typed
+    configuration-schema naming the caller contract. Leg 2 carries a
+    fresh explicit caller id through the identical argv and must clear
+    that gate, failing instead at the next prerequisite (deploy
+    receipt); nothing is contacted and nothing launches either way.
+    If the fixture ever gains a deploy receipt, leg 2's frontier moves
+    past unexpected-source-mutation: update the expected class then,
+    never delete the caller legs."""
+    xdg = tmp_path / "xdg"
+    xdg.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "cao-native@example.invalid"],
+                   cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "cao-native"], cwd=repo)
+    (repo / "task.txt").write_text("admission probe\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True)
+    worktree = tmp_path / "worktree"
+    subprocess.run(["git", "worktree", "add", "-b", "cao-admission-probe", str(worktree)],
+                   cwd=repo, check=True)
+    task_file = tmp_path / "task.md"
+    task_file.write_text("# admission probe\n")
+    # Hermetic omission: no ambient terminal id may mask the missing flag.
+    monkeypatch.delenv("CAO_TERMINAL_ID", raising=False)
+
+    def _argv(extra):
+        return [
+            "spawn",
+            "--project", "cond0845-admission-probe",
+            "--task-class", "fix-kimi",
+            "--provider", "kimi_cli",
+            "--profile", "reviewer",
+            "--model", REQUESTED_MODEL,
+            "--effort", REQUESTED_EFFORT,
+            "--execution-mode", "native_tui",
+            "--worktree", str(worktree),
+            "--branch", "cao-admission-probe",
+            "--task-file", str(task_file),
+            "--pr-action", "none",
+            "--reservation-id", str(uuid.uuid4()),
+            "--delivery-id", str(uuid.uuid4()),
+            "--session", "cao-admission-probe",
+            "--base-url", "http://127.0.0.1:0",
+            *extra,
+        ]
+
+    denied = _conduct(_argv([]), xdg=xdg, timeout=120.0)
+    assert denied.returncode != 0, "spawn without caller id must not admit"
+    assert "no caller_id" in denied.stderr, denied.stderr[-2000:]
+    assert "configuration-schema" in denied.stderr
+
+    admitted = _conduct(_argv(["--caller-id", uuid.uuid4().hex[:8]]), xdg=xdg, timeout=120.0)
+    assert admitted.returncode != 0, "dead base-url must still refuse"
+    assert "no caller_id" not in admitted.stderr + admitted.stdout
+    # Typed errors print to stderr when captured (success receipts go to
+    # stdout, which is why the enrollment fixture reads proc.stdout).
+    answer = json.loads(admitted.stderr)
+    assert answer.get("error", {}).get("failure_class") == "unexpected-source-mutation", answer
 
 
 def test_native_goal_assignment_ok(native_pair, native_preflight, native_admission):
