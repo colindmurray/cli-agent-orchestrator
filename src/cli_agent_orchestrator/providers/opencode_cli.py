@@ -35,6 +35,7 @@ from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_sta
 
 if TYPE_CHECKING:
     from cli_agent_orchestrator.models.agent_profile import AgentProfile
+    from cli_agent_orchestrator.services.opencode_context_restore import RestoreBinding
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class OpenCodeCliProvider(BaseProvider):
         agent_profile: Optional[str] = None,
         allowed_tools: Optional[list] = None,
         model: Optional[str] = None,
+        context_restore: Optional["RestoreBinding"] = None,
     ):
         """Initialize OpenCode CLI provider.
 
@@ -99,10 +101,17 @@ class OpenCodeCliProvider(BaseProvider):
             agent_profile: Name of the installed OpenCode agent (e.g. ``"developer"``)
             allowed_tools: Optional CAO tool list (informational; enforcement is via frontmatter)
             model: Optional model override passed via ``--model`` at launch
+            context_restore: Optional cond-0845 restoration binding. When set,
+                ``initialize()`` installs the worker's managed
+                ``experimental.chat.system.transform`` plugin before sending
+                the launch command; when None (default) initialization is
+                byte-identical to before. A failed install degrades to a
+                launch without restoration, never a launch refusal.
         """
         super().__init__(terminal_id, session_name, window_name, allowed_tools)
         self._agent_profile = agent_profile or ""
         self._model = model
+        self._context_restore = context_restore
         self._initialized = False
 
     @property
@@ -162,6 +171,7 @@ class OpenCodeCliProvider(BaseProvider):
         if not await wait_for_shell(self.terminal_id, timeout=init_timeout):
             raise TimeoutError(f"Shell initialization timed out after {init_timeout}s")
 
+        self._install_context_restore_plugin()
         command = self._build_launch_command()
         get_backend().send_keys(self.session_name, self.window_name, command)
 
@@ -175,6 +185,44 @@ class OpenCodeCliProvider(BaseProvider):
 
         self._initialized = True
         return True
+
+    def _install_context_restore_plugin(self) -> None:
+        """Install the managed goal-restoration plugin, if bound.
+
+        No-op when the provider was constructed without a
+        ``context_restore`` binding. Any install failure degrades to a
+        launch without restoration (logged) — a restoration plugin never
+        fails a launch. The outcome record is debug-logged for
+        diagnostics; durable launch-facts recording belongs to the
+        managed-launch owner (cond-0842), not this provider.
+        """
+        if self._context_restore is None:
+            return
+        try:
+            from cli_agent_orchestrator.services import opencode_context_restore
+
+            path, degraded = opencode_context_restore.install_plugin(
+                self._context_restore
+            )
+        except Exception as exc:  # noqa: BLE001 - restoration never fails a launch
+            logger.warning(
+                "opencode context restoration not installed for terminal %s: %s",
+                self.terminal_id,
+                exc,
+            )
+            return
+        if degraded is not None:
+            logger.warning(
+                "opencode context restoration degraded for terminal %s: %s",
+                self.terminal_id,
+                degraded,
+            )
+        else:
+            logger.debug(
+                "opencode context restoration plugin installed for terminal %s: %s",
+                self.terminal_id,
+                path,
+            )
 
     def _build_launch_command(self) -> str:
         """Build the inline-env opencode launch command string."""
