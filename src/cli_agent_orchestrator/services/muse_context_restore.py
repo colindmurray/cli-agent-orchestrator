@@ -275,6 +275,27 @@ def _is_own_entry(entry: Any, *, terminal_id: str) -> bool:
     return False
 
 
+def _composable_error(hooks_config: Any) -> Optional[str]:
+    """Why ``hooks_config`` cannot take our entry, or None when it can.
+
+    Only the paths this adapter writes are inspected: a present
+    ``"hooks"`` key must be an object and a present
+    ``"hooks.PreLLMCall"`` must be a list. Anything else — absent keys,
+    other events in any shape — is none of this adapter's business and
+    passes through untouched.
+    """
+    if not isinstance(hooks_config, dict):
+        return "hooks config root is not an object"
+    entries = hooks_config.get("hooks")
+    if entries is not None and not isinstance(entries, dict):
+        return '"hooks" key is not an object'
+    if isinstance(entries, dict):
+        pre = entries.get(RESTORE_HOOK_EVENT)
+        if pre is not None and not isinstance(pre, list):
+            return f'"hooks.{RESTORE_HOOK_EVENT}" is not a list'
+    return None
+
+
 def with_context_restore(
     hooks_config: Dict[str, Any], *, terminal_id: str, command: str
 ) -> Dict[str, Any]:
@@ -283,17 +304,17 @@ def with_context_restore(
     The input is not mutated. Every pre-existing key — user hooks for
     any event — is carried over untouched; this terminal's own older
     entries are replaced (reinstall is idempotent), everything else is
-    preserved byte-for-value.
+    preserved byte-for-value. A config whose ``"hooks"`` or
+    ``"hooks.PreLLMCall"`` shape cannot take our entry raises
+    ``ValueError`` with the reason instead of replacing user config —
+    callers that cannot raise (install) degrade with the same text.
     """
+    problem = _composable_error(hooks_config)
+    if problem is not None:
+        raise ValueError(f"{problem}; leaving user hooks untouched")
     composed = copy.deepcopy(hooks_config)
-    entries = composed.get("hooks")
-    if not isinstance(entries, dict):
-        entries = {}
-        composed["hooks"] = entries
-    pre = entries.get(RESTORE_HOOK_EVENT)
-    if not isinstance(pre, list):
-        pre = []
-        entries[RESTORE_HOOK_EVENT] = pre
+    entries = composed.setdefault("hooks", {})
+    pre = entries.setdefault(RESTORE_HOOK_EVENT, [])
     kept = [entry for entry in pre if not _is_own_entry(entry, terminal_id=terminal_id)]
     kept.append(restore_hook_entry(command=command))
     entries[RESTORE_HOOK_EVENT] = kept
@@ -329,9 +350,9 @@ def install(
 
     Returns ``(path, created_file, degraded_reason)``. ``created_file``
     tells the uninstaller whether removing the file afterwards is safe.
-    Any failure — unreadable config, unwritable dir, a lock held by a
-    concurrent writer — degrades with a reason instead of failing the
-    launch that called it. The read-modify-write runs under an exclusive
+    Any failure — unreadable config, an unmergeable shape, unwritable
+    dir, a lock held by a concurrent writer — degrades with a reason
+    instead of failing the launch that called it. The read-modify-write runs under an exclusive
     sidecar lock with an atomic replace, so concurrent installs cannot
     lose each other's entries or tear the file.
     """
@@ -347,6 +368,9 @@ def install(
         data, reason = _read_hooks_file(path)
         if data is None:
             return None, False, reason
+        problem = _composable_error(data)
+        if problem is not None:
+            return None, False, f"{path}: {problem}; leaving user hooks untouched"
         created_file = not path.exists()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

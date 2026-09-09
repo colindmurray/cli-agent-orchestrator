@@ -321,6 +321,15 @@ class TestHookInputParsing:
 
 class TestHookFileComposition:
     def test_install_creates_exact_prellmcall_shape(self, tmp_path):
+        """Golden pin of the registration shape proven to fire.
+
+        The probe workspace that fired this shape was overwritten by
+        later probes, so its exact bytes are unrecoverable and are NOT
+        asserted here; what the preserved evidence pins (observed stdin
+        at /private/tmp/muserev/stdin.log, hook terminal + context
+        effect at .../T/muserev2/export2.json) is this matcher/handler
+        shape, asserted exactly below.
+        """
         path, created, degraded = restore.install(
             tmp_path, terminal_id="t1", command="/w wrapper --terminal t1"
         )
@@ -427,6 +436,52 @@ class TestHookFileComposition:
         restore.with_context_restore(user, terminal_id="t1", command="cmd")
         restore.without_context_restore(user, terminal_id="t1")
         assert user == snapshot
+
+    def test_non_dict_hooks_key_degrades_preserving_bytes(self, tmp_path):
+        """A present-but-unmergeable "hooks" key refuses, never replaces."""
+        hooks = tmp_path / ".muse" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        hooks.write_text('{"hooks": ["not", "an", "object"], "other": 1}')
+
+        path, created, degraded = restore.install(tmp_path, terminal_id="t1", command=_cmd("t1"))
+
+        assert path is None and created is False
+        assert degraded is not None and '"hooks" key is not an object' in degraded
+        assert hooks.read_text() == '{"hooks": ["not", "an", "object"], "other": 1}'
+
+    def test_non_list_prellmcall_degrades_preserving_bytes(self, tmp_path):
+        hooks = tmp_path / ".muse" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        before = '{"hooks": {"PreLLMCall": {"matcher": "*"}, "Stop": []}}'
+        hooks.write_text(before)
+
+        path, created, degraded = restore.install(tmp_path, terminal_id="t1", command=_cmd("t1"))
+
+        assert path is None and created is False
+        assert degraded is not None and '"hooks.PreLLMCall" is not a list' in degraded
+        assert hooks.read_text() == before
+
+    def test_unrelated_event_shapes_pass_through(self, tmp_path):
+        """Shapes this adapter never writes are none of its business."""
+        hooks = tmp_path / ".muse" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        hooks.write_text('{"hooks": {"Stop": "legacy-string", "other_top": {"x": 1}}}')
+
+        path, created, degraded = restore.install(tmp_path, terminal_id="t1", command=_cmd("t1"))
+
+        assert degraded is None and created is False
+        data = json.loads(hooks.read_text())
+        assert data["hooks"]["Stop"] == "legacy-string"
+        assert data["hooks"]["other_top"] == {"x": 1}
+        assert len(data["hooks"]["PreLLMCall"]) == 1
+
+    def test_pure_composer_raises_typed_error_instead_of_replacing(self):
+        with pytest.raises(ValueError, match='"hooks" key is not an object'):
+            restore.with_context_restore({"hooks": []}, terminal_id="t1", command=_cmd("t1"))
+        with pytest.raises(ValueError, match='"hooks.PreLLMCall" is not a list'):
+            restore.with_context_restore(
+                {"hooks": {"PreLLMCall": {}}}, terminal_id="t1", command=_cmd("t1")
+            )
 
 
 class TestWrapperProcess:
