@@ -136,12 +136,11 @@ REFUSED_IMAGE_UNKNOWN = "image_attachment_unknown"
 REFUSED_IMAGE_NOT_READY = "image_attachment_not_ready"
 #: cond-0845 remind-only reasons. Each names a re-verified fence fact,
 #: so a consumer can tell "a wait landed first" from "the build cannot
-#: steer" from "another reminder is already pending".
+#: steer" from "the occurrence moved".
 REFUSED_WAIT_COVER = "wait_cover_active"
 REFUSED_LIFECYCLE = "lifecycle_not_working"
 REFUSED_OCCURRENCE = "occurrence_not_current"
 REFUSED_UNPROVEN_STEER = "steer_chord_unproven"
-REFUSED_REMINDER_PENDING = "reminder_already_pending"
 REFUSAL_REASONS = frozenset(
     {
         REFUSED_ACTIVE_TURN,
@@ -158,9 +157,14 @@ REFUSAL_REASONS = frozenset(
         REFUSED_LIFECYCLE,
         REFUSED_OCCURRENCE,
         REFUSED_UNPROVEN_STEER,
-        REFUSED_REMINDER_PENDING,
     }
 )
+
+#: Why no ``reminder_already_pending`` refusal exists: a losing operation
+#: id rendezvouses with the live row as ``already-pending`` and types
+#: zero bytes. Journaling a REFUSED row for the loser would both lie
+#: (the winner is still live) and mislead a clock into discarding a
+#: due occurrence. The pending row itself is the record.
 
 #: The one control command the lifecycle contract names by itself.  Every
 #: other control -- including route controls -- must be advertised by the
@@ -1058,6 +1062,14 @@ def _assert_session_unblocked(*, native_session_id: str, operation_id: str) -> N
     so the blocked attempt leaves a durable typed refusal rather than
     vanishing as a raised error.  A caller that later asks why nothing
     happened finds the record.
+
+    Ambiguous ``KIND_REMIND`` rows never block: a reminder payload is
+    inert labeled context (never an instruction), so a later work
+    instruction stays interpretable whether or not the reminder's bytes
+    landed, and the reminder channel has its own guard — one unresolved
+    row per terminal generation plus the wire-evidence reconcile that
+    clears it.  Every other ambiguous kind still freezes the whole
+    session: unknown instruction order is unrecoverable by inspection.
     """
     try:
         with database.SessionLocal() as db:
@@ -1067,6 +1079,7 @@ def _assert_session_unblocked(*, native_session_id: str, operation_id: str) -> N
                     database.KimiNativeControlOperationModel.native_session_id == native_session_id,
                     database.KimiNativeControlOperationModel.state == AMBIGUOUS,
                     database.KimiNativeControlOperationModel.operation_id != operation_id,
+                    database.KimiNativeControlOperationModel.kind != KIND_REMIND,
                 )
                 .first()
             )
@@ -2067,6 +2080,272 @@ def record_reminder_acceptance(
         operation_id=operation_id, observation=observation, outcome=outcome)
 
 
+#: Wire-evidence scan bounds. Wire files carry full tool schemas and can
+#: be megabytes; the scan reads only the tail of a few files and parses
+#: only lines containing the marker, so a reconcile stays a short local
+#: read, never a session replay.
+WIRE_SCAN_MAX_FILES = 8
+WIRE_SCAN_TAIL_BYTES = 256 * 1024
+WIRE_SCAN_MAX_MATCH_LINES = 200
+
+
+def _wire_texts(record: Mapping[str, Any]):
+    """Yield the text payloads of one wire record, if it carries any."""
+    for key in ("message", "input", "content"):
+        payload = record.get(key)
+        if isinstance(payload, dict) and payload.get("role") == "user":
+            payload = payload.get("content")
+        if isinstance(payload, list):
+            for part in payload:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        yield text
+        elif isinstance(payload, str) and payload:
+            yield payload
+
+
+def scan_wire_for_marker(*, session_home: object, marker: str) -> dict[str, Any]:
+    """Search Kimi session wire files for one reminder marker.
+
+    ``session_home`` is one KIMI_CODE_HOME root (managed private home
+    or the provider default) or a list of them; sessions live under
+    each root's ``sessions/`` tree.  Returns ``{"model_context_entry",
+    "prompt_accepted", "files_scanned"}`` where each hit is
+    ``{"wire_path", "wire_time", "wire_type"}`` or ``None``.
+
+    A ``context.append_message`` with role ``user`` carrying the marker
+    is model-context entry — the provider's own record that the text
+    reached the model.  A ``turn.prompt`` / ``turn.steer`` /
+    ``prompt.accepted`` carrying it is the provider taking the input.
+    Anything else (or an unreadable home) is no evidence, never an
+    inference: the caller leaves the row unresolved.
+    """
+    import glob as _glob
+    import os as _os
+    found: dict[str, Any] = {
+        "model_context_entry": None,
+        "prompt_accepted": None,
+        "files_scanned": 0,
+    }
+    marker = marker.strip() if isinstance(marker, str) else ""
+    if not marker:
+        return found
+    if isinstance(session_home, (list, tuple)):
+        homes = [session_home_item for session_home_item in session_home]
+    else:
+        homes = [session_home]
+    paths: list[str] = []
+    for home_item in homes:
+        try:
+            home = _os.fspath(home_item)
+        except TypeError:
+            continue
+        if not home or not _os.path.isdir(home):
+            continue
+        patterns = (
+            _os.path.join(home, "sessions", "*", "session_*", "agents", "*",
+                           "wire.jsonl"),
+            _os.path.join(home, "sessions", "*", "agents", "*", "wire.jsonl"),
+        )
+        for pattern in patterns:
+            try:
+                paths.extend(_glob.glob(pattern))
+            except Exception:  # noqa: BLE001 - a bad pattern scans nothing
+                continue
+    try:
+        paths = sorted(set(paths),
+                       key=lambda p: _os.path.getmtime(p), reverse=True)
+    except Exception:  # noqa: BLE001 - mtime failure keeps glob order
+        paths = sorted(set(paths))
+    for path in paths[:WIRE_SCAN_MAX_FILES]:
+        try:
+            size = _os.path.getsize(path)
+            with open(path, "rb") as handle:
+                if size > WIRE_SCAN_TAIL_BYTES:
+                    handle.seek(size - WIRE_SCAN_TAIL_BYTES)
+                    handle.readline()  # drop a torn first line
+                tail = handle.read()
+        except OSError:
+            continue
+        found["files_scanned"] += 1
+        try:
+            text = tail.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - undecodable tail scans nothing
+            continue
+        if marker not in text:
+            continue
+        checked = 0
+        for line in text.splitlines():
+            if marker not in line:
+                continue
+            if checked >= WIRE_SCAN_MAX_MATCH_LINES:
+                break
+            checked += 1
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            kind = record.get("type")
+            texts = [t for t in _wire_texts(record) if marker in t]
+            if not texts:
+                continue
+            hit = {"wire_path": path,
+                   "wire_time": record.get("time"),
+                   "wire_type": kind}
+            if (kind == "context.append_message"
+                    and isinstance(record.get("message"), dict)
+                    and record["message"].get("role") == "user"):
+                if found["model_context_entry"] is None:
+                    found["model_context_entry"] = hit
+            elif kind in ("turn.prompt", "turn.steer", "prompt.accepted"):
+                if found["prompt_accepted"] is None:
+                    found["prompt_accepted"] = hit
+            if (found["model_context_entry"] is not None
+                    and found["prompt_accepted"] is not None):
+                return found
+    return found
+
+
+def reconcile_reminder_from_wire(
+    *,
+    operation_id: str,
+    marker: str,
+    session_home: object,
+) -> dict[str, Any]:
+    """Resolve one reminder row from the provider's own wire evidence.
+
+    The production clear for a posted — or ambiguously frozen — reminder:
+    it scans the generation's Kimi session wire files for the frozen
+    marker and moves the row on exact-id evidence only.  Model-context
+    entry completes; bare prompt acceptance accepts; anything else
+    leaves the row untouched.  Terminal rows (completed/refused) and
+    rows the effect path still owns (intended/writing) are never
+    touched — an ambiguous receipt is never erased, and nothing here
+    invents an acknowledgement: no wire echo means no movement.
+
+    Returns ``{"reconciled", "reason", "record", "evidence"}``.
+    """
+    try:
+        row = get(operation_id)
+    except NativeControlError as exc:
+        return {"reconciled": False, "reason": f"lookup failed: {exc}",
+                "record": None, "evidence": None}
+    if row is None:
+        return {"reconciled": False, "reason": "unknown-operation",
+                "record": None, "evidence": None}
+    state = row.get("state")
+    if state in (COMPLETED, REFUSED):
+        return {"reconciled": False, "reason": f"already-{state}",
+                "record": row, "evidence": None}
+    if state in (INTENDED, WRITING):
+        return {"reconciled": False, "reason": "owned-by-effect-path",
+                "record": row, "evidence": None}
+    if state not in (POSTED, ACCEPTED, AMBIGUOUS):
+        return {"reconciled": False, "reason": f"unexpected-state-{state}",
+                "record": row, "evidence": None}
+    scan = scan_wire_for_marker(session_home=session_home, marker=marker)
+    entry = scan.get("model_context_entry")
+    accepted = scan.get("prompt_accepted")
+    if entry is None and accepted is None:
+        return {"reconciled": False, "reason": "no-wire-evidence",
+                "record": row, "evidence": scan}
+    if entry is not None:
+        outcome: str = COMPLETED
+        hit = entry
+    elif state == ACCEPTED:
+        return {"reconciled": False, "reason": "already-accepted",
+                "record": row, "evidence": scan}
+    else:
+        outcome = ACCEPTED
+        hit = accepted
+    observation = provider_observation(
+        operation_id=operation_id,
+        observed_at=_now(),
+        observer="kimi-wire-scan",
+        evidence={"marker_echo": marker,
+                  "wire_path": hit.get("wire_path") if isinstance(
+                      hit, dict) else None,
+                  "wire_time": hit.get("wire_time") if isinstance(
+                      hit, dict) else None,
+                  "wire_type": hit.get("wire_type") if isinstance(
+                      hit, dict) else None},
+    )
+    try:
+        if state == AMBIGUOUS:
+            record = reconcile(operation_id=operation_id,
+                               observation=observation, outcome=outcome)
+        elif outcome == COMPLETED:
+            record = record_reminder_acceptance(
+                operation_id=operation_id, observation=observation,
+                expected_marker=marker, outcome=COMPLETED)
+        else:
+            record = record_observation(
+                operation_id=operation_id, observation=observation,
+                outcome=ACCEPTED)
+    except NativeControlError as exc:
+        return {"reconciled": False, "reason": f"evidence rejected: {exc}",
+                "record": row, "evidence": scan}
+    return {"reconciled": True, "reason": outcome, "record": record,
+            "evidence": scan}
+
+
+def refuse_reminder(
+    *,
+    operation_id: str,
+    native_session_id: str,
+    terminal_id: str,
+    generation: str,
+    execution_mode: str,
+    occurrence_id: str,
+    text: str,
+    marker: str,
+    observation: Mapping[str, Any],
+    reason: str,
+    detail: str,
+) -> dict[str, Any]:
+    """Journal a typed refusal for a reminder that typed zero bytes.
+
+    The canonical writer for the ``REFUSED_WAIT_COVER`` /
+    ``REFUSED_LIFECYCLE`` / ``REFUSED_OCCURRENCE`` fence answers: the
+    boundary journals the refusal against the dispatch's operation id
+    instead of answering an unrecorded refusal, so a later reader can
+    tell a covered worker from a moved occurrence.  A replayed id
+    returns its existing row unchanged.
+    """
+    if reason not in REFUSAL_REASONS:
+        raise NativeControlInvalid(
+            f"unknown refusal reason {reason!r}")
+    binding = _validate_binding(
+        operation_id=operation_id,
+        native_session_id=native_session_id,
+        terminal_id=terminal_id,
+        generation=generation,
+        execution_mode=execution_mode,
+    )
+    occurrence_id = _require_text(occurrence_id, field="occurrence_id")
+    marker = _require_text(marker, field="marker")
+    body = _require_text(text, field="text")
+    plan = plan_composer_keystrokes(
+        f"{body}\n\n[cao-context-restoration marker:{marker}]",
+        field="text")
+    observed = _validated_turn_observation(observation)
+    record, is_new = _open(
+        kind=KIND_REMIND,
+        binding=binding,
+        turn_id=None,
+        payload_sha256=plan["payload_sha256"],
+        observation=observed,
+        keystroke_plan=plan,
+        occurrence_id=occurrence_id,
+    )
+    if not is_new:
+        return record
+    return _refuse(operation_id, _Refusal(reason, detail))
+
+
 def control(
     *,
     operation_id: str,
@@ -2292,6 +2571,8 @@ def unresolved_ambiguity(native_session_id: str) -> Optional[dict[str, Any]]:
 
     Exposed so a caller can see *why* it is blocked and go find the
     evidence, rather than discovering the block only as a refusal.
+    Mirrors the gate: ambiguous reminders never block (see
+    :func:`_assert_session_unblocked`), so they are not reported here.
     """
     try:
         with database.SessionLocal() as db:
@@ -2301,6 +2582,7 @@ def unresolved_ambiguity(native_session_id: str) -> Optional[dict[str, Any]]:
                     database.KimiNativeControlOperationModel.native_session_id
                     == _require_text(native_session_id, field="native_session_id"),
                     database.KimiNativeControlOperationModel.state == AMBIGUOUS,
+                    database.KimiNativeControlOperationModel.kind != KIND_REMIND,
                 )
                 .first()
             )

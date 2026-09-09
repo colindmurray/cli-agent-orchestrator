@@ -44,6 +44,7 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -69,6 +70,13 @@ MAX_CONTEXT_CHARS = 6000
 
 #: Hook subprocess timeout, inside Kimi's own hook timeout ceiling.
 HOOK_TIMEOUT_SECONDS = 25
+
+#: Per-leg bounds inside one wrapper run (conduct re-read, fence hold,
+#: boundary POST). Each leg is small; together they stay inside the
+#: hook ceiling above.
+CONDUCT_TIMEOUT_SECONDS = 10.0
+FENCE_FLOCK_TIMEOUT_SECONDS = 5.0
+BOUNDARY_TIMEOUT_SECONDS = 10.0
 
 
 def restore_hook_toml(*, command: str) -> str:
@@ -300,10 +308,48 @@ def _run_conduct(conduct_argv: List[str], *, timeout_seconds: float) -> Dict[str
     return answer if isinstance(answer, dict) else {"transport_error": "conduct answer is not an object"}
 
 
+def _valid_flock_path(flock_path: object) -> bool:
+    """The fence's flock pointer names the real exclusion file, or nothing."""
+    return (isinstance(flock_path, str)
+            and os.path.basename(flock_path) == "goal-effect.lock"
+            and os.path.isabs(flock_path))
+
+
+def managed_wire_roots(*, terminal_id: str,
+                       generation: Optional[str]) -> List[str]:
+    """Where this generation's Kimi session wire files may live.
+
+    The generation-private managed homes first (the launcher's
+    ``COMPANION_DIR`` layouts), then the provider default.  Only
+    existing directories are returned.  Markers are unique per
+    operation id, so a hit in any root is unambiguous; a missing root
+    is no evidence, never an error.
+    """
+    from cli_agent_orchestrator.constants import COMPANION_DIR
+    candidates = []
+    if terminal_id and generation:
+        candidates.append(str(
+            Path(COMPANION_DIR) / terminal_id / generation / "kimi-home"))
+        candidates.append(str(
+            Path(COMPANION_DIR) / "kimi-homes" / f"{terminal_id}-{generation}"))
+    try:
+        candidates.append(os.path.expanduser("~/.kimi-code"))
+    except Exception:  # noqa: BLE001 - home lookup failure scans nothing
+        pass
+    return [c for c in candidates if c and os.path.isdir(c)]
+
+
 def _post_boundary(*, fork_base: str, terminal_id: str, fence: Dict[str, Any],
                    context: str, timeout_seconds: float) -> Dict[str, Any]:
-    """Ask the fork boundary to admit-or-refuse one reminder delivery."""
+    """Ask the fork boundary to admit-or-refuse one reminder delivery.
+
+    Every POST mints its own operation id: a repeated compaction
+    rendezvouses with the live pending row as ``already-pending``
+    (zero new bytes) instead of re-delivering, and the boundary's
+    wire-evidence check completes the row when the marker landed.
+    """
     payload = json.dumps({
+        "operation_id": str(uuid.uuid4()),
         "occurrence_id": fence.get("occurrence_id"),
         "generation": fence.get("terminal_generation"),
         "native_session_id": fence.get("native_session_id"),
@@ -345,13 +391,13 @@ def run_wrapper(
         print(f"cao-kimi-hook-context: stdin session {stdin_session!r} does not "
               f"match baked {native_session_id!r}; restoring nothing", file=err)
         return 0
-    answer = _run_conduct(
-        build_conduct_argv(
-            conduct_binary=conduct_binary,
-            native_session_id=native_session_id or str(stdin_session or ""),
-            terminal_id=terminal_id,
-            terminal_generation=terminal_generation),
-        timeout_seconds=HOOK_TIMEOUT_SECONDS)
+    conduct_argv = build_conduct_argv(
+        conduct_binary=conduct_binary,
+        native_session_id=native_session_id or str(stdin_session or ""),
+        terminal_id=terminal_id,
+        terminal_generation=terminal_generation)
+    answer = _run_conduct(conduct_argv,
+                          timeout_seconds=CONDUCT_TIMEOUT_SECONDS)
     if not isinstance(answer, dict) or "transport_error" in answer:
         print(f"cao-kimi-hook-context: projection unavailable: "
               f"{answer.get('transport_error', answer)}", file=err)
@@ -360,9 +406,48 @@ def run_wrapper(
     if context is None:
         return 0
     fence = answer.get("delivery_fence") or {}
-    boundary = _post_boundary(
-        fork_base=fork_base, terminal_id=terminal_id, fence=fence,
-        context=context, timeout_seconds=HOOK_TIMEOUT_SECONDS)
+    # F5: close the read-then-effect race. The projection above was
+    # read with no hold: a hold activation (or claim) could commit
+    # between that read and the boundary POST, and the boundary —
+    # fork-side — cannot re-read conductor legs. So when the fence
+    # names the project flock, hold it shared across a FRESH
+    # conductor re-read and the POST: writers serialize behind us for
+    # the whole read→effect window, and the fence the boundary freezes
+    # carries the updated goal version and hold water. Without a flock
+    # pointer there is nothing to hold; the boundary refuses unfenced
+    # delivery downstream, exactly as before.
+    boundary = None
+    if _valid_flock_path(fence.get("flock_path")):
+        from cli_agent_orchestrator.services import (
+            goal_effect_flock as _flock)
+        try:
+            with _flock.hold_path(
+                    str(fence["flock_path"]), shared=True,
+                    timeout_seconds=FENCE_FLOCK_TIMEOUT_SECONDS):
+                fresh = _run_conduct(
+                    conduct_argv, timeout_seconds=CONDUCT_TIMEOUT_SECONDS)
+                if (isinstance(fresh, dict)
+                        and "transport_error" not in fresh
+                        and _valid_flock_path(
+                            (fresh.get("delivery_fence") or {}).get(
+                                "flock_path"))):
+                    answer, fence = fresh, fresh["delivery_fence"]
+                    context = render_restoration(answer)
+                    if context is None:
+                        return 0
+                boundary = _post_boundary(
+                    fork_base=fork_base, terminal_id=terminal_id,
+                    fence=fence, context=context,
+                    timeout_seconds=BOUNDARY_TIMEOUT_SECONDS)
+        except _flock.GoalEffectBusy as exc:
+            # A writer holds the project lock: deliver on the first
+            # (seconds-old) fence rather than skip this compaction.
+            print(f"cao-kimi-hook-context: fence re-read skipped ({exc}); "
+                  f"delivering on the first projection", file=err)
+    if boundary is None:
+        boundary = _post_boundary(
+            fork_base=fork_base, terminal_id=terminal_id, fence=fence,
+            context=context, timeout_seconds=BOUNDARY_TIMEOUT_SECONDS)
     if "transport_error" in boundary:
         print(f"cao-kimi-hook-context: delivery boundary unreachable: "
               f"{boundary['transport_error']}", file=err)
@@ -583,7 +668,7 @@ def submit_context_reminder(
     if not generation or not flock_path:
         return {"status": "refused",
                 "detail": "fence must carry generation and flock_path; refusing unfenced delivery"}
-    if os.path.basename(flock_path) != "goal-effect.lock" or not os.path.isabs(flock_path):
+    if not _valid_flock_path(flock_path):
         return {"status": "refused",
                 "detail": "flock_path must be an absolute goal-effect.lock path"}
 
@@ -599,7 +684,10 @@ def submit_context_reminder(
                 "detail": f"terminal generation is {resolved.terminal_generation!r}, fence says "
                           f"{generation!r}; the generation moved, discarding"}
     fence_native = fence.get("native_session_id")
-    if fence_native and resolved.native_session_id != fence_native:
+    if not fence_native:
+        return {"status": "refused",
+                "detail": "fence must carry native_session_id; refusing unfenced delivery"}
+    if resolved.native_session_id != fence_native:
         return {"status": "refused",
                 "detail": "native session rotated under this fence; discarding"}
     if resolved.pane_id is None or resolved.pane_dead:
@@ -615,6 +703,43 @@ def submit_context_reminder(
         return {"status": "deferred",
                 "detail": "session name unresolvable; deferring"}
 
+    def _journal_fence_refusal(reason: str, detail: str) -> Dict[str, Any]:
+        """Journal a typed zero-byte refusal for a failed fence leg.
+
+        The canonical writer path for ``REFUSED_WAIT_COVER`` /
+        ``REFUSED_LIFECYCLE`` / ``REFUSED_OCCURRENCE``: the refusal is
+        recorded against this dispatch's operation id instead of
+        answered off-record.  Journaling itself is best-effort — a
+        store failure still returns the refusal, never an exception.
+        """
+        from datetime import datetime, timezone
+        record: Dict[str, Any] = {}
+        try:
+            record = adapter.refuse_reminder(
+                operation_id=operation_id,
+                native_session_id=resolved.native_session_id,
+                terminal_id=terminal_id,
+                generation=resolved.terminal_generation,
+                execution_mode=resolved.execution_mode,
+                occurrence_id=occurrence_id,
+                text=context,
+                marker=operation_id,
+                observation=adapter.turn_observation(
+                    active_turn_id=None,
+                    observed_at=datetime.now(timezone.utc).isoformat(),
+                    observer="kimi_context_restore",
+                ),
+                reason=reason,
+                detail=detail)
+        except adapter.NativeControlConflict:
+            try:
+                record = adapter.get(operation_id) or {}
+            except Exception:  # noqa: BLE001 - keep the refusal answer
+                record = {}
+        except Exception:  # noqa: BLE001 - keep the refusal answer
+            record = {}
+        return {"status": "refused", "detail": detail, "record": record}
+
     import time as _time
     deadline = _time.monotonic() + WRITE_DEADLINE_SECONDS
     try:
@@ -624,7 +749,8 @@ def submit_context_reminder(
                 problem = _fork_lifecycle_working(session_name=resolved.session_name)
                 if problem is not None:
                     if problem[0] == "lifecycle_not_working":
-                        return {"status": "refused", "detail": problem[1]}
+                        return _journal_fence_refusal(
+                            adapter.REFUSED_LIFECYCLE, problem[1])
                     return {"status": "deferred", "detail": problem[1]}
                 problem = _fork_occurrence_current(
                     occurrence_id=occurrence_id, terminal_id=terminal_id,
@@ -632,7 +758,8 @@ def submit_context_reminder(
                 if problem is not None:
                     reason = problem[0]
                     if reason in ("occurrence_closed", "occurrence_moved"):
-                        return {"status": "refused", "detail": problem[1]}
+                        return _journal_fence_refusal(
+                            adapter.REFUSED_OCCURRENCE, problem[1])
                     return {"status": "deferred", "detail": problem[1]}
                 problem = _fork_wait_cover(
                     session_name=resolved.session_name, terminal_id=terminal_id,
@@ -640,7 +767,8 @@ def submit_context_reminder(
                 if problem is not None:
                     reason = problem[0]
                     if reason in ("wait_cover", "wait_recovery"):
-                        return {"status": "refused", "detail": problem[1]}
+                        return _journal_fence_refusal(
+                            adapter.REFUSED_WAIT_COVER, problem[1])
                     return {"status": "deferred", "detail": problem[1]}
                 turn_state, turn_detail = _observe_branch(
                     pane_id=resolved.pane_id, terminal_id=terminal_id,
@@ -753,12 +881,35 @@ def submit_context_reminder(
         return {"status": "unknown", "detail": f"delivery failed before journaling: {exc}"}
     outcome = record.get("reminder_outcome")
     state = record.get("state")
-    if outcome == "posted" or state == "posted":
+    if outcome == "posted":
         return {"status": "posted", "detail": turn_detail, "record": record}
     if outcome in ("adopted", "already-pending") or state in (
             "intended", "writing", "posted", "accepted", "ambiguous"):
         if state == "completed":
             return {"status": "completed", "detail": "already completed", "record": record}
+        # A rendezvous with a live row is also the moment to reconcile
+        # it: a repeated compaction POSTs a fresh id, adopts the live
+        # row, and — when the provider's own wire shows the marker
+        # reached the model — completes it, which resets the due clock.
+        # No echo means no movement: the row stays pending.
+        try:
+            roots = managed_wire_roots(
+                terminal_id=terminal_id,
+                generation=resolved.terminal_generation)
+            settlement = adapter.reconcile_reminder_from_wire(
+                operation_id=record.get("operation_id") or operation_id,
+                marker=record.get("operation_id") or operation_id,
+                session_home=roots)
+            if settlement.get("reconciled") and isinstance(
+                    settlement.get("record"), dict):
+                record = settlement["record"]
+                state = record.get("state")
+        except Exception:  # noqa: BLE001 - reconcile never breaks adopt
+            pass
+        if state == "completed":
+            return {"status": "completed",
+                    "detail": "wire evidence shows the marker reached the model",
+                    "record": record}
         return {"status": "pending", "detail": f"reminder {outcome}; backing off",
                 "record": record}
     if state == "completed":

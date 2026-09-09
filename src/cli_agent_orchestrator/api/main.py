@@ -3898,6 +3898,38 @@ async def context_restore(
     return result
 
 
+@app.get("/terminals/{terminal_id}/context-restore/pending")
+async def context_restore_pending(
+    terminal_id: TerminalId,
+    generation: str,
+    _scopes: List[str] = Depends(require_any_scope(SCOPE_READ, SCOPE_WRITE, SCOPE_ADMIN)),
+) -> Dict:
+    """Whether one terminal generation holds an unresolved reminder.
+
+    Read-only rendezvous for the periodic duty: a pending row means
+    "do not POST" (the next POST would only adopt it); no row means
+    the duty may dispatch. Completion itself is observed on the POST
+    path, where the boundary reconciles the row against the
+    provider wire — this endpoint never moves a row.
+    """
+    from cli_agent_orchestrator.services import kimi_native_control as adapter
+
+    try:
+        row = await asyncio.to_thread(
+            adapter.pending_reminder_for,
+            terminal_id=str(terminal_id),
+            generation=generation,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"context restore pending lookup failed: {str(e)}",
+        )
+    if row is None:
+        return {"pending": False, "record": None}
+    return {"pending": True, "record": row}
+
+
 @app.post("/terminals/{terminal_id}/key")
 async def send_terminal_key(
     terminal_id: TerminalId,
