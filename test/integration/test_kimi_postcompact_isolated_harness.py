@@ -29,7 +29,17 @@ server/tmux legs below self-skip with a loud reason and run on the host/CI):
   owned-selector fixture).
 
 Requires the suite invocation ``PYTHONPATH=src:$SP pytest`` where ``$SP``
-is a 3.13 site-packages holding the fork's runtime deps.
+is a 3.13 site-packages holding the fork's runtime deps (in CI the suite
+interpreter is the project env and no extra path is needed).
+
+Portability: companion paths are discovered, never hardcoded —
+``COND0845_CONDUCTOR_ROOT`` (default: the ``conductor`` sibling checkout),
+``COND0845_PYTHON`` (default: this interpreter), and
+``COND0845_FORK_SITE_PACKAGES`` (default: none when deps import, else the
+standard uv-tools layout). Legs needing an absent companion skip with the
+exact variable to set. The opt-in native-subject path (real Kimi spawn,
+real /compact, wire + model readback) lives in the companion module
+``test_kimi_postcompact_native_subject.py`` and never runs unasked.
 """
 
 from __future__ import annotations
@@ -54,8 +64,50 @@ import requests
 from cli_agent_orchestrator.services import kimi_context_restore as kr
 
 FORK_ROOT = Path(__file__).resolve().parents[2]
-CONDUCTOR_ROOT = FORK_ROOT.parent / "conductor"
-CONDUCT_PY = Path("/Users/colin/.local/share/uv/tools/cao-conductor/bin/python")
+
+#: Env overrides (all optional; discovery is the default):
+#: - ``COND0845_CONDUCTOR_ROOT``: conductor companion clone (default: the
+#:   ``conductor`` sibling of this checkout; must contain ``conduct/cli.py``).
+#: - ``COND0845_PYTHON``: interpreter for spawned ``conduct``/server
+#:   children (default: this test process's own interpreter; ``conduct``
+#:   itself is stdlib-only).
+#: - ``COND0845_FORK_SITE_PACKAGES``: extra ``sys.path`` entry carrying the
+#:   fork's runtime deps for the server child (default: none when this
+#:   interpreter already imports them, else the standard uv-tools layout
+#:   under ``~/.local/share``).
+
+
+def discover_conductor_root() -> Optional[Path]:
+    """The conductor companion clone, or None when truly absent.
+
+    An explicit ``COND0845_CONDUCTOR_ROOT`` that does not contain
+    ``conduct/cli.py`` is a configuration error, not a guess: it returns
+    None rather than silently falling back to the sibling checkout.
+    """
+    override = os.environ.get("COND0845_CONDUCTOR_ROOT")
+    if override:
+        cand = Path(override)
+        return cand if (cand / "conduct" / "cli.py").exists() else None
+    sibling = FORK_ROOT.parent / "conductor"
+    if (sibling / "conduct" / "cli.py").exists():
+        return sibling
+    return None
+
+
+def _require_conductor_root() -> Path:
+    root = discover_conductor_root()
+    if root is None:
+        pytest.skip(
+            "conductor companion clone absent: set COND0845_CONDUCTOR_ROOT "
+            "to a checkout containing conduct/cli.py"
+        )
+    return root
+
+
+def discover_python() -> str:
+    """Interpreter for spawned children (conduct is stdlib-only)."""
+    return os.environ.get("COND0845_PYTHON") or sys.executable
+
 
 # The observed 0.42 PostCompact stdin shape (cond-0588 QA capture
 # kimi-0.42.0-postcompact-20260909-171800/native_postcompact_stdin.json).
@@ -133,14 +185,58 @@ needs_tmux_sockets = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
-def _tool_site_packages(tool: str) -> Path:
-    matches = sorted(
-        Path("/Users/colin/.local/share/uv/tools").glob(f"{tool}/lib/python3*/site-packages")
+def discover_fork_dep_path() -> Optional[str]:
+    """Extra ``sys.path`` entry the server child needs, if any.
+
+    None when this interpreter already imports the fork's runtime deps
+    (the normal CI case: the suite interpreter is the project env). Else
+    an explicit override, else the standard uv-tools layout — never a
+    hardcoded operator path.
+    """
+    override = os.environ.get("COND0845_FORK_SITE_PACKAGES")
+    if override:
+        return override
+    try:
+        import fastapi  # noqa: F401
+        import requests  # noqa: F401
+        import sqlalchemy  # noqa: F401
+        import uvicorn  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return None
+    roots = sorted(
+        (Path.home() / ".local" / "share" / "uv" / "tools").glob(
+            "cli-agent-orchestrator/lib/python3*/site-packages"
+        )
     )
-    for cand in matches:
-        if (cand / "sqlalchemy").exists() or (cand / "requests").exists():
-            return cand
-    raise RuntimeError(f"no site-packages found for uv tool {tool!r}")
+    for cand in roots:
+        if (cand / "sqlalchemy").exists():
+            return str(cand)
+    return None
+
+
+def _deps_importable() -> bool:
+    try:
+        import fastapi  # noqa: F401
+        import requests  # noqa: F401
+        import sqlalchemy  # noqa: F401
+        import uvicorn  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _require_fork_dep_path() -> Optional[str]:
+    if _deps_importable():
+        return None
+    path = discover_fork_dep_path()
+    if path is None:
+        pytest.skip(
+            "fork runtime deps not importable here: run the suite in the "
+            "project env or set COND0845_FORK_SITE_PACKAGES"
+        )
+    return path
 
 
 def build_child_env(
@@ -150,6 +246,7 @@ def build_child_env(
     fork_state: Path,
     conductor_xdg: Path,
     port: int,
+    dep_path: Optional[str] = None,
     extra_pythonpath: Optional[str] = None,
 ) -> Dict[str, str]:
     """Child-only environment for a paired server/conductor process.
@@ -167,7 +264,9 @@ def build_child_env(
         env.pop(name, None)
     for leaked in ("AUTH0_DOMAIN", "AUTH0_AUDIENCE", "CAO_AUTH_JWKS_URI"):
         env.pop(leaked, None)
-    parts = [str(FORK_ROOT / "src"), str(_tool_site_packages("cli-agent-orchestrator"))]
+    parts = [str(FORK_ROOT / "src")]
+    if dep_path:
+        parts.append(dep_path)
     if extra_pythonpath:
         parts.append(extra_pythonpath)
     env.update(
@@ -186,20 +285,20 @@ def build_child_env(
     return env
 
 
-def write_conduct_entrypoint(directory: Path) -> Path:
+def write_conduct_entrypoint(directory: Path, *, conductor_root: Path, python: str) -> Path:
     """An executable ``conduct`` for the wrapper's one permitted subprocess.
 
-    Runs the *conductor clone's* ``conduct`` (never an installed copy)
-    under the conductor tool interpreter. The caller supplies
+    Runs the *conductor companion's* ``conduct`` (never an installed copy)
+    under the discovered interpreter. The caller supplies
     ``PYTHONPATH``/``XDG_STATE_HOME`` through the child environment, so
     this file carries no state of its own.
     """
     directory.mkdir(parents=True, exist_ok=True)
     entry = directory / "conduct"
     entry.write_text(
-        "#!%s\n" % (CONDUCT_PY,)
+        "#!%s\n" % (python,)
         + "import sys\n"
-        + "sys.path.insert(0, %r)\n" % (str(CONDUCTOR_ROOT),)
+        + "sys.path.insert(0, %r)\n" % (str(conductor_root),)
         + "from conduct.cli import main\n"
         + "raise SystemExit(main())\n"
     )
@@ -300,9 +399,21 @@ def test_tmux_isolation_holds_with_or_without_platform_sockets(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-# Fallback closed port for platforms where no bind probe is possible.
-# Only used there: wherever bind works, a freshly picked free port is used.
-_CLOSED_PORT_FALLBACK = 48213
+def _closed_port() -> int:
+    """A port nothing legitimate holds, for paired-but-absent legs.
+
+    Freshly picked OS-ephemeral wherever bind works; port 1 (privileged,
+    never a CAO server) where it does not. No fixed fallback: a constant
+    could collide with a foreign listener and masquerade as paired
+    contact. Residual risk (a root-owned listener on 1) misdetects as a
+    funnel and skips — the safe direction.
+    """
+    if _can_bind_loopback():
+        from test.fixtures.cao_server import _pick_free_port
+
+        return _pick_free_port()
+    return 1
+
 
 _FUNNEL_VERDICT: Optional[bool] = None
 
@@ -352,9 +463,10 @@ def _require_hermetic_loopback() -> None:
 
 
 def _run_conduct(args, *, xdg: Path, timeout: float = 60.0):
+    root = _require_conductor_root()
     env = dict(os.environ)
     env["XDG_STATE_HOME"] = str(xdg)
-    env["PYTHONPATH"] = str(CONDUCTOR_ROOT)
+    env["PYTHONPATH"] = str(root)
     # Direct loopback in the child: an egress proxy must never route the
     # paired-server address (one once forwarded loopback to a live foreign
     # server, which would masquerade as paired contact).
@@ -363,7 +475,7 @@ def _run_conduct(args, *, xdg: Path, timeout: float = 60.0):
     for var in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR"):
         env.pop(var, None)
     return subprocess.run(
-        [str(CONDUCT_PY), "-m", "conduct", *args],
+        [discover_python(), "-m", "conduct", *args],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -388,11 +500,10 @@ def test_conduct_hook_context_typed_unavailable_without_server(tmp_path):
     exit 0 and result_type ``unavailable`` — the wire and the typed-error
     contract, with no live state anywhere."""
     _require_hermetic_loopback()
-    from test.fixtures.cao_server import _pick_free_port
 
     xdg = tmp_path / "conductor-xdg"
     xdg.mkdir()
-    port = _pick_free_port() if _can_bind_loopback() else _CLOSED_PORT_FALLBACK
+    port = _closed_port()
     proc = _run_conduct(
         [
             "goal",
@@ -421,15 +532,16 @@ def test_wrapper_defers_through_real_conduct_no_worker(tmp_path, monkeypatch, ca
     _require_hermetic_loopback()
     xdg = tmp_path / "conductor-xdg"
     xdg.mkdir()
-    entry = write_conduct_entrypoint(tmp_path / "bin")
+    root = _require_conductor_root()
+    entry = write_conduct_entrypoint(
+        tmp_path / "bin", conductor_root=root, python=discover_python()
+    )
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
-    monkeypatch.setenv("PYTHONPATH", str(CONDUCTOR_ROOT))
+    monkeypatch.setenv("PYTHONPATH", str(root))
     # Deterministic pairing: the wrapper's conduct call must reach no live
     # server, so the typed ``unavailable`` answer exercises the defer path.
-    # (Port 19889 is live somewhere in this environment; never assume one.)
-    from test.fixtures.cao_server import _pick_free_port
-
-    closed_port = str(_pick_free_port() if _can_bind_loopback() else _CLOSED_PORT_FALLBACK)
+    # Never assume a port (19889 proved live in one environment already).
+    closed_port = str(_closed_port())
     monkeypatch.setenv("CAO_API_HOST", "127.0.0.1")
     monkeypatch.setenv("CAO_API_PORT", closed_port)
     for var in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR"):
@@ -458,7 +570,7 @@ def test_wrapper_defers_through_real_conduct_no_worker(tmp_path, monkeypatch, ca
 # ---------------------------------------------------------------------------
 
 
-def test_boundary_refuses_unknown_terminal_with_zero_bytes():
+def test_boundary_refuses_unknown_terminal_with_zero_bytes(tmp_path):
     """The real admission boundary against the isolated fork state: an
     unknown terminal is refused before admission with ``new_bytes`` False.
     No pane exists, so no byte can be typed; the pending set stays empty."""
@@ -478,7 +590,7 @@ def test_boundary_refuses_unknown_terminal_with_zero_bytes():
             "native_session_id": POSTCOMPACT_STDIN["session_id"],
             "goal_version": 3,
             "hold_high_water": 0,
-            "flock_path": "/tmp/cao-harness-fences/proj/goal-effect.lock",
+            "flock_path": str(tmp_path / "fences" / "proj" / "goal-effect.lock"),
         },
         hook_evidence={
             "observed_at": "2026-09-09T17:00:00+00:00",
@@ -490,6 +602,73 @@ def test_boundary_refuses_unknown_terminal_with_zero_bytes():
     assert result["new_bytes"] is False
     assert "no terminal" in result["detail"]
     assert adapter.unresolved_reminders_for(terminal_id=terminal_id, generation="gen-1") == []
+
+
+def test_wrapper_identity_mismatch_never_spawns_conduct(tmp_path):
+    """Mutation on the trust seam: a stdin session that disagrees with the
+    baked binding restores nothing AND never spawns the conductor — the
+    refusal precedes every subprocess. The tripwire is a conduct stand-in
+    that records any invocation to a file; the file must stay absent."""
+    log = tmp_path / "conduct-calls.log"
+    fake = tmp_path / "conduct"
+    fake.write_text("#!/bin/sh\n" + f'echo SPAWNED "$@" >> {shlex.quote(str(log))}\n' + "exit 1\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = kr.run_wrapper(
+        hook_input=dict(POSTCOMPACT_STDIN, session_id="session-impostor-rotated-0000"),
+        terminal_id="t-harness-mismatch",
+        terminal_generation="gen-1",
+        native_session_id=POSTCOMPACT_STDIN["session_id"],
+        conduct_binary=str(fake),
+        fork_base="http://127.0.0.1:1",
+        out=out,
+        err=err,
+    )
+    assert rc == 0
+    assert "does not match baked" in err.getvalue()
+    assert not log.exists(), "mismatched identity must not spawn conduct"
+
+
+def test_helpers_ignore_unrelated_cwd(tmp_path, monkeypatch):
+    """Discovery and builders use absolute paths only: an unrelated cwd
+    changes nothing about the produced env, entrypoint, or resolutions."""
+    (tmp_path / "work").mkdir(exist_ok=True)
+    monkeypatch.chdir(tmp_path / "work")
+    monkeypatch.delenv("COND0845_PYTHON", raising=False)
+
+    home = tmp_path / "home"
+    env = build_child_env(
+        home_dir=home,
+        fork_state=tmp_path / "fork-state",
+        conductor_xdg=tmp_path / "conductor-xdg",
+        port=1,
+        dep_path="/dep",
+    )
+    assert env["HOME"] == str(home)
+    assert env["CAO_STATE_ROOT"] == str(tmp_path / "fork-state")
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(FORK_ROOT / "src")
+    assert env["PYTHONPATH"].split(os.pathsep)[1] == "/dep"
+
+    root = _require_conductor_root()
+    entry = write_conduct_entrypoint(
+        tmp_path / "bin", conductor_root=root, python=discover_python()
+    )
+    text = entry.read_text()
+    assert str(root) in text
+    assert discover_python() == sys.executable
+    monkeypatch.setenv("COND0845_PYTHON", "/explicit/python")
+    assert discover_python() == "/explicit/python"
+
+
+def test_absent_companion_skips_actionably(tmp_path, monkeypatch):
+    """An explicit conductor root pointing nowhere is a configuration
+    error with an actionable skip — never a silent fallback, never a
+    crash, and never a guess at the sibling checkout."""
+    monkeypatch.setenv("COND0845_CONDUCTOR_ROOT", str(tmp_path / "no-such-clone"))
+    assert discover_conductor_root() is None
+    with pytest.raises(Exception, match="COND0845_CONDUCTOR_ROOT"):
+        _require_conductor_root()
 
 
 # ---------------------------------------------------------------------------
@@ -608,14 +787,16 @@ def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_s
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
 
+    dep_path = _require_fork_dep_path()
+    parts = [str(FORK_ROOT / "src")]
+    if dep_path:
+        parts.append(dep_path)
     server = _start_cao_server(
         home,
         port,
         extra_env={
             "CAO_STATE_ROOT": str(fork_state),
-            "PYTHONPATH": os.pathsep.join(
-                [str(FORK_ROOT / "src"), str(_tool_site_packages("cli-agent-orchestrator"))]
-            ),
+            "PYTHONPATH": os.pathsep.join(parts),
         },
         deadline=60.0,
     )
@@ -648,7 +829,10 @@ def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_s
         assert answer["result_type"] == "no-worker", answer
         assert answer["identity"]["native_session_id"] == POSTCOMPACT_STDIN["session_id"]
 
-        entry = write_conduct_entrypoint(tmp_path / "bin")
+        root = _require_conductor_root()
+        entry = write_conduct_entrypoint(
+            tmp_path / "bin", conductor_root=root, python=discover_python()
+        )
         out, err = io.StringIO(), io.StringIO()
         rc = kr.run_wrapper(
             hook_input=dict(POSTCOMPACT_STDIN),
@@ -673,7 +857,7 @@ def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_s
                 "native_session_id": POSTCOMPACT_STDIN["session_id"],
                 "goal_version": 3,
                 "hold_high_water": 0,
-                "flock_path": "/tmp/cao-harness-fences/proj/goal-effect.lock",
+                "flock_path": str(tmp_path / "fences" / "proj" / "goal-effect.lock"),
                 "projection": {"result_type": "no-worker"},
                 "hook_evidence": {
                     "observed_at": "2026-09-09T17:00:00+00:00",
