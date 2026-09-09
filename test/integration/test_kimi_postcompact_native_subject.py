@@ -505,6 +505,7 @@ def native_pair(tmp_path_factory, native_preflight):
         shared_server_sentinel,
     )
     from test.integration.test_kimi_postcompact_isolated_harness import (
+        _PAIRED_TMUX_ANCHOR,
         _require_fork_dep_path,
         build_child_env,
         write_conduct_entrypoint,
@@ -552,7 +553,7 @@ def native_pair(tmp_path_factory, native_preflight):
     try:
         with shared_server_sentinel() as sentinel:
             pair.sentinel = sentinel
-            with isolated_tmux_server() as srv:
+            with isolated_tmux_server(anchor=_PAIRED_TMUX_ANCHOR) as srv:
                 pair.tmux = srv
                 srv.write_shim(bin_dir)
                 assert entry.exists(), "pinned conduct entrypoint missing from bin"

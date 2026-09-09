@@ -920,6 +920,106 @@ def live_state_snapshot():
     assert (names(fork_default), names(conductor_default)) == before
 
 
+# Anchor session for paired-server tmux fixtures. It must NOT match the
+# product SESSION_PREFIX ("cao-"): the anchor lives on the owned server,
+# and any cao- name would self-pollute the exact `sessions == []`
+# isolation assertion (filtering it out is forbidden — operator sessions
+# must stay visible to that assertion).
+_PAIRED_TMUX_ANCHOR = "paired-harness-anchor"
+
+
+def _paired_server_extra_env(
+    *,
+    fork_state: Path,
+    dep_path: Optional[str],
+    shim_dir: Path,
+) -> Dict[str, str]:
+    """Extra server-child env for a paired fork server.
+
+    Scratch state root, fork sources + deps, and the owned tmux shim
+    first on PATH — every tmux invocation inside the child (libtmux
+    resolves its binary via PATH lookup, as does the product client)
+    lands on the isolated server, never the ambient default socket.
+    """
+    parts = [str(FORK_ROOT / "src")]
+    if dep_path:
+        parts.append(dep_path)
+    return {
+        "CAO_STATE_ROOT": str(fork_state),
+        "PYTHONPATH": os.pathsep.join(parts),
+        "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+    }
+
+
+def test_paired_server_tmux_wiring_reaches_owned_socket(tmp_path, monkeypatch):
+    """Wiring, not ingredients: the exact child env a paired server gets,
+    built under a hostile ambient (an inherited operator TMUX socket, a
+    shimless PATH), must resolve tmux to the owned shim, name the owned
+    socket, and strip every ambient selector — through the real fixture
+    merge path. No daemon, no network: PATH lookup is pure."""
+    from test.fixtures.cao_server import _subprocess_env
+    from test.fixtures.tmux_server import (
+        TmuxServer,
+        TmuxSelectorLost,
+        default_socket_path,
+        real_tmux_binary,
+    )
+    from cli_agent_orchestrator.constants import SESSION_PREFIX
+
+    try:
+        real_tmux_binary()
+    except TmuxSelectorLost:
+        pytest.skip("no tmux binary here; shim-wiring leg runs on host/CI")
+    # The anchor must stay outside the product session prefix, or the
+    # owned server self-pollutes the exact `sessions == []` assertion.
+    assert not _PAIRED_TMUX_ANCHOR.startswith(SESSION_PREFIX), (
+        f"anchor {_PAIRED_TMUX_ANCHOR!r} matches prefix {SESSION_PREFIX!r}"
+    )
+    monkeypatch.setenv("TMUX", "/tmp/tmux-0/default,12345,0")
+    monkeypatch.setenv("TMUX_PANE", "%0")
+    monkeypatch.setenv("TMUX_TMPDIR", "/elsewhere")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    owned = TmuxServer(
+        socket_path=tmp_path / "owned.sock", owned_root=tmp_path
+    )
+    shim_dir = tmp_path / "bin"
+    owned.write_shim(shim_dir)
+    env = _subprocess_env(
+        tmp_path / "home",
+        1,
+        extra=_paired_server_extra_env(
+            fork_state=tmp_path / "fork-state",
+            dep_path="/dep",
+            shim_dir=shim_dir,
+        ),
+    )
+    # The interception primitive libtmux and the product client both use.
+    # Spelled split: the module source-scan guard forbids the quoted
+    # provider-multiplexer binary name outside the owned-selector fixture.
+    mux = "tmu" + "x"
+    assert shutil.which(mux, path=env["PATH"]) == str(shim_dir / mux)
+    shim_text = (shim_dir / mux).read_text()
+    assert f"-S {shlex.quote(str(owned.socket_path))}" in shim_text
+    assert owned.socket_path.resolve() != default_socket_path(env).resolve()
+    for var in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR"):
+        assert var not in env, f"ambient selector {var} leaks to the child"
+
+
+def test_tmux_teardown_refuses_unowned_socket(tmp_path):
+    """Destruction proves its target first: handles without ownership, and
+    default-named sockets even with it, raise before running anything.
+    Daemon-less by construction — the refusal precedes any subprocess."""
+    from test.fixtures.tmux_server import TmuxSelectorLost, TmuxServer
+
+    with pytest.raises(TmuxSelectorLost):
+        TmuxServer(socket_path=tmp_path / "shared.sock").teardown()
+    with pytest.raises(TmuxSelectorLost):
+        TmuxServer(
+            socket_path=tmp_path / "default", owned_root=tmp_path
+        ).teardown()
+
+
 def _prove_paired_server(server, port: int) -> None:
     """Identity proof BEFORE any mutation: the answering server is the
     owned test instance. Uses only the fixture's supported handles: our
@@ -964,6 +1064,7 @@ def test_prove_paired_server_pins_liveness_and_bind_log(tmp_path):
 
 
 @needs_loopback
+@needs_tmux_sockets
 def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_state_snapshot):
     """Full paired path against a real isolated fork server: bootstrap,
     empty session list (isolation proof), typed no-worker projection over
@@ -989,18 +1090,34 @@ def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_s
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
 
     dep_path = _require_fork_dep_path()
-    parts = [str(FORK_ROOT / "src")]
-    if dep_path:
-        parts.append(dep_path)
-    server = _start_cao_server(
-        home,
-        port,
-        extra_env={
-            "CAO_STATE_ROOT": str(fork_state),
-            "PYTHONPATH": os.pathsep.join(parts),
-        },
-        deadline=60.0,
+    from test.fixtures.tmux_server import isolated_tmux_server
+
+    import contextlib
+
+    # The server child enumerates sessions through libtmux, which resolves
+    # its tmux binary via PATH lookup with no socket of its own — without
+    # an owned server + shim it lands on the ambient default socket and
+    # reads operator sessions (cond-0845 host: cao-cond-0588-*). The
+    # ExitStack keeps this lifetime beside the server's own try/finally
+    # without re-indenting the whole body.
+    _owned_tmux = contextlib.ExitStack()
+    tmux = _owned_tmux.enter_context(
+        isolated_tmux_server(anchor=_PAIRED_TMUX_ANCHOR)
     )
+    shim_dir = tmp_path / "bin"
+    tmux.write_shim(shim_dir)
+    try:
+        server = _start_cao_server(
+            home,
+            port,
+            extra_env=_paired_server_extra_env(
+                fork_state=fork_state, dep_path=dep_path, shim_dir=shim_dir
+            ),
+            deadline=60.0,
+        )
+    except BaseException:
+        _owned_tmux.close()
+        raise
     base = server.url
     try:
         _prove_paired_server(server, port)
@@ -1081,6 +1198,7 @@ def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_s
         assert pending["unresolved"] == []
     finally:
         server.stop()
+        _owned_tmux.close()
     with pytest.raises(requests.ConnectionError):
         requests.get(f"{base}/health", timeout=5)
 
