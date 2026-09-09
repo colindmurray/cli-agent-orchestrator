@@ -487,3 +487,65 @@ def test_loser_id_adopts_without_new_row_or_bytes():
     assert transport.calls == before
     assert knc.get("op_lose_2") is None
     assert not hasattr(knc, "REFUSED_REMINDER_PENDING")
+
+
+def test_posted_row_freezes_origin_and_hook_evidence():
+    # The election's identity evidence: origin + native fingerprint
+    # frozen at POSTED, retrievable for retry/refire decisions.
+    _attach()
+    transport = Recorder()
+    evidence = {"session_id": SESSION, "trigger": "auto",
+                "estimated_token_count": 77,
+                "observed_at": "2026-09-09T00:00:00Z"}
+    record = _remind(transport, operation_id="op_origin_1",
+                     marker="op_origin_1", origin="event",
+                     hook_evidence=evidence)
+    assert record["reminder_outcome"] == "posted"
+    row = knc.get("op_origin_1")
+    assert row["transport"]["origin"] == "event"
+    assert row["transport"]["hook_evidence"] == evidence
+    assert row["transport"]["marker"] == "op_origin_1"
+
+
+def test_unknown_origin_is_rejected():
+    _attach()
+    transport = Recorder()
+    with pytest.raises(knc.NativeControlInvalid):
+        _remind(transport, operation_id="op_origin_x", origin="sidecar")
+
+
+def test_terminal_receipt_query_serves_health_metadata():
+    # The conductor's pending-receipts read: unresolved rows plus the
+    # newest terminal one, with origin/evidence for health — and no
+    # reminder text anywhere.
+    _attach()
+    transport = Recorder()
+    evidence = {"session_id": SESSION, "trigger": "auto",
+                "estimated_token_count": 5,
+                "observed_at": "2026-09-09T00:00:00Z"}
+    _remind(transport, operation_id="op_health_1", marker="op_health_1",
+            origin="event", hook_evidence=evidence)
+    open_rows = knc.unresolved_reminders_for(
+        terminal_id=TERMINAL, generation=GENERATION)
+    assert [r["operation_id"] for r in open_rows] == ["op_health_1"]
+    assert open_rows[0]["transport"]["origin"] == "event"
+    assert knc.latest_terminal_reminder_for(
+        terminal_id=TERMINAL, generation=GENERATION) is None
+    knc.record_reminder_acceptance(
+        operation_id="op_health_1",
+        observation=knc.provider_observation(
+            operation_id="op_health_1",
+            observed_at="2026-09-09T00:00:01Z",
+            observer="test",
+            evidence={"marker_echo": "op_health_1",
+                      "wire_path": "w", "wire_time": 1,
+                      "wire_type": "context.append_message"}),
+        expected_marker="op_health_1")
+    assert knc.unresolved_reminders_for(
+        terminal_id=TERMINAL, generation=GENERATION) == []
+    last = knc.latest_terminal_reminder_for(
+        terminal_id=TERMINAL, generation=GENERATION)
+    assert last["operation_id"] == "op_health_1"
+    assert last["state"] == "completed"
+    assert last["transport"]["hook_evidence"] == evidence
+    assert "current goal" not in json.dumps(last)

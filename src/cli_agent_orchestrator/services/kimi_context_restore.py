@@ -260,6 +260,15 @@ def render_restoration(answer: Dict[str, Any]) -> Optional[str]:
 
     Only an ``ok`` answer with a verified generation fence proceeds;
     everything else restores nothing (stale/ambiguous/terminal exit 0).
+
+    This is the ONE restoration text renderer for the Kimi lane: both
+    the hook event path and the conductor periodic path render through
+    it from the canonical ``hook-context`` compact projection — stable
+    assignment identity, objective/version, ``completion_requirements``
+    (never the nonexistent ``requirements`` field), latest
+    checkpoint/evidence references, current waiting reason/release
+    owner, and next permitted action (§10.3). No parallel renderer may
+    drift from this field set.
     """
     if not isinstance(answer, dict):
         return None
@@ -269,24 +278,61 @@ def render_restoration(answer: Dict[str, Any]) -> Optional[str]:
     if identity.get("generation_fence") != "verified":
         return None
     goal = answer.get("goal") or {}
-    objective = goal.get("objective") or goal.get("summary") or ""
-    version = (goal.get("goal_version", goal.get("version", "?")))
-    requirement_lines = []
-    for req in (goal.get("requirements") or [])[:20]:
-        if isinstance(req, dict):
-            requirement_lines.append(
-                f"- {req.get('id', '?')}: {req.get('summary', req.get('kind', ''))}")
-    context = (
+    if not isinstance(goal, dict):
+        return None
+    objective = goal.get("objective") or ""
+    if not objective.strip():
+        # A hook cannot reconstruct an objective that was never
+        # stored: refuse rather than deliver a blank restoration.
+        return None
+    version = goal.get("goal_version", "?")
+    goal_id = goal.get("goal_id", "?")
+    lines = [
         "[cao-context-restoration] The worker context compacted; this is "
         "the current CAO goal, not a new assignment. Continue the open "
-        "work below under existing continuation policy.\n"
-        f"objective (goal version {version}): {objective}"
-    )
-    if requirement_lines:
-        context += "\nrequirements:\n" + "\n".join(requirement_lines)
+        "work below under existing continuation policy.",
+        f"assignment: goal {goal_id} (version {version})",
+        f"objective: {objective}",
+    ]
+    shown: List[str] = []
+    for req in (goal.get("completion_requirements") or [])[:20]:
+        if isinstance(req, dict):
+            shown.append(
+                f"- {req.get('id', '?')}: {req.get('summary', req.get('kind', ''))}")
+        elif isinstance(req, str) and req.strip():
+            shown.append(f"- {req.strip()}")
+    if shown:
+        lines.append("completion requirements:\n" + "\n".join(shown))
+    outstanding = [r for r in (goal.get("requirements_outstanding") or [])
+                   if isinstance(r, str)]
+    if outstanding:
+        lines.append("outstanding: " + ", ".join(outstanding[:20]))
+    checkpoint = goal.get("latest_checkpoint") or {}
+    if isinstance(checkpoint, dict) and checkpoint.get("event_id"):
+        lines.append(
+            "latest checkpoint: "
+            f"{checkpoint.get('event_id')} "
+            f"({checkpoint.get('kind', '?')}, "
+            f"v{checkpoint.get('goal_version', '?')}, "
+            f"{checkpoint.get('recorded_at', '?')}): "
+            f"{checkpoint.get('summary') or ''}".rstrip())
+    evidence_count = goal.get("evidence_count")
+    if isinstance(evidence_count, int):
+        lines.append(f"evidence entries: {evidence_count}")
+    hold = goal.get("active_hold") or {}
+    if isinstance(hold, dict) and hold.get("hold_id"):
+        lines.append(
+            "waiting on: "
+            f"{hold.get('reason_kind', '?')} "
+            f"(release {hold.get('release_kind', '?')}:"
+            f"{hold.get('release_id') or '—'}, owner "
+            f"{hold.get('requested_by_role', '?')}/"
+            f"{hold.get('requested_by_agent_id', '?')}, "
+            f"decided by {hold.get('decision_authority', '?')})")
     next_action = answer.get("next_action") or goal.get("next_action")
     if next_action:
-        context += f"\nnext permitted action: {next_action}"
+        lines.append(f"next permitted action: {next_action}")
+    context = "\n".join(lines)
     if len(context) > MAX_CONTEXT_CHARS:
         context = context[:MAX_CONTEXT_CHARS] + "\n[truncated]"
     return context
@@ -339,24 +385,63 @@ def managed_wire_roots(*, terminal_id: str,
     return [c for c in candidates if c and os.path.isdir(c)]
 
 
+#: The native PostCompact stdin fields that fingerprint one compaction
+#: observation (verified against the installed Kimi bundle's
+#: fire-and-forget hook dispatch: session id, trigger, and the
+#: post-compaction token count, snake_cased onto stdin). No vendor
+#: per-compaction id exists; a repeated identical fingerprint is the
+#: only native signal of a same-event refire.
+HOOK_EVIDENCE_FIELDS = ("session_id", "trigger", "estimated_token_count")
+
+
+def hook_evidence_from_input(hook_input: Dict[str, Any],
+                             *, observed_at: str) -> Dict[str, Any]:
+    """The durable native fingerprint of this wrapper run's compaction.
+
+    Derived from hook stdin evidence plus the run's own observation
+    time — never an invented vendor field. Two wrapper runs with
+    identical fingerprints are the same compaction observation twice
+    (adopt, zero new bytes); different fingerprints are different
+    compactions even when the rendered goal text is identical
+    (deliver anew). An exactly repeated fingerprint across two
+    genuinely distinct compactions is the documented residual: the
+    second adopts the first and the next event/periodic rendezvous
+    still restores.
+    """
+    evidence: Dict[str, Any] = {"observed_at": observed_at}
+    if isinstance(hook_input, dict):
+        for field in HOOK_EVIDENCE_FIELDS:
+            value = hook_input.get(field)
+            if value is not None:
+                evidence[field] = value
+    return evidence
+
+
 def _post_boundary(*, fork_base: str, terminal_id: str, fence: Dict[str, Any],
-                   context: str, timeout_seconds: float) -> Dict[str, Any]:
+                   request_id: str, projection: Dict[str, Any],
+                   hook_evidence: Optional[Dict[str, Any]],
+                   timeout_seconds: float) -> Dict[str, Any]:
     """Ask the fork boundary to admit-or-refuse one reminder delivery.
 
-    Every POST mints its own operation id: a repeated compaction
-    rendezvouses with the live pending row as ``already-pending``
-    (zero new bytes) instead of re-delivering, and the boundary's
-    wire-evidence check completes the row when the marker landed.
+    ``request_id`` is minted once per originating run (one wrapper run
+    is one compaction observation) and is the request identity: a
+    re-POST under the same id adopts the live row and settles it from
+    the wire (zero new bytes, never a blind retry). A fresh id is a
+    fresh event — even with identical text — and delivers anew after
+    the boundary settles prior rows. The boundary renders delivery
+    bytes itself from ``projection`` through the single
+    :func:`render_restoration`; the caller never formats text.
     """
     payload = json.dumps({
-        "operation_id": str(uuid.uuid4()),
+        "operation_id": request_id,
         "occurrence_id": fence.get("occurrence_id"),
         "generation": fence.get("terminal_generation"),
         "native_session_id": fence.get("native_session_id"),
         "goal_version": fence.get("goal_version"),
         "hold_high_water": fence.get("hold_high_water"),
         "flock_path": fence.get("flock_path"),
-        "context": context,
+        "projection": projection,
+        "hook_evidence": hook_evidence,
     }).encode("utf-8")
     url = (fork_base.rstrip("/") + "/terminals/"
            + urllib.parse.quote(str(terminal_id), safe="")
@@ -486,16 +571,25 @@ def run_wrapper(
                       f"no bytes sent)", file=err)
                 return 0
             assert isinstance(fresh, dict)
-            context = render_restoration(fresh)
-            if context is None:
+            if render_restoration(fresh) is None:
                 print(f"cao-kimi-hook-context: deferred (fresh projection "
                       f"renders nothing deliverable; retry on the next "
                       f"PostCompact or periodic rendezvous; no bytes sent)",
                       file=err)
                 return 0
+            from datetime import datetime, timezone
+            request_id = str(uuid.uuid4())
+            evidence = hook_evidence_from_input(
+                hook_input, observed_at=datetime.now(
+                    timezone.utc).isoformat())
+            # The stdin session already matched the baked binding
+            # above; bind it into the evidence explicitly so the
+            # fingerprint never floats on an unchecked value.
+            evidence["session_id"] = bound_native
             boundary = _post_boundary(
                 fork_base=fork_base, terminal_id=terminal_id,
-                fence=fresh["delivery_fence"], context=context,
+                fence=fresh["delivery_fence"], request_id=request_id,
+                projection=fresh, hook_evidence=evidence,
                 timeout_seconds=BOUNDARY_TIMEOUT_SECONDS)
     except _flock.GoalEffectBusy as exc:
         print(f"cao-kimi-hook-context: deferred (project lock held: {exc}; "
@@ -685,13 +779,122 @@ def _observe_branch(*, pane_id: str, terminal_id: str, session_name: str,
     return "active", f"provider reports {status.value if hasattr(status, 'value') else status}"
 
 
+def _hook_fingerprint(evidence: Optional[Dict[str, Any]]) -> Optional[Tuple[str, str, str]]:
+    """The comparable native triple of one compaction observation.
+
+    ``observed_at`` is audit, never identity: two runs minutes apart
+    are the same compaction when the vendor-visible evidence matches.
+    None means the evidence cannot identify the event — the caller
+    must treat it as distinct, never guess it equal.
+    """
+    if not isinstance(evidence, dict):
+        return None
+    triple = [evidence.get("session_id"), evidence.get("trigger"),
+              evidence.get("estimated_token_count")]
+    for value in triple:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+    return (str(triple[0]), str(triple[1]), str(triple[2]))
+
+
+def _row_hook_fingerprint(row: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+    """The frozen native triple of one journal row, if event-origin."""
+    transport = row.get("transport") or {}
+    if not isinstance(transport, dict):
+        return None
+    if transport.get("origin") != "event":
+        return None
+    return _hook_fingerprint(transport.get("hook_evidence"))
+
+
+def _capture_viewport(pane_id: str) -> Optional[List[str]]:
+    """One pane capture for marker + emptiness checks, or None."""
+    try:
+        from cli_agent_orchestrator.services import native_pane_input as pane
+        return list(pane.capture_pane_screen(pane_id, timeout=5.0))
+    except Exception:  # noqa: BLE001 - capture failure is no evidence
+        return None
+
+
+def _composer_empty_gate(*, pane_id: str, provider_version: Optional[str],
+                         viewport_rows: Optional[Sequence[str]]
+                         ) -> Optional[Tuple[str, str]]:
+    """None when the composer is proven empty; else a session refusal.
+
+    The Sol-correction gate: no same-session byte is typed and no row
+    superseded until the existing proven composer-emptiness
+    observation says empty. Marker absence is NOT emptiness — a
+    marker-free partial or an operator draft blocks exactly this
+    session until the operator submits/clears it and retries. No blind
+    erase, no installation-wide freeze, unrelated sessions unaffected.
+    """
+    from cli_agent_orchestrator.services import kimi_native_control as adapter
+    from cli_agent_orchestrator.services import native_pane_input as pane
+    if viewport_rows is None:
+        return (adapter.REFUSED_COMPOSER_NONEMPTY,
+                "the composer could not be captured, so its emptiness is "
+                "unproven; zero bytes were typed and nothing was erased — "
+                "retry when the pane is readable, or submit/clear any "
+                "composer draft as the operator and retry")
+    pin = pane.composer_emptiness_pin_for("kimi_cli", provider_version)
+    if pin is None:
+        return (adapter.REFUSED_COMPOSER_UNPINNED,
+                f"no composer-emptiness pin is proven for kimi_cli build "
+                f"{provider_version!r}; typing blind would risk "
+                f"concatenating with an unknown draft — zero bytes were "
+                f"typed; live-verify this build's composer layout, pin "
+                f"it, then retry")
+    try:
+        rows = list(viewport_rows)
+        empty = pane.observe_composer_empty(
+            pane_id, pin, screen=lambda: rows)
+    except Exception as exc:  # noqa: BLE001 - "could not look" is not "empty"
+        return (adapter.REFUSED_COMPOSER_NONEMPTY,
+                f"the composer-emptiness proof raised ({exc}); zero bytes "
+                f"were typed — retry when the pane is readable")
+    if empty is True:
+        return None
+    if empty is False:
+        return (adapter.REFUSED_COMPOSER_NONEMPTY,
+                "the composer holds content that is not ours; submitting "
+                "now would concatenate with the queued draft and deliver "
+                "it as prompt text — zero bytes were typed and the draft "
+                "is untouched; submit or clear it as the operator, then "
+                "retry")
+    return (adapter.REFUSED_COMPOSER_NONEMPTY,
+            "the composer's emptiness could not be proven (the input "
+            "region was unparseable); zero bytes were typed — submit or "
+            "clear any composer draft as the operator, then retry")
+
+
+def _settle_adopted_row(record: Dict[str, Any],
+                        *, roots: List[str]) -> Dict[str, Any]:
+    """Wire-settle one adopted row; never types bytes."""
+    from cli_agent_orchestrator.services import kimi_native_control as adapter
+    try:
+        settlement = adapter.reconcile_reminder_from_wire(
+            operation_id=record.get("operation_id") or "",
+            marker=(record.get("transport") or {}).get("marker")
+            or record.get("operation_id") or "",
+            session_home=roots)
+        if settlement.get("reconciled") and isinstance(
+                settlement.get("record"), dict):
+            return settlement["record"]
+    except Exception:  # noqa: BLE001 - reconcile never breaks adopt
+        pass
+    return record
+
+
 def submit_context_reminder(
     *,
     terminal_id: str,
     operation_id: str,
     occurrence_id: str,
-    context: str,
+    projection: Dict[str, Any],
     fence: Dict[str, Any],
+    hook_evidence: Optional[Dict[str, Any]] = None,
     lease_timeout: float = 0.0,
 ) -> Dict[str, Any]:
     """Admit-or-refuse one context reminder and deliver it exactly once.
@@ -699,11 +902,24 @@ def submit_context_reminder(
     Fence fields (all re-verified, none trusted): ``generation``,
     ``native_session_id``, ``goal_version``, ``hold_high_water``,
     ``flock_path`` (absolute ``goal-effect.lock`` path — fail closed
-    when absent). The marker is the operation id: unique per delivery,
-    echoed by provider evidence on acceptance.
+    when absent). ``projection`` is the canonical ``hook-context``
+    answer; delivery bytes render from it through the single
+    :func:`render_restoration`. ``hook_evidence`` is the originating
+    run's native compaction fingerprint (event path) or None
+    (periodic request). The marker is the operation id: unique per
+    delivery, echoed by provider evidence on acceptance.
+
+    Identity rule: a re-POST under a known operation id is a
+    same-event retry (adopt + wire-settle, zero new bytes). A fresh id
+    with the same native fingerprint is a probable refire (adopt, zero
+    new bytes). Anything else is a distinct compaction and delivers
+    anew — even with byte-identical text. Content hashes are audit,
+    never identity.
 
     Returns ``{"status", "detail", "record"?}`` with status in
-    posted/pending/refused/deferred/unknown/completed.
+    posted/pending/refused/deferred/unknown/completed. Only the
+    posted outcome carries new bytes (``new_bytes`` True); every other
+    outcome carries ``new_bytes`` False.
     """
     from cli_agent_orchestrator.services import cohort_journal
     from cli_agent_orchestrator.services import control_input_service
@@ -714,49 +930,111 @@ def submit_context_reminder(
     from cli_agent_orchestrator.utils.terminal import managed_window_name
 
     if not operation_id or not occurrence_id or not terminal_id:
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": "operation_id, occurrence_id, and terminal_id are required"}
-    if not (context or "").strip():
-        return {"status": "refused", "detail": "empty reminder context; nothing to send"}
+    origin = "event" if hook_evidence is not None else "periodic"
     generation = fence.get("generation")
     flock_path = fence.get("flock_path")
     if not generation or not flock_path:
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": "fence must carry generation and flock_path; refusing unfenced delivery"}
     if not _valid_flock_path(flock_path):
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": "flock_path must be an absolute goal-effect.lock path"}
 
     resolved = control_input_service.resolve_control_identity(terminal_id)
     if resolved is None:
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": f"no terminal {terminal_id!r} is known to this server"}
     if resolved.provider != "kimi_cli":
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": f"terminal {terminal_id!r} is provider {resolved.provider!r}, not kimi_cli"}
     if resolved.terminal_generation != generation:
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": f"terminal generation is {resolved.terminal_generation!r}, fence says "
                           f"{generation!r}; the generation moved, discarding"}
     fence_native = fence.get("native_session_id")
     if not fence_native:
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": "fence must carry native_session_id; refusing unfenced delivery"}
     if resolved.native_session_id != fence_native:
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": "native session rotated under this fence; discarding"}
     if resolved.pane_id is None or resolved.pane_dead:
-        return {"status": "refused", "detail": "pane is gone or dead; nothing was typed"}
+        return {"status": "refused", "new_bytes": False, "detail": "pane is gone or dead; nothing was typed"}
     if resolved.window_id is None or resolved.pane_pid is None:
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": "the pane's window and root process could not both be "
                           "observed; nothing was typed"}
     if resolved.native_session_id is None:
-        return {"status": "refused",
+        return {"status": "refused", "new_bytes": False,
                 "detail": "no native session is bound; nothing was typed"}
     if resolved.session_name is None:
-        return {"status": "deferred",
+        return {"status": "deferred", "new_bytes": False,
                 "detail": "session name unresolvable; deferring"}
+
+    # Same-event retry: the operation id is already journaled. Adopt
+    # it and settle from the wire — zero new bytes by construction,
+    # no leg gates (a retry types nothing, so lifecycle/waits cannot
+    # be bypassed by it; only brand-new bytes pass the gates below).
+    try:
+        known = adapter.get(operation_id)
+    except adapter.NativeControlError as exc:
+        return {"status": "unknown", "new_bytes": False,
+                "detail": f"retry lookup failed: {exc}"}
+    if known is not None:
+        if known.get("kind") != adapter.KIND_REMIND:
+            return {"status": "refused", "new_bytes": False,
+                    "detail": f"operation {operation_id!r} is bound to a "
+                              "different control kind; refusing reuse"}
+        if (known.get("terminal_id") != terminal_id
+                or known.get("generation") != resolved.terminal_generation):
+            return {"status": "refused", "new_bytes": False,
+                    "detail": f"operation {operation_id!r} belongs to "
+                              "another terminal generation; refusing reuse"}
+        state = known.get("state")
+        if state in ("completed", "refused"):
+            return {"status": state, "new_bytes": False,
+                    "detail": f"retry rendezvous with terminal row "
+                              f"{operation_id!r}; zero new bytes",
+                    "record": known}
+        if state in ("intended", "writing"):
+            return {"status": "pending", "new_bytes": False,
+                    "detail": f"an effect may still own reminder "
+                              f"{operation_id!r}; will not compound",
+                    "record": known}
+        if adapter._intent_occurrence(
+                known.get("intent")) not in (None, occurrence_id):
+            return {"status": "refused", "new_bytes": False,
+                    "detail": f"operation {operation_id!r} already exists "
+                              "for another occurrence; a caller-minted id "
+                              "is immutable"}
+        if known.get("native_session_id") != resolved.native_session_id:
+            return {"status": "refused", "new_bytes": False,
+                    "detail": f"operation {operation_id!r} is bound to a "
+                              "rotated native session; retry under a fresh "
+                              "request id"}
+        roots = managed_wire_roots(
+            terminal_id=terminal_id,
+            generation=resolved.terminal_generation)
+        record = _settle_adopted_row(known, roots=roots)
+        if record.get("state") == "completed":
+            return {"status": "completed", "new_bytes": False,
+                    "detail": "wire evidence shows the marker reached "
+                              "the model",
+                    "record": record}
+        return {"status": "pending", "new_bytes": False,
+                "detail": f"retry adopted reminder {operation_id!r}; "
+                          "backing off",
+                "record": record}
+
+    # A fresh request id is a fresh event: it needs deliverable bytes.
+    # Retries above return before this point, so a missing projection
+    # here is a malformed new request, never a retry.
+    context = render_restoration(projection)
+    if not (context or "").strip():
+        return {"status": "refused", "new_bytes": False,
+                "detail": "projection renders nothing deliverable; nothing to send"}
 
     def _journal_fence_refusal(reason: str, detail: str) -> Dict[str, Any]:
         """Journal a typed zero-byte refusal for a failed fence leg.
@@ -793,7 +1071,7 @@ def submit_context_reminder(
                 record = {}
         except Exception:  # noqa: BLE001 - keep the refusal answer
             record = {}
-        return {"status": "refused", "detail": detail, "record": record}
+        return {"status": "refused", "new_bytes": False, "detail": detail, "record": record}
 
     import time as _time
     deadline = _time.monotonic() + WRITE_DEADLINE_SECONDS
@@ -806,7 +1084,7 @@ def submit_context_reminder(
                     if problem[0] == "lifecycle_not_working":
                         return _journal_fence_refusal(
                             adapter.REFUSED_LIFECYCLE, problem[1])
-                    return {"status": "deferred", "detail": problem[1]}
+                    return {"status": "deferred", "new_bytes": False, "detail": problem[1]}
                 problem = _fork_occurrence_current(
                     occurrence_id=occurrence_id, terminal_id=terminal_id,
                     generation=resolved.terminal_generation)
@@ -815,7 +1093,7 @@ def submit_context_reminder(
                     if reason in ("occurrence_closed", "occurrence_moved"):
                         return _journal_fence_refusal(
                             adapter.REFUSED_OCCURRENCE, problem[1])
-                    return {"status": "deferred", "detail": problem[1]}
+                    return {"status": "deferred", "new_bytes": False, "detail": problem[1]}
                 problem = _fork_wait_cover(
                     session_name=resolved.session_name, terminal_id=terminal_id,
                     generation=resolved.terminal_generation)
@@ -824,7 +1102,7 @@ def submit_context_reminder(
                     if reason in ("wait_cover", "wait_recovery"):
                         return _journal_fence_refusal(
                             adapter.REFUSED_WAIT_COVER, problem[1])
-                    return {"status": "deferred", "detail": problem[1]}
+                    return {"status": "deferred", "new_bytes": False, "detail": problem[1]}
                 turn_state, turn_detail = _observe_branch(
                     pane_id=resolved.pane_id, terminal_id=terminal_id,
                     session_name=resolved.session_name,
@@ -834,7 +1112,7 @@ def submit_context_reminder(
                 if turn_state == "active":
                     proven = adapter.steer_chords(resolved.provider_version)
                     if not proven:
-                        return {"status": "deferred",
+                        return {"status": "deferred", "new_bytes": False,
                                 "detail": f"turn is active but no steer chord is proven for build "
                                           f"{resolved.provider_version!r} (missing capability, not "
                                           "failure); backing off to idle-submit or degraded routes"}
@@ -861,11 +1139,11 @@ def submit_context_reminder(
                         live = client.pane_control_identity(
                             pane_id=binding.pane_id, deadline_monotonic=deadline)
                         if live is None or live.dead:
-                            return {"status": "refused",
+                            return {"status": "refused", "new_bytes": False,
                                     "detail": "pane is gone or dead as of the write lease"}
                         if (live.window_id != binding.window_id
                                 or live.pane_pid != binding.pane_pid):
-                            return {"status": "refused",
+                            return {"status": "refused", "new_bytes": False,
                                     "detail": "pane identity moved under the lease; discarding"}
                         from datetime import datetime, timezone
                         observation = adapter.turn_observation(
@@ -890,9 +1168,6 @@ def submit_context_reminder(
                                         "admission and first byte; deferring to re-rendezvous")
                             return None
 
-                        from cli_agent_orchestrator.services.canonical_json import (
-                            canonical_sha256 as _content_sha)
-                        incoming_sha = _content_sha({"context": context})
                         roots = managed_wire_roots(
                             terminal_id=terminal_id,
                             generation=resolved.terminal_generation)
@@ -925,13 +1200,15 @@ def submit_context_reminder(
                                     steer_chord=chord,
                                     pre_write=pre_write,
                                     deadline_monotonic=deadline,
-                                    supersede_ids=supersede))
+                                    supersede_ids=supersede,
+                                    origin=origin,
+                                    hook_evidence=hook_evidence))
                             except adapter.NativeControlConflict as exc:
-                                return (False, {"status": "refused",
+                                return (False, {"status": "refused", "new_bytes": False,
                                                 "detail": str(exc),
                                                 "new_bytes": False})
                             except adapter.NativeControlInvalid as exc:
-                                return (False, {"status": "refused",
+                                return (False, {"status": "refused", "new_bytes": False,
                                                 "detail": str(exc),
                                                 "new_bytes": False})
                             except Exception as exc:
@@ -941,32 +1218,42 @@ def submit_context_reminder(
                                         reason=f"reminder submit raised mid-effect: {exc}")
                                 except Exception:
                                     pass
-                                return (False, {"status": "unknown",
+                                return (False, {"status": "unknown", "new_bytes": False,
                                                 "detail": f"submit raised before its outcome was "
                                                           f"journaled: {exc}; reconcile by exact "
                                                           f"operation id",
                                                 "new_bytes": False})
 
                         def _settle(record):
-                            """Wire-settle one adopted row; never types bytes."""
-                            try:
-                                settlement = adapter.reconcile_reminder_from_wire(
-                                    operation_id=record.get("operation_id") or operation_id,
-                                    marker=record.get("operation_id") or operation_id,
-                                    session_home=roots)
-                                if settlement.get("reconciled") and isinstance(
-                                        settlement.get("record"), dict):
-                                    record = settlement["record"]
-                            except Exception:  # noqa: BLE001 - reconcile never breaks adopt
-                                pass
-                            return record
+                            return _settle_adopted_row(record, roots=roots)
+
+                        def _gate_or_deliver(supersede):
+                            """The composer-emptiness gate before new bytes.
+
+                            No same-session byte is typed and no row
+                            superseded until the proven observation says
+                            empty. A refusal journals a terminal
+                            session-scoped row against this dispatch's own
+                            operation id (operator recovery: submit/clear
+                            the draft, then retry); older rows are
+                            untouched and unrelated sessions unaffected.
+                            """
+                            gate = _composer_empty_gate(
+                                pane_id=resolved.pane_id,
+                                provider_version=resolved.provider_version,
+                                viewport_rows=viewport_rows)
+                            if gate is not None:
+                                reason, detail = gate
+                                return _journal_fence_refusal(reason, detail)
+                            return _deliver_new(supersede)
 
                         def _deliver_new(supersede):
                             """Deliver this POST's context as a new row.
 
-                            Only the posted outcome carries new bytes (and
-                            a clock reset downstream); every other outcome
-                            carries new_bytes False.
+                            Only the posted outcome carries new bytes;
+                            every other outcome carries new_bytes False.
+                            The caller runs the composer gate first: this
+                            helper assumes permission was proven.
                             """
                             ok, result = _attempt(operation_id, supersede)
                             if not ok:
@@ -998,11 +1285,23 @@ def submit_context_reminder(
 
                         def _marker_of(row):
                             transport = row.get("transport") or {}
+                            if not isinstance(transport, dict):
+                                transport = {}
                             return transport.get("marker") or row.get("operation_id")
 
-                        def _sha_of(row):
-                            transport = row.get("transport") or {}
-                            return transport.get("context_sha256")
+                        def _compose(row):
+                            """Marker check sharing the one viewport capture."""
+                            try:
+                                return adapter.reconcile_reminder_composer(
+                                    operation_id=row.get("operation_id"),
+                                    marker=_marker_of(row),
+                                    pane_id=resolved.pane_id,
+                                    session_home=roots,
+                                    viewport_rows=viewport_rows)
+                            except Exception:
+                                return {"composer_holds_marker": None,
+                                        "reason": "composer check raised",
+                                        "record": row}
 
                         rows = adapter.unresolved_reminders_for(
                             terminal_id=terminal_id,
@@ -1020,54 +1319,61 @@ def submit_context_reminder(
                                     "detail": f"an effect may still own reminder "
                                               f"{owned[0].get('operation_id')}; will not compound",
                                     "record": owned[0]}
-                        same = [r for r in live + ambiguous
-                                if _sha_of(r) is not None
-                                and _sha_of(r) == incoming_sha]
-                        if same:
-                            # Re-POST of the same compaction: rendezvous
-                            # with that row and settle it from the wire.
-                            # Zero new bytes by construction.
-                            elected = same[-1]
-                            ok, result = _attempt(elected.get("operation_id"),
-                                                  frozenset())
-                            if not ok:
-                                return result
-                            record = _settle(result)
-                            if record.get("state") == "completed":
-                                return {"status": "completed", "new_bytes": False,
-                                        "detail": "wire evidence shows the marker reached "
-                                                  "the model",
+                        # One viewport capture serves the marker checks and
+                        # the emptiness gate below; a failed capture is no
+                        # evidence (the gate refuses the session on it).
+                        viewport_rows = _capture_viewport(resolved.pane_id)
+                        incoming_fp = _hook_fingerprint(hook_evidence)
+                        if incoming_fp is not None:
+                            # Probable refire: the same native compaction
+                            # evidence already owns a live row. Adopt and
+                            # settle it — zero new bytes, never a blind
+                            # repeat. Text is NEVER compared: identical
+                            # bytes with different fingerprints are a
+                            # distinct compaction and deliver below.
+                            twins = [
+                                r for r in live + ambiguous
+                                if _row_hook_fingerprint(r) == incoming_fp
+                                and r.get("native_session_id")
+                                == resolved.native_session_id
+                                and adapter._intent_occurrence(
+                                    r.get("intent")) in (None, occurrence_id)]
+                            if twins and len(live) == len(
+                                    [r for r in live
+                                     if _row_hook_fingerprint(r) == incoming_fp]):
+                                elected = twins[-1]
+                                record = _settle(elected)
+                                if record.get("state") == "completed":
+                                    return {"status": "completed",
+                                            "new_bytes": False,
+                                            "detail": "wire evidence shows the marker "
+                                                      "reached the model",
+                                            "record": record}
+                                return {"status": "pending", "new_bytes": False,
+                                        "detail": f"refire adopted reminder "
+                                                  f"{elected.get('operation_id')}; backing off",
                                         "record": record}
-                            return {"status": "pending", "new_bytes": False,
-                                    "detail": f"reminder {record.get('reminder_outcome')}; "
-                                              f"backing off",
-                                    "record": record}
                         if len(live) > 1:
                             return {"status": "deferred", "new_bytes": False,
                                     "detail": "multiple live reminder rows; refusing to guess "
                                               "which compaction this continues",
                                     "record": live[-1]}
                         if live:
-                            # New compaction while one row is live: settle
-                            # the old receipt, then deliver the new
-                            # context — never swallow it by adopting.
+                            # Distinct compaction while one row is live:
+                            # settle the old receipt, prove the composer
+                            # empty, then deliver anew — never swallow the
+                            # new event by adopting the old row.
                             target = live[0]
                             settled = _settle(target)
                             if settled is not target:
                                 target = settled
                             if target.get("state") in ("completed", "refused"):
-                                return _deliver_new(
+                                return _gate_or_deliver(
                                     {r.get("operation_id") for r in ambiguous})
-                            try:
-                                composition = adapter.reconcile_reminder_composer(
-                                    operation_id=target.get("operation_id"),
-                                    marker=_marker_of(target),
-                                    pane_id=resolved.pane_id,
-                                    session_home=roots)
-                            except Exception:
-                                composition = {"composer_holds_marker": None,
-                                             "reason": "composer check raised",
-                                             "record": target}
+                            composition = _compose(target)
+                            used = composition.get("viewport_rows")
+                            if isinstance(used, list) and used:
+                                viewport_rows = used
                             holds = composition.get("composer_holds_marker")
                             if holds is not False:
                                 return {"status": "deferred", "new_bytes": False,
@@ -1076,7 +1382,7 @@ def submit_context_reminder(
                                                   f"({composition.get('reason')}); will not "
                                                   f"compound bytes; retry on a later compaction",
                                         "record": composition.get("record") or target}
-                            return _deliver_new(
+                            return _gate_or_deliver(
                                 {r.get("operation_id") for r in ambiguous}
                                 | {target.get("operation_id")})
                         if ambiguous:
@@ -1084,16 +1390,10 @@ def submit_context_reminder(
                             # only when no history row still holds partial
                             # bytes in the composer.
                             for prior in ambiguous:
-                                try:
-                                    composition = adapter.reconcile_reminder_composer(
-                                        operation_id=prior.get("operation_id"),
-                                        marker=_marker_of(prior),
-                                        pane_id=resolved.pane_id,
-                                        session_home=roots)
-                                except Exception:
-                                    composition = {"composer_holds_marker": None,
-                                                 "reason": "composer check raised",
-                                                 "record": prior}
+                                composition = _compose(prior)
+                                used = composition.get("viewport_rows")
+                                if isinstance(used, list) and used:
+                                    viewport_rows = used
                                 if composition.get("composer_holds_marker") is not False:
                                     return {"status": "deferred", "new_bytes": False,
                                             "detail": f"superseded reminder "
@@ -1101,18 +1401,18 @@ def submit_context_reminder(
                                                       f"delivery ({composition.get('reason')}); will "
                                                       f"not compound bytes",
                                             "record": composition.get("record") or prior}
-                            return _deliver_new(
+                            return _gate_or_deliver(
                                 {r.get("operation_id") for r in ambiguous})
-                        return _deliver_new(frozenset())
+                        return _gate_or_deliver(frozenset())
     except goal_effect_flock.GoalEffectBusy as exc:
-        return {"status": "deferred", "detail": str(exc)}
+        return {"status": "deferred", "new_bytes": False, "detail": str(exc)}
     except cohort_journal.SessionEffectRefused as exc:
-        return {"status": "refused", "detail": str(exc)}
+        return {"status": "refused", "new_bytes": False, "detail": str(exc)}
     except PaneBusyError as exc:
-        return {"status": "deferred",
+        return {"status": "deferred", "new_bytes": False,
                 "detail": f"another writer holds the pane: {exc}"}
     except Exception as exc:
-        return {"status": "unknown", "detail": f"delivery failed before journaling: {exc}"}
+        return {"status": "unknown", "new_bytes": False, "detail": f"delivery failed before journaling: {exc}"}
     # All delivery paths above return directly; nothing falls through.
 
 
