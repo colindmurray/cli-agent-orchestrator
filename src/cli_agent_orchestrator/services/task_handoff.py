@@ -1374,17 +1374,23 @@ def complete_handoff(
             f"expected_revision must be a non-negative int; got {expected_revision!r}"
         )
     completed_by = _require_text(completed_by, field_name="completed_by")
-    return _with_session(
-        lambda session: _complete_once(
-            session,
-            handoff_id,
-            incarnation=incarnation,
-            expected_revision=expected_revision,
-            completed_by=completed_by,
-        ),
-        db,
-        unavailable="concurrent handoff transfers kept conflicting",
-    )
+    # The call names no session: resolve it from the handoff row (session
+    # never moves for a handoff; unknown ids raise here exactly as the
+    # write below would), then fence the transfer.
+    from cli_agent_orchestrator.services.callback_recovery import (
+        session_lifecycle_write_claim)
+    with session_lifecycle_write_claim(get_handoff(handoff_id)["session_name"]):
+        return _with_session(
+            lambda session: _complete_once(
+                session,
+                handoff_id,
+                incarnation=incarnation,
+                expected_revision=expected_revision,
+                completed_by=completed_by,
+            ),
+            db,
+            unavailable="concurrent handoff transfers kept conflicting",
+        )
 
 
 def occurrence_move_id_for(handoff_id: str) -> str:

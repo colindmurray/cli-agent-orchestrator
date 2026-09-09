@@ -511,6 +511,30 @@ def _input_disposition(
         return f"input-unreadable:{exc}"
 
 
+def _session_fence_for(wait_id: str):
+    """Session write fence, outermost (cond-0845).
+
+    Resolved from the wait row (session never moves); nullcontext when
+    the row is gone or unreadable — those paths write nothing. Callers
+    take this OUTSIDE ``_monitor_lock``: session -> monitor -> inbox ->
+    transaction, never the inverse.
+    """
+    from cli_agent_orchestrator.services.callback_recovery import (
+        session_lifecycle_write_claim)
+    from contextlib import nullcontext
+    try:
+        from cli_agent_orchestrator.clients import database
+        with database.SessionLocal() as db:
+            row = db.get(database.RegisteredWaitModel, wait_id)
+            session_name = (str(row.session_name)
+                            if row is not None and row.session_name else None)
+    except Exception:
+        return nullcontext()
+    if not session_name:
+        return nullcontext()
+    return session_lifecycle_write_claim(session_name)
+
+
 def process_monitors(
     *,
     now: Optional[datetime] = None,
@@ -534,7 +558,10 @@ def process_monitors(
     results = []
     for wait_id in ids:
         try:
-            with _monitor_lock(wait_id):
+            # cond-0845: session fence outermost; the monitor RLock nests
+            # inside it (never the inverse) so wait transitions and
+            # restoration delivery stay mutually exclusive.
+            with _session_fence_for(wait_id), _monitor_lock(wait_id):
                 result = _process_one_monitor(
                     wait_id,
                     observed=observed,
@@ -936,7 +963,12 @@ def _stop_monitor_locked(
         RegisteredWaitUnavailable,
     )
 
-    with database.SessionLocal() as db:
+    # cond-0845: session fence around the stop txn. Both production
+    # callers (cancel, interrupt) already hold this exact fence outside
+    # their inbox lock, so this nests as a re-entrant no-op and the
+    # canonical session -> inbox order holds. Standalone callers hold
+    # no lock here. No cycle either way.
+    with _session_fence_for(wait_id), database.SessionLocal() as db:
         wait_row = db.get(database.RegisteredWaitModel, wait_id)
         monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
         if wait_row is None:

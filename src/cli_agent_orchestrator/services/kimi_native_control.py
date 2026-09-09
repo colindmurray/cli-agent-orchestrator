@@ -70,9 +70,20 @@ KIND_CONTROL = "control"
 #: gated exactly like a queue operation but replaying on the caller's
 #: whole-request digest.
 KIND_OPERATOR_MESSAGE = "operator-message"
-OPERATION_KINDS = frozenset({KIND_QUEUE, KIND_STEER, KIND_CONTROL, KIND_OPERATOR_MESSAGE})
+#: cond-0845: one goal-context reminder, journaled like queue/steer but
+#: admitting BOTH observed-idle (ordinary submit) and observed-active
+#: (chord steer into the running turn). Neither queue (refuses active)
+#: nor steer (refuses idle, binds one turn) spans both, and a reminder
+#: rendered at delivery is valid for whichever turn is live — unlike a
+#: work instruction about a turn that already ended.
+KIND_REMIND = "remind"
+OPERATION_KINDS = frozenset({KIND_QUEUE, KIND_STEER, KIND_CONTROL, KIND_OPERATOR_MESSAGE, KIND_REMIND})
 
 #: ``intended`` -> intent is durable, nothing has been typed.
+#: ``writing``  -> the frozen effect payload is committed and the first
+#:                 provider byte is imminent.  The exact bytes are fixed
+#:                 here so a crash during typing cannot be re-rendered
+#:                 into different bytes on retry.
 #: ``posted``   -> bytes reached the transport.  Transport fact only.
 #: ``accepted`` -> the provider was observed taking the input.
 #: ``completed``-> the provider was observed finishing the operation.
@@ -88,12 +99,13 @@ OPERATION_KINDS = frozenset({KIND_QUEUE, KIND_STEER, KIND_CONTROL, KIND_OPERATOR
 #: native TUI "we sent it" and "the provider took it" are separate facts
 #: with a real gap between them.
 INTENDED = "intended"
+WRITING = "writing"
 POSTED = "posted"
 ACCEPTED = "accepted"
 COMPLETED = "completed"
 REFUSED = "refused"
 AMBIGUOUS = "ambiguous"
-OPERATION_STATES = frozenset({INTENDED, POSTED, ACCEPTED, COMPLETED, REFUSED, AMBIGUOUS})
+OPERATION_STATES = frozenset({INTENDED, WRITING, POSTED, ACCEPTED, COMPLETED, REFUSED, AMBIGUOUS})
 
 #: States that need nothing further.  ``ambiguous`` is deliberately absent:
 #: it is frozen, not finished, and it still blocks the session.
@@ -122,6 +134,14 @@ REFUSED_UNPROVEN_COMPOSER_NEWLINE = "composer_newline_unproven"
 #: this module (``REFUSED_ATTACHMENT``).
 REFUSED_IMAGE_UNKNOWN = "image_attachment_unknown"
 REFUSED_IMAGE_NOT_READY = "image_attachment_not_ready"
+#: cond-0845 remind-only reasons. Each names a re-verified fence fact,
+#: so a consumer can tell "a wait landed first" from "the build cannot
+#: steer" from "another reminder is already pending".
+REFUSED_WAIT_COVER = "wait_cover_active"
+REFUSED_LIFECYCLE = "lifecycle_not_working"
+REFUSED_OCCURRENCE = "occurrence_not_current"
+REFUSED_UNPROVEN_STEER = "steer_chord_unproven"
+REFUSED_REMINDER_PENDING = "reminder_already_pending"
 REFUSAL_REASONS = frozenset(
     {
         REFUSED_ACTIVE_TURN,
@@ -134,6 +154,11 @@ REFUSAL_REASONS = frozenset(
         REFUSED_UNPROVEN_COMPOSER_NEWLINE,
         REFUSED_IMAGE_UNKNOWN,
         REFUSED_IMAGE_NOT_READY,
+        REFUSED_WAIT_COVER,
+        REFUSED_LIFECYCLE,
+        REFUSED_OCCURRENCE,
+        REFUSED_UNPROVEN_STEER,
+        REFUSED_REMINDER_PENDING,
     }
 )
 
@@ -924,6 +949,7 @@ def _intent(
     payload_sha256: str,
     turn_observation_record: Mapping[str, Any],
     keystroke_plan: Optional[Mapping[str, Any]] = None,
+    occurrence_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """The record written before anything is typed.
 
@@ -952,6 +978,9 @@ def _intent(
         "payload_sha256": payload_sha256,
         "turn_observation": dict(turn_observation_record),
         "keystroke_plan": None if keystroke_plan is None else _journalable_plan(keystroke_plan),
+        # cond-0845 remind only; absent on every older kind so existing
+        # intent rows stay byte-identical.
+        **({"occurrence_id": occurrence_id} if occurrence_id is not None else {}),
     }
 
 
@@ -1152,6 +1181,7 @@ def _open(
     payload_sha256: str,
     observation: Mapping[str, Any],
     keystroke_plan: Optional[Mapping[str, Any]] = None,
+    occurrence_id: Optional[str] = None,
 ) -> tuple[dict[str, Any], bool]:
     """Journal the intent, or return the existing operation unchanged.
 
@@ -1178,6 +1208,7 @@ def _open(
                 payload_sha256=payload_sha256,
                 turn_observation_record=observation,
                 keystroke_plan=keystroke_plan,
+                occurrence_id=occurrence_id,
             )
         ),
         "epoch": 0,
@@ -1730,6 +1761,312 @@ def steer(
     return _post(operation_id=binding["operation_id"], plan=plan, transport=transport)
 
 
+def _pending_reminder_rows(db: Any, *, terminal_id: str,
+                           generation: str) -> list:
+    """Unresolved KIND_REMIND rows for one terminal generation, oldest first.
+
+    The one-pending-per-occurrence authority without a schema migration:
+    scope key is (terminal, generation) — a retained-agent reassignment
+    mints a new generation, so a new generation can never alias an old
+    occurrence's pending row — and the occurrence itself is verified
+    from the winner's intent before anything is adopted.
+    """
+    return list(
+        db.query(database.KimiNativeControlOperationModel)
+        .filter(
+            database.KimiNativeControlOperationModel.kind == KIND_REMIND,
+            database.KimiNativeControlOperationModel.terminal_id == terminal_id,
+            database.KimiNativeControlOperationModel.generation == generation,
+            database.KimiNativeControlOperationModel.state.notin_(
+                (COMPLETED, REFUSED)),
+        )
+        .order_by(database.KimiNativeControlOperationModel.created_at,
+                  database.KimiNativeControlOperationModel.operation_id)
+        .all()
+    )
+
+
+def pending_reminder_for(*, terminal_id: str,
+                         generation: str) -> Optional[dict[str, Any]]:
+    """The unresolved reminder for one terminal generation, if any."""
+    try:
+        with database.SessionLocal() as db:
+            rows = _pending_reminder_rows(
+                db, terminal_id=terminal_id, generation=generation)
+            if not rows:
+                return None
+            return _row_dict(rows[0])
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise NativeControlUnavailable(
+            f"reminder pending lookup failed: {exc}") from exc
+
+
+def _intent_occurrence(intent: Optional[dict]) -> Optional[str]:
+    if not isinstance(intent, dict):
+        return None
+    if intent.get("occurrence_id"):
+        return str(intent["occurrence_id"])
+    return None
+
+
+def remind(
+    *,
+    operation_id: str,
+    native_session_id: str,
+    terminal_id: str,
+    generation: str,
+    execution_mode: str,
+    occurrence_id: str,
+    text: str,
+    marker: str,
+    observation: Mapping[str, Any],
+    transport: NativeControlTransport,
+    fence_snapshot: Optional[Mapping[str, Any]] = None,
+    turn_state: str = "idle",
+    provider_version: Optional[str] = None,
+    steer_chord: Optional[str] = None,
+    pre_write: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
+    deadline_monotonic: Optional[float] = None,
+) -> dict[str, Any]:
+    """Deliver one goal-context reminder through the live turn state.
+
+    Unlike :func:`queue` (refuses active) and :func:`steer` (refuses
+    idle, binds one turn), a reminder admits BOTH: observed idle takes
+    the ordinary composer+Enter submit (a fresh turn under CAO
+    continuation policy); an observed active turn takes the proven
+    steer chord after typing with ``submit=False`` (the reminder joins
+    the running turn — composer text is preserved as turn input, never
+    destroyed). The payload is labeled context restoration carrying a
+    unique marker; it is never an assignment, amendment, satisfaction,
+    or hold release.
+
+    One unresolved row per (terminal, generation): a different
+    operation id arriving while one is pending returns the pending row
+    with ``reminder_outcome == "already-pending"`` and types zero
+    bytes — never a second delivery, never a blind retry. Ambiguity
+    freezes (never resends); acceptance/completion require provider
+    evidence naming this exact operation id AND echoing the marker
+    (see :func:`record_reminder_acceptance`).
+    """
+    binding = _validate_binding(
+        operation_id=operation_id,
+        native_session_id=native_session_id,
+        terminal_id=terminal_id,
+        generation=generation,
+        execution_mode=execution_mode,
+    )
+    occurrence_id = _require_text(occurrence_id, field="occurrence_id")
+    marker = _require_text(marker, field="marker")
+    body = _require_text(text, field="text")
+    payload = f"{body}\n\n[cao-context-restoration marker:{marker}]"
+    plan = plan_composer_keystrokes(payload, provider_version=provider_version,
+                                    field="text")
+    observed = _validated_turn_observation(observation)
+    # Branch selection comes from the provider detector's turn state, not
+    # from the bound turn id: a freshly rendered context reminder is valid
+    # for whichever turn is live, so unlike a work instruction it needs no
+    # turn binding to be safe. An idle claim must still be exact (a named
+    # active turn with turn_state "idle" is a caller bug, refused loudly);
+    # an active turn needs no name to be joined.
+    if turn_state not in ("idle", "active"):
+        raise NativeControlInvalid(
+            f"turn_state must be 'idle' or 'active'; got {turn_state!r}")
+    if turn_state == "idle" and observed["active_turn_id"] is not None:
+        raise NativeControlInvalid(
+            "turn_state 'idle' contradicts an observation naming active turn "
+            f"{observed['active_turn_id']!r}; re-observe instead of guessing")
+
+    try:
+        with database.SessionLocal() as db:
+            pending = _pending_reminder_rows(
+                db, terminal_id=terminal_id, generation=generation)
+            for row in pending:
+                if row.operation_id == binding["operation_id"]:
+                    adopted = _row_dict(row)
+                    if _intent_occurrence(adopted.get("intent")) not in (None, occurrence_id):
+                        raise NativeControlConflict(
+                            f"operation {binding['operation_id']} already exists for occurrence "
+                            f"{_intent_occurrence(adopted.get('intent'))!r}, not "
+                            f"{occurrence_id!r}; a caller-minted id is immutable")
+                    return {**adopted, "reminder_outcome": "adopted"}
+            if pending:
+                winner = _row_dict(pending[0])
+                if _intent_occurrence(winner.get("intent")) not in (None, occurrence_id):
+                    raise NativeControlConflict(
+                        f"terminal {terminal_id} generation {generation} has a pending "
+                        f"reminder for occurrence "
+                        f"{_intent_occurrence(winner.get('intent'))!r}, not "
+                        f"{occurrence_id!r}; the generation was reassigned, adopt nothing")
+                return {**winner, "reminder_outcome": "already-pending"}
+    except NativeControlError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise NativeControlUnavailable(
+            f"reminder pending check failed: {exc}") from exc
+
+    record, is_new = _open(
+        kind=KIND_REMIND,
+        binding=binding,
+        turn_id=None,
+        payload_sha256=plan["payload_sha256"],
+        observation=observed,
+        keystroke_plan=plan,
+        occurrence_id=occurrence_id,
+    )
+    if not is_new:
+        if _intent_occurrence(record.get("intent")) not in (None, occurrence_id):
+            raise NativeControlConflict(
+                f"operation {binding['operation_id']} already exists for occurrence "
+                f"{_intent_occurrence(record.get('intent'))!r}, not {occurrence_id!r}; "
+                "a caller-minted id is immutable")
+        return {**record, "reminder_outcome": "adopted"}
+
+    try:
+        _assert_session_unblocked(
+            native_session_id=binding["native_session_id"],
+            operation_id=binding["operation_id"],
+        )
+        _assert_attachment_owner(
+            native_session_id=binding["native_session_id"],
+            terminal_id=binding["terminal_id"],
+            generation=binding["generation"],
+            execution_mode=binding["execution_mode"],
+        )
+        _assert_deliverable(plan)
+        chord = None
+        if turn_state == "active":
+            if steer_chord is None:
+                raise _Refusal(
+                    REFUSED_UNPROVEN_STEER,
+                    "the turn is active but no proven steer chord was supplied; an "
+                    "active-turn reminder is a steer, never a blind submit",
+                )
+            proven = steer_chords(provider_version)
+            if steer_chord not in proven:
+                raise _Refusal(
+                    REFUSED_UNPROVEN_STEER,
+                    f"steer chord {steer_chord!r} is not in the proven set for provider "
+                    f"version {provider_version!r}; refusing rather than typing an "
+                    "unproven key at a live turn",
+                )
+            send_chord = getattr(transport, "send_chord", None)
+            if not callable(send_chord):
+                raise _Refusal(
+                    REFUSED_UNSUPPORTED_CONTROL,
+                    "the turn is active but this transport has no steer-chord "
+                    "primitive; refusing rather than submitting into a live turn",
+                )
+            chord = steer_chord
+        if pre_write is not None:
+            # Last safe point: the caller's admission re-read (fork legs:
+            # lifecycle, waits, occurrence currency) runs after the
+            # journal claim and every gate above, immediately before the
+            # first byte. A refusal here journals zero bytes typed.
+            hook_refusal = pre_write()
+            if hook_refusal is not None:
+                reason, detail = hook_refusal
+                if reason not in REFUSAL_REASONS:
+                    raise NativeControlInvalid(
+                        f"the pre-write hook answered with unknown refusal reason "
+                        f"{reason!r}")
+                return {**_refuse(binding["operation_id"], _Refusal(reason, detail)),
+                        "reminder_outcome": "refused"}
+    except _Refusal as refusal:
+        return {**_refuse(binding["operation_id"], refusal),
+                "reminder_outcome": "refused"}
+
+    # Freeze the exact effect payload: from here until POSTED the bytes
+    # are fixed, so a crash cannot be re-rendered into different bytes.
+    frozen = _canonical({
+        "frozen_payload_sha256": plan["payload_sha256"],
+        "marker": marker,
+        "branch": "steer" if chord else "submit",
+        "turn_state": turn_state,
+        "chord": chord,
+        "occurrence_id": occurrence_id,
+        # The conductor-verified fence (goal version, hold high-water
+        # mark) frozen for audit. The fork cannot re-read conductor
+        # legs; their truth across the effect comes from the project
+        # flock the caller holds shared — no conductor writer can
+        # commit between verification and first byte.
+        "fence_snapshot": dict(fence_snapshot) if fence_snapshot else None,
+    })
+    try:
+        _update(operation_id=binding["operation_id"],
+                from_states=frozenset({INTENDED}), to_state=WRITING,
+                extra={"transport_json": frozen})
+    except NativeControlError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise NativeControlUnavailable(
+            f"reminder freeze failed: {exc}") from exc
+
+    try:
+        if chord is None:
+            result = execute_composer_plan(
+                plan=plan, transport=transport,
+                deadline_monotonic=deadline_monotonic)
+            enter_sent = bool(result.get("enter_sent"))
+        else:
+            execute_composer_plan(
+                plan=plan, transport=transport, submit=False,
+                deadline_monotonic=deadline_monotonic)
+            # The proven steer primitive (send_steer_chord under the
+            # control-input transport), never a bare control key: only
+            # the pinned chord may join a live turn.
+            getattr(transport, "send_chord")(chord)
+            enter_sent = False
+    except ComposerWriteInterrupted as exc:
+        return {**mark_ambiguous(
+            operation_id=binding["operation_id"], reason=exc.detail),
+            "reminder_outcome": "ambiguous"}
+
+    return {**_update(
+        operation_id=binding["operation_id"],
+        from_states=frozenset({WRITING}), to_state=POSTED,
+        extra={
+            "posted_at": _now(),
+            "transport_json": _canonical({
+                "frozen_payload_sha256": plan["payload_sha256"],
+                "marker": marker,
+                "branch": "steer" if chord else "submit",
+                "enter_sent": enter_sent,
+                "transport_contract": "literal-lines-composer-breaks-then-explicit-boundary",
+            }),
+        },
+    ), "reminder_outcome": "posted"}
+
+
+def record_reminder_acceptance(
+    *,
+    operation_id: str,
+    observation: Mapping[str, Any],
+    expected_marker: str,
+    outcome: str = COMPLETED,
+) -> dict[str, Any]:
+    """Accept/complete a posted reminder on exact-id marker-echo evidence.
+
+    Beyond :func:`record_observation`'s exact-id rule, the evidence must
+    echo the frozen marker: only provider-observed model-context entry
+    — the marker reaching the model — completes the receipt and (via
+    the caller) resets the eligible-time clock. A tmux write alone
+    stays POSTED; an observation without the echo is invalid evidence,
+    not a transport failure.
+    """
+    if outcome not in {ACCEPTED, COMPLETED}:
+        raise NativeControlInvalid(
+            f"reminder outcome must be accepted or completed; got {outcome!r}")
+    evidence = _validated_provider_observation(
+        observation, operation_id=operation_id)
+    echo = (evidence.get("evidence") or {}).get("marker_echo")
+    if echo != expected_marker:
+        raise NativeControlInvalid(
+            "reminder evidence does not echo the frozen marker: provider "
+            "model-context entry is unproven, the operation stays posted")
+    return record_observation(
+        operation_id=operation_id, observation=observation, outcome=outcome)
+
+
 def control(
     *,
     operation_id: str,
@@ -1898,7 +2235,7 @@ def mark_ambiguous(*, operation_id: str, reason: str) -> dict[str, Any]:
     try:
         return _update(
             operation_id=operation_id,
-            from_states=frozenset({INTENDED, POSTED, ACCEPTED, AMBIGUOUS}),
+            from_states=frozenset({INTENDED, WRITING, POSTED, ACCEPTED, AMBIGUOUS}),
             to_state=AMBIGUOUS,
             extra={"ambiguity_reason": detail},
         )

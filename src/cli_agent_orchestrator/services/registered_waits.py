@@ -335,6 +335,37 @@ def _owner(request: Mapping[str, Any]) -> wait_admission.WaitOwner:
     return wait_admission.WaitOwner(**request["owner"])
 
 
+def _session_fence(session_name: Optional[str]):
+    """Session write fence for wait transitions (cond-0845).
+
+    Every fork-side writer that can move a wait toward covering,
+    deferring, or terminal takes the session write claim exclusively
+    around its short transaction — never across Popen, wake POSTs, or
+    other unbounded I/O. A restoration delivery holds the matching
+    shared claim across its effect, so the two are mutually exclusive.
+    Order everywhere: session fence -> monitor RLock -> inbox lock ->
+    transaction. Nothing nested under the fence takes another lock.
+    """
+    from cli_agent_orchestrator.services.callback_recovery import (
+        session_lifecycle_write_claim)
+    from contextlib import nullcontext
+    if not session_name:
+        return nullcontext()
+    return session_lifecycle_write_claim(session_name)
+
+
+def _session_name_of_wait(wait_id: str) -> Optional[str]:
+    """Read-only session resolution for fencing (session never moves)."""
+    try:
+        with database.SessionLocal() as db:
+            row = _wait_row(db, wait_id)
+            if row is None or row.session_name is None:
+                return None
+            return str(row.session_name)
+    except (OperationalError, SQLAlchemyError):
+        return None
+
+
 def register(request: RegistrationRequest, *, now: Optional[datetime] = None) -> dict[str, Any]:
     """Persist registration intent, then verify and acknowledge its exact owner.
 
@@ -360,8 +391,16 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
     adopting_pending = False
     has_adapter = request.adapter is not None
     # --- intent phase: wait row + monitor intent ---
+    # cond-0845: the pending intent commits under the session write
+    # fence, so a registration-pending row is visible to a restoration
+    # delivery before any monitor Popen. The fence releases for owner
+    # verification and Popen below, then each acknowledgement txn below
+    # re-acquires it: PENDING already makes the worker ineligible, so
+    # no fence may span the unbounded launch.
+    from cli_agent_orchestrator.services.callback_recovery import (
+        session_lifecycle_write_claim as _session_write_claim)
     try:
-        with database.SessionLocal() as db:
+        with _session_write_claim(request.session_name), database.SessionLocal() as db:
             existing = _operation_row(db, request.operation_id)
             if existing is not None and existing.state != STATE_REGISTRATION_PENDING:
                 if existing.request_digest != digest:
@@ -467,7 +506,7 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
     if has_adapter:
         if state == STATE_INVALID:
             try:
-                with database.SessionLocal() as db:
+                with _session_fence(request.session_name), database.SessionLocal() as db:
                     stored = _wait_row(db, wait_id)
                     mon = db.get(database.RegisteredWaitMonitorModel, wait_id)
                     if stored is not None and stored.state == STATE_REGISTRATION_PENDING:
@@ -498,7 +537,7 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
                 monitor_paths_for_monitor,
             )
 
-            with database.SessionLocal() as db:
+            with _session_fence(request.session_name), database.SessionLocal() as db:
                 mon = db.get(database.RegisteredWaitMonitorModel, wait_id)
                 wait_row = _wait_row(db, wait_id)
                 if mon is None or wait_row is None:
@@ -537,7 +576,7 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
                         raise RegisteredWaitUnavailable(f"monitor launch failed: {exc}") from exc
                     # try to adopt whatever appeared
                     adopted = adopt_monitor_evidence(wait_id)
-                    with database.SessionLocal() as db2:
+                    with _session_fence(request.session_name), database.SessionLocal() as db2:
                         w2 = _wait_row(db2, wait_id)
                         m2 = db2.get(database.RegisteredWaitMonitorModel, wait_id)
                         # ack only if adoption succeeded (helper or result recorded)
@@ -557,7 +596,7 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
                         return result
                 # adopting_pending with ready/result present: adopt
                 adopted = adopt_monitor_evidence(wait_id)
-                with database.SessionLocal() as db2:
+                with _session_fence(request.session_name), database.SessionLocal() as db2:
                     w2 = _wait_row(db2, wait_id)
                     m2 = db2.get(database.RegisteredWaitMonitorModel, wait_id)
                     if (
@@ -580,7 +619,7 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
 
     # timer path
     try:
-        with database.SessionLocal() as db:
+        with _session_fence(request.session_name), database.SessionLocal() as db:
             stored = _wait_row(db, wait_id)
             if stored is None:
                 raise RegisteredWaitUnavailable("registration intent disappeared")
@@ -652,6 +691,7 @@ def cancel(
             initial = _wait_row(db, wait_id)
             if initial is None:
                 raise RegisteredWaitInvalid(f"unknown wait {wait_id}")
+            cancel_session = initial.session_name
             message_id = initial.wake_message_id
             # For adapter waits, also consider monitor wake
             monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
@@ -698,7 +738,9 @@ def cancel(
             from cli_agent_orchestrator.services.inbox_service import InboxService
 
             lock = InboxService._managed_delivery_lock(combined_wake)
-        with lock, database.SessionLocal() as db:
+        # cond-0845: session fence OUTSIDE the inbox lock (session ->
+        # inbox -> transaction, never the inverse).
+        with _session_fence(cancel_session), lock, database.SessionLocal() as db:
             row = _wait_row(db, wait_id)
             if row is None:
                 raise RegisteredWaitInvalid(f"unknown wait {wait_id}")
@@ -853,7 +895,7 @@ def _settle_expiry_wake(
 ) -> Optional[dict[str, Any]]:
     """Settle an installed wake from durable evidence without repeating admission."""
     receipt = receipt_probe(terminal_id, message_id) if receipt_probe else None
-    with database.SessionLocal() as db:
+    with _session_fence(_session_name_of_wait(wait_id)), database.SessionLocal() as db:
         current = _wait_row(db, wait_id)
         if current is None or current.state != STATE_EXPIRY_WAKE_PENDING:
             return None
@@ -909,7 +951,7 @@ def _process_due_wait(
 ) -> Optional[dict[str, Any]]:
     """Advance one wait so an unreadable row cannot starve later rows."""
     pending_wake: Optional[tuple[str, int]] = None
-    with database.SessionLocal() as db:
+    with _session_fence(_session_name_of_wait(wait_id)), database.SessionLocal() as db:
         row = _wait_row(db, wait_id)
         if row is None or row.state not in ACTIVE_STATES:
             return None
@@ -968,7 +1010,7 @@ def _process_due_wait(
     if record is None:
         return None
     created_message = False
-    with database.SessionLocal() as db:
+    with _session_fence(_session_name_of_wait(wait_id)), database.SessionLocal() as db:
         current = _wait_row(db, wait_id)
         if current is None or current.state not in {
             STATE_EXPIRY_INTENT,
@@ -1162,8 +1204,10 @@ def interrupt_session_waits(session_name: str, operation_id: str) -> Sequence[Ma
     """Stop exit verb: interrupt every still-live wait in the stopped cohort."""
     operation_id = _uuid(operation_id, "operation_id")
     observed = _now()
+    # cond-0845: session fence (Stop's own exclusive claim additionally
+    # drains effects first — belt and suspenders, same key, no cycle).
     try:
-        with database.SessionLocal() as db:
+        with _session_fence(session_name), database.SessionLocal() as db:
             wait_ids = [
                 str(row.wait_id)
                 for row in (
@@ -1177,7 +1221,7 @@ def interrupt_session_waits(session_name: str, operation_id: str) -> Sequence[Ma
             ]
         results = []
         for wait_id in wait_ids:
-            with database.SessionLocal() as db:
+            with _session_fence(session_name), database.SessionLocal() as db:
                 initial = _wait_row(db, wait_id)
                 monitor = db.get(database.RegisteredWaitMonitorModel, wait_id)
                 # For adapter, need monitor wake id for fencing

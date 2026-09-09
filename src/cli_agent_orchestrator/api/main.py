@@ -3836,6 +3836,68 @@ async def send_terminal_input(
         )
 
 
+class ContextRestoreBody(BaseModel):
+    operation_id: str
+    occurrence_id: str
+    generation: Optional[str] = None
+    native_session_id: Optional[str] = None
+    goal_version: Optional[int] = None
+    hold_high_water: Optional[int] = None
+    flock_path: Optional[str] = None
+    context: str = ""
+
+
+@app.post("/terminals/{terminal_id}/context-restore")
+async def context_restore(
+    terminal_id: TerminalId,
+    body: ContextRestoreBody,
+    _scopes: List[str] = Depends(require_any_scope(SCOPE_WRITE, SCOPE_ADMIN)),
+) -> Dict:
+    """Admit-or-refuse one CAO goal-context reminder (cond-0845 Kimi lane).
+
+    The conductor (PostCompact hook wrapper or sentinel periodic duty)
+    supplies the validated fence; this boundary re-verifies every leg
+    under the project flock (shared), the session fence, and byte
+    admission before the first provider byte, then delivers exactly one
+    KIND_REMIND through the existing pane transport. Response
+    ``status`` is posted/pending/refused/deferred/unknown/completed —
+    never a bare boolean, so a due clock can tell backoff from reset.
+    """
+    from cli_agent_orchestrator.services import kimi_context_restore
+
+    if not body.operation_id or not body.occurrence_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="operation_id and occurrence_id are required",
+        )
+    try:
+        result = await asyncio.to_thread(
+            kimi_context_restore.submit_context_reminder,
+            terminal_id=str(terminal_id),
+            operation_id=body.operation_id,
+            occurrence_id=body.occurrence_id,
+            context=body.context,
+            fence={
+                "generation": body.generation,
+                "native_session_id": body.native_session_id,
+                "goal_version": body.goal_version,
+                "hold_high_water": body.hold_high_water,
+                "flock_path": body.flock_path,
+            },
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"context restore failed before admission: {str(e)}",
+        )
+    if not isinstance(result, dict) or "status" not in result:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="context restore returned no status",
+        )
+    return result
+
+
 @app.post("/terminals/{terminal_id}/key")
 async def send_terminal_key(
     terminal_id: TerminalId,
