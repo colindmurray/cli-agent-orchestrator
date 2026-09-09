@@ -490,8 +490,8 @@ def test_loser_id_adopts_without_new_row_or_bytes():
 
 
 def test_posted_row_freezes_origin_and_hook_evidence():
-    # The election's identity evidence: origin + native fingerprint
-    # frozen at POSTED, retrievable for retry/refire decisions.
+    # Audit evidence frozen at POSTED: origin + native invocation
+    # fields, retrievable for diagnosis. Identity is the request id.
     _attach()
     transport = Recorder()
     evidence = {"session_id": SESSION, "trigger": "auto",

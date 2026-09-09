@@ -385,28 +385,25 @@ def managed_wire_roots(*, terminal_id: str,
     return [c for c in candidates if c and os.path.isdir(c)]
 
 
-#: The native PostCompact stdin fields that fingerprint one compaction
-#: observation (verified against the installed Kimi bundle's
-#: fire-and-forget hook dispatch: session id, trigger, and the
-#: post-compaction token count, snake_cased onto stdin). No vendor
-#: per-compaction id exists; a repeated identical fingerprint is the
-#: only native signal of a same-event refire.
+#: The native PostCompact stdin fields carried as audit evidence on a
+#: request (verified against the installed Kimi bundle's fire-and-forget
+#: hook dispatch: session id, trigger, and the post-compaction token
+#: count, snake_cased onto stdin). No vendor per-compaction id exists
+#: and none is invented: a new hook callback is a new context
+#: invalidation, never an inferred retry — these fields are audit
+#: evidence only, never identity.
 HOOK_EVIDENCE_FIELDS = ("session_id", "trigger", "estimated_token_count")
 
 
 def hook_evidence_from_input(hook_input: Dict[str, Any],
                              *, observed_at: str) -> Dict[str, Any]:
-    """The durable native fingerprint of this wrapper run's compaction.
+    """The audit evidence of this wrapper run's hook invocation.
 
     Derived from hook stdin evidence plus the run's own observation
-    time — never an invented vendor field. Two wrapper runs with
-    identical fingerprints are the same compaction observation twice
-    (adopt, zero new bytes); different fingerprints are different
-    compactions even when the rendered goal text is identical
-    (deliver anew). An exactly repeated fingerprint across two
-    genuinely distinct compactions is the documented residual: the
-    second adopts the first and the next event/periodic rendezvous
-    still restores.
+    time — never an invented vendor field, and never request
+    identity: the request id minted at invocation origin is the only
+    identity the boundary coalesces on. Two invocations are two
+    requests even when every native field matches.
     """
     evidence: Dict[str, Any] = {"observed_at": observed_at}
     if isinstance(hook_input, dict):
@@ -583,8 +580,8 @@ def run_wrapper(
                 hook_input, observed_at=datetime.now(
                     timezone.utc).isoformat())
             # The stdin session already matched the baked binding
-            # above; bind it into the evidence explicitly so the
-            # fingerprint never floats on an unchecked value.
+            # above; bind it into the evidence explicitly so the audit
+            # record never floats on an unchecked value.
             evidence["session_id"] = bound_native
             boundary = _post_boundary(
                 fork_base=fork_base, terminal_id=terminal_id,
@@ -779,36 +776,6 @@ def _observe_branch(*, pane_id: str, terminal_id: str, session_name: str,
     return "active", f"provider reports {status.value if hasattr(status, 'value') else status}"
 
 
-def _hook_fingerprint(evidence: Optional[Dict[str, Any]]) -> Optional[Tuple[str, str, str]]:
-    """The comparable native triple of one compaction observation.
-
-    ``observed_at`` is audit, never identity: two runs minutes apart
-    are the same compaction when the vendor-visible evidence matches.
-    None means the evidence cannot identify the event — the caller
-    must treat it as distinct, never guess it equal.
-    """
-    if not isinstance(evidence, dict):
-        return None
-    triple = [evidence.get("session_id"), evidence.get("trigger"),
-              evidence.get("estimated_token_count")]
-    for value in triple:
-        if value is None:
-            return None
-        if isinstance(value, str) and not value.strip():
-            return None
-    return (str(triple[0]), str(triple[1]), str(triple[2]))
-
-
-def _row_hook_fingerprint(row: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
-    """The frozen native triple of one journal row, if event-origin."""
-    transport = row.get("transport") or {}
-    if not isinstance(transport, dict):
-        return None
-    if transport.get("origin") != "event":
-        return None
-    return _hook_fingerprint(transport.get("hook_evidence"))
-
-
 def _capture_viewport(pane_id: str) -> Optional[List[str]]:
     """One pane capture for marker + emptiness checks, or None."""
     try:
@@ -905,16 +872,18 @@ def submit_context_reminder(
     when absent). ``projection`` is the canonical ``hook-context``
     answer; delivery bytes render from it through the single
     :func:`render_restoration`. ``hook_evidence`` is the originating
-    run's native compaction fingerprint (event path) or None
-    (periodic request). The marker is the operation id: unique per
-    delivery, echoed by provider evidence on acceptance.
+    run's native invocation evidence (event path) or None
+    (periodic request) — audit only. The marker is the operation id:
+    unique per delivery, echoed by provider evidence on acceptance.
 
-    Identity rule: a re-POST under a known operation id is a
-    same-event retry (adopt + wire-settle, zero new bytes). A fresh id
-    with the same native fingerprint is a probable refire (adopt, zero
-    new bytes). Anything else is a distinct compaction and delivers
-    anew — even with byte-identical text. Content hashes are audit,
-    never identity.
+    Identity rule: a re-POST under a known operation id is the
+    same request retrying its transport (adopt + wire-settle, zero
+    new bytes). A fresh id is a distinct invocation and delivers
+    anew after prior rows settle — even with byte-identical text and
+    byte-identical native fields. No content hash and no native
+    field equality across invocations ever coalesces; both are audit
+    evidence only. A wrapper crash/relaunch mints a new id and is a
+    new request unless the caller preserved and resupplied its id.
 
     Returns ``{"status", "detail", "record"?}`` with status in
     posted/pending/refused/deferred/unknown/completed. Only the
@@ -1323,36 +1292,13 @@ def submit_context_reminder(
                         # the emptiness gate below; a failed capture is no
                         # evidence (the gate refuses the session on it).
                         viewport_rows = _capture_viewport(resolved.pane_id)
-                        incoming_fp = _hook_fingerprint(hook_evidence)
-                        if incoming_fp is not None:
-                            # Probable refire: the same native compaction
-                            # evidence already owns a live row. Adopt and
-                            # settle it — zero new bytes, never a blind
-                            # repeat. Text is NEVER compared: identical
-                            # bytes with different fingerprints are a
-                            # distinct compaction and deliver below.
-                            twins = [
-                                r for r in live + ambiguous
-                                if _row_hook_fingerprint(r) == incoming_fp
-                                and r.get("native_session_id")
-                                == resolved.native_session_id
-                                and adapter._intent_occurrence(
-                                    r.get("intent")) in (None, occurrence_id)]
-                            if twins and len(live) == len(
-                                    [r for r in live
-                                     if _row_hook_fingerprint(r) == incoming_fp]):
-                                elected = twins[-1]
-                                record = _settle(elected)
-                                if record.get("state") == "completed":
-                                    return {"status": "completed",
-                                            "new_bytes": False,
-                                            "detail": "wire evidence shows the marker "
-                                                      "reached the model",
-                                            "record": record}
-                                return {"status": "pending", "new_bytes": False,
-                                        "detail": f"refire adopted reminder "
-                                                  f"{elected.get('operation_id')}; backing off",
-                                        "record": record}
+                        # A fresh request id is a distinct invocation:
+                        # every native hook callback is a new context
+                        # invalidation, even when all native fields and
+                        # all rendered bytes match a live row. No native
+                        # field or content equality across invocations
+                        # ever coalesces — only an exact request-id
+                        # re-POST (handled before the locks) is a retry.
                         if len(live) > 1:
                             return {"status": "deferred", "new_bytes": False,
                                     "detail": "multiple live reminder rows; refusing to guess "

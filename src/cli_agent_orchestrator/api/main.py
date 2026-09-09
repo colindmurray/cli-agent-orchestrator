@@ -3853,8 +3853,8 @@ class ContextRestoreBody(BaseModel):
     # The canonical hook-context answer; the boundary renders delivery
     # bytes from it through the single restoration renderer.
     projection: Optional[Dict[str, Any]] = None
-    # The originating run's native compaction fingerprint (event path)
-    # or None (periodic request). Identity evidence, never invented.
+    # The originating run's native invocation evidence (event path)
+    # or None (periodic request). Audit only, never identity.
     hook_evidence: Optional[Dict[str, Any]] = None
 
 

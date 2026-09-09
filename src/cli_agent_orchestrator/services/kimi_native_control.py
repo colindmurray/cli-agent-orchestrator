@@ -1913,12 +1913,11 @@ def remind(
 
     ``origin`` names which path opened the row (``"event"`` for a hook
     compaction notification, ``"periodic"`` for a timer request) and
-    ``hook_evidence`` carries the originating run's native compaction
+    ``hook_evidence`` carries the originating run's native invocation
     evidence (stdin session/trigger/token count). Both are frozen into
-    the posted transport record so a later rendezvous can tell a retry
-    of the same compaction (same id, or same native fingerprint) from
-    a distinct compaction (deliver anew) without ever comparing
-    content hashes.
+    the posted transport record as audit evidence: the boundary
+    coalesces only on exact request id, never on these fields and
+    never on content hashes.
     """
     if origin not in ("event", "periodic"):
         raise NativeControlInvalid(
@@ -2110,12 +2109,11 @@ def remind(
             "transport_json": _canonical({
                 "frozen_payload_sha256": plan["payload_sha256"],
                 "marker": marker,
-                # Identity evidence, never an identity: the origin and
-                # the originating run's native compaction fingerprint
-                # let a later rendezvous adopt a same-event retry and
-                # deliver a distinct compaction anew. The content hash
-                # below is retained for audit only — election must
-                # never equate it with the event id.
+                # Audit evidence only, never identity: the boundary
+                # coalesces solely on the exact request id. The origin
+                # and native fields below record which invocation
+                # opened the row; the content hash lets an operator
+                # compare bytes after the fact.
                 "context_sha256": canonical_sha256({"context": body}),
                 **frozen_origin,
                 "branch": "steer" if chord else "submit",

@@ -706,7 +706,7 @@ def _projection(**over):
 
 
 def _evidence(**over):
-    """One wrapper run's native compaction fingerprint."""
+    """One wrapper run's native invocation evidence (audit only)."""
     ev = {"session_id": "sess-n", "trigger": "auto",
           "estimated_token_count": 120000,
           "observed_at": "2026-09-09T00:00:00Z"}
@@ -782,11 +782,13 @@ def test_same_event_retry_adopts_once(tmp_path, monkeypatch):
     assert box["transport"].calls == typed
 
 
-def test_refire_twin_fingerprint_adopts_without_new_bytes(
+def test_two_invocations_identical_native_fields_deliver_twice(
         tmp_path, monkeypatch):
-    # Unknown id but the identical native fingerprint: a probable
-    # refire of the same compaction. Adopt, zero new bytes, no row.
-    # Text is never compared.
+    # Parent gate: every native hook invocation is a new request. Two
+    # invocations with identical ALL native fields and identical
+    # rendered text restore twice — no native-field or content
+    # equality across invocations ever coalesces. Only an exact
+    # request-id re-POST is a retry.
     _attach_submit_world()
     lockdir = tmp_path / "proj"
     lockdir.mkdir()
@@ -796,27 +798,35 @@ def test_refire_twin_fingerprint_adopts_without_new_bytes(
     monkeypatch.setattr(kr, "managed_wire_roots", lambda **k: [str(home)])
     _stub_capture(monkeypatch, rows=_empty_box())
     fence = _submit_fence(str(lockdir / "goal-effect.lock"))
+    same_evidence = _evidence()
     first = kr.submit_context_reminder(
-        terminal_id="t-submit", operation_id="op_twin_A",
+        terminal_id="t-submit", operation_id="op_same_A",
         occurrence_id="occ-1", projection=_projection(), fence=fence,
-        hook_evidence=_evidence(estimated_token_count=100))
+        hook_evidence=dict(same_evidence))
     assert first["status"] == "posted", first
+    assert first["new_bytes"] is True
     typed = list(box["transport"].calls)
+    # The old row's marker reaches the wire — that proves A's bytes,
+    # never B's invalidation. The distinct new id still delivers.
+    (home / "sessions" / "wd_1" / "session_s" / "agents" / "main").mkdir(
+        parents=True)
+    _wire_echo(home, "op_same_A")
     second = kr.submit_context_reminder(
-        terminal_id="t-submit", operation_id="op_twin_B",
+        terminal_id="t-submit", operation_id="op_same_B",
         occurrence_id="occ-1", projection=_projection(), fence=fence,
-        hook_evidence=_evidence(estimated_token_count=100))
-    assert second["status"] == "pending", second
-    assert second["new_bytes"] is False
-    assert second["record"]["operation_id"] == "op_twin_A"
-    assert box["transport"].calls == typed
-    assert knc.get("op_twin_B") is None
+        hook_evidence=dict(same_evidence))
+    assert second["status"] == "posted", second
+    assert second["new_bytes"] is True
+    assert second["record"]["operation_id"] == "op_same_B"
+    assert len(box["transport"].calls) > len(typed)
+    # A settled honestly from its own wire echo; B delivered anew.
+    assert knc.get("op_same_A")["state"] == "completed"
 
 
 def test_distinct_same_text_events_deliver_twice(tmp_path, monkeypatch):
-    # P1-1 decisive: two compactions, byte-identical restoration text,
-    # different native fingerprints — the second delivers anew with
-    # new bytes (the old row settles honestly first).
+    # Two invocations, byte-identical restoration text — the second
+    # delivers anew with new bytes (the old row settles honestly
+    # first). Native fields never coalesce.
     _attach_submit_world()
     lockdir = tmp_path / "proj"
     lockdir.mkdir()
