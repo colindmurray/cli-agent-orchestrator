@@ -25,10 +25,16 @@ Official contract (verified 2026-09-09 against
   capped at 10,000 chars (spill to file + preview), so this adapter stays
   well under that and truncates explicitly.
 * Hook entries merge across settings levels rather than replacing each
-  other, so a managed ``--settings`` payload is additive over user/project
-  hooks. Within this adapter's own payload, :func:`with_context_restore`
-  preserves every pre-existing entry (notably the readiness hook, which
-  carries no matcher) while appending the restore entries.
+  other (official reference; doc-proven, not live-run-proven), so a
+  managed ``--settings`` payload is additive over user/project hooks at
+  the provider. Within this adapter's own payload,
+  :func:`with_context_restore` preserves every pre-existing entry
+  (notably the readiness hook, which carries no matcher) while appending
+  the restore entries.
+* A ``fork`` source mints a new native session id, so the baked claim no
+  longer binds any live terminal: the projection answers ``no-worker``
+  and the wrapper restores nothing. Forks are safe by construction, and
+  need no matcher of their own.
 
 What this adapter does NOT do, by construction:
 
@@ -92,9 +98,11 @@ STARTUP_RESUME_MATCHER = "startup|resume"
 MAX_ADDITIONAL_CONTEXT_CHARS = 8000
 
 #: How long the wrapper waits for the read-only projection before
-#: degrading to empty context. SessionStart hooks must stay fast (they
-#: run on every session), and a slow read must never stall a start.
-CONDUCT_TIMEOUT_SECONDS = 20.0
+#: degrading to empty context. SessionStart hooks run on every session,
+#: so this stays small — but it is a bound, not a non-block guarantee:
+#: the wrapper waits synchronously, so a wedged server can delay a start
+#: by up to this long before the hook gives up and restores nothing.
+CONDUCT_TIMEOUT_SECONDS = 10.0
 
 #: Label marking every injected string as restoration. The model must be
 #: able to tell restored assignment context from live conversation.
@@ -117,6 +125,18 @@ WRAPPER_ENTRY_POINT = "cao-claude-hook-context"
 #: are uninterpretable, so they degrade to empty context, never to a
 #: guess about what their fields mean.
 HOOK_CONTEXT_SCHEMA = "cao-hook-context-v1"
+
+#: Goal states whose assignment is over (§10.2): restoring their
+#: objective text would re-inject a finished assignment as if it were
+#: current work. An ``ok`` projection carrying one of these renders
+#: nothing — the projection's own "no restoration" next_action is
+#: already the verdict, and repeating it as injected context would still
+#: put stale assignment text in front of the model.
+TERMINAL_GOAL_STATES = frozenset({"satisfied", "cancelled"})
+
+#: The selected restoration mechanism, recorded in the existing launch
+#: facts so diagnostics can show what a generation installed (§10.1).
+MECHANISM = "claude-SessionStart:compact+startup|resume"
 
 #: Projection answers that carry a projectable goal.
 _OK_RESULT = "ok"
@@ -160,10 +180,13 @@ def with_context_restore(settings: Dict[str, Any], *, command: str) -> Dict[str,
     """Return ``settings`` plus the restore entries, preserving all else.
 
     The input is not mutated: the caller keeps its readiness-only payload
-    and this returns the readiness+restore composition. Every pre-existing
-    entry — the readiness hook (which carries no matcher), user/project
-    entries merged from files, any other event — is carried over
-    byte-identical. Only ``hooks.SessionStart`` grows, by exactly the two
+    and this returns the readiness+restore composition. Every entry
+    already present in the payload — the readiness hook (which carries no
+    matcher), any other event — is carried over byte-identical. (Whether
+    user/project file entries reach the provider alongside this payload
+    is vendor runtime behavior — hook entries merge across settings
+    levels per the official reference — not something this function
+    observes.) Only ``hooks.SessionStart`` grows, by exactly the two
     entries from :func:`restore_hook_entries`.
     """
     composed = copy.deepcopy(settings)
@@ -290,6 +313,27 @@ def attach_to_launch_settings(
     return with_context_restore(settings, command=command), None
 
 
+def describe_installation(
+    *,
+    terminal_id: str,
+    generation: str,
+    degraded_reason: Optional[str],
+) -> Dict[str, Any]:
+    """The launch-facts record of what restoration this generation got.
+
+    One small dict, written to the existing launch facts by the caller:
+    the selected mechanism when installed, or the reason the generation
+    launched readiness-only. A later diagnostic reads this instead of
+    re-deriving install state from logs.
+    """
+    return {
+        "mechanism": MECHANISM if degraded_reason is None else None,
+        "terminal_id": terminal_id,
+        "terminal_generation": generation,
+        "degraded_reason": degraded_reason,
+    }
+
+
 def build_conduct_argv(
     *,
     conduct_binary: str,
@@ -389,7 +433,14 @@ def render_restoration(answer: Dict[str, Any]) -> Optional[str]:
         return None
     result_type = answer.get("result_type")
     if result_type == _OK_RESULT:
-        rendered = _render_goal(answer.get("goal"), answer.get("identity"))
+        goal = answer.get("goal")
+        if isinstance(goal, dict) and goal.get("state") in TERMINAL_GOAL_STATES:
+            # §10.2: a satisfied or cancelled assignment is over. The
+            # projection says "no restoration" for it; this consumer
+            # enforces that by restoring nothing, rather than carrying
+            # the verdict prose alongside the finished objective.
+            return None
+        rendered = _render_goal(goal, answer.get("identity"))
         if rendered is None:
             return None
         # The bound lives here, not in the field renderers: a long goal

@@ -81,7 +81,12 @@ with open(os.environ["CONDUCT_CANNED"]) as handle:
 )
 
 
-def _ok_answer(*, version="v3", objective="Ship the thing"):
+def _ok_answer(*, version="v3", objective="Ship the thing", state="open", hold=None):
+    next_action = (
+        "ordinary work may continue; this read starts no turn"
+        if state == "open"
+        else f"no restoration: occurrence 'occ-1' is {state}; start no turn"
+    )
     return {
         "ok": True,
         "schema": "cao-hook-context-v1",
@@ -97,16 +102,32 @@ def _ok_answer(*, version="v3", objective="Ship the thing"):
         },
         "goal": {
             "goal_id": "g-1",
-            "state": "open",
+            "state": state,
             "goal_version": version,
             "objective": objective,
             "requirements_outstanding": ["r1"],
             "requirements_outstanding_count": 1,
             "completion_requirements_truncated": False,
-            "active_hold": None,
-            "next_action": "ordinary work may continue; this read starts no turn",
+            "active_hold": hold,
+            "next_action": next_action,
         },
         "bounds": {},
+    }
+
+
+def _waiting_hold():
+    return {
+        "hold_id": "h-1",
+        "state": "active",
+        "resolution": None,
+        "reason_kind": "review",
+        "requested_by_role": "decider",
+        "requested_by_agent_id": "a-2",
+        "decision_authority": "decider",
+        "release_kind": "review-decision",
+        "release_id": "rd-1",
+        "deadline_at": None,
+        "resume_policy": "resume-paused",
     }
 
 
@@ -221,16 +242,21 @@ class TestLaunchSettingsComposition:
         )
         assert prepared["settings"] == snapshot
 
-    def test_user_and_project_entries_are_preserved(self, tmp_path):
-        """A pre-existing user-style entry is carried over byte-identical."""
+    def test_other_payload_entries_are_preserved(self, tmp_path):
+        """Entries already in the payload are carried over byte-identical.
+
+        (Whether user/project *file* entries reach the provider alongside
+        this payload is vendor runtime behavior, not something this
+        function observes — the test pins the payload contract only.)
+        """
         prepared = readiness.prepare(tmp_path, "t1", "g1")
-        user_entry = {
+        other_entry = {
             "matcher": "Write|Edit",
             "hooks": [{"type": "command", "command": "/home/u/hooks/check.sh"}],
         }
-        prepared["settings"]["hooks"].setdefault("PostToolUse", []).append(user_entry)
-        user_session_entry = {"hooks": [{"type": "command", "command": "echo hi"}]}
-        prepared["settings"]["hooks"]["SessionStart"].append(user_session_entry)
+        prepared["settings"]["hooks"].setdefault("PostToolUse", []).append(other_entry)
+        other_session_entry = {"hooks": [{"type": "command", "command": "echo hi"}]}
+        prepared["settings"]["hooks"]["SessionStart"].append(other_session_entry)
 
         composed, _ = restore.attach_to_launch_settings(
             prepared["settings"],
@@ -240,8 +266,8 @@ class TestLaunchSettingsComposition:
             conduct_binary=sys.executable,
         )
 
-        assert composed["hooks"]["PostToolUse"] == [user_entry]
-        assert composed["hooks"]["SessionStart"][1] == user_session_entry
+        assert composed["hooks"]["PostToolUse"] == [other_entry]
+        assert composed["hooks"]["SessionStart"][1] == other_session_entry
         assert [e.get("matcher") for e in composed["hooks"]["SessionStart"][2:]] == [
             "compact",
             "startup|resume",
@@ -514,3 +540,284 @@ class TestOutputBounds:
             bounded = restore.apply_output_bound(context)
             assert len(bounded) <= restore.MAX_ADDITIONAL_CONTEXT_CHARS
             assert restore.TRUNCATION_MARKER in bounded
+
+
+class TestTerminalStatesAreDiscarded:
+    """§10.2: a finished assignment is not restored as current work.
+
+    The projection answers ``ok`` with a "no restoration" next_action for
+    satisfied/cancelled goals; this consumer enforces the verdict by
+    restoring nothing — not by injecting the verdict prose alongside the
+    finished objective. Full projection-shaped envelopes throughout.
+    """
+
+    @pytest.mark.parametrize("state", ["satisfied", "cancelled"])
+    def test_finished_assignments_restore_nothing(self, fake, state):
+        fake["canned"].write_text(json.dumps(_ok_answer(state=state)))
+        proc = _run_wrapper_process(_hook_stdin(), fake=fake)
+        assert proc.returncode == 0
+        output = json.loads(proc.stdout.decode())
+        assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert output["hookSpecificOutput"]["additionalContext"] == ""
+
+    def test_finished_objective_text_never_reaches_context(self, state="satisfied"):
+        context = restore.render_restoration(
+            _ok_answer(state=state, objective="Finished objective must not re-enter")
+        )
+        assert context is None
+
+    def test_completion_claimed_still_restores_current_context(self):
+        """Claimed-but-undecided is not terminal: the model still needs to
+        know it is awaiting the decider rather than holding a live task."""
+        context = restore.render_restoration(_ok_answer(state="completion-claimed"))
+        assert context is not None
+        assert "Ship the thing" in context
+        assert "start no turn" in context
+
+    def test_intentional_waiting_keeps_passive_context_without_a_turn(self):
+        """An active hold renders as waiting context: authorized interaction
+        already exists, and the text starts nothing and releases nothing."""
+        context = restore.render_restoration(_ok_answer(hold=_waiting_hold()))
+        assert context is not None
+        assert "waiting: review until review-decision:rd-1" in context
+        assert "starts no turn" in context
+
+
+class TestUnknownAndMalformedAnswersDiscard:
+    """Anything outside the documented seam restores nothing (exit 0)."""
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            {"schema": "cao-hook-context-v1", "result_type": "future-type"},
+            {"schema": "cao-hook-context-v1", "result_type": None},
+            {"schema": "other-schema-v9", "result_type": "ok"},
+            {"result_type": "ok"},
+            {"schema": "cao-hook-context-v1", "result_type": "ok", "goal": None},
+            {"schema": "cao-hook-context-v1", "result_type": "ok", "goal": ["not", "a", "dict"]},
+        ],
+    )
+    def test_unreadable_answers_render_nothing(self, answer):
+        assert restore.render_restoration(answer) is None
+
+    def test_non_dict_answer_renders_nothing(self):
+        assert restore.render_restoration(["ok"]) is None  # type: ignore[arg-type]
+
+    def test_wrapper_exits_zero_on_unreadable_answers(self, fake):
+        fake["canned"].write_text(json.dumps({"schema": "cao-hook-context-v1"}))
+        proc = _run_wrapper_process(_hook_stdin(), fake=fake)
+        assert proc.returncode == 0
+        assert json.loads(proc.stdout.decode())["hookSpecificOutput"]["additionalContext"] == ""
+
+
+class TestTimeoutIsABoundNotAGuarantee:
+    def test_default_timeout_stays_small(self):
+        """SessionStart runs on every session: the synchronous wait must
+        stay bounded by a small default, or a wedged server stalls starts."""
+        assert restore.CONDUCT_TIMEOUT_SECONDS <= 10
+
+    def test_baked_command_carries_the_bounded_default(self):
+        command = restore.restore_command(
+            wrapper_executable=sys.executable,
+            terminal_id="t1",
+            generation="g1",
+            conduct_binary=sys.executable,
+        )
+        assert f"--timeout {restore.CONDUCT_TIMEOUT_SECONDS}" in command
+
+
+class TestRealLaunchWiring:
+    """P1: both real launch functions install restoration, or tests fail.
+
+    Helper-level composition cannot catch a deleted callsite: these drive
+    ``_mint_claude_native_session`` and ``_prepare_claude_resume_session``
+    themselves and pin matchers, the baked successor generation, the
+    byte-identical readiness entry, and the launch-facts record.
+    """
+
+    @pytest.fixture()
+    def wired(self, tmp_path, monkeypatch):
+        from cli_agent_orchestrator.services import managed_launch_v2 as v2
+
+        monkeypatch.setattr(v2, "COMPANION_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            restore, "resolve_wrapper_executable", lambda explicit=None: sys.executable
+        )
+        monkeypatch.setattr(restore, "resolve_conduct_binary", lambda explicit=None: sys.executable)
+        recorded = []
+        monkeypatch.setattr(
+            v2, "_record_context_restoration", lambda rid, payload: recorded.append((rid, payload))
+        )
+        return {"v2": v2, "recorded": recorded, "dir": tmp_path}
+
+    def _record(self, **overrides):
+        record = {
+            "reservation_id": "res-test",
+            "terminal_id": "t-probe",
+            "generation": "gen-probe",
+            "working_directory": "/tmp",
+        }
+        record.update(overrides)
+        return record
+
+    def _request(self):
+        return {
+            "expected_model": "sonnet",
+            "expected_effort": "high",
+            "provider_route": "anthropic",
+        }
+
+    def _pending(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            provider="claude_code",
+            model="sonnet",
+            effort="high",
+            quota_provider="q",
+            provider_route="anthropic",
+            auth_transport="t",
+            operation_id="op-1",
+            predecessor_native_session_id="11111111-1111-4111-8111-111111111111",
+        )
+
+    def _matchers(self, settings):
+        return [entry.get("matcher") for entry in settings["hooks"]["SessionStart"]]
+
+    def test_mint_installs_restoration_alongside_readiness(self, wired):
+        v2 = wired["v2"]
+        bootstrap, hook = v2._mint_claude_native_session(
+            record=self._record(),
+            request=self._request(),
+            version_output="2.1.233 (Claude Code)",
+            digest="d",
+        )
+        assert self._matchers(hook["settings"]) == [None, "compact", "startup|resume"]
+        # The readiness entry is the real one, byte-identical to a direct
+        # prepare on the same generation path.
+        fresh = readiness.prepare(wired["dir"], "t-probe", "gen-probe")
+        assert (
+            hook["settings"]["hooks"]["SessionStart"][0]
+            == fresh["settings"]["hooks"]["SessionStart"][0]
+        )
+        # The baked generation is this launch's own.
+        assert (
+            "--terminal-generation gen-probe"
+            in hook["settings"]["hooks"]["SessionStart"][1]["hooks"][0]["command"]
+        )
+        # Identity was minted, canonically.
+        assert bootstrap["native_session_id"] != "11111111-1111-4111-8111-111111111111"
+        # Mechanism recorded for diagnostics.
+        assert wired["recorded"] == [
+            (
+                "res-test",
+                {
+                    "mechanism": restore.MECHANISM,
+                    "terminal_id": "t-probe",
+                    "terminal_generation": "gen-probe",
+                    "degraded_reason": None,
+                },
+            )
+        ]
+
+    def test_resume_binds_the_successor_generation(self, wired):
+        v2 = wired["v2"]
+        bootstrap, hook = v2._prepare_claude_resume_session(
+            record=self._record(generation="gen-next"),
+            pending=self._pending(),
+            version_output="2.1.233 (Claude Code)",
+            digest="d",
+        )
+        assert self._matchers(hook["settings"]) == [None, "compact", "startup|resume"]
+        # Same native session, new generation: the replay carries the
+        # successor binding, never the predecessor's.
+        assert bootstrap["native_session_id"] == "11111111-1111-4111-8111-111111111111"
+        command = hook["settings"]["hooks"]["SessionStart"][1]["hooks"][0]["command"]
+        assert "--terminal-generation gen-next" in command
+        assert "gen-probe" not in command
+        assert wired["recorded"][0][1]["terminal_generation"] == "gen-next"
+
+    def test_degraded_launch_records_the_reason_and_stays_readiness_only(self, wired, monkeypatch):
+        v2 = wired["v2"]
+        monkeypatch.setattr(restore, "resolve_wrapper_executable", lambda explicit=None: None)
+        bootstrap, hook = v2._mint_claude_native_session(
+            record=self._record(),
+            request=self._request(),
+            version_output="2.1.233 (Claude Code)",
+            digest="d",
+        )
+        assert self._matchers(hook["settings"]) == [None]
+        assert wired["recorded"][0][1]["mechanism"] is None
+        assert "readiness-only" in wired["recorded"][0][1]["degraded_reason"]
+
+
+class TestMechanismSurfacing:
+    """§10.1: the selected mechanism/degraded reason lives on the existing
+    launch-facts record — projected through the existing ``launch_facts``
+    surface — not only in server logs."""
+
+    def _stub_db(self, monkeypatch, row):
+        from cli_agent_orchestrator.services import managed_launch_v2 as v2
+
+        class FakeQuery:
+            def filter(self, *_args, **_kwargs):
+                return self
+
+            def first(self):
+                return row
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def query(self, *_args):
+                return FakeQuery()
+
+            def commit(self):
+                self.committed = True
+
+        session = FakeSession()
+        session.committed = False
+        monkeypatch.setattr(v2.database, "SessionLocal", lambda: session)
+        return {"v2": v2, "session": session}
+
+    def test_write_back_records_mechanism_on_existing_facts(self, monkeypatch):
+        from types import SimpleNamespace
+
+        row = SimpleNamespace(launch_facts_json='{"pinned": true}', updated_at=None)
+        stub = self._stub_db(monkeypatch, row)
+        installation = restore.describe_installation(
+            terminal_id="t1", generation="g1", degraded_reason=None
+        )
+        assert installation["mechanism"] == restore.MECHANISM
+        stub["v2"]._record_context_restoration("res-1", installation)
+        facts = json.loads(row.launch_facts_json)
+        assert facts["pinned"] is True
+        assert facts["context_restoration"] == installation
+        assert stub["session"].committed is True
+
+    def test_write_back_is_best_effort_never_a_gate(self, monkeypatch):
+        from cli_agent_orchestrator.services import managed_launch_v2 as v2
+
+        monkeypatch.setattr(
+            v2.database, "SessionLocal", lambda: (_ for _ in ()).throw(RuntimeError("db down"))
+        )
+        # Raises nothing: a row that fails to persist simply carries none.
+        v2._record_context_restoration("res-1", {"mechanism": None})
+        v2._record_context_restoration("", {"mechanism": None})
+
+    def test_missing_row_or_facts_writes_nothing(self, monkeypatch):
+        from types import SimpleNamespace
+
+        for row in (
+            None,
+            SimpleNamespace(launch_facts_json=None, updated_at=None),
+            SimpleNamespace(launch_facts_json="not-json", updated_at=None),
+        ):
+            stub = self._stub_db(monkeypatch, row)
+            stub["session"].committed = False
+            stub["v2"]._record_context_restoration("res-1", {"mechanism": restore.MECHANISM})
+            assert stub["session"].committed is False

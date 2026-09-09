@@ -5646,6 +5646,44 @@ def _muse_bootstrap_intent(
     )
 
 
+def _record_context_restoration(reservation_id: str, installation: dict[str, Any]) -> None:
+    """Write back what restoration a Claude generation installed, best-effort.
+
+    The same additive pattern as :func:`_record_launch_executable_version`:
+    one ``context_restoration`` key on the existing launch facts, projected
+    through the existing ``launch_facts`` surface so diagnostics can show
+    the selected mechanism (or the readiness-only degraded reason) instead
+    of re-deriving install state from logs. Recording is never a launch
+    gate: a row that fails to persist simply carries no restoration fact.
+    """
+    if not isinstance(reservation_id, str) or not reservation_id:
+        return
+    try:
+        with database.SessionLocal() as db:
+            row = _query(db, reservation_id)
+            if row is None:
+                return
+            stored = getattr(row, "launch_facts_json", None)
+            if not stored:
+                return
+            try:
+                facts = json.loads(stored)
+            except (TypeError, ValueError):
+                return
+            if not isinstance(facts, dict):
+                return
+            facts["context_restoration"] = installation
+            row.launch_facts_json = _canonical_json(facts)
+            row.updated_at = _now()
+            db.commit()
+    except Exception as exc:  # noqa: BLE001 - additive durability, never a launch gate
+        logger.warning(
+            "could not durably record context_restoration for reservation %s: %s",
+            reservation_id,
+            exc,
+        )
+
+
 def _with_claude_context_restore(hook: dict[str, Any], *, record: dict[str, Any]) -> dict[str, Any]:
     """Compose passive goal restoration onto a prepared Claude hook.
 
@@ -5653,7 +5691,9 @@ def _with_claude_context_restore(hook: dict[str, Any], *, record: dict[str, Any]
     session carry the same restoration binding. Additive over the
     readiness settings and degrading to readiness-only when the wrapper
     or conduct is unresolvable — a restoration hook never fails a
-    launch. The degradation is logged, not silent.
+    launch. The outcome (mechanism or degraded reason) is recorded on
+    the existing launch facts when the record names a reservation, so
+    the degradation is diagnosable, not merely logged.
     """
     from cli_agent_orchestrator.services import claude_context_restore
 
@@ -5662,6 +5702,15 @@ def _with_claude_context_restore(hook: dict[str, Any], *, record: dict[str, Any]
         terminal_id=record["terminal_id"],
         generation=record["generation"],
     )
+    if record.get("reservation_id"):
+        _record_context_restoration(
+            record["reservation_id"],
+            claude_context_restore.describe_installation(
+                terminal_id=record["terminal_id"],
+                generation=record["generation"],
+                degraded_reason=degraded,
+            ),
+        )
     if degraded is not None:
         logger.warning("claude context restoration degraded: %s", degraded)
         return hook
