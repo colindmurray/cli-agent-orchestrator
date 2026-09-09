@@ -3172,9 +3172,7 @@ async def create_terminal(
             # ``.muse/hooks.json``) — Muse only; every other provider
             # receives None and is unaffected.
             hooks_workspace=(
-                effective_working_directory
-                if provider == ProviderType.MUSE_CLI.value
-                else None
+                effective_working_directory if provider == ProviderType.MUSE_CLI.value else None
             ),
             # The provider launch consumes the exact pre-task minted native
             # id AND the same effective route (model/effort) the pre-task
