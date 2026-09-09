@@ -88,6 +88,7 @@ search = [
 "cao-mcp-server" = "cli_agent_orchestrator.mcp_server.server:main"
 "cao-ops-mcp-server" = "cli_agent_orchestrator.ops_mcp_server.server:main"
 "cao-claude-hook-context" = "cli_agent_orchestrator.services.claude_context_restore:main"
+"cao-agy-hook-context" = "cli_agent_orchestrator.services.agy_context_restore:main"
 
 [project.entry-points."cao.plugins"]
 claude_code_memory = "cli_agent_orchestrator.plugins.builtin.claude_code_memory:ClaudeCodeMemoryPlugin"
