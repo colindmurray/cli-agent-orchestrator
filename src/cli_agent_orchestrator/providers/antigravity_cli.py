@@ -46,7 +46,7 @@ import shlex
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from cli_agent_orchestrator.models.agent_profile import AgentProfile
@@ -188,6 +188,7 @@ class AntigravityCliProvider(BaseProvider):
         effort: Optional[str] = None,
         launch_profile: Optional["AgentProfile"] = None,
         sealed_launch_material: Optional[SealedLaunchMaterial] = None,
+        hooks_workspace: Optional[str] = None,
     ):
         """Initialize the Antigravity CLI provider.
 
@@ -210,6 +211,10 @@ class AntigravityCliProvider(BaseProvider):
                 resolve from it verbatim — the mint and the resumed
                 ``--conversation`` launch consume the admitted inputs.
                 None keeps the legacy per-kwarg resolution.
+            hooks_workspace: Pane working directory for the cond-0845
+                PreInvocation restoration hook (workspace ``.agents/``
+                ``hooks.json``). None skips restoration with a logged
+                degraded reason and changes no other behaviour.
         """
         if sealed_launch_material is not None:
             launch_profile = sealed_launch_material.profile
@@ -228,6 +233,11 @@ class AntigravityCliProvider(BaseProvider):
         self._launch_profile = launch_profile
         self._sealed_launch_material = sealed_launch_material
         self._native_session_id = native_session_id
+        self._hooks_workspace = hooks_workspace
+        # The cond-0845 installation record (or None when restoration is
+        # skipped/degraded). Read-only diagnostic surface; never a gate.
+        self._context_restore: Optional[Dict[str, Any]] = None
+        self._hooks_file_created = False
         # MCP server names registered into ~/.gemini/config/mcp_config.json,
         # removed on cleanup().
         self._mcp_server_names: list[str] = []
@@ -452,6 +462,68 @@ class AntigravityCliProvider(BaseProvider):
             # names behind and block terminal teardown.
             self._mcp_server_names = []
 
+    @property
+    def context_restoration(self) -> Optional[Dict[str, Any]]:
+        """The cond-0845 installation record, or None when skipped/degraded."""
+        return self._context_restore
+
+    def _install_context_restore(self) -> None:
+        """Install this terminal's PreInvocation restoration hook.
+
+        Runs before ``agy`` starts so the first invocation already
+        carries restoration. Never raises: every failure degrades to a
+        hook-free launch with a logged reason, mirroring the MCP
+        registration posture above.
+        """
+        if self._hooks_workspace is None:
+            logger.debug(
+                "agy context restoration skipped for terminal %s (no hooks workspace)",
+                self.terminal_id,
+            )
+            return
+        try:
+            from cli_agent_orchestrator.services import agy_context_restore
+
+            installation, degraded = agy_context_restore.attach(
+                Path(self._hooks_workspace),
+                terminal_id=self.terminal_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - restoration never fails init
+            logger.warning(
+                "agy context restoration install failed for terminal %s: %s",
+                self.terminal_id,
+                exc,
+            )
+            return
+        if degraded is not None:
+            logger.warning("agy context restoration degraded: %s", degraded)
+            return
+        self._context_restore = installation
+        self._hooks_file_created = bool(installation["hooks_file_created"])
+
+    def _uninstall_context_restore(self) -> None:
+        """Remove this terminal's hook key; never touches anything else."""
+        if self._hooks_workspace is None:
+            self._context_restore = None
+            return
+        try:
+            from cli_agent_orchestrator.services import agy_context_restore
+
+            agy_context_restore.uninstall(
+                Path(self._hooks_workspace),
+                terminal_id=self.terminal_id,
+                created_file=self._hooks_file_created,
+            )
+        except Exception as exc:  # noqa: BLE001 - teardown is best-effort
+            logger.warning(
+                "agy context restoration uninstall failed for terminal %s: %s",
+                self.terminal_id,
+                exc,
+            )
+        finally:
+            self._context_restore = None
+            self._hooks_file_created = False
+
     def _handle_startup_dialog(
         self, idle_gap: Optional[float] = None, outer_timeout: Optional[float] = None
     ) -> None:
@@ -640,6 +712,13 @@ class AntigravityCliProvider(BaseProvider):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         command = self._build_agy_command()
+
+        # Passive goal restoration (cond-0845): the workspace hooks file
+        # must exist before agy starts so the first invocation already
+        # carries it. The same key is (re)installed on exact
+        # ``--conversation`` resume, since resume runs this same path.
+        # Degradation is to a hook-free launch, never an init failure.
+        self._install_context_restore()
 
         log_file = (
             Path.home() / ".gemini" / "antigravity-cli" / "log" / f"terminal_{self.terminal_id}.log"
@@ -976,8 +1055,9 @@ class AntigravityCliProvider(BaseProvider):
         return "/quit"
 
     def cleanup(self) -> None:
-        """Remove the MCP servers this provider registered and reset state."""
+        """Remove the MCP servers and the restoration hook this provider registered."""
         self._unregister_mcp_servers()
+        self._uninstall_context_restore()
         self._initialized = False
 
     def mark_input_received(self) -> None:

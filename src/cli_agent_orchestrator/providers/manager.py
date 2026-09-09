@@ -191,6 +191,10 @@ class ProviderManager:
         # validated artifact instead of re-resolving. ``None`` keeps
         # legacy per-adapter resolution.
         prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
+        # Pane working directory for the cond-0845 AGY PreInvocation hook
+        # (workspace ``.agents/hooks.json``). Forwarded to the Antigravity
+        # adapter only; ``None`` skips restoration with a logged reason.
+        hooks_workspace: Optional[str] = None,
     ) -> BaseProvider:
         """Create and store provider instance."""
         try:
@@ -318,6 +322,7 @@ class ProviderManager:
                     effort=expected_effort,
                     launch_profile=launch_profile,
                     sealed_launch_material=sealed_launch_material,
+                    hooks_workspace=hooks_workspace,
                 )
             # --- Credentials-free mock provider (test/CI infrastructure) ---
             elif provider_type == ProviderType.MOCK_CLI.value:
