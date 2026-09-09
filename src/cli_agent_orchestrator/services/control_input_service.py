@@ -578,6 +578,31 @@ def _managed_identity(terminal_id: str) -> Optional[Dict[str, Any]]:
     return managed_launch.managed_control_identity(terminal_id)
 
 
+def _managed_native_session_id(
+    managed: Optional[Dict[str, Any]], metadata: Optional[Dict[str, Any]]
+) -> Optional[str]:
+    """The native session id this resolution may report, if any.
+
+    Managed evidence wins outright: when the reservation names the key —
+    including an explicit null (the v2 refusal shape) — its value stands
+    and nothing below may paper over it. Only when the reservation is
+    absent (unmanaged) or carries no such key (v1 rows, which have no
+    native-identity column) does the terminal row's recorded session
+    apply — and then only for ``opencode_cli``, the one provider whose
+    cond-0845 writer records provider-observed sessions there. Every
+    other provider resolves exactly as before: no reader guard is
+    weakened, only an absent key gains a single narrowly-scoped source.
+    """
+    if isinstance(managed, dict) and "native_session_id" in managed:
+        return managed.get("native_session_id")
+    if isinstance(metadata, dict) and metadata.get("provider") == "opencode_cli":
+        sid = metadata.get("native_session_id")
+        if isinstance(sid, str) and sid.strip():
+            return sid
+        return None
+    return None
+
+
 def _tmux_client() -> Any:
     """The tmux client, or None when the backend is not tmux.
 
@@ -752,7 +777,7 @@ def resolve_control_identity(terminal_id: str) -> Optional[ResolvedControlIdenti
         # all, even once it was admitted. The mode is the reservation's
         # own, never inferred from argv or protocol vintage, because the
         # ACP bridge is also a v2 argv-launched terminal.
-        native_session_id=managed.get("native_session_id") if managed else None,
+        native_session_id=_managed_native_session_id(managed, metadata),
         execution_mode=_managed_execution_mode(managed),
         session_name=metadata.get("tmux_session"),
         provider_version=managed.get("provider_version") if managed else None,
