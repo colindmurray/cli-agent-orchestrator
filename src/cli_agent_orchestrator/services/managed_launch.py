@@ -32,6 +32,7 @@ from cli_agent_orchestrator.models.managed_launch import (
 from cli_agent_orchestrator.services import companion_receipts
 from cli_agent_orchestrator.services import execution_mode as em
 from cli_agent_orchestrator.services import provider_contracts
+from cli_agent_orchestrator.services import stable_agent_roster
 
 logger = logging.getLogger(__name__)
 from cli_agent_orchestrator.utils.terminal import generate_terminal_id, managed_window_name
@@ -348,6 +349,16 @@ def _row_dict(row: Any) -> dict[str, Any]:
         "reservation_id": row.reservation_id,
         "terminal_id": row.terminal_id,
         "generation": row.generation,
+        # The fork-authoritative stable CAO-agent id for this reservation
+        # (cond-0842): the roster's deterministic initial id derived from
+        # the immutable terminal+generation allocated at reserve, so an
+        # exact-id replay, get, or reconcile after response loss returns
+        # the same id and a retry never invents or nulls the binding.
+        # Projected, never stored: every v1 row already carries
+        # terminal+generation, so no migration and no request-shape change.
+        "stable_agent_id": stable_agent_roster.derive_initial_agent_id(
+            row.terminal_id, row.generation
+        ),
         "session_name": row.session_name,
         "provider": row.provider,
         "agent_profile": row.agent_profile,
