@@ -759,15 +759,17 @@ def test_spawn_admission_caller_gate(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "cao-native@example.invalid"],
-                   cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "cao-native@example.invalid"], cwd=repo, check=True
+    )
     subprocess.run(["git", "config", "user.name", "cao-native"], cwd=repo)
     (repo / "task.txt").write_text("admission probe\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True)
     worktree = tmp_path / "worktree"
-    subprocess.run(["git", "worktree", "add", "-b", "cao-admission-probe", str(worktree)],
-                   cwd=repo, check=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "cao-admission-probe", str(worktree)], cwd=repo, check=True
+    )
     task_file = tmp_path / "task.md"
     task_file.write_text("# admission probe\n")
     # Hermetic omission: no ambient terminal id may mask the missing flag.
@@ -776,21 +778,36 @@ def test_spawn_admission_caller_gate(tmp_path, monkeypatch):
     def _argv(extra):
         return [
             "spawn",
-            "--project", "cond0845-admission-probe",
-            "--task-class", "fix-kimi",
-            "--provider", "kimi_cli",
-            "--profile", "reviewer",
-            "--model", REQUESTED_MODEL,
-            "--effort", REQUESTED_EFFORT,
-            "--execution-mode", "native_tui",
-            "--worktree", str(worktree),
-            "--branch", "cao-admission-probe",
-            "--task-file", str(task_file),
-            "--pr-action", "none",
-            "--reservation-id", str(uuid.uuid4()),
-            "--delivery-id", str(uuid.uuid4()),
-            "--session", "cao-admission-probe",
-            "--base-url", "http://127.0.0.1:0",
+            "--project",
+            "cond0845-admission-probe",
+            "--task-class",
+            "fix-kimi",
+            "--provider",
+            "kimi_cli",
+            "--profile",
+            "reviewer",
+            "--model",
+            REQUESTED_MODEL,
+            "--effort",
+            REQUESTED_EFFORT,
+            "--execution-mode",
+            "native_tui",
+            "--worktree",
+            str(worktree),
+            "--branch",
+            "cao-admission-probe",
+            "--task-file",
+            str(task_file),
+            "--pr-action",
+            "none",
+            "--reservation-id",
+            str(uuid.uuid4()),
+            "--delivery-id",
+            str(uuid.uuid4()),
+            "--session",
+            "cao-admission-probe",
+            "--base-url",
+            "http://127.0.0.1:0",
             *extra,
         ]
 
@@ -826,7 +843,6 @@ def _real_install():
     arguments — safe to run against scratch fixture trees.
     """
     import sys as _sys
-
     from test.integration.test_kimi_postcompact_isolated_harness import (
         discover_conductor_root,
     )
@@ -895,7 +911,9 @@ def _install_deploy_receipt(
     for label, root in (("conductor", conductor_root), ("fork", fork_root)):
         dirty = subprocess.run(
             ["git", "-C", str(root), "status", "--porcelain"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         if dirty.returncode != 0:
             raise AssertionError(f"cannot establish {label} cleanliness at {root}")
@@ -909,7 +927,9 @@ def _install_deploy_receipt(
     for label, root in (("conductor", conductor_root), ("fork", fork_root)):
         proc = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         if proc.returncode != 0:
             raise AssertionError(f"cannot establish {label} head at {root}")
@@ -939,9 +959,15 @@ def _install_deploy_receipt(
         )
     chosen = _shutil.which(python) if not os.path.isabs(python) else python
     probe = subprocess.run(
-        [chosen or python, "-I", "-c",
-         "import conduct, json, sys; print(json.dumps({'file': conduct.__file__}))"],
-        capture_output=True, text=True, timeout=60,
+        [
+            chosen or python,
+            "-I",
+            "-c",
+            "import conduct, json, sys; print(json.dumps({'file': conduct.__file__}))",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
         env={"PATH": os.environ.get("PATH", "")},
     )
     if probe.returncode != 0:
@@ -987,7 +1013,6 @@ def test_native_launch_route_resolves():
     harmlessly and stays so the argv matches the driven run.
     """
     import sys as _sys
-
     from test.integration.test_kimi_postcompact_isolated_harness import (
         discover_conductor_root,
     )
@@ -1012,8 +1037,9 @@ def _fake_git_root(path: Path, files: Dict[str, str]) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text, encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.email", "cao-test@example.invalid"],
-                   cwd=path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "cao-test@example.invalid"], cwd=path, check=True
+    )
     subprocess.run(["git", "config", "user.name", "cao-test"], cwd=path, check=True)
     subprocess.run(["git", "add", "."], cwd=path, check=True)
     subprocess.run(["git", "commit", "-qm", "seed"], cwd=path, check=True)
@@ -1021,20 +1047,27 @@ def _fake_git_root(path: Path, files: Dict[str, str]) -> Path:
 
 
 def _git_head(path: Path) -> str:
-    proc = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],
-                          capture_output=True, text=True, check=True)
+    proc = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    )
     return proc.stdout.strip()
 
 
 def _receipt_case(tmp_path: Path):
     """Hermetic conductor+fork roots with the required package asset."""
-    cond = _fake_git_root(tmp_path / "cond", {
-        "conduct/__init__.py": "",
-        "assets/marshal-harness.sh": "#!/bin/sh\n",
-    })
-    fork = _fake_git_root(tmp_path / "fork", {
-        "src/cli_agent_orchestrator/__init__.py": "",
-    })
+    cond = _fake_git_root(
+        tmp_path / "cond",
+        {
+            "conduct/__init__.py": "",
+            "assets/marshal-harness.sh": "#!/bin/sh\n",
+        },
+    )
+    fork = _fake_git_root(
+        tmp_path / "fork",
+        {
+            "src/cli_agent_orchestrator/__init__.py": "",
+        },
+    )
     install = _real_install()
     manifest = install.hash_conduct_tree(str(cond))
     digest = install.tree_hash(manifest)
@@ -1063,8 +1096,7 @@ def _deployed_python_or_skip() -> str:
     if not first.startswith(b"#!"):
         pytest.skip("conduct entrypoint has no interpreter line")
     python = first[2:].decode("utf-8").split()[0]
-    probe = subprocess.run([python, "-I", "-c", "import conduct"],
-                           capture_output=True, timeout=60)
+    probe = subprocess.run([python, "-I", "-c", "import conduct"], capture_output=True, timeout=60)
     if probe.returncode != 0:
         pytest.skip("discovered interpreter cannot load conduct with -I")
     return python
@@ -1099,21 +1131,32 @@ def test_deploy_receipt_absent_rejected(tmp_path):
     xdg.mkdir()
     with pytest.raises(AssertionError, match="COND0845_DEPLOY_RECEIPT"):
         _install_deploy_receipt(
-            receipt_path=None, conductor_root=cond, fork_root=fork,
-            xdg_state_home=xdg, python=sys.executable, install=install,
+            receipt_path=None,
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=xdg,
+            python=sys.executable,
+            install=install,
         )
     with pytest.raises(AssertionError, match="unreadable"):
         _install_deploy_receipt(
-            receipt_path=str(tmp_path / "no-such.json"), conductor_root=cond,
-            fork_root=fork, xdg_state_home=xdg, python=sys.executable,
+            receipt_path=str(tmp_path / "no-such.json"),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=xdg,
+            python=sys.executable,
             install=install,
         )
     garbage = tmp_path / "garbage.json"
     garbage.write_text("not json{{{", encoding="utf-8")
     with pytest.raises(AssertionError, match="not JSON"):
         _install_deploy_receipt(
-            receipt_path=str(garbage), conductor_root=cond, fork_root=fork,
-            xdg_state_home=xdg, python=sys.executable, install=install,
+            receipt_path=str(garbage),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=xdg,
+            python=sys.executable,
+            install=install,
         )
     # Nothing is staged and nothing else is written on rejection.
     assert list(xdg.rglob("*")) == []
@@ -1125,8 +1168,11 @@ def test_deploy_receipt_stage_rejected(tmp_path):
     src = _write_receipt(tmp_path / "stage.json", _stage_receipt_payload())
     with pytest.raises(AssertionError, match="stage-only"):
         _install_deploy_receipt(
-            receipt_path=str(src), conductor_root=cond, fork_root=fork,
-            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            receipt_path=str(src),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=tmp_path / "xdg",
+            python=sys.executable,
             install=install,
         )
 
@@ -1138,8 +1184,11 @@ def test_deploy_receipt_head_mismatch_rejected(tmp_path):
     src = _write_receipt(tmp_path / "receipt.json", base)
     with pytest.raises(AssertionError, match="conductor head does not match"):
         _install_deploy_receipt(
-            receipt_path=str(src), conductor_root=cond, fork_root=fork,
-            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            receipt_path=str(src),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=tmp_path / "xdg",
+            python=sys.executable,
             install=install,
         )
 
@@ -1151,8 +1200,11 @@ def test_deploy_receipt_tree_mismatch_rejected(tmp_path):
     src = _write_receipt(tmp_path / "receipt.json", base)
     with pytest.raises(AssertionError, match="tree hash differs"):
         _install_deploy_receipt(
-            receipt_path=str(src), conductor_root=cond, fork_root=fork,
-            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            receipt_path=str(src),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=tmp_path / "xdg",
+            python=sys.executable,
             install=install,
         )
 
@@ -1164,8 +1216,11 @@ def test_deploy_receipt_dirty_tree_rejected(tmp_path):
     src = _write_receipt(tmp_path / "receipt.json", base)
     with pytest.raises(AssertionError, match="is dirty"):
         _install_deploy_receipt(
-            receipt_path=str(src), conductor_root=cond, fork_root=fork,
-            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            receipt_path=str(src),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=tmp_path / "xdg",
+            python=sys.executable,
             install=install,
         )
 
@@ -1176,14 +1231,18 @@ def test_deploy_receipt_interpreter_without_conduct_rejected(tmp_path):
     src = _write_receipt(tmp_path / "receipt.json", base)
     probe = subprocess.run(
         [sys.executable, "-I", "-c", "import conduct"],
-        capture_output=True, timeout=60,
+        capture_output=True,
+        timeout=60,
     )
     if probe.returncode == 0:
         pytest.skip("suite interpreter already loads conduct; nothing to prove")
     with pytest.raises(AssertionError, match="COND0845_PYTHON"):
         _install_deploy_receipt(
-            receipt_path=str(src), conductor_root=cond, fork_root=fork,
-            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            receipt_path=str(src),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=tmp_path / "xdg",
+            python=sys.executable,
             install=install,
         )
 
@@ -1201,8 +1260,11 @@ def test_deploy_receipt_interpreter_mismatch_rejected(tmp_path):
     src = _write_receipt(tmp_path / "receipt.json", base)
     with pytest.raises(AssertionError, match="does not match the receipt"):
         _install_deploy_receipt(
-            receipt_path=str(src), conductor_root=cond, fork_root=fork,
-            xdg_state_home=tmp_path / "xdg", python=python,
+            receipt_path=str(src),
+            conductor_root=cond,
+            fork_root=fork,
+            xdg_state_home=tmp_path / "xdg",
+            python=python,
             install=install,
         )
 
@@ -1215,8 +1277,12 @@ def test_deploy_receipt_copies_bytes_exactly(tmp_path):
     src = _write_receipt(tmp_path / "receipt.json", base)
     xdg = tmp_path / "xdg"
     dest = _install_deploy_receipt(
-        receipt_path=str(src), conductor_root=cond, fork_root=fork,
-        xdg_state_home=xdg, python=python, install=install,
+        receipt_path=str(src),
+        conductor_root=cond,
+        fork_root=fork,
+        xdg_state_home=xdg,
+        python=python,
+        install=install,
     )
     assert dest == xdg / "cao-conductor" / "deploy.json"
     assert dest.read_bytes() == src.read_bytes(), "staged receipt must be byte-identical"
@@ -1506,9 +1572,9 @@ def _wait_wire_quiet(kimi_home: Path, *, window: float = 10.0, deadline: float =
         _time.sleep(window)
         if _turn_events_since(kimi_home, cursor) == []:
             return
-        assert _time.monotonic() - start < deadline, (
-            f"wire still turning after {deadline}s; refusing to observe a moving target"
-        )
+        assert (
+            _time.monotonic() - start < deadline
+        ), f"wire still turning after {deadline}s; refusing to observe a moving target"
 
 
 def test_wire_helpers_read_genuine_redacted_frames(tmp_path):
@@ -1533,20 +1599,58 @@ def test_wire_helpers_read_genuine_redacted_frames(tmp_path):
         }
 
     lines = [
-        _json.dumps({"type": "profile.bind", "agentId": "main", "modelAlias": "m",
-                     "thinkingEffort": "high", "time": 1}),
+        _json.dumps(
+            {
+                "type": "profile.bind",
+                "agentId": "main",
+                "modelAlias": "m",
+                "thinkingEffort": "high",
+                "time": 1,
+            }
+        ),
         _json.dumps({"type": "mcp.tools_discovered", "agentId": "main", "time": 2}),
         _json.dumps(_user("RESTORATION sentinel-alpha checkpoint check-alpha", 3)),
         "NOT-JSON{{{",
-        _json.dumps({"type": "turn.prompt", "agentId": "main", "input": "i",
-                     "origin": "o", "promptId": "p1", "time": 4}),
-        _json.dumps({"type": "prompt.accepted", "agentId": "main", "promptId": "p1",
-                     "content": "i", "time": 5}),
+        _json.dumps(
+            {
+                "type": "turn.prompt",
+                "agentId": "main",
+                "input": "i",
+                "origin": "o",
+                "promptId": "p1",
+                "time": 4,
+            }
+        ),
+        _json.dumps(
+            {
+                "type": "prompt.accepted",
+                "agentId": "main",
+                "promptId": "p1",
+                "content": "i",
+                "time": 5,
+            }
+        ),
         _json.dumps({"type": "usage.record", "agentId": "main", "time": 6}),
-        _json.dumps({"type": "prompt.completed", "agentId": "main", "promptId": "p1",
-                     "finishedAt": 7, "reason": "done", "time": 7}),
-        _json.dumps({"type": "turn.ended", "agentId": "main", "turnId": "t1",
-                     "reason": "done", "durationMs": 1, "time": 8}),
+        _json.dumps(
+            {
+                "type": "prompt.completed",
+                "agentId": "main",
+                "promptId": "p1",
+                "finishedAt": 7,
+                "reason": "done",
+                "time": 7,
+            }
+        ),
+        _json.dumps(
+            {
+                "type": "turn.ended",
+                "agentId": "main",
+                "turnId": "t1",
+                "reason": "done",
+                "durationMs": 1,
+                "time": 8,
+            }
+        ),
         _json.dumps(_user("later entry beta", 9)),
     ]
     wire.write_text("\n".join(lines) + "\n", encoding="utf-8")

@@ -373,8 +373,15 @@ def _undefined_names(tree):
 
     builtin = set(dir(_builtins))
     module_attrs = {
-        "__name__", "__doc__", "__file__", "__package__", "__spec__",
-        "__loader__", "__cached__", "__path__", "__annotations__",
+        "__name__",
+        "__doc__",
+        "__file__",
+        "__package__",
+        "__spec__",
+        "__loader__",
+        "__cached__",
+        "__path__",
+        "__annotations__",
     }
     bad = set()
     _scopes = (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef, _ast.Lambda)
@@ -391,9 +398,7 @@ def _undefined_names(tree):
                 if not isinstance(child, _ast.Lambda):
                     found.add(child.name)
                 continue
-            if isinstance(child, _ast.Name) and isinstance(
-                child.ctx, (_ast.Store, _ast.Del)
-            ):
+            if isinstance(child, _ast.Name) and isinstance(child.ctx, (_ast.Store, _ast.Del)):
                 found.add(child.id)
             elif isinstance(child, _ast.ExceptHandler) and child.name:
                 found.add(child.name)
@@ -1091,11 +1096,12 @@ def test_paired_server_tmux_wiring_reaches_owned_socket(tmp_path, monkeypatch):
     merge path. No daemon, no network: PATH lookup is pure."""
     from test.fixtures.cao_server import _subprocess_env
     from test.fixtures.tmux_server import (
-        TmuxServer,
         TmuxSelectorLost,
+        TmuxServer,
         default_socket_path,
         real_tmux_binary,
     )
+
     from cli_agent_orchestrator.constants import SESSION_PREFIX
 
     try:
@@ -1104,17 +1110,15 @@ def test_paired_server_tmux_wiring_reaches_owned_socket(tmp_path, monkeypatch):
         pytest.skip("no tmux binary here; shim-wiring leg runs on host/CI")
     # The anchor must stay outside the product session prefix, or the
     # owned server self-pollutes the exact `sessions == []` assertion.
-    assert not _PAIRED_TMUX_ANCHOR.startswith(SESSION_PREFIX), (
-        f"anchor {_PAIRED_TMUX_ANCHOR!r} matches prefix {SESSION_PREFIX!r}"
-    )
+    assert not _PAIRED_TMUX_ANCHOR.startswith(
+        SESSION_PREFIX
+    ), f"anchor {_PAIRED_TMUX_ANCHOR!r} matches prefix {SESSION_PREFIX!r}"
     monkeypatch.setenv("TMUX", "/tmp/tmux-0/default,12345,0")
     monkeypatch.setenv("TMUX_PANE", "%0")
     monkeypatch.setenv("TMUX_TMPDIR", "/elsewhere")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    owned = TmuxServer(
-        socket_path=tmp_path / "owned.sock", owned_root=tmp_path
-    )
+    owned = TmuxServer(socket_path=tmp_path / "owned.sock", owned_root=tmp_path)
     shim_dir = tmp_path / "bin"
     owned.write_shim(shim_dir)
     env = _subprocess_env(
@@ -1147,9 +1151,7 @@ def test_tmux_teardown_refuses_unowned_socket(tmp_path):
     with pytest.raises(TmuxSelectorLost):
         TmuxServer(socket_path=tmp_path / "shared.sock").teardown()
     with pytest.raises(TmuxSelectorLost):
-        TmuxServer(
-            socket_path=tmp_path / "default", owned_root=tmp_path
-        ).teardown()
+        TmuxServer(socket_path=tmp_path / "default", owned_root=tmp_path).teardown()
 
 
 def _prove_paired_server(server, port: int) -> None:
@@ -1222,9 +1224,8 @@ def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_s
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
 
     dep_path = _require_fork_dep_path()
-    from test.fixtures.tmux_server import isolated_tmux_server
-
     import contextlib
+    from test.fixtures.tmux_server import isolated_tmux_server
 
     # The server child enumerates sessions through libtmux, which resolves
     # its tmux binary via PATH lookup with no socket of its own — without
@@ -1233,9 +1234,7 @@ def test_paired_server_bootstrap_wire_and_teardown(tmp_path, monkeypatch, live_s
     # ExitStack keeps this lifetime beside the server's own try/finally
     # without re-indenting the whole body.
     _owned_tmux = contextlib.ExitStack()
-    tmux = _owned_tmux.enter_context(
-        isolated_tmux_server(anchor=_PAIRED_TMUX_ANCHOR)
-    )
+    tmux = _owned_tmux.enter_context(isolated_tmux_server(anchor=_PAIRED_TMUX_ANCHOR))
     shim_dir = tmp_path / "bin"
     tmux.write_shim(shim_dir)
     try:
