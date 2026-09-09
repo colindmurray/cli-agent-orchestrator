@@ -104,3 +104,37 @@ def test_second_apply_is_idempotent_and_keeps_values(tmp_path, monkeypatch):
         None,
         None,
     )
+
+
+def test_reapply_preserves_populated_repair_values(tmp_path, monkeypatch):
+    """Populated repair fields survive a second production migration (cond-0852)."""
+    from cli_agent_orchestrator import constants
+
+    db_file = tmp_path / "populated-repair.db"
+    _legacy_db(db_file)
+    monkeypatch.setattr("cli_agent_orchestrator.constants.DATABASE_FILE", db_file, raising=False)
+    assert constants.DATABASE_FILE == db_file
+    database._migrate_terminals_schema()
+
+    readiness, fingerprint = "ready", "9f" * 32
+    with sqlite3.connect(str(db_file)) as connection:
+        connection.execute(
+            "UPDATE terminals SET provider_readiness = ?, "
+            "create_request_fingerprint = ? WHERE id = ?",
+            (readiness, fingerprint, "legacy8101"),
+        )
+
+    assert constants.DATABASE_FILE == db_file
+    database._migrate_terminals_schema()
+
+    assert _legacy_row(db_file, "legacy8101") == (
+        "cao-s",
+        "w-0",
+        "claude_code",
+        "%81",
+        "gpt-5.6-sol",
+        "high",
+        readiness,
+        fingerprint,
+    )
+    assert _legacy_row(db_file, "legacy8102")[6:] == (None, None)
