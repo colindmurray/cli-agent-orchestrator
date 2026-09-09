@@ -519,15 +519,15 @@ def _session_fence_for(wait_id: str):
     take this OUTSIDE ``_monitor_lock``: session -> monitor -> inbox ->
     transaction, never the inverse.
     """
-    from cli_agent_orchestrator.services.callback_recovery import (
-        session_lifecycle_write_claim)
+    from cli_agent_orchestrator.services.callback_recovery import session_lifecycle_write_claim
     from contextlib import nullcontext
+
     try:
         from cli_agent_orchestrator.clients import database
+
         with database.SessionLocal() as db:
             row = db.get(database.RegisteredWaitModel, wait_id)
-            session_name = (str(row.session_name)
-                            if row is not None and row.session_name else None)
+            session_name = str(row.session_name) if row is not None and row.session_name else None
     except Exception:
         return nullcontext()
     if not session_name:

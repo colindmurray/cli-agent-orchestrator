@@ -66,8 +66,9 @@ def lock_path(project_state_dir: str) -> str:
 
 
 @contextlib.contextmanager
-def hold_path(path: str, *, shared: bool = False,
-              timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> Iterator[None]:
+def hold_path(
+    path: str, *, shared: bool = False, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+) -> Iterator[None]:
     """Hold the flock at an explicit absolute path (fork-side entry).
 
     Same contract as :func:`hold`; the path comes from the conductor

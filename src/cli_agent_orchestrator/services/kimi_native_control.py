@@ -77,7 +77,9 @@ KIND_OPERATOR_MESSAGE = "operator-message"
 #: rendered at delivery is valid for whichever turn is live — unlike a
 #: work instruction about a turn that already ended.
 KIND_REMIND = "remind"
-OPERATION_KINDS = frozenset({KIND_QUEUE, KIND_STEER, KIND_CONTROL, KIND_OPERATOR_MESSAGE, KIND_REMIND})
+OPERATION_KINDS = frozenset(
+    {KIND_QUEUE, KIND_STEER, KIND_CONTROL, KIND_OPERATOR_MESSAGE, KIND_REMIND}
+)
 
 #: ``intended`` -> intent is durable, nothing has been typed.
 #: ``writing``  -> the frozen effect payload is committed and the first
@@ -483,7 +485,7 @@ _PROVEN_COMPOSER_NEWLINE: dict[str, dict[str, Any]] = {
             "'enter' submit, computes "
             "expandPasteMarkers(this.state.lines.join('\\n')).trim() on submit; "
             "PASTE_ENTER_SUPPRESS_WINDOW_MS = 120 with the byte-exact "
-            "content-neutral reset and the Key.ctrl(\"s\") steer dispatch "
+            'content-neutral reset and the Key.ctrl("s") steer dispatch '
             "(bundle read, cond-0845 Sol correction)"
         ),
     },
@@ -1821,8 +1823,7 @@ def steer(
     return _post(operation_id=binding["operation_id"], plan=plan, transport=transport)
 
 
-def _pending_reminder_rows(db: Any, *, terminal_id: str,
-                           generation: str) -> list:
+def _pending_reminder_rows(db: Any, *, terminal_id: str, generation: str) -> list:
     """Unresolved KIND_REMIND rows for one terminal generation, oldest first.
 
     The one-pending-per-occurrence authority without a schema migration:
@@ -1837,28 +1838,26 @@ def _pending_reminder_rows(db: Any, *, terminal_id: str,
             database.KimiNativeControlOperationModel.kind == KIND_REMIND,
             database.KimiNativeControlOperationModel.terminal_id == terminal_id,
             database.KimiNativeControlOperationModel.generation == generation,
-            database.KimiNativeControlOperationModel.state.notin_(
-                (COMPLETED, REFUSED)),
+            database.KimiNativeControlOperationModel.state.notin_((COMPLETED, REFUSED)),
         )
-        .order_by(database.KimiNativeControlOperationModel.created_at,
-                  database.KimiNativeControlOperationModel.operation_id)
+        .order_by(
+            database.KimiNativeControlOperationModel.created_at,
+            database.KimiNativeControlOperationModel.operation_id,
+        )
         .all()
     )
 
 
-def pending_reminder_for(*, terminal_id: str,
-                         generation: str) -> Optional[dict[str, Any]]:
+def pending_reminder_for(*, terminal_id: str, generation: str) -> Optional[dict[str, Any]]:
     """The unresolved reminder for one terminal generation, if any."""
     try:
         with database.SessionLocal() as db:
-            rows = _pending_reminder_rows(
-                db, terminal_id=terminal_id, generation=generation)
+            rows = _pending_reminder_rows(db, terminal_id=terminal_id, generation=generation)
             if not rows:
                 return None
             return _row_dict(rows[0])
     except Exception as exc:  # noqa: BLE001 - fail closed
-        raise NativeControlUnavailable(
-            f"reminder pending lookup failed: {exc}") from exc
+        raise NativeControlUnavailable(f"reminder pending lookup failed: {exc}") from exc
 
 
 def _intent_occurrence(intent: Optional[dict]) -> Optional[str]:
@@ -1920,8 +1919,7 @@ def remind(
     never on content hashes.
     """
     if origin not in ("event", "periodic"):
-        raise NativeControlInvalid(
-            f"reminder origin must be 'event' or 'periodic'; got {origin!r}")
+        raise NativeControlInvalid(f"reminder origin must be 'event' or 'periodic'; got {origin!r}")
     frozen_origin = {
         "origin": origin,
         "hook_evidence": dict(hook_evidence) if hook_evidence else None,
@@ -1937,8 +1935,7 @@ def remind(
     marker = _require_text(marker, field="marker")
     body = _require_text(text, field="text")
     payload = f"{body}\n\n[cao-context-restoration marker:{marker}]"
-    plan = plan_composer_keystrokes(payload, provider_version=provider_version,
-                                    field="text")
+    plan = plan_composer_keystrokes(payload, provider_version=provider_version, field="text")
     observed = _validated_turn_observation(observation)
     # Branch selection comes from the provider detector's turn state, not
     # from the bound turn id: a freshly rendered context reminder is valid
@@ -1947,19 +1944,22 @@ def remind(
     # active turn with turn_state "idle" is a caller bug, refused loudly);
     # an active turn needs no name to be joined.
     if turn_state not in ("idle", "active"):
-        raise NativeControlInvalid(
-            f"turn_state must be 'idle' or 'active'; got {turn_state!r}")
+        raise NativeControlInvalid(f"turn_state must be 'idle' or 'active'; got {turn_state!r}")
     if turn_state == "idle" and observed["active_turn_id"] is not None:
         raise NativeControlInvalid(
             "turn_state 'idle' contradicts an observation naming active turn "
-            f"{observed['active_turn_id']!r}; re-observe instead of guessing")
+            f"{observed['active_turn_id']!r}; re-observe instead of guessing"
+        )
 
     try:
         with database.SessionLocal() as db:
             pending = [
-                row for row in _pending_reminder_rows(
-                    db, terminal_id=terminal_id, generation=generation)
-                if row.operation_id not in supersede_ids]
+                row
+                for row in _pending_reminder_rows(
+                    db, terminal_id=terminal_id, generation=generation
+                )
+                if row.operation_id not in supersede_ids
+            ]
             for row in pending:
                 if row.operation_id == binding["operation_id"]:
                     adopted = _row_dict(row)
@@ -1967,7 +1967,8 @@ def remind(
                         raise NativeControlConflict(
                             f"operation {binding['operation_id']} already exists for occurrence "
                             f"{_intent_occurrence(adopted.get('intent'))!r}, not "
-                            f"{occurrence_id!r}; a caller-minted id is immutable")
+                            f"{occurrence_id!r}; a caller-minted id is immutable"
+                        )
                     return {**adopted, "reminder_outcome": "adopted"}
             if pending:
                 winner = _row_dict(pending[0])
@@ -1976,13 +1977,13 @@ def remind(
                         f"terminal {terminal_id} generation {generation} has a pending "
                         f"reminder for occurrence "
                         f"{_intent_occurrence(winner.get('intent'))!r}, not "
-                        f"{occurrence_id!r}; the generation was reassigned, adopt nothing")
+                        f"{occurrence_id!r}; the generation was reassigned, adopt nothing"
+                    )
                 return {**winner, "reminder_outcome": "already-pending"}
     except NativeControlError:
         raise
     except Exception as exc:  # noqa: BLE001 - fail closed
-        raise NativeControlUnavailable(
-            f"reminder pending check failed: {exc}") from exc
+        raise NativeControlUnavailable(f"reminder pending check failed: {exc}") from exc
 
     record, is_new = _open(
         kind=KIND_REMIND,
@@ -1998,7 +1999,8 @@ def remind(
             raise NativeControlConflict(
                 f"operation {binding['operation_id']} already exists for occurrence "
                 f"{_intent_occurrence(record.get('intent'))!r}, not {occurrence_id!r}; "
-                "a caller-minted id is immutable")
+                "a caller-minted id is immutable"
+            )
         return {**record, "reminder_outcome": "adopted"}
 
     try:
@@ -2047,81 +2049,93 @@ def remind(
                 reason, detail = hook_refusal
                 if reason not in REFUSAL_REASONS:
                     raise NativeControlInvalid(
-                        f"the pre-write hook answered with unknown refusal reason "
-                        f"{reason!r}")
-                return {**_refuse(binding["operation_id"], _Refusal(reason, detail)),
-                        "reminder_outcome": "refused"}
+                        f"the pre-write hook answered with unknown refusal reason " f"{reason!r}"
+                    )
+                return {
+                    **_refuse(binding["operation_id"], _Refusal(reason, detail)),
+                    "reminder_outcome": "refused",
+                }
     except _Refusal as refusal:
-        return {**_refuse(binding["operation_id"], refusal),
-                "reminder_outcome": "refused"}
+        return {**_refuse(binding["operation_id"], refusal), "reminder_outcome": "refused"}
 
     # Freeze the exact effect payload: from here until POSTED the bytes
     # are fixed, so a crash cannot be re-rendered into different bytes.
-    frozen = _canonical({
-        "frozen_payload_sha256": plan["payload_sha256"],
-        "marker": marker,
-        "branch": "steer" if chord else "submit",
-        "turn_state": turn_state,
-        "chord": chord,
-        "occurrence_id": occurrence_id,
-        # The conductor-verified fence (goal version, hold high-water
-        # mark) frozen for audit. The fork cannot re-read conductor
-        # legs; their truth across the effect comes from the project
-        # flock the caller holds shared — no conductor writer can
-        # commit between verification and first byte.
-        "fence_snapshot": dict(fence_snapshot) if fence_snapshot else None,
-    })
+    frozen = _canonical(
+        {
+            "frozen_payload_sha256": plan["payload_sha256"],
+            "marker": marker,
+            "branch": "steer" if chord else "submit",
+            "turn_state": turn_state,
+            "chord": chord,
+            "occurrence_id": occurrence_id,
+            # The conductor-verified fence (goal version, hold high-water
+            # mark) frozen for audit. The fork cannot re-read conductor
+            # legs; their truth across the effect comes from the project
+            # flock the caller holds shared — no conductor writer can
+            # commit between verification and first byte.
+            "fence_snapshot": dict(fence_snapshot) if fence_snapshot else None,
+        }
+    )
     try:
-        _update(operation_id=binding["operation_id"],
-                from_states=frozenset({INTENDED}), to_state=WRITING,
-                extra={"transport_json": frozen})
+        _update(
+            operation_id=binding["operation_id"],
+            from_states=frozenset({INTENDED}),
+            to_state=WRITING,
+            extra={"transport_json": frozen},
+        )
     except NativeControlError:
         raise
     except Exception as exc:  # noqa: BLE001 - fail closed
-        raise NativeControlUnavailable(
-            f"reminder freeze failed: {exc}") from exc
+        raise NativeControlUnavailable(f"reminder freeze failed: {exc}") from exc
 
     try:
         if chord is None:
             result = execute_composer_plan(
-                plan=plan, transport=transport,
-                deadline_monotonic=deadline_monotonic)
+                plan=plan, transport=transport, deadline_monotonic=deadline_monotonic
+            )
             enter_sent = bool(result.get("enter_sent"))
         else:
             execute_composer_plan(
-                plan=plan, transport=transport, submit=False,
-                deadline_monotonic=deadline_monotonic)
+                plan=plan, transport=transport, submit=False, deadline_monotonic=deadline_monotonic
+            )
             # The proven steer primitive (send_steer_chord under the
             # control-input transport), never a bare control key: only
             # the pinned chord may join a live turn.
             getattr(transport, "send_chord")(chord)
             enter_sent = False
     except ComposerWriteInterrupted as exc:
-        return {**mark_ambiguous(
-            operation_id=binding["operation_id"], reason=exc.detail),
-            "reminder_outcome": "ambiguous"}
+        return {
+            **mark_ambiguous(operation_id=binding["operation_id"], reason=exc.detail),
+            "reminder_outcome": "ambiguous",
+        }
 
-    return {**_update(
-        operation_id=binding["operation_id"],
-        from_states=frozenset({WRITING}), to_state=POSTED,
-        extra={
-            "posted_at": _now(),
-            "transport_json": _canonical({
-                "frozen_payload_sha256": plan["payload_sha256"],
-                "marker": marker,
-                # Audit evidence only, never identity: the boundary
-                # coalesces solely on the exact request id. The origin
-                # and native fields below record which invocation
-                # opened the row; the content hash lets an operator
-                # compare bytes after the fact.
-                "context_sha256": canonical_sha256({"context": body}),
-                **frozen_origin,
-                "branch": "steer" if chord else "submit",
-                "enter_sent": enter_sent,
-                "transport_contract": "literal-lines-composer-breaks-then-explicit-boundary",
-            }),
-        },
-    ), "reminder_outcome": "posted"}
+    return {
+        **_update(
+            operation_id=binding["operation_id"],
+            from_states=frozenset({WRITING}),
+            to_state=POSTED,
+            extra={
+                "posted_at": _now(),
+                "transport_json": _canonical(
+                    {
+                        "frozen_payload_sha256": plan["payload_sha256"],
+                        "marker": marker,
+                        # Audit evidence only, never identity: the boundary
+                        # coalesces solely on the exact request id. The origin
+                        # and native fields below record which invocation
+                        # opened the row; the content hash lets an operator
+                        # compare bytes after the fact.
+                        "context_sha256": canonical_sha256({"context": body}),
+                        **frozen_origin,
+                        "branch": "steer" if chord else "submit",
+                        "enter_sent": enter_sent,
+                        "transport_contract": "literal-lines-composer-breaks-then-explicit-boundary",
+                    }
+                ),
+            },
+        ),
+        "reminder_outcome": "posted",
+    }
 
 
 def record_reminder_acceptance(
@@ -2142,16 +2156,16 @@ def record_reminder_acceptance(
     """
     if outcome not in {ACCEPTED, COMPLETED}:
         raise NativeControlInvalid(
-            f"reminder outcome must be accepted or completed; got {outcome!r}")
-    evidence = _validated_provider_observation(
-        observation, operation_id=operation_id)
+            f"reminder outcome must be accepted or completed; got {outcome!r}"
+        )
+    evidence = _validated_provider_observation(observation, operation_id=operation_id)
     echo = (evidence.get("evidence") or {}).get("marker_echo")
     if echo != expected_marker:
         raise NativeControlInvalid(
             "reminder evidence does not echo the frozen marker: provider "
-            "model-context entry is unproven, the operation stays posted")
-    return record_observation(
-        operation_id=operation_id, observation=observation, outcome=outcome)
+            "model-context entry is unproven, the operation stays posted"
+        )
+    return record_observation(operation_id=operation_id, observation=observation, outcome=outcome)
 
 
 #: Wire-evidence scan bounds. Wire files carry full tool schemas and can
@@ -2197,6 +2211,7 @@ def scan_wire_for_marker(*, session_home: object, marker: str) -> dict[str, Any]
     """
     import glob as _glob
     import os as _os
+
     found: dict[str, Any] = {
         "model_context_entry": None,
         "prompt_accepted": None,
@@ -2218,8 +2233,7 @@ def scan_wire_for_marker(*, session_home: object, marker: str) -> dict[str, Any]
         if not home or not _os.path.isdir(home):
             continue
         patterns = (
-            _os.path.join(home, "sessions", "*", "session_*", "agents", "*",
-                           "wire.jsonl"),
+            _os.path.join(home, "sessions", "*", "session_*", "agents", "*", "wire.jsonl"),
             _os.path.join(home, "sessions", "*", "agents", "*", "wire.jsonl"),
         )
         for pattern in patterns:
@@ -2228,8 +2242,7 @@ def scan_wire_for_marker(*, session_home: object, marker: str) -> dict[str, Any]
             except Exception:  # noqa: BLE001 - a bad pattern scans nothing
                 continue
     try:
-        paths = sorted(set(paths),
-                       key=lambda p: _os.path.getmtime(p), reverse=True)
+        paths = sorted(set(paths), key=lambda p: _os.path.getmtime(p), reverse=True)
     except Exception:  # noqa: BLE001 - mtime failure keeps glob order
         paths = sorted(set(paths))
     for path in paths[:WIRE_SCAN_MAX_FILES]:
@@ -2270,19 +2283,18 @@ def scan_wire_for_marker(*, session_home: object, marker: str) -> dict[str, Any]
             texts = [t for t in _wire_texts(record) if marker in t]
             if not texts:
                 continue
-            hit = {"wire_path": path,
-                   "wire_time": record.get("time"),
-                   "wire_type": kind}
-            if (kind == "context.append_message"
-                    and isinstance(record.get("message"), dict)
-                    and record["message"].get("role") == "user"):
+            hit = {"wire_path": path, "wire_time": record.get("time"), "wire_type": kind}
+            if (
+                kind == "context.append_message"
+                and isinstance(record.get("message"), dict)
+                and record["message"].get("role") == "user"
+            ):
                 if found["model_context_entry"] is None:
                     found["model_context_entry"] = hit
             elif kind in ("turn.prompt", "turn.steer", "prompt.accepted"):
                 if found["prompt_accepted"] is None:
                     found["prompt_accepted"] = hit
-            if (found["model_context_entry"] is not None
-                    and found["prompt_accepted"] is not None):
+            if found["model_context_entry"] is not None and found["prompt_accepted"] is not None:
                 return found
     return found
 
@@ -2309,33 +2321,46 @@ def reconcile_reminder_from_wire(
     try:
         row = get(operation_id)
     except NativeControlError as exc:
-        return {"reconciled": False, "reason": f"lookup failed: {exc}",
-                "record": None, "evidence": None}
+        return {
+            "reconciled": False,
+            "reason": f"lookup failed: {exc}",
+            "record": None,
+            "evidence": None,
+        }
     if row is None:
-        return {"reconciled": False, "reason": "unknown-operation",
-                "record": None, "evidence": None}
+        return {
+            "reconciled": False,
+            "reason": "unknown-operation",
+            "record": None,
+            "evidence": None,
+        }
     state = row.get("state")
     if state in (COMPLETED, REFUSED):
-        return {"reconciled": False, "reason": f"already-{state}",
-                "record": row, "evidence": None}
+        return {"reconciled": False, "reason": f"already-{state}", "record": row, "evidence": None}
     if state in (INTENDED, WRITING):
-        return {"reconciled": False, "reason": "owned-by-effect-path",
-                "record": row, "evidence": None}
+        return {
+            "reconciled": False,
+            "reason": "owned-by-effect-path",
+            "record": row,
+            "evidence": None,
+        }
     if state not in (POSTED, ACCEPTED, AMBIGUOUS):
-        return {"reconciled": False, "reason": f"unexpected-state-{state}",
-                "record": row, "evidence": None}
+        return {
+            "reconciled": False,
+            "reason": f"unexpected-state-{state}",
+            "record": row,
+            "evidence": None,
+        }
     scan = scan_wire_for_marker(session_home=session_home, marker=marker)
     entry = scan.get("model_context_entry")
     accepted = scan.get("prompt_accepted")
     if entry is None and accepted is None:
-        return {"reconciled": False, "reason": "no-wire-evidence",
-                "record": row, "evidence": scan}
+        return {"reconciled": False, "reason": "no-wire-evidence", "record": row, "evidence": scan}
     if entry is not None:
         outcome: str = COMPLETED
         hit = entry
     elif state == ACCEPTED:
-        return {"reconciled": False, "reason": "already-accepted",
-                "record": row, "evidence": scan}
+        return {"reconciled": False, "reason": "already-accepted", "record": row, "evidence": scan}
     else:
         outcome = ACCEPTED
         hit = accepted
@@ -2343,35 +2368,38 @@ def reconcile_reminder_from_wire(
         operation_id=operation_id,
         observed_at=_now(),
         observer="kimi-wire-scan",
-        evidence={"marker_echo": marker,
-                  "wire_path": hit.get("wire_path") if isinstance(
-                      hit, dict) else None,
-                  "wire_time": hit.get("wire_time") if isinstance(
-                      hit, dict) else None,
-                  "wire_type": hit.get("wire_type") if isinstance(
-                      hit, dict) else None},
+        evidence={
+            "marker_echo": marker,
+            "wire_path": hit.get("wire_path") if isinstance(hit, dict) else None,
+            "wire_time": hit.get("wire_time") if isinstance(hit, dict) else None,
+            "wire_type": hit.get("wire_type") if isinstance(hit, dict) else None,
+        },
     )
     try:
         if state == AMBIGUOUS:
-            record = reconcile(operation_id=operation_id,
-                               observation=observation, outcome=outcome)
+            record = reconcile(operation_id=operation_id, observation=observation, outcome=outcome)
         elif outcome == COMPLETED:
             record = record_reminder_acceptance(
-                operation_id=operation_id, observation=observation,
-                expected_marker=marker, outcome=COMPLETED)
+                operation_id=operation_id,
+                observation=observation,
+                expected_marker=marker,
+                outcome=COMPLETED,
+            )
         else:
             record = record_observation(
-                operation_id=operation_id, observation=observation,
-                outcome=ACCEPTED)
+                operation_id=operation_id, observation=observation, outcome=ACCEPTED
+            )
     except NativeControlError as exc:
-        return {"reconciled": False, "reason": f"evidence rejected: {exc}",
-                "record": row, "evidence": scan}
-    return {"reconciled": True, "reason": outcome, "record": record,
-            "evidence": scan}
+        return {
+            "reconciled": False,
+            "reason": f"evidence rejected: {exc}",
+            "record": row,
+            "evidence": scan,
+        }
+    return {"reconciled": True, "reason": outcome, "record": record, "evidence": scan}
 
 
-def unresolved_reminders_for(*, terminal_id: str,
-                             generation: str) -> list:
+def unresolved_reminders_for(*, terminal_id: str, generation: str) -> list:
     """All unresolved KIND_REMIND rows for one scope, oldest first.
 
     Includes ambiguous rows: the boundary — not the journal — decides
@@ -2380,17 +2408,19 @@ def unresolved_reminders_for(*, terminal_id: str,
     """
     try:
         with database.SessionLocal() as db:
-            return [_row_dict(row) for row in _pending_reminder_rows(
-                db, terminal_id=terminal_id, generation=generation)]
+            return [
+                _row_dict(row)
+                for row in _pending_reminder_rows(
+                    db, terminal_id=terminal_id, generation=generation
+                )
+            ]
     except NativeControlError:
         raise
     except Exception as exc:  # noqa: BLE001 - fail closed
-        raise NativeControlUnavailable(
-            f"reminder lookup failed: {exc}") from exc
+        raise NativeControlUnavailable(f"reminder lookup failed: {exc}") from exc
 
 
-def latest_terminal_reminder_for(*, terminal_id: str,
-                                     generation: str) -> Optional[dict]:
+def latest_terminal_reminder_for(*, terminal_id: str, generation: str) -> Optional[dict]:
     """The newest terminal (completed/refused) KIND_REMIND row, if any.
 
     Read-only health evidence for the conductor's hook-health path: a
@@ -2405,19 +2435,19 @@ def latest_terminal_reminder_for(*, terminal_id: str,
                     database.KimiNativeControlOperationModel.kind == KIND_REMIND,
                     database.KimiNativeControlOperationModel.terminal_id == terminal_id,
                     database.KimiNativeControlOperationModel.generation == generation,
-                    database.KimiNativeControlOperationModel.state.in_(
-                        (COMPLETED, REFUSED)),
+                    database.KimiNativeControlOperationModel.state.in_((COMPLETED, REFUSED)),
                 )
-                .order_by(database.KimiNativeControlOperationModel.updated_at.desc(),
-                          database.KimiNativeControlOperationModel.operation_id.desc())
+                .order_by(
+                    database.KimiNativeControlOperationModel.updated_at.desc(),
+                    database.KimiNativeControlOperationModel.operation_id.desc(),
+                )
                 .first()
             )
             return _row_dict(row) if row is not None else None
     except NativeControlError:
         raise
     except Exception as exc:  # noqa: BLE001 - fail closed
-        raise NativeControlUnavailable(
-            f"terminal reminder lookup failed: {exc}") from exc
+        raise NativeControlUnavailable(f"terminal reminder lookup failed: {exc}") from exc
 
 
 def reconcile_reminder_composer(
@@ -2457,63 +2487,111 @@ def reconcile_reminder_composer(
     try:
         row = get(operation_id)
     except NativeControlError as exc:
-        return {"reconciled": False, "reason": f"lookup failed: {exc}",
-                "record": None, "composer_holds_marker": None,
-                "evidence": None, "viewport_rows": None}
+        return {
+            "reconciled": False,
+            "reason": f"lookup failed: {exc}",
+            "record": None,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
     if row is None:
-        return {"reconciled": False, "reason": "unknown-operation",
-                "record": None, "composer_holds_marker": None,
-                "evidence": None, "viewport_rows": None}
+        return {
+            "reconciled": False,
+            "reason": "unknown-operation",
+            "record": None,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
     state = row.get("state")
     if state in (COMPLETED, REFUSED):
-        return {"reconciled": False, "reason": f"already-{state}",
-                "record": row, "composer_holds_marker": None,
-                "evidence": None, "viewport_rows": None}
+        return {
+            "reconciled": False,
+            "reason": f"already-{state}",
+            "record": row,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
     if state in (INTENDED, WRITING):
-        return {"reconciled": False, "reason": "owned-by-effect-path",
-                "record": row, "composer_holds_marker": None,
-                "evidence": None, "viewport_rows": None}
+        return {
+            "reconciled": False,
+            "reason": "owned-by-effect-path",
+            "record": row,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
     if state not in (POSTED, ACCEPTED, AMBIGUOUS):
-        return {"reconciled": False, "reason": f"unexpected-state-{state}",
-                "record": row, "composer_holds_marker": None,
-                "evidence": None, "viewport_rows": None}
+        return {
+            "reconciled": False,
+            "reason": f"unexpected-state-{state}",
+            "record": row,
+            "composer_holds_marker": None,
+            "evidence": None,
+            "viewport_rows": None,
+        }
     if viewport_rows is None:
         try:
-            from cli_agent_orchestrator.services import (
-                native_pane_input as _pane)
-            viewport_rows = list(_pane.capture_pane_screen(
-                pane_id, timeout=_pane._OBSERVATION_CAPTURE_TIMEOUT_SECONDS))
+            from cli_agent_orchestrator.services import native_pane_input as _pane
+
+            viewport_rows = list(
+                _pane.capture_pane_screen(
+                    pane_id, timeout=_pane._OBSERVATION_CAPTURE_TIMEOUT_SECONDS
+                )
+            )
         except Exception:  # noqa: BLE001 - capture failure is no evidence
-            return {"reconciled": False, "reason": "composer-unreadable",
-                    "record": row, "composer_holds_marker": None,
-                    "evidence": None, "viewport_rows": None}
+            return {
+                "reconciled": False,
+                "reason": "composer-unreadable",
+                "record": row,
+                "composer_holds_marker": None,
+                "evidence": None,
+                "viewport_rows": None,
+            }
     else:
         viewport_rows = list(viewport_rows)
     visible = "\n".join(viewport_rows)
     if marker and marker in visible:
         if state == AMBIGUOUS:
-            return {"reconciled": False, "reason": "already-ambiguous",
-                    "record": row, "composer_holds_marker": True,
-                    "evidence": None, "viewport_rows": viewport_rows}
+            return {
+                "reconciled": False,
+                "reason": "already-ambiguous",
+                "record": row,
+                "composer_holds_marker": True,
+                "evidence": None,
+                "viewport_rows": viewport_rows,
+            }
         record = mark_ambiguous(
             operation_id=operation_id,
             reason="partial owned bytes visible unsubmitted in the "
-                   "composer; fate unknown, will not compound")
-        return {"reconciled": True, "reason": "ambiguous-partial-composer",
-                "record": record, "composer_holds_marker": True,
-                "evidence": None, "viewport_rows": viewport_rows}
+            "composer; fate unknown, will not compound",
+        )
+        return {
+            "reconciled": True,
+            "reason": "ambiguous-partial-composer",
+            "record": record,
+            "composer_holds_marker": True,
+            "evidence": None,
+            "viewport_rows": viewport_rows,
+        }
     settled = reconcile_reminder_from_wire(
-        operation_id=operation_id, marker=marker,
-        session_home=session_home)
+        operation_id=operation_id, marker=marker, session_home=session_home
+    )
     if settled.get("reconciled"):
         settled["composer_holds_marker"] = False
         settled["viewport_rows"] = viewport_rows
         return settled
     if state == AMBIGUOUS:
-        return {"reconciled": False, "reason": "already-ambiguous",
-                "record": row, "composer_holds_marker": False,
-                "evidence": settled.get("evidence"),
-                "viewport_rows": viewport_rows}
+        return {
+            "reconciled": False,
+            "reason": "already-ambiguous",
+            "record": row,
+            "composer_holds_marker": False,
+            "evidence": settled.get("evidence"),
+            "viewport_rows": viewport_rows,
+        }
     # Marker-absent says only that OUR marker bytes are not visible;
     # it never proves the composer empty (a marker-free partial or an
     # operator draft may sit there). Delivery permission is decided by
@@ -2521,12 +2599,17 @@ def reconcile_reminder_composer(
     record = mark_ambiguous(
         operation_id=operation_id,
         reason="owned bytes absent from the composer but unproven in "
-               "the provider wire; fate unknown, marker absent "
-               "(composer emptiness unproven)")
-    return {"reconciled": True, "reason": "ambiguous-unproven-clear",
-            "record": record, "composer_holds_marker": False,
-            "evidence": settled.get("evidence"),
-            "viewport_rows": viewport_rows}
+        "the provider wire; fate unknown, marker absent "
+        "(composer emptiness unproven)",
+    )
+    return {
+        "reconciled": True,
+        "reason": "ambiguous-unproven-clear",
+        "record": record,
+        "composer_holds_marker": False,
+        "evidence": settled.get("evidence"),
+        "viewport_rows": viewport_rows,
+    }
 
 
 def refuse_reminder(
@@ -2553,8 +2636,7 @@ def refuse_reminder(
     returns its existing row unchanged.
     """
     if reason not in REFUSAL_REASONS:
-        raise NativeControlInvalid(
-            f"unknown refusal reason {reason!r}")
+        raise NativeControlInvalid(f"unknown refusal reason {reason!r}")
     binding = _validate_binding(
         operation_id=operation_id,
         native_session_id=native_session_id,
@@ -2566,8 +2648,8 @@ def refuse_reminder(
     marker = _require_text(marker, field="marker")
     body = _require_text(text, field="text")
     plan = plan_composer_keystrokes(
-        f"{body}\n\n[cao-context-restoration marker:{marker}]",
-        field="text")
+        f"{body}\n\n[cao-context-restoration marker:{marker}]", field="text"
+    )
     observed = _validated_turn_observation(observation)
     record, is_new = _open(
         kind=KIND_REMIND,

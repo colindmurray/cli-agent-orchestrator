@@ -1377,8 +1377,8 @@ def complete_handoff(
     # The call names no session: resolve it from the handoff row (session
     # never moves for a handoff; unknown ids raise here exactly as the
     # write below would), then fence the transfer.
-    from cli_agent_orchestrator.services.callback_recovery import (
-        session_lifecycle_write_claim)
+    from cli_agent_orchestrator.services.callback_recovery import session_lifecycle_write_claim
+
     with session_lifecycle_write_claim(get_handoff(handoff_id)["session_name"]):
         return _with_session(
             lambda session: _complete_once(

@@ -725,8 +725,8 @@ def _occurrence_session_fence(session_name: str):
     write claim, so a delivery and a succession are mutually exclusive.
     Short transactions only, never across dispatch or other I/O.
     """
-    from cli_agent_orchestrator.services.callback_recovery import (
-        session_lifecycle_write_claim)
+    from cli_agent_orchestrator.services.callback_recovery import session_lifecycle_write_claim
+
     return session_lifecycle_write_claim(session_name)
 
 

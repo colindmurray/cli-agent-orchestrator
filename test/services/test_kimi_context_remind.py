@@ -84,14 +84,14 @@ def _attach(**over) -> dict:
     na.declare(**kw, intent=intent, pane_id="%7")
     na.mark_starting(**kw, pane_id="%7")
     return na.mark_attached(
-        **kw, pane_id="%7",
-        process_identity=na.process_identity(pid=4242, start_marker="88213"))
+        **kw, pane_id="%7", process_identity=na.process_identity(pid=4242, start_marker="88213")
+    )
 
 
 def _idle() -> dict:
     return knc.turn_observation(
-        active_turn_id=None, observed_at="2026-09-09T00:00:00Z",
-        observer="status_monitor")
+        active_turn_id=None, observed_at="2026-09-09T00:00:00Z", observer="status_monitor"
+    )
 
 
 def _remind(transport, **over) -> dict:
@@ -145,8 +145,12 @@ def test_active_turn_steers_proven_chord_without_enter():
     chords = sorted(knc.steer_chords(PROVEN_VERSION))
     assert chords, "test needs a proven chord set"
     record = _remind(
-        transport, operation_id="op_steer_1", turn_state="active",
-        steer_chord=chords[0], provider_version=PROVEN_VERSION)
+        transport,
+        operation_id="op_steer_1",
+        turn_state="active",
+        steer_chord=chords[0],
+        provider_version=PROVEN_VERSION,
+    )
     assert record["state"] == "posted"
     assert f"chord:{chords[0]}" in transport.calls
     assert "enter" not in transport.calls
@@ -166,8 +170,12 @@ def test_active_turn_on_unproven_build_refuses_missing_capability():
     _attach()
     transport = Recorder()
     record = _remind(
-        transport, operation_id="op_0361_1", turn_state="active",
-        steer_chord="C-s", provider_version=UNPROVEN_VERSION)
+        transport,
+        operation_id="op_0361_1",
+        turn_state="active",
+        steer_chord="C-s",
+        provider_version=UNPROVEN_VERSION,
+    )
     assert record["state"] == "refused"
     assert record["refusal_reason"] == knc.REFUSED_UNPROVEN_COMPOSER_NEWLINE
     assert transport.calls == []
@@ -178,8 +186,12 @@ def test_active_turn_with_typing_but_no_chord_pin_refuses(monkeypatch):
     monkeypatch.setattr(knc, "steer_chords", lambda _v: frozenset())
     transport = Recorder()
     record = _remind(
-        transport, operation_id="op_nopin_1", turn_state="active",
-        steer_chord="C-s", provider_version="0.29.0")
+        transport,
+        operation_id="op_nopin_1",
+        turn_state="active",
+        steer_chord="C-s",
+        provider_version="0.29.0",
+    )
     assert record["state"] == "refused"
     assert record["refusal_reason"] == knc.REFUSED_UNPROVEN_STEER
     assert transport.calls == []
@@ -190,8 +202,12 @@ def test_active_turn_without_chord_primitive_refuses():
     transport = NoChord()
     chords = sorted(knc.steer_chords(PROVEN_VERSION))
     record = _remind(
-        transport, operation_id="op_np_1", turn_state="active",
-        steer_chord=chords[0], provider_version=PROVEN_VERSION)
+        transport,
+        operation_id="op_np_1",
+        turn_state="active",
+        steer_chord=chords[0],
+        provider_version=PROVEN_VERSION,
+    )
     assert record["state"] == "refused"
     assert record["refusal_reason"] == knc.REFUSED_UNSUPPORTED_CONTROL
     assert transport.calls == []
@@ -237,31 +253,37 @@ def test_occurrence_mismatch_is_a_conflict_not_an_adopt():
 def test_idle_claim_naming_an_active_turn_is_invalid():
     _attach()
     busy = knc.turn_observation(
-        active_turn_id="turn_live", observed_at="2026-09-09T00:00:00Z",
-        observer="status_monitor")
+        active_turn_id="turn_live", observed_at="2026-09-09T00:00:00Z", observer="status_monitor"
+    )
     with pytest.raises(knc.NativeControlInvalid):
-        _remind(Recorder(), operation_id="op_bad_1", observation=busy,
-                turn_state="idle")
+        _remind(Recorder(), operation_id="op_bad_1", observation=busy, turn_state="idle")
 
 
 def test_acceptance_requires_marker_echo():
     _attach()
     _remind(Recorder(), operation_id="op_mk_1", marker="mk-echo")
     evidence = knc.provider_observation(
-        operation_id="op_mk_1", observed_at="2026-09-09T00:00:02Z",
-        observer="status_monitor", entered_turn_id="turn_9",
-        evidence={"marker_echo": "wrong"})
+        operation_id="op_mk_1",
+        observed_at="2026-09-09T00:00:02Z",
+        observer="status_monitor",
+        entered_turn_id="turn_9",
+        evidence={"marker_echo": "wrong"},
+    )
     with pytest.raises(knc.NativeControlInvalid):
         knc.record_reminder_acceptance(
-            operation_id="op_mk_1", observation=evidence,
-            expected_marker="mk-echo")
+            operation_id="op_mk_1", observation=evidence, expected_marker="mk-echo"
+        )
     assert knc.get("op_mk_1")["state"] == "posted"
     good = knc.provider_observation(
-        operation_id="op_mk_1", observed_at="2026-09-09T00:00:03Z",
-        observer="status_monitor", entered_turn_id="turn_9",
-        evidence={"marker_echo": "mk-echo"})
+        operation_id="op_mk_1",
+        observed_at="2026-09-09T00:00:03Z",
+        observer="status_monitor",
+        entered_turn_id="turn_9",
+        evidence={"marker_echo": "mk-echo"},
+    )
     done = knc.record_reminder_acceptance(
-        operation_id="op_mk_1", observation=good, expected_marker="mk-echo")
+        operation_id="op_mk_1", observation=good, expected_marker="mk-echo"
+    )
     assert done["state"] == "completed"
 
 
@@ -269,8 +291,10 @@ def test_pre_write_refusal_types_zero_bytes():
     _attach()
     transport = Recorder()
     record = _remind(
-        transport, operation_id="op_pw_1",
-        pre_write=lambda: (knc.REFUSED_WAIT_COVER, "a wait landed first"))
+        transport,
+        operation_id="op_pw_1",
+        pre_write=lambda: (knc.REFUSED_WAIT_COVER, "a wait landed first"),
+    )
     assert record["state"] == "refused"
     assert record["reminder_outcome"] == "refused"
     assert transport.calls == []
@@ -278,22 +302,44 @@ def test_pre_write_refusal_types_zero_bytes():
 
 def _wire_home(tmp_path, marker, *, accept_only=False):
     """A fake Kimi home whose session wire carries one marker."""
-    main = (tmp_path / "kh" / "sessions" / "wd_x_1" / "session_abc"
-            / "agents" / "main")
+    main = tmp_path / "kh" / "sessions" / "wd_x_1" / "session_abc" / "agents" / "main"
     main.mkdir(parents=True)
-    lines = [json.dumps({
-        "type": "turn.prompt", "agentId": "main",
-        "input": [{"type": "text",
-                   "text": f"goal: x\n\n[cao-context-restoration marker:{marker}]"}],
-        "origin": {"kind": "user"}, "time": 1})]
+    lines = [
+        json.dumps(
+            {
+                "type": "turn.prompt",
+                "agentId": "main",
+                "input": [
+                    {
+                        "type": "text",
+                        "text": f"goal: x\n\n[cao-context-restoration marker:{marker}]",
+                    }
+                ],
+                "origin": {"kind": "user"},
+                "time": 1,
+            }
+        )
+    ]
     if not accept_only:
-        lines.append(json.dumps({
-            "type": "context.append_message", "agentId": "main",
-            "message": {"role": "user",
-                        "content": [{"type": "text",
-                                     "text": f"goal: x\n\n[cao-context-restoration marker:{marker}]"}],
-                        "origin": {"kind": "user"}},
-            "time": 2}))
+        lines.append(
+            json.dumps(
+                {
+                    "type": "context.append_message",
+                    "agentId": "main",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"goal: x\n\n[cao-context-restoration marker:{marker}]",
+                            }
+                        ],
+                        "origin": {"kind": "user"},
+                    },
+                    "time": 2,
+                }
+            )
+        )
     (main / "wire.jsonl").write_text("\n".join(lines) + "\n")
     return str(tmp_path / "kh")
 
@@ -307,10 +353,8 @@ def test_wire_scan_finds_model_context_entry_and_accept(tmp_path):
 
 
 def test_wire_scan_missing_home_is_no_evidence(tmp_path):
-    scan = knc.scan_wire_for_marker(
-        session_home=str(tmp_path / "absent"), marker="op_scan_9")
-    assert scan == {"model_context_entry": None, "prompt_accepted": None,
-                    "files_scanned": 0}
+    scan = knc.scan_wire_for_marker(session_home=str(tmp_path / "absent"), marker="op_scan_9")
+    assert scan == {"model_context_entry": None, "prompt_accepted": None, "files_scanned": 0}
 
 
 def test_reconcile_completes_posted_row_on_marker_echo(tmp_path):
@@ -318,7 +362,8 @@ def test_reconcile_completes_posted_row_on_marker_echo(tmp_path):
     _remind(Recorder(), operation_id="op_wire_1", marker="op_wire_1")
     home = _wire_home(tmp_path, "op_wire_1")
     result = knc.reconcile_reminder_from_wire(
-        operation_id="op_wire_1", marker="op_wire_1", session_home=home)
+        operation_id="op_wire_1", marker="op_wire_1", session_home=home
+    )
     assert result["reconciled"] is True
     assert result["record"]["state"] == "completed"
 
@@ -327,8 +372,8 @@ def test_reconcile_leaves_posted_row_without_evidence(tmp_path):
     _attach()
     _remind(Recorder(), operation_id="op_wire_2", marker="op_wire_2")
     result = knc.reconcile_reminder_from_wire(
-        operation_id="op_wire_2", marker="op_wire_2",
-        session_home=str(tmp_path / "empty"))
+        operation_id="op_wire_2", marker="op_wire_2", session_home=str(tmp_path / "empty")
+    )
     assert result["reconciled"] is False
     assert result["reason"] == "no-wire-evidence"
     assert knc.get("op_wire_2")["state"] == "posted"
@@ -340,7 +385,8 @@ def test_reconcile_clears_ambiguous_reminder_on_echo(tmp_path):
     knc.mark_ambiguous(operation_id="op_wire_3", reason="submit raised")
     home = _wire_home(tmp_path, "op_wire_3")
     result = knc.reconcile_reminder_from_wire(
-        operation_id="op_wire_3", marker="op_wire_3", session_home=home)
+        operation_id="op_wire_3", marker="op_wire_3", session_home=home
+    )
     assert result["reconciled"] is True
     assert result["record"]["state"] == "completed"
 
@@ -350,10 +396,12 @@ def test_reconcile_never_moves_completed_row(tmp_path):
     _remind(Recorder(), operation_id="op_wire_4", marker="op_wire_4")
     home = _wire_home(tmp_path, "op_wire_4")
     first = knc.reconcile_reminder_from_wire(
-        operation_id="op_wire_4", marker="op_wire_4", session_home=home)
+        operation_id="op_wire_4", marker="op_wire_4", session_home=home
+    )
     assert first["record"]["state"] == "completed"
     second = knc.reconcile_reminder_from_wire(
-        operation_id="op_wire_4", marker="op_wire_4", session_home=home)
+        operation_id="op_wire_4", marker="op_wire_4", session_home=home
+    )
     assert second["reconciled"] is False
     assert second["reason"] == "already-completed"
 
@@ -364,48 +412,69 @@ def test_ambiguous_remind_does_not_block_other_kinds():
     knc.mark_ambiguous(operation_id="op_amb_r", reason="submit raised")
     # The production gate every lane calls: an ambiguous reminder is
     # inert labeled context, so other kinds proceed.
-    knc._assert_session_unblocked(
-        native_session_id=SESSION, operation_id="op_queue_other")
+    knc._assert_session_unblocked(native_session_id=SESSION, operation_id="op_queue_other")
     assert knc.unresolved_ambiguity(SESSION) is None
 
 
 def test_ambiguous_steer_still_blocks_everything():
     _attach()
     from cli_agent_orchestrator.clients import database
+
     with database.SessionLocal() as db:
-        db.add(database.KimiNativeControlOperationModel(
-            operation_id="op_amb_s", kind="steer", state="ambiguous",
-            provider=knc.PROVIDER, native_session_id=SESSION,
-            terminal_id=TERMINAL, generation=GENERATION,
-            execution_mode=em.NATIVE_TUI, payload_sha256="x",
-            intent_json="{}", epoch=0, created_at="t", updated_at="t"))
+        db.add(
+            database.KimiNativeControlOperationModel(
+                operation_id="op_amb_s",
+                kind="steer",
+                state="ambiguous",
+                provider=knc.PROVIDER,
+                native_session_id=SESSION,
+                terminal_id=TERMINAL,
+                generation=GENERATION,
+                execution_mode=em.NATIVE_TUI,
+                payload_sha256="x",
+                intent_json="{}",
+                epoch=0,
+                created_at="t",
+                updated_at="t",
+            )
+        )
         db.commit()
     with pytest.raises(Exception) as excinfo:
-        knc._assert_session_unblocked(
-            native_session_id=SESSION, operation_id="op_queue_blocked")
-    assert getattr(excinfo.value, "reason", "") == \
-        knc.REFUSED_UNRESOLVED_AMBIGUITY
+        knc._assert_session_unblocked(native_session_id=SESSION, operation_id="op_queue_blocked")
+    assert getattr(excinfo.value, "reason", "") == knc.REFUSED_UNRESOLVED_AMBIGUITY
 
 
 def test_refuse_reminder_journals_typed_zero_byte_refusal():
     _attach()
     record = knc.refuse_reminder(
-        operation_id="op_ref_1", native_session_id=SESSION,
-        terminal_id=TERMINAL, generation=GENERATION,
-        execution_mode=em.NATIVE_TUI, occurrence_id=OCCURRENCE,
-        text="current goal: ship the report", marker="op_ref_1",
-        observation=_idle(), reason=knc.REFUSED_WAIT_COVER,
-        detail="a wait landed first")
+        operation_id="op_ref_1",
+        native_session_id=SESSION,
+        terminal_id=TERMINAL,
+        generation=GENERATION,
+        execution_mode=em.NATIVE_TUI,
+        occurrence_id=OCCURRENCE,
+        text="current goal: ship the report",
+        marker="op_ref_1",
+        observation=_idle(),
+        reason=knc.REFUSED_WAIT_COVER,
+        detail="a wait landed first",
+    )
     assert record["state"] == "refused"
     assert record["refusal_reason"] == knc.REFUSED_WAIT_COVER
     # A replayed id returns its row, never a conflict.
     again = knc.refuse_reminder(
-        operation_id="op_ref_1", native_session_id=SESSION,
-        terminal_id=TERMINAL, generation=GENERATION,
-        execution_mode=em.NATIVE_TUI, occurrence_id=OCCURRENCE,
-        text="current goal: ship the report", marker="op_ref_1",
-        observation=_idle(), reason=knc.REFUSED_LIFECYCLE,
-        detail="changed mind too late")
+        operation_id="op_ref_1",
+        native_session_id=SESSION,
+        terminal_id=TERMINAL,
+        generation=GENERATION,
+        execution_mode=em.NATIVE_TUI,
+        occurrence_id=OCCURRENCE,
+        text="current goal: ship the report",
+        marker="op_ref_1",
+        observation=_idle(),
+        reason=knc.REFUSED_LIFECYCLE,
+        detail="changed mind too late",
+    )
     assert again["state"] == "refused"
     assert again["refusal_reason"] == knc.REFUSED_WAIT_COVER
 
@@ -424,12 +493,12 @@ def _stub_viewport(monkeypatch, rows=None, exc=None):
 def test_composer_holding_marker_goes_ambiguous_never_erases(tmp_path, monkeypatch):
     _attach()
     _remind(Recorder(), operation_id="op_cmp_1", marker="op_cmp_1")
-    _stub_viewport(monkeypatch, rows=[
-        "k> partial bytes here",
-        "[cao-context-restoration marker:op_cmp_1]"])
+    _stub_viewport(
+        monkeypatch, rows=["k> partial bytes here", "[cao-context-restoration marker:op_cmp_1]"]
+    )
     result = knc.reconcile_reminder_composer(
-        operation_id="op_cmp_1", marker="op_cmp_1",
-        pane_id="%1", session_home=str(tmp_path))
+        operation_id="op_cmp_1", marker="op_cmp_1", pane_id="%1", session_home=str(tmp_path)
+    )
     assert result["reconciled"] is True
     assert result["reason"] == "ambiguous-partial-composer"
     assert result["composer_holds_marker"] is True
@@ -442,8 +511,8 @@ def test_composer_clear_with_wire_echo_completes(tmp_path, monkeypatch):
     home = _wire_home(tmp_path, "op_cmp_2")
     _stub_viewport(monkeypatch, rows=["k> clean composer"])
     result = knc.reconcile_reminder_composer(
-        operation_id="op_cmp_2", marker="op_cmp_2",
-        pane_id="%1", session_home=home)
+        operation_id="op_cmp_2", marker="op_cmp_2", pane_id="%1", session_home=home
+    )
     assert result["reconciled"] is True
     assert result["record"]["state"] == "completed"
     assert result["composer_holds_marker"] is False
@@ -454,8 +523,11 @@ def test_composer_clear_without_echo_goes_ambiguous(tmp_path, monkeypatch):
     _remind(Recorder(), operation_id="op_cmp_3", marker="op_cmp_3")
     _stub_viewport(monkeypatch, rows=["k> user typed something else"])
     result = knc.reconcile_reminder_composer(
-        operation_id="op_cmp_3", marker="op_cmp_3",
-        pane_id="%1", session_home=str(tmp_path / "empty"))
+        operation_id="op_cmp_3",
+        marker="op_cmp_3",
+        pane_id="%1",
+        session_home=str(tmp_path / "empty"),
+    )
     assert result["reconciled"] is True
     assert result["reason"] == "ambiguous-unproven-clear"
     assert result["composer_holds_marker"] is False
@@ -467,8 +539,8 @@ def test_composer_unreadable_leaves_row_untouched(tmp_path, monkeypatch):
     _remind(Recorder(), operation_id="op_cmp_4", marker="op_cmp_4")
     _stub_viewport(monkeypatch, exc=OSError("tmux down"))
     result = knc.reconcile_reminder_composer(
-        operation_id="op_cmp_4", marker="op_cmp_4",
-        pane_id="%1", session_home=str(tmp_path))
+        operation_id="op_cmp_4", marker="op_cmp_4", pane_id="%1", session_home=str(tmp_path)
+    )
     assert result["reconciled"] is False
     assert result["reason"] == "composer-unreadable"
     assert result["composer_holds_marker"] is None
@@ -494,12 +566,19 @@ def test_posted_row_freezes_origin_and_hook_evidence():
     # fields, retrievable for diagnosis. Identity is the request id.
     _attach()
     transport = Recorder()
-    evidence = {"session_id": SESSION, "trigger": "auto",
-                "estimated_token_count": 77,
-                "observed_at": "2026-09-09T00:00:00Z"}
-    record = _remind(transport, operation_id="op_origin_1",
-                     marker="op_origin_1", origin="event",
-                     hook_evidence=evidence)
+    evidence = {
+        "session_id": SESSION,
+        "trigger": "auto",
+        "estimated_token_count": 77,
+        "observed_at": "2026-09-09T00:00:00Z",
+    }
+    record = _remind(
+        transport,
+        operation_id="op_origin_1",
+        marker="op_origin_1",
+        origin="event",
+        hook_evidence=evidence,
+    )
     assert record["reminder_outcome"] == "posted"
     row = knc.get("op_origin_1")
     assert row["transport"]["origin"] == "event"
@@ -520,31 +599,40 @@ def test_terminal_receipt_query_serves_health_metadata():
     # reminder text anywhere.
     _attach()
     transport = Recorder()
-    evidence = {"session_id": SESSION, "trigger": "auto",
-                "estimated_token_count": 5,
-                "observed_at": "2026-09-09T00:00:00Z"}
-    _remind(transport, operation_id="op_health_1", marker="op_health_1",
-            origin="event", hook_evidence=evidence)
-    open_rows = knc.unresolved_reminders_for(
-        terminal_id=TERMINAL, generation=GENERATION)
+    evidence = {
+        "session_id": SESSION,
+        "trigger": "auto",
+        "estimated_token_count": 5,
+        "observed_at": "2026-09-09T00:00:00Z",
+    }
+    _remind(
+        transport,
+        operation_id="op_health_1",
+        marker="op_health_1",
+        origin="event",
+        hook_evidence=evidence,
+    )
+    open_rows = knc.unresolved_reminders_for(terminal_id=TERMINAL, generation=GENERATION)
     assert [r["operation_id"] for r in open_rows] == ["op_health_1"]
     assert open_rows[0]["transport"]["origin"] == "event"
-    assert knc.latest_terminal_reminder_for(
-        terminal_id=TERMINAL, generation=GENERATION) is None
+    assert knc.latest_terminal_reminder_for(terminal_id=TERMINAL, generation=GENERATION) is None
     knc.record_reminder_acceptance(
         operation_id="op_health_1",
         observation=knc.provider_observation(
             operation_id="op_health_1",
             observed_at="2026-09-09T00:00:01Z",
             observer="test",
-            evidence={"marker_echo": "op_health_1",
-                      "wire_path": "w", "wire_time": 1,
-                      "wire_type": "context.append_message"}),
-        expected_marker="op_health_1")
-    assert knc.unresolved_reminders_for(
-        terminal_id=TERMINAL, generation=GENERATION) == []
-    last = knc.latest_terminal_reminder_for(
-        terminal_id=TERMINAL, generation=GENERATION)
+            evidence={
+                "marker_echo": "op_health_1",
+                "wire_path": "w",
+                "wire_time": 1,
+                "wire_type": "context.append_message",
+            },
+        ),
+        expected_marker="op_health_1",
+    )
+    assert knc.unresolved_reminders_for(terminal_id=TERMINAL, generation=GENERATION) == []
+    last = knc.latest_terminal_reminder_for(terminal_id=TERMINAL, generation=GENERATION)
     assert last["operation_id"] == "op_health_1"
     assert last["state"] == "completed"
     assert last["transport"]["hook_evidence"] == evidence

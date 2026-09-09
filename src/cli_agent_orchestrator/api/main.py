@@ -3934,8 +3934,7 @@ async def context_restore_pending(
         return {
             "operation_id": row.get("operation_id"),
             "state": row.get("state"),
-            "occurrence_id": (
-                adapter._intent_occurrence(row.get("intent"))),
+            "occurrence_id": (adapter._intent_occurrence(row.get("intent"))),
             "origin": transport.get("origin"),
             "hook_evidence": evidence if isinstance(evidence, dict) else None,
             "posted_at": row.get("posted_at"),
@@ -3946,11 +3945,13 @@ async def context_restore_pending(
         rows = await asyncio.to_thread(
             adapter.unresolved_reminders_for,
             terminal_id=str(terminal_id),
-            generation=generation or "")
+            generation=generation or "",
+        )
         last = await asyncio.to_thread(
             adapter.latest_terminal_reminder_for,
             terminal_id=str(terminal_id),
-            generation=generation or "")
+            generation=generation or "",
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

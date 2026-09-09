@@ -346,9 +346,9 @@ def _session_fence(session_name: Optional[str]):
     Order everywhere: session fence -> monitor RLock -> inbox lock ->
     transaction. Nothing nested under the fence takes another lock.
     """
-    from cli_agent_orchestrator.services.callback_recovery import (
-        session_lifecycle_write_claim)
+    from cli_agent_orchestrator.services.callback_recovery import session_lifecycle_write_claim
     from contextlib import nullcontext
+
     if not session_name:
         return nullcontext()
     return session_lifecycle_write_claim(session_name)
@@ -398,7 +398,9 @@ def register(request: RegistrationRequest, *, now: Optional[datetime] = None) ->
     # re-acquires it: PENDING already makes the worker ineligible, so
     # no fence may span the unbounded launch.
     from cli_agent_orchestrator.services.callback_recovery import (
-        session_lifecycle_write_claim as _session_write_claim)
+        session_lifecycle_write_claim as _session_write_claim,
+    )
+
     try:
         with _session_write_claim(request.session_name), database.SessionLocal() as db:
             existing = _operation_row(db, request.operation_id)
