@@ -3418,6 +3418,66 @@ def assert_route_observation_wake_admission_current(
         ) from exc
 
 
+def _open_v2_admission_occurrence(
+    db: Any, row: Any, request: ManagedLaunchV2AdmitRequest, task_occurrence_id: str
+) -> None:
+    """Open (or adopt) the admission's task occurrence in the claim txn.
+
+    The occurrence id rides the reservation (written at reserve, omitted
+    for taskless launches); the agent/incarnation come from the durable
+    roster binding the ``bound`` transition committed — never from the
+    caller.  A new initial assignment opens at round 0 over a digest of
+    the claim's immutable admission identity; an exact replay adopts.
+    """
+    from cli_agent_orchestrator.services import task_occurrence as occurrence
+
+    incarnation = stable_agent_roster.get_incarnation_by_terminal(
+        row.terminal_id, row.generation, db=db
+    )
+    if incarnation is None:
+        raise ManagedLaunchUnavailable(
+            "roster incarnation for the bound generation is not yet readable; "
+            "retry the claim"
+        )
+    expected_agent = getattr(row, "stable_agent_id", None) or (
+        stable_agent_roster.derive_initial_agent_id(row.terminal_id, row.generation)
+    )
+    if incarnation["agent_id"] != expected_agent:
+        raise ManagedLaunchConflict(
+            "roster incarnation for the bound generation names a different "
+            "stable agent than the reservation; refusing rather than opening "
+            "an occurrence under a disputed identity"
+        )
+    binding = _parse_json(row.binding_json, {})
+    identity = {**_admission_identity(request), "task_occurrence_id": task_occurrence_id}
+    try:
+        occurrence.open_occurrence(
+            occurrence.OpenRequest(
+                task_occurrence_id=task_occurrence_id,
+                session_name=row.session_name,
+                agent_id=incarnation["agent_id"],
+                round_index=0,
+                dispatch_digest=occurrence.dispatch_digest_for(identity),
+                incarnation=occurrence.EffectIncarnation(
+                    incarnation_id=incarnation["incarnation_id"],
+                    terminal_id=row.terminal_id,
+                    generation=row.generation,
+                    lineage_id=incarnation.get("lineage_id"),
+                    native_session_id=binding.get("native_session_id"),
+                ),
+            ),
+            db=db,
+        )
+    except occurrence.TaskOccurrenceConflict as exc:
+        raise ManagedLaunchConflict(
+            f"task occurrence refused the v2 admission: {exc}"
+        ) from exc
+    except occurrence.TaskOccurrenceError as exc:
+        raise ManagedLaunchUnavailable(
+            f"task occurrence unavailable for the v2 admission: {exc}"
+        ) from exc
+
+
 def claim_admission(
     reservation_id: str, request: ManagedLaunchV2AdmitRequest
 ) -> tuple[dict[str, Any], bool]:
@@ -3500,6 +3560,14 @@ def claim_admission(
                     synchronize_session=False,
                 )
             )
+            if updated == 1:
+                # The occurrence opens atomically with the admitting
+                # transition (cond-0842): the id rides the reservation
+                # (absent for taskless launches, which open nothing), the
+                # agent/incarnation come from the durable roster binding.
+                task_occurrence_id = getattr(row, "task_occurrence_id", None)
+                if task_occurrence_id is not None:
+                    _open_v2_admission_occurrence(db, row, request, task_occurrence_id)
             db.commit()
             row = _query(db, reservation_id)
             if updated == 1:
@@ -3511,6 +3579,20 @@ def claim_admission(
                 # orchestration type, or binding is a different immutable
                 # identity and is refused — never treated as a safe replay.
                 _assert_same_admission_identity(existing, request)
+                task_occurrence_id = getattr(row, "task_occurrence_id", None)
+                if task_occurrence_id is not None:
+                    # Adopt-open for a claim that committed before this
+                    # healing existed; a transient failure defers to the
+                    # next recovery pass rather than failing healthy state.
+                    try:
+                        _open_v2_admission_occurrence(db, row, request, task_occurrence_id)
+                    except ManagedLaunchUnavailable as exc:
+                        logger.warning(
+                            "v2 occurrence heal deferred for terminal %s: %s; "
+                            "the next reconcile pass retries it",
+                            row.terminal_id,
+                            exc,
+                        )
                 return _row_dict(row), False
             raise ManagedLaunchConflict(f"task admission requires state 'bound', not {row.state!r}")
     except ManagedLaunchError:
@@ -3739,6 +3821,73 @@ def complete_native_admission(
         raise ManagedLaunchUnavailable(f"native admission completion failed: {exc}") from exc
 
 
+def _finalize_row_occurrence_abandoned(db: Any, row: Any, delivery_id: str) -> None:
+    """Finalize the row's open occurrence as abandoned, in the caller txn.
+
+    No-op when the reservation carries no occurrence id (taskless rows and
+    rows reserved before the occurrence seam). Adopts an already-abandoned
+    occurrence. Refuses typed when the occurrence is missing, bound to a
+    different terminal/generation, or closed under another disposition —
+    abandonment never finalizes another worker's occurrence and never
+    rewrites a closed chain.
+    """
+    from cli_agent_orchestrator.services import task_occurrence as occurrence
+
+    occurrence_id = getattr(row, "task_occurrence_id", None)
+    if occurrence_id is None:
+        return
+    try:
+        record = occurrence.get_occurrence(occurrence_id, db=db)
+    except occurrence.TaskOccurrenceNotFound as exc:
+        raise ManagedLaunchConflict(
+            "reservation names an occurrence the store does not have; "
+            "refusing rather than abandoning half a chain"
+        ) from exc
+    except occurrence.TaskOccurrenceError as exc:
+        raise ManagedLaunchUnavailable(
+            f"task occurrence unreadable; abandonment unproven: {exc}"
+        ) from exc
+    if record.get("state") == occurrence.STATE_OPEN:
+        if (
+            record.get("terminal_id") != row.terminal_id
+            or record.get("generation") != row.generation
+        ):
+            raise ManagedLaunchConflict(
+                "reservation names an occurrence bound to a different "
+                "terminal/generation; refusing rather than finalizing "
+                "another worker's occurrence"
+            )
+        try:
+            occurrence.finalize_occurrence(
+                occurrence.FinalizeRequest(
+                    task_occurrence_id=occurrence_id,
+                    expected_revision=record.get("revision", 0),
+                    disposition=occurrence.DISPOSITION_ABANDONED,
+                    finalized_by="managed-launch-abandonment",
+                    note=f"definitive zero-byte abandonment of delivery {delivery_id}",
+                ),
+                db=db,
+            )
+        except occurrence.TaskOccurrenceConflict as exc:
+            raise ManagedLaunchConflict(
+                f"task occurrence refused abandonment: {exc}"
+            ) from exc
+        except occurrence.TaskOccurrenceError as exc:
+            raise ManagedLaunchUnavailable(
+                f"task occurrence unavailable for abandonment: {exc}"
+            ) from exc
+    elif not (
+        record.get("state") == occurrence.STATE_FINALIZED
+        and (record.get("finalized") or {}).get("disposition")
+        == occurrence.DISPOSITION_ABANDONED
+    ):
+        raise ManagedLaunchConflict(
+            "reservation names an occurrence already finalized "
+            f"{(record.get('finalized') or {}).get('disposition')!r}; "
+            "refusing rather than rewriting a closed chain"
+        )
+
+
 def mark_admission_refused(
     reservation_id: str,
     delivery_id: str,
@@ -3769,6 +3918,13 @@ def mark_admission_refused(
             admission["detail"] = detail
             admission["updated_at"] = _now()
             row.admission_json = _canonical_json(admission)
+            if reason not in _RETRYABLE_REFUSAL_REASONS:
+                # A permanent refusal ends the delivery's chain: the claim
+                # opened the reservation's occurrence, so it finalizes as
+                # abandoned in the same transaction and the goal chain ends
+                # instead of dangling. Retryable refusals keep the
+                # occurrence open — the same delivery may still complete.
+                _finalize_row_occurrence_abandoned(db, row, delivery_id)
             # The row is preserved rather than advanced: nothing was
             # delivered, so nothing downstream may treat this generation
             # as carrying a task.
