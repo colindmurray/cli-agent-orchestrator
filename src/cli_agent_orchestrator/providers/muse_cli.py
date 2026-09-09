@@ -43,7 +43,8 @@ from __future__ import annotations
 import logging
 import re
 import shlex
-from typing import TYPE_CHECKING, List, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from cli_agent_orchestrator.backends.registry import get_backend
 from cli_agent_orchestrator.models.terminal import TerminalStatus
@@ -104,6 +105,7 @@ class MuseCliProvider(BaseProvider):
         expected_model: Optional[str] = None,
         expected_effort: Optional[str] = None,
         launch_profile: Optional["AgentProfile"] = None,
+        hooks_workspace: Optional[str] = None,
     ) -> None:
         super().__init__(terminal_id, session_name, window_name, allowed_tools, skill_prompt)
         self._agent_profile = agent_profile
@@ -113,6 +115,11 @@ class MuseCliProvider(BaseProvider):
         # launch argv consumes this exact object and never reloads the
         # profile by name. None keeps the legacy load.
         self._launch_profile = launch_profile
+        self._hooks_workspace = hooks_workspace
+        # The cond-0845 installation record (or None when restoration is
+        # skipped/degraded). Read-only diagnostic surface; never a gate.
+        self._context_restore: Optional[Dict[str, Any]] = None
+        self._hooks_file_created = False
         self._initialized = False
         self._has_received_input = False
         # Shell process running in the pane before muse launches; used to detect
@@ -148,6 +155,71 @@ class MuseCliProvider(BaseProvider):
         if self._expected_effort:
             parts.extend(["--reasoning-effort", self._expected_effort])
         return shlex.join(parts)
+
+    @property
+    def context_restoration(self) -> Optional[Dict[str, Any]]:
+        """The cond-0845 installation record, or None when skipped/degraded."""
+        return self._context_restore
+
+    def _install_context_restore(self) -> None:
+        """Install this terminal's PreLLMCall restoration hook.
+
+        Runs before ``muse`` starts so the first model call already
+        carries restoration. Never raises: every failure degrades to a
+        hook-free launch with a logged reason. Project hooks load under
+        the existing ``--yolo`` run-flag trust in :meth:`_build_command`
+        — no trust change here, and none is needed while that flag
+        stands; if a launch ever drops it, the hook silently does not
+        load (recorded limitation, not a second gate).
+        """
+        if self._hooks_workspace is None:
+            logger.debug(
+                "muse context restoration skipped for terminal %s (no hooks workspace)",
+                self.terminal_id,
+            )
+            return
+        try:
+            from cli_agent_orchestrator.services import muse_context_restore
+
+            installation, degraded = muse_context_restore.attach(
+                Path(self._hooks_workspace),
+                terminal_id=self.terminal_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - restoration never fails init
+            logger.warning(
+                "muse context restoration install failed for terminal %s: %s",
+                self.terminal_id,
+                exc,
+            )
+            return
+        if degraded is not None:
+            logger.warning("muse context restoration degraded: %s", degraded)
+            return
+        self._context_restore = installation
+        self._hooks_file_created = bool(installation["hooks_file_created"])
+
+    def _uninstall_context_restore(self) -> None:
+        """Remove this terminal's hook entries; never touches anything else."""
+        if self._hooks_workspace is None:
+            self._context_restore = None
+            return
+        try:
+            from cli_agent_orchestrator.services import muse_context_restore
+
+            muse_context_restore.uninstall(
+                Path(self._hooks_workspace),
+                terminal_id=self.terminal_id,
+                created_file=self._hooks_file_created,
+            )
+        except Exception as exc:  # noqa: BLE001 - teardown is best-effort
+            logger.warning(
+                "muse context restoration uninstall failed for terminal %s: %s",
+                self.terminal_id,
+                exc,
+            )
+        finally:
+            self._context_restore = None
+            self._hooks_file_created = False
 
     @classmethod
     def supports_sealed_launch(
@@ -233,6 +305,14 @@ class MuseCliProvider(BaseProvider):
         status_monitor.notify_input_sent(self.terminal_id)
 
         command = self._build_command()
+
+        # Passive goal restoration (cond-0845): the workspace hooks file
+        # must exist before muse starts so the first model call already
+        # carries it. Resume runs this same path, so the entry is
+        # (re)installed there too. Degradation is to a hook-free launch,
+        # never an init failure.
+        self._install_context_restore()
+
         get_backend().send_keys(self.session_name, self.window_name, command)
 
         if not await wait_until_status(
@@ -325,4 +405,5 @@ class MuseCliProvider(BaseProvider):
         return "/exit"
 
     def cleanup(self) -> None:
-        return None
+        """Remove this terminal's restoration hook entries, if any."""
+        self._uninstall_context_restore()
