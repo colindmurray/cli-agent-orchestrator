@@ -922,15 +922,45 @@ def live_state_snapshot():
 
 def _prove_paired_server(server, port: int) -> None:
     """Identity proof BEFORE any mutation: the answering server is the
-    owned test instance. Uses only the existing health/process contract:
-    our spawned PID is alive, and our own child's log records serving
-    this exact port. A foreign listener on the port fails here instead
-    of receiving our writes."""
-    assert server.process.poll() is None, "owned server process already dead"
+    owned test instance. Uses only the fixture's supported handles: our
+    spawned child is alive (``is_alive`` closes over the owned Popen),
+    and our own child's log records serving this exact port. A foreign
+    listener on the port fails here instead of receiving our writes."""
+    assert server.is_alive(), "owned server process already dead"
     log_text = server.log_path.read_text(errors="replace")[-4000:]
     assert (
         f"127.0.0.1:{port}" in log_text or f":{port}" in log_text
     ), f"owned server log names no bind on {port}; refusing mutations"
+
+
+def test_prove_paired_server_pins_liveness_and_bind_log(tmp_path):
+    """Both halves of the pre-mutation identity proof, with no network.
+
+    A dead owned child refuses even when the log names the port, and a
+    live child whose log never bound the port refuses mutations. The
+    handle is built as a real ``CaoServer`` so drift in the fixture
+    interface (a removed ``is_alive``) fails here, not behind a mock.
+    """
+    from test.fixtures.cao_server import CaoServer
+
+    def _server(alive: bool, log_text: str) -> CaoServer:
+        log_path = tmp_path / f"server-{alive}-{len(log_text)}.log"
+        log_path.write_text(log_text)
+        return CaoServer(
+            url="http://127.0.0.1:1",
+            port=1,
+            home_dir=tmp_path,
+            db_path=tmp_path / "db.sqlite",
+            log_path=log_path,
+            stop=lambda: None,
+            is_alive=lambda: alive,
+        )
+
+    _prove_paired_server(_server(True, "serving on 127.0.0.1:1\n"), 1)
+    with pytest.raises(AssertionError, match="already dead"):
+        _prove_paired_server(_server(False, "serving on 127.0.0.1:1\n"), 1)
+    with pytest.raises(AssertionError, match="refusing mutations"):
+        _prove_paired_server(_server(True, "listening elsewhere\n"), 1)
 
 
 @needs_loopback

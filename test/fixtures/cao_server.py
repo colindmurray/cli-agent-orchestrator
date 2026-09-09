@@ -99,6 +99,10 @@ class CaoServer:
         log_path: File where the subprocess's merged stdout+stderr is
             appended; tail it for failure diagnostics.
         stop: Idempotent teardown callable.
+        is_alive: Liveness probe closing over the owned ``Popen`` — the
+            only supported ownership handle. Never reach past it for
+            ``process``/``pid`` attributes; they are not part of this
+            interface.
     """
 
     url: str
@@ -107,6 +111,7 @@ class CaoServer:
     db_path: Path
     log_path: Path
     stop: Callable[[], None]
+    is_alive: Callable[[], bool]
 
 
 @dataclass(frozen=True)
@@ -441,6 +446,7 @@ def _start_cao_server(
         db_path=db_path,
         log_path=log_path,
         stop=_stop,
+        is_alive=lambda: process.poll() is None,
     )
     _LIVE_SERVERS.add(server)
     return server
