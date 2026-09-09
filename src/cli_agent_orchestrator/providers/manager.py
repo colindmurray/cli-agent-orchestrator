@@ -160,6 +160,10 @@ class ProviderManager:
         # validated artifact instead of re-resolving. ``None`` keeps
         # legacy per-adapter resolution.
         prepared_sealed_launch: Optional[PreparedSealedLaunch] = None,
+        # Pane working directory for the cond-0845 PreLLMCall hook
+        # (workspace ``.muse/hooks.json``). Forwarded to the Muse
+        # adapter only; ``None`` skips restoration with a logged reason.
+        hooks_workspace: Optional[str] = None,
     ) -> BaseProvider:
         """Create and store provider instance."""
         try:
@@ -237,6 +241,7 @@ class ProviderManager:
                     expected_model=expected_model,
                     expected_effort=expected_effort,
                     launch_profile=launch_profile,
+                    hooks_workspace=hooks_workspace,
                 )
             elif provider_type == ProviderType.OPENCODE_CLI.value:
                 provider = OpenCodeCliProvider(

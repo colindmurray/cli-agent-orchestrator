@@ -3167,6 +3167,15 @@ async def create_terminal(
             skill_prompt=skill_prompt,
             model=profile.model if profile else None,
             trusted_project_root=provider_trust_root,
+            # The cond-0845 Muse PreLLMCall hook installs into the same
+            # working directory the pane itself starts in (workspace
+            # ``.muse/hooks.json``) — Muse only; every other provider
+            # receives None and is unaffected.
+            hooks_workspace=(
+                effective_working_directory
+                if provider == ProviderType.MUSE_CLI.value
+                else None
+            ),
             # The provider launch consumes the exact pre-task minted native
             # id AND the same effective route (model/effort) the pre-task
             # bootstrap selected — for Codex the observed actual model and
