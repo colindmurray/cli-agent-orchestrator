@@ -265,31 +265,46 @@ def _executable(path: str) -> Optional[str]:
     return None
 
 
-def resolve_wrapper_executable(explicit: Optional[str] = None) -> Optional[str]:
+def resolve_wrapper_executable(
+    explicit: Optional[str] = None,
+    *,
+    search_path: Optional[str] = None,
+) -> Optional[str]:
     """Absolute wrapper path, or None when it cannot be resolved.
 
     None is a normal answer, not an error: a launch whose environment
     cannot resolve the wrapper degrades to restoration-uninstalled
     settings (logged by the caller) rather than failing a launch over a
-    restoration hook.
+    restoration hook. ``search_path`` overrides the PATH the bare-name
+    lookup probes; callers binding a worker environment pass that
+    environment's PATH so the probe answers for the worker, not the
+    supervisor. None keeps the inherited PATH.
     """
     if explicit:
         if os.path.dirname(explicit):
             return _executable(explicit)
         found = shutil.which(explicit)
         return _executable(found) if found else None
-    found = shutil.which(WRAPPER_ENTRY_POINT)
+    found = shutil.which(WRAPPER_ENTRY_POINT, path=search_path)
     return _executable(found) if found else None
 
 
-def resolve_conduct_binary(explicit: Optional[str] = None) -> Optional[str]:
-    """Absolute ``conduct`` path, or None when it cannot be resolved."""
+def resolve_conduct_binary(
+    explicit: Optional[str] = None,
+    *,
+    search_path: Optional[str] = None,
+) -> Optional[str]:
+    """Absolute ``conduct`` path, or None when it cannot be resolved.
+
+    ``search_path`` overrides the PATH the bare-name lookup probes, as
+    in :func:`resolve_wrapper_executable`; None keeps the inherited PATH.
+    """
     if explicit:
         if os.path.dirname(explicit):
             return _executable(explicit)
         found = shutil.which(explicit)
         return _executable(found) if found else None
-    found = shutil.which("conduct")
+    found = shutil.which("conduct", path=search_path)
     return _executable(found) if found else None
 
 
@@ -776,8 +791,13 @@ def prepare_codex_restoration(
     terminal_id = record["terminal_id"]
     generation = record["generation"]
     try:
-        wrapper = resolve_wrapper_executable()
-        conduct = resolve_conduct_binary()
+        # Probe the worker's PATH, not the supervisor's: the baked hook
+        # command executes in the worker's environment, so binaries
+        # reachable only from the inherited PATH must not count as
+        # installed for this generation.
+        worker_path = base_environment.get("PATH")
+        wrapper = resolve_wrapper_executable(search_path=worker_path)
+        conduct = resolve_conduct_binary(search_path=worker_path)
         if wrapper is None or conduct is None:
             missing = ", ".join(
                 name
