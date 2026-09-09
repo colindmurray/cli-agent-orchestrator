@@ -31,8 +31,7 @@ from cli_agent_orchestrator.models.managed_launch import (
 )
 from cli_agent_orchestrator.services import companion_receipts
 from cli_agent_orchestrator.services import execution_mode as em
-from cli_agent_orchestrator.services import provider_contracts
-from cli_agent_orchestrator.services import stable_agent_roster
+from cli_agent_orchestrator.services import provider_contracts, stable_agent_roster
 
 logger = logging.getLogger(__name__)
 from cli_agent_orchestrator.utils.terminal import generate_terminal_id, managed_window_name

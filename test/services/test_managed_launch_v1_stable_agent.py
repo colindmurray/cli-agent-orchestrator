@@ -30,9 +30,7 @@ from cli_agent_orchestrator.models.managed_launch import (
     ManagedLaunchAdmitRequest,
     ManagedLaunchReserveRequest,
 )
-from cli_agent_orchestrator.services import managed_launch
-from cli_agent_orchestrator.services import stable_agent_roster
-from cli_agent_orchestrator.services import task_occurrence
+from cli_agent_orchestrator.services import managed_launch, stable_agent_roster, task_occurrence
 from cli_agent_orchestrator.services.managed_provider_bridge import BRIDGE_VERSION
 
 DELIVERY_ID = "33333333-3333-4333-8333-333333333333"
