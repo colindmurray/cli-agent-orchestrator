@@ -33,22 +33,35 @@ config acceptance additionally verified offline via
   a worker-scoped ``config.toml`` is additive over the user's own hooks —
   which this adapter never writes (see :func:`compose_codex_home`).
 
-Child/parent identity (the Codex-critical rule): the reference states
-"Subagent hooks use the parent session id", and a subagent start fires
-``SessionStart`` (indistinguishable payload: same ``session_id``, no
-subagent marker) alongside ``SubagentStart``. Restoring on ``startup``
-would therefore inject the parent's goal into every child at spawn. This
-adapter installs no ``startup``/``resume`` matcher and no
-``SubagentStart``/``SubagentStop`` entries, so a subagent start never
-triggers restoration — structurally, not by payload inspection, because
-there is nothing truthful to inspect. Residual: a subagent's own mid-run
-compaction would still present the parent id under ``^compact$``; that
-behavior is UNPROVEN on the installed rev (no live model launch in this
-lane) and is a deployed-QA validation case, not a guessed mapping — the
-wrapper never invents a child identity. ``PostCompact`` is deliberately
-not a second mechanism: same subagent exposure with unclear ordering
-against ``SessionStart^compact``, and §10.1 selects one primary mechanism
-per worker.
+Child/parent identity (the Codex-critical rule), proven at the
+provider's own dispatch — ``openai/codex`` tag ``rust-v0.153.4`` (the
+installed rev), ``codex-rs/hooks/src/events/session_start.rs`` and
+``codex-rs/core/src/hook_runtime.rs::run_pending_session_start_hooks``:
+
+* start-hook dispatch keys on an internal target enum, not on the
+  payload: a thread-spawn subagent start becomes ``SubagentStart``
+  (matched against ``SubagentStart`` entries by agent type); every other
+  subagent session source hits ``SessionSource::SubAgent(_) => return
+  false`` — no start hooks run at all, including a subagent's own
+  mid-run compaction. Only non-subagent (root) sessions reach
+  ``SessionStart{source}``.
+* the reference sentence "subagent hooks use the parent session id"
+  describes the ``SubagentStart`` input's ``session_id`` field, not a
+  ``SessionStart`` firing for subagents: a subagent start never reaches
+  ``SessionStart`` handlers.
+
+This adapter installs ``SessionStart`` entries only, so subagent starts
+match nothing provider-side (empty match returns early); the wrapper
+additionally performs no child/parent mapping because the install makes
+it unreachable, not because the payload allows it. ``startup``/``resume``
+matchers stay out for a second reason: rotation mints a fresh thread
+whose admission bootstrap already carries the current goal, so replay
+would add no coverage — while ``compact`` is the contract-required
+event. ``PostCompact`` is deliberately not a second mechanism (§10.1:
+one primary mechanism per worker). Model entry itself is provider-side:
+``record_additional_contexts`` records hook ``additionalContext`` as
+conversation items into the session's turn context
+(``hook_runtime.rs``); live-model marker proof remains deployed QA.
 
 What this adapter does NOT do, by construction:
 
@@ -68,6 +81,22 @@ What this adapter does NOT do, by construction:
   empty context, never a blocked session start.
 * No timers, no coalescing, no event steer, no physical resume behaviour.
   Those are later slices, not this candidate.
+
+Resume/session continuity of the private home: preflight sets
+``CODEX_HOME`` on the launch environment, which flows unchanged into
+both ``mint_session`` (so the thread is minted under the private home
+and the bootstrap guard digests the managed config) and the pane
+transport (so the resumed TUI's ``resume <thread-id>`` reads the same
+home). Nothing between resets it (the forwarded ``CODEX_HOME`` pin
+exists only on the unmanaged path). Successor generations re-enter
+preflight with a new record and get a new private home — per-generation
+isolation, with predecessor files left inspectable. The ``sessions/``
+symlink shares provider session metadata (including rollout ``*.jsonl``
+transcripts) across generations, but resume adoption requires the sole
+exact rollout for the generation's own thread id and skips symlinks
+(``codex_native_bootstrap._rollout_path``), so a successor can never
+adopt a predecessor's transcript; the denied ``*.sqlite`` history index
+stays per generation as the second bar.
 """
 
 from __future__ import annotations

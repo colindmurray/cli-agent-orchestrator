@@ -5672,7 +5672,7 @@ def _muse_bootstrap_intent(
 
 
 def _record_context_restoration(reservation_id: str, installation: dict[str, Any]) -> None:
-    """Write back what restoration a Claude generation installed, best-effort.
+    """Write back what restoration a managed generation installed, best-effort.
 
     The same additive pattern as :func:`_record_launch_executable_version`:
     one ``context_restoration`` key on the existing launch facts, projected

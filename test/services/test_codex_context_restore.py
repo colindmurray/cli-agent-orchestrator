@@ -314,13 +314,24 @@ class TestWrapperProcess:
         context = json.loads(second.stdout.decode())["hookSpecificOutput"]["additionalContext"]
         assert "version 4" in context and "other thing" in context
 
-    def test_parent_session_id_resolves_without_a_guessed_mapping(self, fake):
-        """A subagent-presented parent id is resolved exactly as claimed —
-        the wrapper performs no child/parent distinction because the
-        payload offers none. The structural exclusion (compact-only
-        matcher) is what keeps subagent *starts* from restoring; this
-        pins the wrapper's honesty at the boundary it owns."""
-        proc = _run_wrapper(fake, _hook_input(session_id="thr_parent"), "--conduct-bin", fake["conduct"])
+    def test_claimed_id_forwarded_verbatim_without_mapping(self, fake):
+        """The wrapper resolves exactly what the hook claims — no child/
+        parent mapping, because no payload field could ground one. Safety
+        against subagent injection lives one layer up and is proven, not
+        assumed: installed 0.153.4 dispatches subagent starts to
+        ``SubagentStart`` handlers (or runs nothing), and this install
+        contains no such entries (see the config test above) — so a
+        subagent start never reaches this wrapper. What this test pins is
+        the wrapper's half of the contract: the claimed id is forwarded
+        byte-identical to the read-only projection, never rewritten,
+        never defaulted, never matched against a second source."""
+        # Decoy identity fields a guessed mapping might consult: the
+        # wrapper must ignore all of them and forward session_id alone.
+        proc = _run_wrapper(fake, _hook_input(
+            session_id="thr_parent", agent_id="child-1",
+            transcript_path="/other/rollout.jsonl",
+            agent_transcript_path="/other/child.jsonl",
+        ), "--conduct-bin", fake["conduct"])
         logged = [json.loads(line) for line in fake["log"].read_text().splitlines()]
         assert logged and "--native-session-id" in logged[0]
         assert logged[0][logged[0].index("--native-session-id") + 1] == "thr_parent"
