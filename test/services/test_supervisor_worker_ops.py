@@ -562,6 +562,59 @@ def test_a_lost_worker_with_an_open_round_admits_before_it_launches(_no_tmux):
     assert successor["incarnation_id"] == "inc-fresh-1"
 
 
+def test_a_fresh_successor_names_its_predecessor_in_provenance(_no_tmux):
+    """Explicit lineage for goal inheritance (cond-0842).
+
+    The admission resolves the predecessor round, so the successor names
+    it in dispatch_provenance at open time. Goal readers follow this
+    written association; they never infer it from agent proximity.
+    """
+    worker = _bind()
+    predecessor = _open_round(worker)
+    launcher = _CountingLauncher()
+
+    result = asyncio.run(
+        ops.recover_lost_pane(
+            SESSION,
+            worker["agent"]["agent_id"],
+            recovery_id=str(uuid.uuid4()),
+            requested_by="supervisor",
+            fallback=ops.FreshFallback(_complete_seed(), _DIGEST_A, 1),
+            fresh_launcher=launcher,
+        )
+    )
+
+    assert result["outcome"] == ops.OUTCOME_FRESH_FALLBACK
+    successor = occ.get_occurrence(result["task_occurrence_id"])
+    provenance = successor["dispatch_provenance"]
+    assert provenance["predecessor_occurrence_id"] == predecessor["task_occurrence_id"]
+    assert provenance["mode"] == ops.MODE_FRESH
+
+
+def test_a_successor_with_no_predecessor_carries_no_link(_no_tmux):
+    """No round resolved, no association written: readers must miss loudly."""
+    worker = _bind()
+    # The pane died before any round opened: retire the incarnation so the
+    # admission (correctly) finds no live pane and no round on record.
+    roster.retire_incarnation(terminal_id=worker["incarnation"]["terminal_id"], reason="pane lost")
+    launcher = _CountingLauncher()
+
+    result = asyncio.run(
+        ops.recover_lost_pane(
+            SESSION,
+            worker["agent"]["agent_id"],
+            recovery_id=str(uuid.uuid4()),
+            requested_by="supervisor",
+            fallback=ops.FreshFallback(_complete_seed(), _DIGEST_A, 1),
+            fresh_launcher=launcher,
+        )
+    )
+
+    assert result["outcome"] == ops.OUTCOME_FRESH_FALLBACK
+    successor = occ.get_occurrence(result["task_occurrence_id"])
+    assert "predecessor_occurrence_id" not in successor["dispatch_provenance"]
+
+
 def test_a_pane_is_never_created_when_admission_cannot_succeed(_no_tmux, monkeypatch):
     """No orphan: if the round cannot be resolved, nothing is launched."""
     worker = _bind()

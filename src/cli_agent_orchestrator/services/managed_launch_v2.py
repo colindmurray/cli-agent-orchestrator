@@ -1863,6 +1863,53 @@ def _assert_recovery_identity(row: Any, *, terminal_id: str, generation: str) ->
         )
 
 
+def _abandon_admitting_admission(
+    db: Any, row: Any, request: ManagedLaunchV2NegativeRequest
+) -> dict[str, Any]:
+    """Fence a stuck admitting row whose worker provably delivered nothing.
+
+    The conductor's abandonment call carries pane absence plus the exact
+    delivery; this re-verifies bridge-negative from the row before
+    fencing: no admitted status, no submission receipt. Anything else —
+    a settled admission, a recorded receipt, a retryable refusal that may
+    still complete — refuses and preserves ambiguity. A permanent refusal
+    already standing is adopted so replays converge. The row keeps state
+    ``admitting`` (zero bytes, closed); the row's occurrence, opened by
+    the claim, finalizes abandoned in the same transaction.
+    """
+    admission = _parse_json(row.admission_json, None)
+    if not admission or admission.get("delivery_id") != request.delivery_id:
+        raise ManagedLaunchConflict("delivery_id does not match the admission claim")
+    if admission.get("status") == "refused":
+        if admission.get("refusal_reason") in _RETRYABLE_REFUSAL_REASONS:
+            raise ManagedLaunchConflict(
+                "admission refused retryably; the delivery may still "
+                "complete, so abandonment must not close it — reconcile "
+                "the admission instead"
+            )
+        return _row_dict(row)
+    if admission.get("status") == "admitted":
+        raise ManagedLaunchConflict("admission settled; complete it instead of abandoning it")
+    if admission.get("provider_submission_receipt") is not None:
+        raise ManagedLaunchConflict(
+            "bridge recorded a submission for this delivery; complete the "
+            "admission instead of abandoning it"
+        )
+    admission["status"] = "refused"
+    admission["refusal_reason"] = "abandoned"
+    admission["refusal_detail"] = {
+        "finalize_id": request.finalize_id,
+        "reason": request.reason,
+    }
+    admission["updated_at"] = _now()
+    row.admission_json = _canonical_json(admission)
+    _finalize_row_occurrence_abandoned(db, row, request.delivery_id)
+    row.updated_at = _now()
+    db.commit()
+    db.refresh(row)
+    return _row_dict(row)
+
+
 def finalize_negative(
     reservation_id: str, request: ManagedLaunchV2NegativeRequest
 ) -> dict[str, Any]:
@@ -1880,6 +1927,17 @@ def finalize_negative(
     ``admitting``, ``admitted``, or a bound row that does carry an
     admission, "never submitted" is precisely the claim that cannot be
     proven, and asserting it would be a lie about spend.
+
+    One exception, definitive abandonment (cond-0842 lineage): an
+    ``admitting`` row named with kind ``"cancelled"`` plus its exact
+    delivery id. The caller asserts the worker is gone — pane proven
+    absent conductor-side — and this verb re-verifies bridge-negative
+    fork-side (no admitted status, no submission receipt) before fencing
+    the admission refused and finalizing the row's occurrence abandoned.
+    A retryable refusal or a recorded receipt refuses instead: the
+    delivery may still complete, so abandonment must not close it. The
+    row is preserved as ``admitting`` (the v2 convention: still zero
+    bytes, but closed), never advanced to a state that claims delivery.
 
     Idempotent by construction: a no-op from ``negative``, and the first
     finalization wins — a later call with a different ``finalize_id`` is an
@@ -1901,6 +1959,12 @@ def finalize_negative(
                 raise ManagedLaunchConflict(
                     "recovery obligation_generation does not match the reservation row"
                 )
+            if (
+                row.state == "admitting"
+                and request.kind == "cancelled"
+                and request.delivery_id is not None
+            ):
+                return _abandon_admitting_admission(db, row, request)
             if row.state not in _NEGATIVE_FINALIZABLE_STATES:
                 raise ManagedLaunchConflict(
                     f"zero-byte finalization requires state 'preflight_blocked', a "

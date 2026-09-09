@@ -449,6 +449,13 @@ def admit_fresh_successor(
         }
 
     open_round = occurrence.open_occurrence_for_agent(agent_id)
+    # The explicit successor link (cond-0842 lineage): the round this
+    # admission resolves is named on the successor at open time, so goal
+    # readers follow a written association instead of inferring one from
+    # agent proximity. The id finalized here wins; otherwise the latest
+    # record this authority read (a retry whose predecessor an earlier
+    # attempt already resolved), else no link at all.
+    predecessor_occurrence_id = (predecessor or {}).get("task_occurrence_id")
     if open_round is not None:
         try:
             occurrence.finalize_occurrence(
@@ -466,6 +473,7 @@ def admit_fresh_successor(
                 "task_occurrence_id": occurrence_id,
                 "reason": str(exc)[: occurrence.MAX_TEXT_LEN],
             }
+        predecessor_occurrence_id = open_round["task_occurrence_id"]
 
     if live and incarnation.get("terminal_id"):
         try:
@@ -492,6 +500,7 @@ def admit_fresh_successor(
     return {
         "mode": ADMIT_LAUNCH,
         "task_occurrence_id": occurrence_id,
+        "predecessor_occurrence_id": predecessor_occurrence_id,
         "reason": "the predecessor round is resolved and the agent holds no live pane",
     }
 
@@ -645,7 +654,17 @@ async def recover_lost_pane(
     # The successor gets a *new* occurrence carrying the seed explicitly,
     # including its completeness. A fresh worker is a new round by definition:
     # reusing the predecessor's occurrence would let a restarted worker inherit
-    # a round somebody else already reported on.
+    # a round somebody else already reported on. The resolved predecessor is
+    # named explicitly so goal readers inherit by written association, never
+    # by agent proximity.
+    successor_provenance: dict[str, Any] = {
+        "recovery_id": recovery_id,
+        "requested_by": requested_by,
+        "mode": MODE_FRESH,
+        "seed_quality": fallback.seed.quality,
+    }
+    if admission.get("predecessor_occurrence_id"):
+        successor_provenance["predecessor_occurrence_id"] = admission["predecessor_occurrence_id"]
     try:
         opened = occurrence.open_occurrence(
             occurrence.OpenRequest(
@@ -661,12 +680,7 @@ async def recover_lost_pane(
                     lineage_id=launched.get("lineage_id"),
                     native_session_id=launched.get("native_session_id"),
                 ),
-                dispatch_provenance={
-                    "recovery_id": recovery_id,
-                    "requested_by": requested_by,
-                    "mode": MODE_FRESH,
-                    "seed_quality": fallback.seed.quality,
-                },
+                dispatch_provenance=successor_provenance,
                 seed=fallback.seed,
             )
         )

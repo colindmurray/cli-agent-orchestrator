@@ -638,3 +638,85 @@ def test_v2_retryable_refusal_keeps_the_occurrence_open(effect_tmp, monkeypatch,
         "may complete later",
     )
     assert occurrence.get_occurrence(occurrence_id)["state"] == occurrence.STATE_OPEN
+
+
+def _v2_abandon_request(bound, **changes):
+    from cli_agent_orchestrator.models.managed_launch_v2 import (
+        ManagedLaunchV2NegativeRequest,
+    )
+
+    payload = {
+        "protocol_version": PROTOCOL_VERSION_V2,
+        "finalize_id": str(uuid.uuid4()),
+        "terminal_id": bound["terminal_id"],
+        "generation": bound["generation"],
+        "obligation_generation": bound["obligation_generation"],
+        "reason": "worker gone with nothing delivered",
+        "delivery_id": V2_DELIVERY_ID,
+        "kind": "cancelled",
+    }
+    payload.update(changes)
+    return ManagedLaunchV2NegativeRequest(**payload)
+
+
+@pytest.mark.parametrize("execution_mode", ["acp", "native_tui"])
+def test_v2_abandon_fences_and_finalizes_the_chain(effect_tmp, monkeypatch, execution_mode):
+    """Worker death after claim: definitive no-io fences refused/abandoned."""
+    tmp_path = effect_tmp
+    bound, occurrence_id = _v2_bound_row(tmp_path, monkeypatch, execution_mode)
+    claimed, _ = v2.claim_admission(bound["reservation_id"], _v2_admit_request(bound))
+    assert claimed["state"] == "admitting"
+    fenced = v2.finalize_negative(bound["reservation_id"], _v2_abandon_request(bound))
+    assert fenced["admission"]["status"] == "refused"
+    assert fenced["admission"]["refusal_reason"] == "abandoned"
+    # Preserved, not advanced: still zero bytes, but closed.
+    assert fenced["state"] == "admitting"
+    stored = occurrence.get_occurrence(occurrence_id)
+    assert stored["state"] == occurrence.STATE_FINALIZED
+    assert stored["finalized"]["disposition"] == occurrence.DISPOSITION_ABANDONED
+
+
+@pytest.mark.parametrize("execution_mode", ["acp", "native_tui"])
+def test_v2_abandon_replay_adopts(effect_tmp, monkeypatch, execution_mode):
+    """A lost abandon answer replays into the standing fence, not a rewrite."""
+    tmp_path = effect_tmp
+    bound, occurrence_id = _v2_bound_row(tmp_path, monkeypatch, execution_mode)
+    v2.claim_admission(bound["reservation_id"], _v2_admit_request(bound))
+    v2.finalize_negative(bound["reservation_id"], _v2_abandon_request(bound))
+    again = v2.finalize_negative(bound["reservation_id"], _v2_abandon_request(bound))
+    assert again["admission"]["status"] == "refused"
+    assert again["admission"]["refusal_reason"] == "abandoned"
+    stored = occurrence.get_occurrence(occurrence_id)
+    assert stored["state"] == occurrence.STATE_FINALIZED
+    assert stored["finalized"]["disposition"] == occurrence.DISPOSITION_ABANDONED
+
+
+@pytest.mark.parametrize("execution_mode", ["acp", "native_tui"])
+def test_v2_abandon_refuses_a_retryable_refusal(effect_tmp, monkeypatch, execution_mode):
+    """A refusal that may still complete is never abandoned: ambiguity stands."""
+    tmp_path = effect_tmp
+    bound, occurrence_id = _v2_bound_row(tmp_path, monkeypatch, execution_mode)
+    v2.claim_admission(bound["reservation_id"], _v2_admit_request(bound))
+    v2.mark_admission_refused(
+        bound["reservation_id"],
+        V2_DELIVERY_ID,
+        "provider_not_yet_ready",
+        "may complete later",
+    )
+    with pytest.raises(v2.ManagedLaunchConflict):
+        v2.finalize_negative(bound["reservation_id"], _v2_abandon_request(bound))
+    assert occurrence.get_occurrence(occurrence_id)["state"] == occurrence.STATE_OPEN
+
+
+def test_v2_plain_negative_still_refuses_admitting_rows(
+    effect_tmp,
+    monkeypatch,
+):
+    """No kind, no arm: an older-shape call degrades to the 409, never a fence."""
+    tmp_path = effect_tmp
+    bound, occurrence_id = _v2_bound_row(tmp_path, monkeypatch, "acp")
+    v2.claim_admission(bound["reservation_id"], _v2_admit_request(bound))
+    request = _v2_abandon_request(bound, kind=None, delivery_id=None)
+    with pytest.raises(v2.ManagedLaunchConflict):
+        v2.finalize_negative(bound["reservation_id"], request)
+    assert occurrence.get_occurrence(occurrence_id)["state"] == occurrence.STATE_OPEN
