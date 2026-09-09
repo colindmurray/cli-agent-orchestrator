@@ -25,11 +25,28 @@ and an authenticated Kimi CLI; no rediscovery needed):
     tmux -S /tmp/cao-driver-probe.sock new-session -d -s probe -- sleep 5 \
       && tmux -S /tmp/cao-driver-probe.sock kill-server && echo 'tmux ok'
 
+  POST-DEPLOY PREREQUISITE (truthful, no fabrication): spawn's sourcechain
+  gate compares the deploy receipt's top-level conduct_tree_hash with the
+  loaded conductor tree, so native acceptance needs a REAL completed
+  `conduct deploy` of the exact candidate revs FIRST — a stage-only
+  receipt can never satisfy it, and the dev escape is refused on
+  campaign routes. The operator passes the genuine receipt explicitly:
+    COND0845_DEPLOY_RECEIPT=<scratch-XDG-independent path to deploy.json>
+  The fixture verifies schema, both clone heads (derived live via git,
+  never pinned), the package hash (real conductor functions), and the
+  -I-capable interpreter, then preserves the exact bytes unmodified in
+  its own scratch XDG state. Both clones must be clean; set
+  COND0845_PYTHON to the deployed interpreter when the suite python
+  cannot `import conduct` under -I. Every socket, server, home, and
+  state dir is per-run owned under the test tmp root — there is no
+  reusable fixed default (no shared /tmp socket recipe).
+
   RUN (one command; ~10-20 min wall clock, mostly Kimi readiness/compaction):
     cd /tmp/cond0845-kimi/fork && \\
     SP=/Users/colin/.local/share/uv/tools/cli-agent-orchestrator/lib/python3.13/site-packages && \\
     COND0845_NATIVE_SUBJECT=1 \\
     COND0845_CONDUCTOR_ROOT=/tmp/cond0845-kimi/conductor \\
+    COND0845_DEPLOY_RECEIPT=<path to genuine completed deploy.json> \\
     PYTHONPATH=src:$SP /Users/colin/.local/bin/pytest \\
       test/integration/test_kimi_postcompact_native_subject.py \\
       -p no:cacheprovider -o addopts="" -v
@@ -525,6 +542,19 @@ def native_pair(tmp_path_factory, native_preflight):
     entry = write_conduct_entrypoint(
         bin_dir, conductor_root=conductor_root, python=discover_python()
     )
+    # Post-deploy prerequisite, before any tmux server, child server, or
+    # model contact: stage the genuine deploy receipt's exact bytes into
+    # the owned XDG state, verified against these live clones. Absent,
+    # stage-only, mismatched, or unreadable receipts fail here — never
+    # past this line, never against a live service.
+    _install_deploy_receipt(
+        receipt_path=os.environ.get(_DEPLOY_RECEIPT_ENV),
+        conductor_root=conductor_root,
+        fork_root=FORK_ROOT,
+        xdg_state_home=conductor_xdg,
+        python=discover_python(),
+        install=_real_install(),
+    )
 
     pair = _NativePair(
         scratch=scratch,
@@ -776,6 +806,423 @@ def test_spawn_admission_caller_gate(tmp_path, monkeypatch):
     # stdout, which is why the enrollment fixture reads proc.stdout).
     answer = json.loads(admitted.stderr)
     assert answer.get("error", {}).get("failure_class") == "unexpected-source-mutation", answer
+
+
+# Explicit genuine deploy receipt for post-deploy acceptance. The spawn
+# sourcechain gate compares a receipt's top-level conduct_tree_hash with
+# the loaded conductor tree, so only a real completed `conduct deploy`
+# of the exact candidate revs produces a receipt this fixture can use —
+# never minted, patched, or blessed here. The operator supplies the path
+# via this variable; the fixture verifies schema, heads, package hash,
+# and interpreter, then preserves the exact bytes unmodified in its own
+# scratch state (writing owned files is normal test setup, not minting).
+_DEPLOY_RECEIPT_ENV = "COND0845_DEPLOY_RECEIPT"
+
+
+def _real_install():
+    """The real conductor packaging functions (stdlib-only, no drift).
+
+    Imported from the companion clone, but pure over their path
+    arguments — safe to run against scratch fixture trees.
+    """
+    import sys as _sys
+
+    from test.integration.test_kimi_postcompact_isolated_harness import (
+        discover_conductor_root,
+    )
+
+    root = discover_conductor_root()
+    if root is None:
+        pytest.skip("conductor companion clone absent")
+    if str(root) not in _sys.path:
+        _sys.path.insert(0, str(root))
+    from conduct.lib import install as _install
+
+    return _install
+
+
+def _install_deploy_receipt(
+    *,
+    receipt_path,
+    conductor_root: Path,
+    fork_root: Path,
+    xdg_state_home: Path,
+    python: str,
+    install,
+) -> Path:
+    """Verify a genuine deploy receipt and stage its exact bytes.
+
+    Rejects (before any server or model contact): an unset receipt
+    selector, an unreadable or non-JSON file, a stage-only receipt, a
+    missing conductor tree hash, dirty worktrees, head mismatches
+    against the live clones, a package-hash mismatch against the loaded
+    conductor tree, and an interpreter that cannot load an installed
+    conductor with -I or disagrees with the receipt. On success copies
+    the raw bytes byte-identical into
+    ``<xdg_state_home>/cao-conductor/deploy.json`` and returns its path.
+    """
+    import hashlib as _hashlib
+    import shutil as _shutil
+
+    if not receipt_path:
+        raise AssertionError(
+            f"post-deploy acceptance needs {_DEPLOY_RECEIPT_ENV} pointing at a "
+            "genuine completed deploy receipt; refusing to proceed without one"
+        )
+    src = Path(receipt_path)
+    try:
+        raw = src.read_bytes()
+    except OSError as exc:
+        raise AssertionError(f"deploy receipt unreadable at {src}: {exc}") from exc
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise AssertionError(f"deploy receipt at {src} is not JSON: {exc}") from exc
+    if not isinstance(receipt, dict):
+        raise AssertionError(f"deploy receipt at {src} must be a JSON object")
+    if receipt.get("mode") == "isolated-stage-only":
+        raise AssertionError(
+            f"deploy receipt at {src} is a stage-only receipt (mode "
+            "isolated-stage-only), not a completed deployment; run a real "
+            "`conduct deploy` of the candidate revs instead"
+        )
+    expected_hash = receipt.get("conduct_tree_hash")
+    if not isinstance(expected_hash, str) or not expected_hash:
+        raise AssertionError(
+            f"deploy receipt at {src} carries no top-level conduct_tree_hash; "
+            "a stage receipt or foreign file cannot satisfy the sourcechain gate"
+        )
+    for label, root in (("conductor", conductor_root), ("fork", fork_root)):
+        dirty = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if dirty.returncode != 0:
+            raise AssertionError(f"cannot establish {label} cleanliness at {root}")
+        if dirty.stdout.strip():
+            raise AssertionError(
+                f"{label} worktree at {root} is dirty; untracked and modified "
+                "files enter the package hash, so no receipt can truthfully "
+                f"match it: {dirty.stdout.strip()[:300]}"
+            )
+    heads = {}
+    for label, root in (("conductor", conductor_root), ("fork", fork_root)):
+        proc = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(f"cannot establish {label} head at {root}")
+        heads[label] = proc.stdout.strip()
+    if receipt.get("git_head") != heads["conductor"]:
+        raise AssertionError(
+            "deploy receipt conductor head does not match the selected clone "
+            f"(receipt {receipt.get('git_head')!r} vs clone {heads['conductor']!r}); "
+            "deploy the exact candidate revs first"
+        )
+    recorded_fork = receipt.get("fork")
+    if not isinstance(recorded_fork, dict) or recorded_fork.get("git_head") != heads["fork"]:
+        raise AssertionError(
+            "deploy receipt fork head does not match the selected clone; "
+            "paired-head verification requires an exact fork record"
+        )
+    kind = receipt.get("conduct_identity_kind")
+    manifest = (
+        install.hash_conduct_tree(str(conductor_root))
+        if kind == install.CONDUCT_IDENTITY_KIND
+        else install.hash_tree(str(conductor_root))
+    )
+    if install.tree_hash(manifest) != expected_hash:
+        raise AssertionError(
+            "deploy receipt conductor tree hash differs from the loaded "
+            "conductor tree; the receipt attests different content"
+        )
+    chosen = _shutil.which(python) if not os.path.isabs(python) else python
+    probe = subprocess.run(
+        [chosen or python, "-I", "-c",
+         "import conduct, json, sys; print(json.dumps({'file': conduct.__file__}))"],
+        capture_output=True, text=True, timeout=60,
+        env={"PATH": os.environ.get("PATH", "")},
+    )
+    if probe.returncode != 0:
+        if os.environ.get("COND0845_PYTHON"):
+            raise AssertionError(
+                "COND0845_PYTHON cannot load an installed conductor with -I; "
+                f"point it at the deployed interpreter: {probe.stderr[-500:]}"
+            )
+        raise AssertionError(
+            "default pytest interpreter cannot load an installed conductor "
+            "with -I; set COND0845_PYTHON to the deployed interpreter"
+        )
+    # Identity mirrors _file_identity exactly (realpath + sha256). Known
+    # limit: venv interpreters aliasing one base binary compare equal;
+    # the digest leg still rejects any binary that is not that file.
+    recorded_exe = (receipt.get("interpreters") or {}).get("conduct") or {}
+    if recorded_exe.get("realpath") and recorded_exe.get("sha256"):
+        real = os.path.realpath(chosen or python)
+        try:
+            with open(real, "rb") as handle:
+                digest = _hashlib.sha256(handle.read()).hexdigest()
+        except OSError as exc:
+            raise AssertionError(f"cannot hash chosen interpreter {real}: {exc}") from exc
+        if real != recorded_exe["realpath"] or digest != recorded_exe["sha256"]:
+            raise AssertionError(
+                "chosen interpreter does not match the receipt's deployed "
+                "interpreter; set COND0845_PYTHON to "
+                f"{recorded_exe.get('path') or recorded_exe['realpath']}"
+            )
+    dest = xdg_state_home / "cao-conductor" / "deploy.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw)
+    return dest
+
+
+def test_native_launch_route_resolves():
+    """The launch identity the fixture depends on, from the real routing
+    table: task-class fix-kimi resolves with profile fixer-kimi on
+    provider kimi_cli. Pure read, runs everywhere; an unknown task class
+    fails here instead of dying obscurely inside enrollment. Note the
+    fixture's `--profile reviewer` flag is NOT consumed on the managed
+    path (spawn.py uses route.profile throughout); it rides along
+    harmlessly and stays so the argv matches the driven run.
+    """
+    import sys as _sys
+
+    from test.integration.test_kimi_postcompact_isolated_harness import (
+        discover_conductor_root,
+    )
+
+    root = discover_conductor_root()
+    if root is None:
+        pytest.skip("conductor companion clone absent")
+    if str(root) not in _sys.path:
+        _sys.path.insert(0, str(root))
+    from conduct.lib import routing as _routing
+
+    route = _routing.resolve("fix-kimi")
+    assert route.profile == "fixer-kimi", f"fix-kimi route profile is {route.profile!r}"
+    assert route.provider == "kimi_cli", f"fix-kimi provider is {route.provider!r}"
+
+
+def _fake_git_root(path: Path, files: Dict[str, str]) -> Path:
+    """A tiny clean git checkout standing in for a clone (hermetic)."""
+    path.mkdir(parents=True, exist_ok=True)
+    for rel, text in files.items():
+        dest = path / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "cao-test@example.invalid"],
+                   cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "cao-test"], cwd=path, check=True)
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=path, check=True)
+    return path
+
+
+def _git_head(path: Path) -> str:
+    proc = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True)
+    return proc.stdout.strip()
+
+
+def _receipt_case(tmp_path: Path):
+    """Hermetic conductor+fork roots with the required package asset."""
+    cond = _fake_git_root(tmp_path / "cond", {
+        "conduct/__init__.py": "",
+        "assets/marshal-harness.sh": "#!/bin/sh\n",
+    })
+    fork = _fake_git_root(tmp_path / "fork", {
+        "src/cli_agent_orchestrator/__init__.py": "",
+    })
+    install = _real_install()
+    manifest = install.hash_conduct_tree(str(cond))
+    digest = install.tree_hash(manifest)
+    base = {
+        "schema_version": 1,
+        "git_head": _git_head(cond),
+        "conduct_tree_hash": digest,
+        "conduct_identity_kind": install.CONDUCT_IDENTITY_KIND,
+        "fork": {"repo": str(fork), "git_head": _git_head(fork)},
+    }
+    return cond, fork, install, base
+
+
+def _write_receipt(path: Path, payload: dict) -> Path:
+    path.write_text(json.dumps(payload, indent=1, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _deployed_python_or_skip() -> str:
+    """An interpreter with conduct installed, discovered — never hardcoded."""
+    exe = shutil.which("conduct")
+    if exe is None:
+        pytest.skip("no conduct on PATH here")
+    with open(exe, "rb") as handle:
+        first = handle.readline().strip()
+    if not first.startswith(b"#!"):
+        pytest.skip("conduct entrypoint has no interpreter line")
+    python = first[2:].decode("utf-8").split()[0]
+    probe = subprocess.run([python, "-I", "-c", "import conduct"],
+                           capture_output=True, timeout=60)
+    if probe.returncode != 0:
+        pytest.skip("discovered interpreter cannot load conduct with -I")
+    return python
+
+
+def _exe_identity(python: str) -> dict:
+    import hashlib as _hashlib
+
+    real = os.path.realpath(python)
+    with open(real, "rb") as handle:
+        digest = _hashlib.sha256(handle.read()).hexdigest()
+    return {"path": python, "realpath": real, "sha256": digest}
+
+
+def _stage_receipt_payload() -> dict:
+    """The real stage-only schema: nested hash, stage mode, no top hash."""
+    return {
+        "schema_version": 1,
+        "mode": "isolated-stage-only",
+        "created_at": "2026-09-09T00:00:00Z",
+        "repo": "/tmp/stage/repo",
+        "git_head": "0" * 40,
+        "fork": None,
+        "verification": {"conduct_tree_hash": "0" * 64},
+    }
+
+
+def test_deploy_receipt_absent_rejected(tmp_path):
+    install = _real_install()
+    cond, fork, _, _ = _receipt_case(tmp_path)
+    xdg = tmp_path / "xdg"
+    xdg.mkdir()
+    with pytest.raises(AssertionError, match="COND0845_DEPLOY_RECEIPT"):
+        _install_deploy_receipt(
+            receipt_path=None, conductor_root=cond, fork_root=fork,
+            xdg_state_home=xdg, python=sys.executable, install=install,
+        )
+    with pytest.raises(AssertionError, match="unreadable"):
+        _install_deploy_receipt(
+            receipt_path=str(tmp_path / "no-such.json"), conductor_root=cond,
+            fork_root=fork, xdg_state_home=xdg, python=sys.executable,
+            install=install,
+        )
+    garbage = tmp_path / "garbage.json"
+    garbage.write_text("not json{{{", encoding="utf-8")
+    with pytest.raises(AssertionError, match="not JSON"):
+        _install_deploy_receipt(
+            receipt_path=str(garbage), conductor_root=cond, fork_root=fork,
+            xdg_state_home=xdg, python=sys.executable, install=install,
+        )
+    # Nothing is staged and nothing else is written on rejection.
+    assert list(xdg.rglob("*")) == []
+
+
+def test_deploy_receipt_stage_rejected(tmp_path):
+    install = _real_install()
+    cond, fork, _, _ = _receipt_case(tmp_path)
+    src = _write_receipt(tmp_path / "stage.json", _stage_receipt_payload())
+    with pytest.raises(AssertionError, match="stage-only"):
+        _install_deploy_receipt(
+            receipt_path=str(src), conductor_root=cond, fork_root=fork,
+            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            install=install,
+        )
+
+
+def test_deploy_receipt_head_mismatch_rejected(tmp_path):
+    install = _real_install()
+    cond, fork, _, base = _receipt_case(tmp_path)
+    base["git_head"] = "0" * 40
+    src = _write_receipt(tmp_path / "receipt.json", base)
+    with pytest.raises(AssertionError, match="conductor head does not match"):
+        _install_deploy_receipt(
+            receipt_path=str(src), conductor_root=cond, fork_root=fork,
+            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            install=install,
+        )
+
+
+def test_deploy_receipt_tree_mismatch_rejected(tmp_path):
+    install = _real_install()
+    cond, fork, _, base = _receipt_case(tmp_path)
+    base["conduct_tree_hash"] = "0" * 64
+    src = _write_receipt(tmp_path / "receipt.json", base)
+    with pytest.raises(AssertionError, match="tree hash differs"):
+        _install_deploy_receipt(
+            receipt_path=str(src), conductor_root=cond, fork_root=fork,
+            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            install=install,
+        )
+
+
+def test_deploy_receipt_dirty_tree_rejected(tmp_path):
+    install = _real_install()
+    cond, fork, _, base = _receipt_case(tmp_path)
+    (cond / "untracked-scratch.txt").write_text("oops\n", encoding="utf-8")
+    src = _write_receipt(tmp_path / "receipt.json", base)
+    with pytest.raises(AssertionError, match="is dirty"):
+        _install_deploy_receipt(
+            receipt_path=str(src), conductor_root=cond, fork_root=fork,
+            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            install=install,
+        )
+
+
+def test_deploy_receipt_interpreter_without_conduct_rejected(tmp_path):
+    install = _real_install()
+    cond, fork, _, base = _receipt_case(tmp_path)
+    src = _write_receipt(tmp_path / "receipt.json", base)
+    probe = subprocess.run(
+        [sys.executable, "-I", "-c", "import conduct"],
+        capture_output=True, timeout=60,
+    )
+    if probe.returncode == 0:
+        pytest.skip("suite interpreter already loads conduct; nothing to prove")
+    with pytest.raises(AssertionError, match="COND0845_PYTHON"):
+        _install_deploy_receipt(
+            receipt_path=str(src), conductor_root=cond, fork_root=fork,
+            xdg_state_home=tmp_path / "xdg", python=sys.executable,
+            install=install,
+        )
+
+
+def test_deploy_receipt_interpreter_mismatch_rejected(tmp_path):
+    install = _real_install()
+    cond, fork, _, base = _receipt_case(tmp_path)
+    python = _deployed_python_or_skip()
+    # Same realpath the helper will resolve, but a digest no binary can
+    # match: venv interpreters frequently alias one base binary, so the
+    # digest leg (not just the path leg) carries the mismatch proof.
+    bogus = dict(_exe_identity(python))
+    bogus["sha256"] = "0" * 64
+    base["interpreters"] = {"conduct": bogus}
+    src = _write_receipt(tmp_path / "receipt.json", base)
+    with pytest.raises(AssertionError, match="does not match the receipt"):
+        _install_deploy_receipt(
+            receipt_path=str(src), conductor_root=cond, fork_root=fork,
+            xdg_state_home=tmp_path / "xdg", python=python,
+            install=install,
+        )
+
+
+def test_deploy_receipt_copies_bytes_exactly(tmp_path):
+    install = _real_install()
+    cond, fork, _, base = _receipt_case(tmp_path)
+    python = _deployed_python_or_skip()
+    base["interpreters"] = {"conduct": _exe_identity(python)}
+    src = _write_receipt(tmp_path / "receipt.json", base)
+    xdg = tmp_path / "xdg"
+    dest = _install_deploy_receipt(
+        receipt_path=str(src), conductor_root=cond, fork_root=fork,
+        xdg_state_home=xdg, python=python, install=install,
+    )
+    assert dest == xdg / "cao-conductor" / "deploy.json"
+    assert dest.read_bytes() == src.read_bytes(), "staged receipt must be byte-identical"
+    assert sorted(p.relative_to(xdg).as_posix() for p in xdg.rglob("*") if p.is_file()) == [
+        "cao-conductor/deploy.json"
+    ]
 
 
 def test_native_goal_assignment_ok(native_pair, native_preflight, native_admission):
