@@ -7,10 +7,11 @@ that cannot be placed fails loudly instead of landing somewhere plausible.
 """
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
@@ -48,6 +49,43 @@ def cao_system(tmp_path):
 
 
 class TestProjectCreation:
+    def test_project_counts_do_not_read_issue_payloads(self, cao_system):
+        tracker.create_issue(
+            project_id="cao-system",
+            title="resolved bug",
+            status="resolved",
+            body="synthetic payload " * 1000,
+        )
+        tracker.create_issue(
+            project_id="cao-system",
+            title="closed feature",
+            kind="feature",
+            status="closed",
+        )
+        with tracker.SessionLocal() as session:
+            engine = session.get_bind()
+
+        def guard_payload_reads(connection, _record):
+            def authorize(action, table, column, _database, _trigger):
+                if action == sqlite3.SQLITE_READ and table == "tracker_issues":
+                    if column not in {"project_id", "kind", "status", ""}:
+                        return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            connection.set_authorizer(authorize)
+
+        event.listen(engine, "connect", guard_payload_reads)
+        engine.dispose()
+        try:
+            counts = tracker.list_projects()[0]["counts"]
+        finally:
+            event.remove(engine, "connect", guard_payload_reads)
+
+        assert (counts["total"], counts["open"]) == (1, 1)
+        assert (counts["all_total"], counts["all_open"]) == (2, 1)
+        assert counts["by_kind"]["bug"] == {"total": 1, "open": 1}
+        assert counts["by_kind"]["feature"] == {"total": 1, "open": 0}
+
     def test_a_project_spans_many_paths_and_sessions(self, cao_system):
         detail = tracker.get_project("cao-system")
         kinds = sorted((s["kind"], s["value"]) for s in detail["scopes"])
