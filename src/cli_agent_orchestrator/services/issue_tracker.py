@@ -545,7 +545,11 @@ def list_projects(*, include_archived: bool = False) -> List[Dict[str, Any]]:
             query = query.filter(TrackerProjectModel.status == "active")
         rows = query.order_by(TrackerProjectModel.name.asc()).all()
         # Single snapshot for all counts to avoid concurrency drift (PR1-2 gate 4)
-        all_issues = db.query(TrackerIssueModel).all()
+        all_issues = db.query(
+            TrackerIssueModel.project_id,
+            TrackerIssueModel.kind,
+            TrackerIssueModel.status,
+        ).all()
         # Compute tallies in Python from one snapshot
         tallies: Dict[str, int] = {}
         open_tallies: Dict[str, int] = {}
