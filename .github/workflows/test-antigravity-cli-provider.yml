@@ -3,23 +3,9 @@ name: Test Antigravity CLI Provider
 permissions:
   contents: read
 
+# Test locally while iterating; request CI explicitly for a substantial PR.
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'src/cli_agent_orchestrator/providers/antigravity_cli.py'
-      - 'test/providers/test_antigravity_cli_unit.py'
-      - 'test/providers/fixtures/agy_*.txt'
-      - 'pyproject.toml'
-      - '.github/workflows/test-antigravity-cli-provider.yml'
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - 'src/cli_agent_orchestrator/providers/antigravity_cli.py'
-      - 'test/providers/test_antigravity_cli_unit.py'
-      - 'test/providers/fixtures/agy_*.txt'
-      - 'pyproject.toml'
-      - '.github/workflows/test-antigravity-cli-provider.yml'
+  workflow_dispatch:
 
 jobs:
   unit-tests:

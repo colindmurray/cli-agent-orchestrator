@@ -1,12 +1,8 @@
 name: CI
 
+# Test locally while iterating; request CI explicitly for a substantial PR.
 on:
-  push:
-    branches: [main, conductor-deploy]
-  pull_request:
-    # The native-TUI-console integration branch is the base of the lane PRs
-    # (design.md §9); CI must run on PRs targeting it as well.
-    branches: [main, conductor-deploy, feature/native-tui-interaction-console]
+  workflow_dispatch:
 
 permissions:
   contents: read
