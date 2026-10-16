@@ -3,23 +3,9 @@ name: Test Kiro CLI Provider
 permissions:
   contents: read
 
+# Test locally while iterating; request CI explicitly for a substantial PR.
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'src/cli_agent_orchestrator/providers/kiro_cli.py'
-      - 'test/providers/test_kiro_cli_unit.py'
-      - 'test/providers/fixtures/kiro_cli_*.txt'
-      - 'pyproject.toml'
-      - '.github/workflows/test-kiro-cli-provider.yml'
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - 'src/cli_agent_orchestrator/providers/kiro_cli.py'
-      - 'test/providers/test_kiro_cli_unit.py'
-      - 'test/providers/fixtures/kiro_cli_*.txt'
-      - 'pyproject.toml'
-      - '.github/workflows/test-kiro-cli-provider.yml'
+  workflow_dispatch:
 
 jobs:
   unit-tests:

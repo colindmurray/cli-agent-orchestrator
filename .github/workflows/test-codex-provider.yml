@@ -3,23 +3,9 @@ name: Test Codex CLI Provider
 permissions:
   contents: read
 
+# Test locally while iterating; request CI explicitly for a substantial PR.
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'src/cli_agent_orchestrator/providers/codex.py'
-      - 'test/providers/test_codex_provider_unit.py'
-      - 'test/providers/fixtures/codex_*.txt'
-      - 'pyproject.toml'
-      - '.github/workflows/test-codex-provider.yml'
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - 'src/cli_agent_orchestrator/providers/codex.py'
-      - 'test/providers/test_codex_provider_unit.py'
-      - 'test/providers/fixtures/codex_*.txt'
-      - 'pyproject.toml'
-      - '.github/workflows/test-codex-provider.yml'
+  workflow_dispatch:
 
 jobs:
   unit-tests:

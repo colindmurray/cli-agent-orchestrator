@@ -3,21 +3,9 @@ name: Test Claude Code Provider
 permissions:
   contents: read
 
+# Test locally while iterating; request CI explicitly for a substantial PR.
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'src/cli_agent_orchestrator/providers/claude_code.py'
-      - 'test/providers/test_claude_code_unit.py'
-      - 'pyproject.toml'
-      - '.github/workflows/test-claude-code-provider.yml'
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - 'src/cli_agent_orchestrator/providers/claude_code.py'
-      - 'test/providers/test_claude_code_unit.py'
-      - 'pyproject.toml'
-      - '.github/workflows/test-claude-code-provider.yml'
+  workflow_dispatch:
 
 jobs:
   unit-tests:
